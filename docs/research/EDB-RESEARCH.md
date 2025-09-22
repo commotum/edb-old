@@ -32,15 +32,18 @@ Meta
 
 ## PostgreSQL Storage Setup Scripts
 Files: `datomic-postgresql-storage-setup-scripts/`
-- [ ] `postgres-user.sql` — role creation
-  - [ ] Summary + insights (security posture, creds policy)
-  - [ ] Actions (harden grants/roles)
-- [ ] `postgres-db.sql` — DB creation
-  - [ ] Summary + insights (encoding, template, ownership)
-  - [ ] Actions (env‑specific names/owners)
-- [ ] `postgres-table.sql` — K/V table
-  - [ ] Summary + insights (id/rev/map/val, CAS expectations)
-  - [ ] Actions (narrow grants, indexes, migrations)
+- [x] `postgres-user.sql` — role creation
+  - Summary: Creates login role `nemo` with password `nemo`.
+  - Insights: Example only; insecure default credentials.
+  - Actions: Parameterize user/secret; remove public grants; follow least‑privilege.
+- [x] `postgres-db.sql` — DB creation
+  - Summary: Creates `mycloud` DB (UTF‑8, template0), owner postgres.
+  - Insights: Baseline settings fine; owner should be dedicated role.
+  - Actions: Use app role as owner; configure connection limits per env.
+- [x] `postgres-table.sql` — K/V table
+  - Summary: `mycloud_kvs(id text primary key, rev integer, map text, val bytea)`; grants ALL to postgres and public.
+  - Insights: Simple K/V layout matching Datomic SQL adapter expectations; permissive grants.
+  - Actions: Revoke public ALL; grant needed privileges to app role; consider indexes on `rev` depending on CAS usage; migration path.
 
 ## Datomic Reference (Ground Truth)
 Folder: `datomic-reference/`
@@ -215,21 +218,36 @@ For each: note patterns portable to EDB (even if not Rust), risks from unmaintai
 ## Datomic Reverse Engineer (Peer)
 Folder: `datomic-reverse-engineer/`
 - Orientation
-  - [ ] `src-java/summary.txt` (CFR report)
+  - [x] `src-java/summary.txt` (CFR report)
+    - Summary: Decompile of peer-1.0.7277.jar via CFR 0.152, with numerous unstructured methods flagged.
+    - Actions: Use targeted file reads for high-signal classes; avoid relying on broken reconstructions.
 - Query/Data path
-  - [ ] `datomic/datalog$eval_query.java`, joins, projections
+  - [x] `datomic/datalog$eval_query.java`, joins, projections
+    - Summary: Datalog evaluation dispatches rules (`eval-rule`), adornment/predicate processing, input pruning; heavy use of Clojure vars/seq processing.
+    - Insights: Rule evaluation loop over program rules; input set pruning before scheduling; aligns with staged eval.
+    - Actions: Reflect staged query plan in EDB algebrizer/executor; keep rule dispatch explicit.
   - [ ] `datomic/pull$*.java`
 - Indexes/Log/IO
-  - [ ] `datomic/index$*.java`, `index/TransposedData.java`
-  - [ ] `datomic/log$*.java`
+  - [x] `datomic/index$*.java`, `index/TransposedData.java`
+    - Sample: `index$write_vals.java` logs batch counts, accumulates bytes, delegates to `cluster/write-vals` with `:index` op.
+    - Insights: Index writes are clustered; metrics collected; value map batched.
+    - Actions: In EDB, implement batched index writes; expose metrics; pluggable backends.
+  - [x] `datomic/log$*.java`
+    - Sample: `log$write_new_log.java` constructs new log root/tail, writes descriptors, uses `uuid->val-key`; sets rev=0, etag nil, d/r and d/l entries.
+    - Insights: Log is append-structured; root/tail objects with descriptors; fressian serialization references.
+    - Actions: EDB log: append-only with root/tail descriptors; avoid Fressian (use CBOR/JSON + binary values).
 - Storage adapters
-  - [ ] `datomic/kv_sql*`, `kv_sql_ext*`, `sql-src/datomic/sql$*.java`
+  - [x] `datomic/kv_sql*`, `kv_sql_ext*`, `sql-src/datomic/sql$*.java`
+    - Sample: `kv_sql_ext$kv_sql.java` bridges cluster conf → JDBC spec → kv-sql connection; `kv_sql$constraint_violation_QMARK_.java` checks SQLState "23"; `sql$execute_commands.java` iterates commands into PreparedStatements.
+    - Insights: SQL adapter expects constraint detection via SQLState; commands batched across JDBC.
+    - Actions: EDB Postgres adapter: map unique violations, robust error mapping; command batching.
   - [ ] `datomic/ddb*`, `s3*`, `cassandra*`, `h2*`
 - Peer/cluster/process
   - [ ] `datomic/peer$*.java`, `cluster*`, `process_monitor*`, `extensions*`
+    - Actions: Identify tx-report propagation, peer cache invalidation, and cluster write paths to inform EDB observer/caching APIs.
 - Utilities
   - [ ] `fressian*`, `crypto*`, `lucene/*`, `datafy*`, `treewalk*`
-- Java internals
+  - Java internals
   - [ ] `com/datomic/impl/peer/ActiveMQInputStream.java`
 - Tools
   - [ ] `tools/tools.decompiler/*`
@@ -237,9 +255,9 @@ Folder: `datomic-reverse-engineer/`
 For each: extract invariants (tx ordering, CAS rules, index semantics), and portability deltas (JVM → WASM/HTTP, serialization alternatives). 
 
 ## P2P & Sync
-- [ ] Define log model (append‑only, signed, t/causality, replay)
+- [x] Define log model (append‑only, signed, t/causality, replay)
 - [ ] Device identity & trust (keys, signatures, rotation)
-- [ ] Replication flows (peer↔peer, peer↔service, conflicts)
+- [x] Replication flows (peer↔peer, peer↔service, conflicts)
 - [ ] Consistency targets (eventual vs. partitions, per‑attr unique)
 - [ ] Security/encryption (at rest/in transit)
 - [ ] Offline‑first behavior (queues, backpressure)
@@ -254,3 +272,24 @@ Output: p2p-sync-mvp.md with an MVP plan and open questions.
 - [ ] Risks/open questions
 - [ ] Proposed next actions
 - [ ] File references
+
+## EDB Requirements (Draft)
+- Runtime & Transport
+  - WASM/wasi transactor runtime; polyglot peers; HTTP/gRPC baseline; optional P2P transports.
+- Storage
+  - SQLite (local), Postgres (server), KV options (RocksDB/FDB); CAS semantics at segment level.
+- Schema & Catalog
+  - Attribute catalog with type, cardinality, uniqueness, noHistory, isComponent; aliasing/deprecation metadata; schema‑as‑data.
+- Transactions & Log
+  - Append‑only signed tx log; deterministic tx functions (WASM); tempid resolution; tx reports; time filters (as‑of/since/history).
+- Query & Pull
+  - Datalog subset MVP; algebrize → SQL plan; Pull patterns (forward/reverse/nesting/limits/defaults) with efficient joins.
+- Indexing
+  - EAVT/AVET/AEVT/VAET via covering indexes; background merge; full‑text via FTS5/tsvector.
+- P2P Sync
+  - Signed DAG of txs; head advertisement; push/pull; conflict handling (uniques on merge); snapshots/checkpoints.
+- DevEx
+  - CLI, FFI (C), SDKs, docs mirroring model→architecture→API; DOT diagram tooling.
+
+Open Risks & Questions
+- Global t coordination and merge; partitions/shards; ACLs; large values; index compaction at scale; tx function safety across runtimes; Pull recursion performance.

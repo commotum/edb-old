@@ -10,6 +10,8 @@ Keep (from Datomic)
 - Attribute schema: value type, cardinality, uniqueness, noHistory
 - Datalog + Pull, peer caches, read scalability via immutability
 - Background indexing and durable segments (EAVT/AVET/AEVT/VAET)
+ - Batched index writes and metrics; segment streaming to peers
+ - Tx reports to peers; tempid resolution; catalog of attributes
 
 Evolve (EDB deltas)
 - Runtimes: WASM/wasi transactor; polyglot peers (JS/Swift/Rust/etc.)
@@ -26,6 +28,10 @@ Early Decisions (Draft)
 - Tx functions: sandboxed WASM; deterministic only
 - Identity: Ed25519 keys per device; signed tx envelope
 - Values: typed encoding with small, sortable representation (for composite indexes)
+ - Indexing: EAVT/AVET/AEVT/VAET via covering indexes; background merge workers per store
+ - DevEx: CLI + FFI; schema‑as‑data with guided defaults; Pull and Query as first‑class
+ - Error mapping: SQL adapter maps unique violations and constraint errors coherently
+ - Avoid Fressian; prefer CBOR/JSON for envelopes; binary/columnar for value storage
 
 Open Questions
 - Global t: per‑peer lamport/hybrid time or server‑assigned? merge rules?
@@ -33,6 +39,8 @@ Open Questions
 - Large values and blobs: external store + content‑addressed refs?
 - Access control: per‑attribute/namespace ACLs in a P2P model?
 - Index compaction: background merge strategy on SQLite/Postgres?
+ - How to expose tx functions safely across WASM runtimes (deterministic footprint)?
+ - Pull recursion limits and performance on SQLite/Postgres schemas?
 
 Next Actions
 - Prototype signed tx envelope and local append‑only log
