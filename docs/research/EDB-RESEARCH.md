@@ -226,7 +226,11 @@ Folder: `datomic-reverse-engineer/`
     - Summary: Datalog evaluation dispatches rules (`eval-rule`), adornment/predicate processing, input pruning; heavy use of Clojure vars/seq processing.
     - Insights: Rule evaluation loop over program rules; input set pruning before scheduling; aligns with staged eval.
     - Actions: Reflect staged query plan in EDB algebrizer/executor; keep rule dispatch explicit.
-  - [ ] `datomic/pull$*.java`
+  - [x] `datomic/pull$*.java`
+    - Samples: `pull$normalize_pattern.java`, `pull$dereffed_index_pull.java`, `pull$try_xform.java`, `pull$pull_1$f__19054.java`, `pull$pull$f__19059.java`.
+    - Summary: Pull normalizes patterns (string/edn → canonical map), caches normalized patterns, supports dereferenced index pulls, and integrates optional extension transforms via `extension-resolver/resolve-xform!`.
+    - Insights: Pattern normalization + caching is a key optimization; supports reverse attrs and xform/default/limit options; pull can run standalone or inside query projections.
+    - Actions: EDB Pull: implement normalization cache, extension hook points for transforms, efficient joins for nested patterns, reverse navigation.
 - Indexes/Log/IO
   - [x] `datomic/index$*.java`, `index/TransposedData.java`
     - Sample: `index$write_vals.java` logs batch counts, accumulates bytes, delegates to `cluster/write-vals` with `:index` op.
@@ -243,12 +247,21 @@ Folder: `datomic-reverse-engineer/`
     - Actions: EDB Postgres adapter: map unique violations, robust error mapping; command batching.
   - [ ] `datomic/ddb*`, `s3*`, `cassandra*`, `h2*`
 - Peer/cluster/process
-  - [ ] `datomic/peer$*.java`, `cluster*`, `process_monitor*`, `extensions*`
-    - Actions: Identify tx-report propagation, peer cache invalidation, and cluster write paths to inform EDB observer/caching APIs.
+  - [x] `datomic/peer$*.java`, `cluster*`, `process_monitor*`, `extensions*`
+    - Samples: `peer$get_catalog.java` (URI parse → local or system cluster catalog), `peer$administer_system.java` (actions like `upgrade-schema`, `release-object-cache`), `cluster$write_vals_STAR_$fn__10660.java` (write path helper), `cluster/QueueingWriter.java` (async write queue with timeouts/promises), `process_monitor$fn__23484.java` (module load registration), `extensions$tx_ids.java` (tx id range from log).
+    - Summary: Peer utilities for catalog discovery and admin, clustered write helpers with async queueing + timeouts, process monitoring hooks, and tx id helpers.
+    - Insights: Cluster write path abstracts over store with queueing and backpressure; peers maintain local db catalogs; administrative tasks adjust schema/cache; tx ids streamed from log.
+    - Actions: EDB: design observer and admin APIs; provide async write batching with bounded queues; expose tx-range APIs; define catalog discovery for P2P and centralized modes.
 - Utilities
-  - [ ] `fressian*`, `crypto*`, `lucene/*`, `datafy*`, `treewalk*`
+  - [x] `fressian*`, `crypto*`, `lucene/*`, `datafy*`, `treewalk*`
+    - Samples: `fressian$write_handler_lookup.java` (compose custom write handlers), `crypto$random_bytes.java` (SecureRandom bytes), `lucene$field_stream.java` (field binary stream view), `datafy$fn__17266.java` (helpers for data coercion), `treewalk$create_node.java` (node creation via lookup).
+    - Summary: Serialization handlers (Fressian), crypto utilities, full‑text interop, datafy/treewalk utilities for value coercion and tree building.
+    - Insights: Fressian is central to Datomic wire/storage serialization; Lucene utilities indicate FT integration; helpers provide coercion and tree building around identifiers.
+    - Actions: EDB: choose serialization (avoid Fressian; prefer CBOR/JSON + typed encoding); plan FT via SQLite FTS5/Postgres tsvector; implement datafy/tree building helpers for Pull.
   - Java internals
-  - [ ] `com/datomic/impl/peer/ActiveMQInputStream.java`
+  - [x] `com/datomic/impl/peer/ActiveMQInputStream.java`
+    - Summary: Adapts an `ActiveMQBuffer` to a Java `InputStream` (read byte/bytes with readableBytes checks).
+    - Actions: If adopting message queues/transports, provide similar adapters; for EDB, prefer gRPC/HTTP streams.
 - Tools
   - [ ] `tools/tools.decompiler/*`
 
