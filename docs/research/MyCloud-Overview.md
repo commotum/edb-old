@@ -1,13 +1,12 @@
-````markdown
 # MyCloud — Hero Application for EDB (Extensible Database)
 
-**MyCloud** is the flagship, document‑centric application that showcases the capabilities of **EDB (Extensible Database)**: a time‑traveling, append‑only store with Datalog + Pull, schema‑as‑data, and first‑class peer‑to‑peer sync. MyCloud focuses on user experience and collaboration while relying on EDB for core data mechanics, storage, querying, and sync. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
+**MyCloud** is the flagship, document‑centric application that showcases the capabilities of **EDB (Extensible Database)**: a time‑traveling, append‑only store with Datalog + Pull, schema‑as‑data, and first‑class peer‑to‑peer sync. MyCloud focuses on user experience and collaboration while relying on EDB for core data mechanics, storage, querying, and sync.
 
 ---
 
 ## Why MyCloud exists
 
-MyCloud demonstrates how everyday users can create, organize, and share living documents while retaining the guarantees and power of a serious database: immutable history, reproducible queries, offline‑first operation, and evolvable schemas. It is the **hero app** for EDB—an opinionated product layered cleanly over EDB’s engine. :contentReference[oaicite:2]{index=2}
+MyCloud demonstrates how everyday users can create, organize, and share living documents while retaining the guarantees and power of a serious database: immutable history, reproducible queries, offline‑first operation, and evolvable schemas. It is the **hero app** for EDB—an opinionated product layered cleanly over EDB’s engine.
 
 ---
 
@@ -23,7 +22,7 @@ MyCloud demonstrates how everyday users can create, organize, and share living d
 - Tags and Questions are **attributes** defined by schema: `:db/valueType`, `:db/cardinality`, `:db/unique`, `:db/doc`, `:db/alias`, `:db/noHistory`.  
 - Blocks are modeled via **component relationships** (`:db/isComponent true`) so ownership and lifecycle are explicit.  
 - HyperDocs are ordinary entities that aggregate Blocks and Tags.  
-This embraces EDB’s **universal schema**: any entity may have any attribute, and schema evolves *growth‑only*. :contentReference[oaicite:3]{index=3}
+This embraces EDB’s **universal schema**: any entity may have any attribute, and schema evolves *growth‑only*.
 
 ---
 
@@ -35,13 +34,17 @@ MyCloud adopts EDB’s information model:
 - **Transactions**: sets of changes applied atomically; each transaction has a **tx entity** and a **signed envelope** (author key, tx‑instant, parents, body).  
 - **Time travel**: `as‑of`, `since`, and `history` views produce reproducible results over immutable database values.  
 - **Sync**: replication is a **signed DAG** of transactions (advertise heads, push/pull, verify, apply).  
-These mechanics are provided by EDB and surfaced in MyCloud’s UX (history, attribution, conflict surfacing). :contentReference[oaicite:4]{index=4} :contentReference[oaicite:5]{index=5}
+These mechanics are provided by EDB and surfaced in MyCloud’s UX (history, attribution, conflict surfacing).
 
 ---
 
 ## Schema & evolution philosophy
 
-MyCloud leans on EDB’s **schema‑as‑data** to describe the characteristics of attributes (types, cardinality, uniqueness, ownership, history), and follows a strict **growth‑only** approach: add, alias, and deprecate—never remove or repurpose names. When an attribute requires a domain‑specific type, **we add a new value type** rather than forcing data into an ill‑fitting existing type. (Example: colors use `uint8` channels instead of overloading `long`.) :contentReference[oaicite:6]{index=6} :contentReference[oaicite:7]{index=7} :contentReference[oaicite:8]{index=8}
+MyCloud leans on EDB’s **schema‑as‑data** to describe the characteristics of attributes (types, cardinality, uniqueness, ownership, history), and follows a strict **growth‑only** approach: add, alias, and deprecate—never remove or repurpose names. When an attribute requires a domain‑specific type, **we add a new value type** rather than forcing data into an ill‑fitting existing type. (Example: colors use `uint8` channels instead of overloading `long`.)
+
+See also
+- Value types (scalars): `docs/research/value-types.md`
+- Requirements — Schema & Catalog: `docs/research/EDB-REQUIREMENTS.md`
 
 ---
 
@@ -49,7 +52,7 @@ MyCloud leans on EDB’s **schema‑as‑data** to describe the characteristics 
 
 EDB supports a canonical set of scalar value types and **tuple/composite values** for small, fixed‑arity records. MyCloud uses these to represent structured “values” (e.g., colors, geo points, ranges) while keeping **cardinality** at the attribute level.  
 - **New scalar example:** `:db.type/uint8` (0..255), a single byte with numeric sort.  
-- **Composite example:** `:db.type/tuple` with per‑slot types and optional labels for ergonomic Pull rendering. :contentReference[oaicite:9]{index=9} :contentReference[oaicite:10]{index=10} :contentReference[oaicite:11]{index=11}
+- **Composite example:** `:db.type/tuple` with per‑slot types and optional labels for ergonomic Pull rendering.
 
 ### Example: Color as RGBA (tuple of `uint8`)
 **Schema (EDN)**
@@ -61,7 +64,7 @@ EDB supports a canonical set of scalar value types and **tuple/composite values*
  :db/tupleLabels [:r :g :b :a]
  :db/default     [0 0 0 255]
  :db/doc         "RGBA; each channel 0..255 (00–FF); a defaults to 255"}
-````
+```
 
 **Transact (JSON)**
 
@@ -77,7 +80,11 @@ EDB supports a canonical set of scalar value types and **tuple/composite values*
 ;;    :style/color {:r 120 :g 40 :b 255 :a 128}}
 ```
 
-Tuples are encoded canonically for ordering and hashing; labeled accessors like `(tuple/get ?c :r ?r)` are lowered to positional access at query time. &#x20;
+Tuples are encoded canonically for ordering and hashing; labeled accessors like `(tuple/get ?c :r ?r)` are lowered to positional access at query time.
+
+See also
+- Tuple encoding spec: `docs/research/tuple-encoding.md`
+- Value types (scalars): `docs/research/value-types.md`
 
 ---
 
@@ -87,13 +94,16 @@ MyCloud builds features on **Datalog + Pull**:
 
 * Use Datalog for relations, filters, and aggregates; use Pull to materialize structured entity trees (documents with nested blocks/tags).
 * Pull supports forward/reverse navigation, nesting, wildcards, recursion limits, `:as/:default/:limit/:xform`.
-* MyCloud composes views and exports using Pull patterns so rendering is decoupled from storage layout.&#x20;
+* MyCloud composes views and exports using Pull patterns so rendering is decoupled from storage layout.
+
+See also
+- Requirements — Query & Pull: `docs/research/EDB-REQUIREMENTS.md`
 
 ---
 
 ## Identity & uniqueness
 
-Documents and other public objects use **unique identity attributes** (e.g., `:doc/id`) to enable idempotent upserts and stable references. EDB enforces uniqueness on `(a, v)` with appropriate indexes; conflicts are detected deterministically at transact/merge time. &#x20;
+Documents and other public objects use **unique identity attributes** (e.g., `:doc/id`) to enable idempotent upserts and stable references. EDB enforces uniqueness on `(a, v)` with appropriate indexes; conflicts are detected deterministically at transact/merge time.
 
 ---
 
@@ -104,7 +114,10 @@ MyCloud runs wherever EDB runs:
 * **Local**: embedded on‑device with SQLite for offline‑first authoring.
 * **Hosted**: Postgres for team workspaces and shared datasets.
 
-EDB maintains EAVT/AVET/AEVT/VAET covering indexes with compact, typed encodings. Tuples encode to sortable bytes; optional generated columns can accelerate slot‑wise filters. MyCloud benefits from these index strategies without custom storage code. &#x20;
+EDB maintains EAVT/AVET/AEVT/VAET covering indexes with compact, typed encodings. Tuples encode to sortable bytes; optional generated columns can accelerate slot‑wise filters. MyCloud benefits from these index strategies without custom storage code.
+
+See also
+- Indexing strategy: `docs/research/indexing-strategy.md`
 
 ---
 
@@ -114,19 +127,22 @@ MyCloud’s collaboration model is EDB’s P2P sync:
 
 * **Signed DAG** of transactions (author key, timestamp, parents, body), heads advertisement, push/pull by differences, signature verification.
 * **Conflict handling** via unique constraints and clear surfacing in the UI; **snapshots** accelerate catch‑up.
-* **Feature negotiation** allows new types/encodings (e.g., `tuple`, `tuple-enc:v1`, `uint8`) to roll out safely.&#x20;
+* **Feature negotiation** allows new types/encodings (e.g., `tuple`, `tuple-enc:v1`, `uint8`) to roll out safely.
+
+See also
+- P2P sync MVP: `docs/research/p2p-sync-mvp.md`
 
 ---
 
 ## Security & integrity
 
-EDB provides TLS in transit, optional at‑rest encryption (backend‑specific), **signed transaction envelopes**, deterministic validation (types, cardinality, uniqueness), and a sandbox for deterministic tx functions (WASM). MyCloud inherits these guarantees and exposes them through audit/history views and sharing workflows. &#x20;
+EDB provides TLS in transit, optional at‑rest encryption (backend‑specific), **signed transaction envelopes**, deterministic validation (types, cardinality, uniqueness), and a sandbox for deterministic tx functions (WASM). MyCloud inherits these guarantees and exposes them through audit/history views and sharing workflows.
 
 ---
 
 ## Observability & operations
 
-EDB exposes metrics (index merge latency, query latencies, sync status) and tx‑report subscriptions. MyCloud builds on these for activity feeds, diagnostics, and backup/restore flows.&#x20;
+EDB exposes metrics (index merge latency, query latencies, sync status) and tx‑report subscriptions. MyCloud builds on these for activity feeds, diagnostics, and backup/restore flows.
 
 ---
 
@@ -137,7 +153,7 @@ EDB exposes metrics (index merge latency, query latencies, sync status) and tx�
 3. Offline‑first editing; background sync; conflict surfacing.
 4. History/time‑travel views (`as‑of`, `since`, `history`) and replay.
 5. Search, filters, and views built on Datalog + Pull.
-6. Export/import using Pull patterns (JSON/EDN). &#x20;
+6. Export/import using Pull patterns (JSON/EDN).
 
 ---
 
@@ -146,9 +162,13 @@ EDB exposes metrics (index merge latency, query latencies, sync status) and tx�
 * **Layering**: MyCloud is a product; EDB is the engine. No shadow engines.
 * **Growth‑only**: evolve via new attributes, aliases, and **new value types/structs** instead of twisting old ones.
 * **Ubiquity**: rely on EDB’s SQLite/Postgres portability and HTTP/gRPC transports.
-* **Determinism**: signed envelopes, canonical encodings, and reproducible queries underpin collaboration at scale. &#x20;
+* **Determinism**: signed envelopes, canonical encodings, and reproducible queries underpin collaboration at scale.
 
 ---
 
-```
-```
+## See also
+- Requirements overview: `docs/research/EDB-REQUIREMENTS.md`
+- Value types (scalars): `docs/research/value-types.md`
+- Tuple encoding: `docs/research/tuple-encoding.md`
+- Indexing strategy: `docs/research/indexing-strategy.md`
+- P2P sync MVP: `docs/research/p2p-sync-mvp.md`
