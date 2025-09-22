@@ -29,6 +29,10 @@ Schema & Catalog
 - Support aliases and deprecation metadata; never remove or reuse names (growth‑only).
 - Provide a catalog API to list attributes, schema versions, and annotations.
 
+Value Types (overview)
+- See docs/research/value-types.md for the canonical scalar set, external representations (EDN/JSON), and internal encoding/ordering notes.
+- Growth-only: add new value types when they make domain sense (e.g., `:db.type/uint8` for color channels) rather than overloading existing types.
+
 Philosophy
 - The database evolves by adding sensible data types and structs (tuples) rather than forcing attributes to fit ill‑suited value types. Prefer adding new scalars like `:db.type/uint8` when appropriate.
 
