@@ -52,6 +52,12 @@ Status: Spec-only (MVP). No code.
 - Hashing/signing cover encoded `V` bytes as part of the canonical tx envelope.
 - Older peers without declared support must fail-closed on decode or request downgrade.
 
+## Cross-references (See also)
+- Requirements: EDB-REQUIREMENTS.md
+- Value types (scalars): value-types.md
+- Indexing strategy: indexing-strategy.md
+- P2P sync MVP: p2p-sync-mvp.md
+
 ## Open Questions
 - Index hints per slot to drive generated columns automatically?
 - Byte layout versioning strategy; cross-runtime conformance test matrix.

@@ -57,10 +57,11 @@ Notes
 P2P & interoperability
 - New types are advertised via feature flags (e.g., "uint8"); envelopes encode canonical bytes and are signed/hashed.
 
-Cross-references
+Cross-references (See also)
+- Requirements: EDB-REQUIREMENTS.md
 - Tuple encoding: tuple-encoding.md
-- Indexing: indexing-strategy.md
-- Requirements overview: EDB-REQUIREMENTS.md
+- Indexing strategy: indexing-strategy.md
+- P2P sync MVP: p2p-sync-mvp.md
 
 Open questions
 - Canonical external form for instants across APIs (ISO-8601 vs epoch micros)?
