@@ -278,6 +278,31 @@ For each: extract invariants (tx ordering, CAS rules, index semantics), and port
 
 Output: p2p-sync-mvp.md with an MVP plan and open questions.
 
+## Tuple/Composite Values (Spec Only; MVP target)
+- Purpose
+  - Compact representation for small fixed-shape records (color, geo, ranges) as single values to keep `EAVT/AVET/AEVT/VAET` lean.
+- Key insights
+  - Lexicographic canonical encoding for tuples; optional generated columns for hot attributes; Pull label mapping; Datalog tuple accessors; evolve by adding new scalars like `:db.type/uint8`.
+- Dependencies
+  - Value encoding layer; algebrizer predicate support; SQL adapters; JSON/EDN serializers.
+- Constraints
+  - Growth-only schema; stable canonicalization for P2P; no hard cap in spec — initial focus on common small composites.
+- Risks/gaps
+  - Slot pushdown on SQLite; migration from component-entity patterns; unknown-type handling in older peers.
+- Actions
+  - Draft encoding spec; add query accessor grammar; feature flags (`tuple`,`tuple-enc:v1`,`uint8`); author examples.
+- Produce
+  - 1-page spec + tests + examples (RGBA, geo point, range).
+
+Review checklist (tuples & new types)
+- [ ] Arity and per-slot types deterministic
+- [ ] Canonical encoding documented (endianness, varint, text normalization)
+- [ ] Datalog accessor grammar specified (labeled + positional lowering)
+- [ ] Pull rendering (labels vs vector) specified
+- [ ] SQL pushdown plan captured for Postgres/SQLite
+- [ ] P2P feature flags and interop policy stated (tuple, tuple-enc:v1, uint8)
+- [ ] Growth-only migration guidance written
+
 ## Deliverables (Each Section)
 - [ ] 1‑paragraph summary
 - [ ] Key insights (bullets)

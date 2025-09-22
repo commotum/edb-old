@@ -38,7 +38,28 @@ Compaction/Merge
 - Background job to coalesce segments and prune retracted current values.
 - Maintain tombstones for history if needed (or move to history table).
 
+Tuple/Composite Value Encoding & Indexing
+- Encoding
+  - Type tag `tuple`, arity byte, per-slot type tags, and per-slot canonical encodings; overall byte sequence is lexicographically sortable.
+  - Example encodings: RGBA `[r g b a]` as four `uint8` bytes, geo `[lon lat]` as two doubles, range `[start end]` as two longs.
+- Comparison rule
+  - Lexicographic by slot: compare slot 0, then slot 1, etc.
+- SQL mapping
+  - Unified table: store encoded tuple in `v BLOB`; equality via bytes; ordering via byte order.
+  - Typed columns (optional): expose generated columns per hot tuple attribute
+    - Postgres: `GENERATED ALWAYS AS (...) STORED` with functional indexes.
+    - SQLite: `VIRTUAL`/computed columns where available; otherwise views.
+- Indexes
+  - EAVT/AVET/AEVT/VAET remain applicable; no extra composite indexes required for MVP.
+- Query pushdown
+  - Optimizer can rewrite `(tuple/slot ?v i ?x)` into SQL over generated columns when present.
+- Tradeoffs
+  - Generated columns speed slot filters/sorts at storage cost; default to raw BLOB unless a tuple attr is hot for slot queries.
+
+<!-- TODO(tuple): Add a small diagram of the encoded layout and example generated column definitions. -->
+
 Open Questions
 - Value encoding: canonical format for composite ordering across types?
 - History retention policy: per‑attr noHistory; archiving strategy.
 - Index maintenance on multi‑writer P2P: per‑replica queues vs. centralized service.
+- Tuple arity upper bound; byte layout versioning; cross‑runtime conformance.

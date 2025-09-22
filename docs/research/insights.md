@@ -21,6 +21,13 @@ Evolve (EDB deltas)
 - Built‑in P2P sync: signed log replication; offline‑first
 - Free‑text: FTS (SQLite FTS5 / Postgres tsvector)
 - Serialization: EDN/JSON for API; compact internal encoding for values
+- Values: add tuple/composite as first‑class typed values with small, sortable canonical encoding; include `:db.type/uint8` (0..255, 1 byte) for RGBA and similar
+- DevEx: Pull renders labeled maps for tuples if `:db/tupleLabels` exist; vectors otherwise
+- Modeling guidance: prefer component entities for unbounded/nested structures; use tuples for small, fixed‑arity records (RGBA, geo points, ranges, quaternions)
+- Safety: growth‑only — introduce new tuple attributes rather than mutating arity/types
+
+Philosophy
+- Evolve by adding sensible value types and structs (e.g., `uint8` for color channels, tuples for RGBA) rather than forcing attributes into ill‑fitting existing types.
 
 Early Decisions (Draft)
 - Single‑writer vs. multi‑writer: aim for multi‑writer via signed logs; resolve conflicts at index‑build or read via constraints
@@ -39,8 +46,9 @@ Open Questions
 - Large values and blobs: external store + content‑addressed refs?
 - Access control: per‑attribute/namespace ACLs in a P2P model?
 - Index compaction: background merge strategy on SQLite/Postgres?
- - How to expose tx functions safely across WASM runtimes (deterministic footprint)?
- - Pull recursion limits and performance on SQLite/Postgres schemas?
+- How to expose tx functions safely across WASM runtimes (deterministic footprint)?
+- Pull recursion limits and performance on SQLite/Postgres schemas?
+- Tuple arity cap; Datalog accessor syntax; cost/benefit of SQL pushdown for tuple slots
 
 Next Actions
 - Prototype signed tx envelope and local append‑only log
