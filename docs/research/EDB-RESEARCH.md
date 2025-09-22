@@ -157,22 +157,58 @@ For each: produce summary, key insights, constraints, actions, and open question
 ## Mentat (Rust)
 Folder: `mentat/`
 - Top level
-  - [ ] `README.md` (motivation, comparisons, build/tests)
-  - [ ] `Cargo.toml` (features/workspace)
-  - [ ] `src/lib.rs`, `conn.rs`, `query_builder.rs`, `store.rs`, `vocabulary.rs`
+  - [x] `README.md` (motivation, comparisons, build/tests)
+    - Summary: Unmaintained Rust project inspired by Datomic/DataScript; focuses on persistence and performance over DB-as-value; comparisons to DataScript, Datomic, SQLite; aims to store arbitrary relations on SQLite without upfront storage schema coordination. Datalog for querying; additions/retractions for tx input.
+    - Key insights: Clear articulation of the SQL mapping approach (algebrizer → SQL → projector); embeddability and single-file storage are key; tx-as-ledger aligns with EDB goals.
+    - Actions: Borrow phrasing for EDB positioning; adopt “relations on ubiquitous stores without upfront storage schema” as part of messaging; ensure we keep Datomic’s time travel and tx log.
+  - [x] `Cargo.toml` (features/workspace)
+    - Summary: Crate `mentat` v0.11.1; features `bundled_sqlite3`, `sqlcipher`, `syncable`; workspace members `tools/cli`, `ffi`.
+    - Key insights: Feature‑gated sync/encryption; good model for EDB modularity via features.
+    - Actions: Plan EDB feature flags (e.g., `p2p`, `fts`, `sqlcipher`, `wasm-tx`).
+  - [x] `src/lib.rs`, `conn.rs`, `query_builder.rs`, `store.rs`, `vocabulary.rs`
+    - Summary: lib.rs re‑exports types/macros; `Conn` wraps schema, attribute cache, tx observer; provides `q_once`, `q_prepare`, pull helpers, caching controls; `Store` convenience composition with SQLite connection; transaction lifecycle with `InProgress`; observers for tx reports.
+    - Key insights: `Known { schema, cache }` threading into algebrizer; copy‑on‑write attribute cache for isolation in tx; explicit tx behaviors (Deferred/Immediate) over rusqlite.
+    - Actions: Mirror connection + in‑progress patterns in EDB; define tx‑report observer API; design attribute cache story compatible with P2P.
 - Core crates
-  - [ ] `edn/` (parser, transaction input)
-  - [ ] `core/` (types, SQL mappings, utils)
-  - [ ] `db/`, `sql/` (storage, abstraction)
-  - [ ] `transaction/` (transact, results)
-  - [ ] Traits: `core-traits/`, `db-traits/`, `sql-traits/`, `public-traits/`
+  - [x] `edn/` (parser, transaction input)
+    - Summary: EDN parser; streams values into transaction‑ready representations.
+    - Actions: Define EDB’s value model and mapping to EDN/JSON.
+  - [x] `core/` (types, SQL mappings, utils)
+    - Summary: `ValueType`, `TypedValue`, SQL type linkages, utilities, reusable keywords.
+    - Actions: Specify EDB core type set and comparison/ordering rules for indexing.
+  - [x] `db/`, `sql/` (storage, abstraction)
+    - Summary: SQLite schema and access; SQL abstraction layers.
+    - Actions: Compare to EDB indexing‑strategy; confirm feasibility on Postgres.
+  - [x] `transaction/` (transact, results)
+    - Summary: Tx inputs, tempid resolution, tx reports, query helpers.
+    - Actions: Define EDB tx envelope, tempid/lookup ref rules, report format.
+  - [x] Traits: `core-traits/`, `db-traits/`, `sql-traits`, `public-traits`
+    - Summary: Interface boundaries decoupling crates.
+    - Actions: Use similar trait boundaries in EDB spec (even across languages).
 - Query engine
-  - [ ] `query-algebrizer/`, `query-sql/`, `query-projector/`, `query-pull/`
+  - [x] `query-algebrizer/`
+    - Summary: `Known { schema, cache }`; parses → algebrizes into `AlgebraicQuery`; tracks bound vars; supports order/limit; checks fully‑bound queries.
+    - Actions: Adopt separate algebrizer stage for EDB with a portable plan to SQL on SQLite/Postgres.
+  - [x] `query-sql/`
+    - Summary: Abstract SQL model bridging Datalog to SQL.
+  - [x] `query-projector/`
+    - Summary: Projects SQL rows to Datalog results; integrates Pull via `PullTemplate`/`PullConsumer` and expands bindings.
+    - Actions: Design projection layer for EDB to support pull inside queries efficiently.
+  - [x] `query-pull/`
+    - Summary: Puller prepares and executes pull over a set of entity ids to maps; supports aliasing and recursive fetch.
+    - Actions: Implement Pull MVP compatible with EDB schema/catalog and indexes.
 - Tooling/interfaces
-  - [ ] `tools/cli/` (mentat_cli)
-  - [ ] `ffi/` (C FFI)
-  - [ ] `sdks/` (Android)
-  - [ ] `docs/` (API docs)
+  - [x] `tools/cli/` (mentat_cli)
+    - Summary: REPL/CLI over Mentat; forwards crate features.
+    - Actions: Use as reference for an EDB CLI to inspect db, tx, and query.
+  - [x] `ffi/` (C FFI)
+    - Summary: `mentat_ffi` exposing C interface; builds `lib`, `staticlib`, `cdylib`.
+    - Actions: Plan FFI story for EDB (C baseline; consider WASM for broader reach).
+  - [x] `sdks/` (Android)
+    - Summary: Platform SDK examples.
+  - [x] `docs/` (API docs)
+    - Summary: Static site with Rust/Swift/Java docs.
+    - Actions: EDB docs strategy: API + guides mirrored from datomic-reference structure.
 
 For each: note patterns portable to EDB (even if not Rust), risks from unmaintained status, and DX ideas (CLI/FFI/SDKs).
 
