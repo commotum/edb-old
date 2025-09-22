@@ -104,7 +104,7 @@ Below is an example of a transaction written in EDN notation. This transaction c
 
 In the transaction above:
 
-- `:person/name` and `:person/email` are namespace d keyword s denoting the ident s <att-ref-ident> of attributes the new entity will possess.
+- `:person/name` and `:person/email` are namespaced keywords denoting the idents <att-ref-ident> of attributes the new entity will possess.
 - "Anna" is a string denoting the the value of the `:person/name` attribute.
 - "anna@example.com" is string denoting the value of the `:person/email` attribute.
 - the entire transaction is a vector containing a nested map.
