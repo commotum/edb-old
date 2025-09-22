@@ -45,43 +45,112 @@ Files: `datomic-postgresql-storage-setup-scripts/`
 ## Datomic Reference (Ground Truth)
 Folder: `datomic-reference/`
 - Overviews
-  - [ ] `overview.md`
-  - [ ] `entities.md`
-  - [ ] `programming_with_data_and_edn.md`
-  - [ ] `time_in_datomic.md`
-  - [ ] `best_practices.md`
+  - [x] `overview.md`
+    - Summary: Introduction to Datomic’s information model (datoms, schema, entities), architecture (transactor, peers, storage), editions/APIs, and getting started.
+    - Key insights: Immutable log and indexes enable time travel and read scale; peer vs client API split; schema-as-data with attribute-level constraints.
+    - Actions: Capture invariants in insights.md; align EDB intro structure around model → architecture → APIs.
+  - [x] `entities.md`
+    - Summary: Entities are lazy associative views over datoms at a point in time; forward/reverse navigation; caching via touch; time-basis behavior.
+    - Key insights: Entities are point-in-time; reverse lookup via underscore attrs; component semantics for recursive touch.
+    - Actions: Specify entity view semantics for EDB, including reverse navigation and component recursion.
+  - [x] `programming_with_data_and_edn.md`
+    - Summary: EDN as data exchange; program with data-first mindset; patterns for representing rich types and domain facts.
+    - Key insights: EDN/EDB API should be language-neutral; typed values and lossless serialization are core.
+    - Actions: Define EDB wire format (EDN and JSON), and typed value mapping.
+  - [x] `time_in_datomic.md`
+    - Summary: as-of/since/history filters and examples; time t/tx semantics and impacts on queries.
+    - Key insights: Time-travel APIs are first-class; entities are not history-spanning; history view includes retractions.
+    - Actions: Specify EDB time filters and result semantics; plan index support for time predicates.
+  - [x] `best_practices.md`
+    - Summary: Growth-not-breakage; one-direction relationships; uniques for external keys; noHistory for churn; aliases; schema annotation.
+    - Key insights: Strong defaults for evolvability; name stability; leveraging idents for enums.
+    - Actions: Adopt growth-only schema migrations in EDB; add aliasing and deprecation metadata.
 - Indexes
-  - [ ] `indexes/1_indexes_toc.md`
-  - [ ] `indexes/2_index_model.md`
-  - [ ] `indexes/3_background_indexing.md`
+  - [x] `indexes/1_indexes_toc.md`
+    - Summary: Structure of index docs.
+    - Actions: N/A.
+  - [x] `indexes/2_index_model.md`
+    - Summary: EAVT/AVET/AEVT/VAET roles; sorted, immutable segments; query access patterns.
+    - Key insights: Composite ordering drives query plans; values must be comparably ordered across types.
+    - Actions: See indexing-strategy.md for SQLite/Postgres index designs.
+  - [x] `indexes/3_background_indexing.md`
+    - Summary: Background index build/merge from tx log into persistent segments; durability.
+    - Key insights: Decouple write path from index maintenance; peers stream segments.
+    - Actions: Define EDB background merge job and snapshot strategy.
 - Query & Pull
-  - [ ] `query_and_pull/1_query_toc.md`
-  - [ ] `query_and_pull/2_executing_queries.md`
-  - [ ] `query_and_pull/3_query.md`
-  - [ ] `query_and_pull/4_pull.md`
+  - [x] `query_and_pull/1_query_toc.md`
+    - Summary: TOC for query docs.
+  - [x] `query_and_pull/2_executing_queries.md`
+    - Summary: Executing Datalog queries; inputs; result shapes; performance notes.
+    - Key insights: Find specs, bindings, and inputs shape API ergonomics.
+    - Actions: Draft minimal EDB query API surface and result encodings.
+  - [x] `query_and_pull/3_query.md`
+    - Summary: Datalog clauses, predicates, rules; source vars; aggregation.
+    - Key insights: Separation of parse → algebrize → plan is beneficial.
+    - Actions: Mirror Mentat’s algebrizer → SQL approach for EDB MVP.
+  - [x] `query_and_pull/4_pull.md`
+    - Summary: Pull patterns (forward/reverse, wildcard, nesting, recursion, as/default/limit/xform) and grammar.
+    - Key insights: Pull is declarative and language-neutral; integrates with query find.
+    - Actions: Define a Pull subset for EDB and map to SQL joins efficiently.
 - Schema
-  - [ ] `schema/1_schema.md`
-  - [ ] `schema/2_changing_schema.md`
-  - [ ] `schema/3_data_modeling.md`
-  - [ ] `schema/4_identity_and_uniqueness.md`
+  - [x] `schema/1_schema.md`
+    - Summary: Attribute schema (type, cardinality, doc, refs); schema as data.
+    - Key insights: Attribute-level control unlocks evolvability and per-attr constraints.
+    - Actions: Specify EDB attribute catalog and migration DDL.
+  - [x] `schema/2_changing_schema.md`
+    - Summary: Additive changes, renames via aliases, avoiding breaking changes.
+    - Key insights: Never remove or reuse names; prefer aliases and annotations.
+    - Actions: Provide first-class aliasing and deprecation markers in EDB.
+  - [x] `schema/3_data_modeling.md`
+    - Summary: Modeling entities/refs/enums; component relationships; cardinality choices.
+    - Key insights: Components form ownership trees; enums via idents.
+    - Actions: Document modeling playbook for EDB users.
+  - [x] `schema/4_identity_and_uniqueness.md`
+    - Summary: Unique identity (`db.unique/identity`) and value constraints; lookup refs.
+    - Key insights: Uniques enable idempotent upserts and external keys.
+    - Actions: Enforce unique indexes and conflict retries in EDB (incl. P2P merge behavior).
 - Transactions
-  - [ ] `transactions/1_transactions_toc.md`
-  - [ ] `transactions/2_transaction_model.md`
+  - [x] `transactions/1_transactions_toc.md`
+    - Summary: TOC for transactions docs.
+  - [x] `transactions/2_transaction_model.md`
+    - Summary: Declarative, immutable transaction model; d/with vs d/transact; db as value; adds/retracts.
+    - Key insights: Order-free validation; tx as information; ledger semantics.
+    - Actions: Design EDB tx envelope and with/apply function; add deterministic validation hooks.
   - [ ] `transactions/3_transaction_data.md`
-  - [ ] `transactions/4_processing_transactions.md`
-  - [ ] `transactions/5_transaction_functions.md`
+    - Actions: Review and capture data clause shapes for EDB wire format.
+  - [x] `transactions/4_processing_transactions.md`
+    - Summary: Tx processing stages; tempids; indexing; tx reports.
+    - Key insights: Tempid resolution and tx-report contracts for subscribers.
+    - Actions: Define EDB tx-report schema and subscription API.
+  - [x] `transactions/5_transaction_functions.md`
+    - Summary: Tx functions for computed writes; constraints and safety.
+    - Key insights: Determinism and sandboxing are critical.
+    - Actions: Specify WASM tx functions with deterministic sandbox.
   - [ ] `transactions/6_acid.md`
+    - Actions: Capture ACID guarantees target for EDB (local vs distributed).
   - [ ] `transactions/7_synchronization.md`
+    - Actions: Align with P2P log model; define sync consistency envelope.
   - [ ] `transactions/8_partitions.md`
+    - Actions: Decide on partitions/shards for concurrency and scaling.
   - [ ] `transactions/9_reducing_latency_with_transaction_hints.md`
+    - Actions: Evaluate hints analogous to Datomic for EDB.
 - Operation
-  - [ ] `operation/1_storage.md`
-  - [ ] `operation/2_transactor.md`
+  - [x] `operation/1_storage.md`
+    - Summary: Storage backends; configuration; performance considerations.
+    - Actions: Map to EDB storage adapters (SQLite/Postgres/KV options).
+  - [x] `operation/2_transactor.md`
+    - Summary: Transactor config, connectivity, SSL, memcached, AWS notes.
+    - Key insights: Single-writer architecture and peer discovery.
+    - Actions: For EDB, define transactor/writer role for centralized mode; contrast with P2P.
   - [ ] `operation/tutorial/1_tutorial_toc.md` … `8_history.md`
+    - Actions: Skim for examples to reuse in EDB docs.
 - Diagrams
-  - [ ] `datomic.dot` (classic)
-  - [ ] `overview.dot` (full view)
-  - [ ] `newDB.dot` (new runtimes)
+  - [x] `datomic.dot` (classic)
+    - Summary: JVM transactor/peers, CAS to storage, segment streaming.
+  - [x] `overview.dot` (full view)
+    - Summary: Information model + indexes + processes in one diagram.
+  - [x] `newDB.dot` (new runtimes)
+    - Summary: WASM transactor, polyglot peers, gRPC/Web, KV storage options.
 
 For each: produce summary, key insights, constraints, actions, and open questions; feed invariants into insights.md.
 
