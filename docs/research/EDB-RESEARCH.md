@@ -16,9 +16,19 @@ Meta
 - Related docs: insights.md, p2p-sync-mvp.md, indexing-strategy.md
 
 ## Repo Survey & Tooling
-- [ ] Root purpose and tooling (`README.md`, `main.py`, `pyproject.toml`)
-  - [ ] Summary + insights
-  - [ ] Actions
+- [x] Root purpose and tooling (`README.md`, `main.py`, `pyproject.toml`)
+  - Summary
+    - Root overview names the project “EDB” (README.md:1). Python entrypoint prints a greeting (main.py:1) and minimal Python packaging is present (pyproject.toml:1) requiring Python 3.10 (.python-version:1).
+    - Repo content centers on Datomic research and prototypes: reverse engineering (datomic-reverse-engineer), reference docs (datomic-reference), Mentat (Rust), and Postgres K/V setup scripts.
+    - Tooling mix: Python (basic), Rust (Mentat workspace), SQL, Bash, Graphviz DOT diagrams, Java/Clojure artifacts for decompiled Datomic code, and a Clojure CLI installer script.
+  - Key insights
+    - This repo is a research workspace rather than a single build target; multiple languages and ecosystems coexist.
+    - Python is currently non-essential; Rust and documentation are the primary assets; Java/Clojure pieces are artifacts for study, not to be built.
+    - Graphviz can render `.dot` architecture diagrams; scripts for rendering could improve DX.
+  - Actions
+    - Define a minimal dev environment doc (Rust stable, Python 3.10, Graphviz, Java JRE for browsing decompiled code, optional Clojure CLI if needed).
+    - Add simple Makefile/scripts to render DOT to PNG/SVG and to open docs (optional).
+    - Keep Python lightweight unless an analysis/CLI emerges; avoid unnecessary Python deps.
 
 ## PostgreSQL Storage Setup Scripts
 Files: `datomic-postgresql-storage-setup-scripts/`
