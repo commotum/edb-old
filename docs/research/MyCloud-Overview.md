@@ -1,224 +1,154 @@
-# **MyCloud Overview**
+````markdown
+# MyCloud — Hero Application for EDB (Extensible Database)
 
-## **What is MyCloud?**
+**MyCloud** is the flagship, document‑centric application that showcases the capabilities of **EDB (Extensible Database)**: a time‑traveling, append‑only store with Datalog + Pull, schema‑as‑data, and first‑class peer‑to‑peer sync. MyCloud focuses on user experience and collaboration while relying on EDB for core data mechanics, storage, querying, and sync. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
 
-[https://docs.datomic.com/cloud/whatis/data-model.html](https://docs.datomic.com/cloud/whatis/data-model.html)
+---
 
-MyCloud is a MacOS and iOS app built with SwiftUI, FastAPI, and JAX, that brings the power of enterprise scale databases to everyone with a distributed, highly available, scalable, real-time, multiplayer database and document store that provides ACID transactions, flexible schema, powerful Datalog queries, and complete data history.
+## Why MyCloud exists
 
-## **MyCloud Data Model**
+MyCloud demonstrates how everyday users can create, organize, and share living documents while retaining the guarantees and power of a serious database: immutable history, reproducible queries, offline‑first operation, and evolvable schemas. It is the **hero app** for EDB—an opinionated product layered cleanly over EDB’s engine. :contentReference[oaicite:2]{index=2}
 
-A MyCloud database is a set of immutable atomic facts called atoms. A database contains no tables; rather, there is a universal schema of user-defined attributes. Any entity can possess any attribute.
+---
 
-MyCloud datalog queries automatically use multiple indexes to support a variety of access patterns. In addition to supporting query, these indexes support identity and uniqueness, an indelible time model, and lookup refs.
+## Core concepts
 
-### **Database** 
+### HyperDocs, Blocks, Tags, Questions & Answers
+- **HyperDoc**: a top‑level document entity.
+- **Block**: an owned sub‑entity within a HyperDoc (headings, sections, lists, media, etc.).
+- **Tag**: a domain attribute used for classification or structure (e.g., `:doc/title`, `:doc/tags`).
+- **Question/Answer**: the logical notion of an attribute (**Question**) and its value(s) (**Answer**).
 
-### In MyCloud, *a database value* is a set of *atoms* and is often abbreviated as *database* or *db*. A db is a point-in-time, immutable value and will never change. If you use the same db for several queries, you will know the answers are based upon exactly the same data from a single point in time.  An atom is an immutable atomic fact that represents the addition or retraction of a relation between an entity, an attribute, a value, a transaction, an author/user, and a point in time. An atom is expressed as a seven-tuple:
+**EDB mapping**
+- Tags and Questions are **attributes** defined by schema: `:db/valueType`, `:db/cardinality`, `:db/unique`, `:db/doc`, `:db/alias`, `:db/noHistory`.  
+- Blocks are modeled via **component relationships** (`:db/isComponent true`) so ownership and lifecycle are explicit.  
+- HyperDocs are ordinary entities that aggregate Blocks and Tags.  
+This embraces EDB’s **universal schema**: any entity may have any attribute, and schema evolves *growth‑only*. :contentReference[oaicite:3]{index=3}
 
-### 
+---
 
-- ### an entity id (E)
+## Data model (inheriting EDB)
 
-- ### an attribute (A)
+MyCloud adopts EDB’s information model:
 
-- a value for the attribute (V)  
-- a boolean (Op) indicating whether the atom is being added or retracted  
-- a user id (U) indicating the user/author adding or retracting the atom  
-- a timestamp (Tm) indicating the exact moment in time the atom was added or retracted  
-- a transaction id (Tx)
+- **Datom**: ⟨E, A, V, Tx, Op⟩ where Op ∈ {add, retract}. Entities are point‑in‑time associative views over datoms.  
+- **Transactions**: sets of changes applied atomically; each transaction has a **tx entity** and a **signed envelope** (author key, tx‑instant, parents, body).  
+- **Time travel**: `as‑of`, `since`, and `history` views produce reproducible results over immutable database values.  
+- **Sync**: replication is a **signed DAG** of transactions (advertise heads, push/pull, verify, apply).  
+These mechanics are provided by EDB and surfaced in MyCloud’s UX (history, attribution, conflict surfacing). :contentReference[oaicite:4]{index=4} :contentReference[oaicite:5]{index=5}
 
-#### **Example Datom**
+---
 
-| E | aedb54ac-1b09-497e-a9ab-ef94ae89c330 |
-| :---: | :---- |
-| **A** | :user/favorite-color |
-| **V** | :blue |
-| **Tx** | c284d833-4b5a-41ff-b8c7-bd0cd0a2c404 |
-| **Op** | TRUE |
-| **U** | f637d8ed-58c7-4494-bd54-74014d630676 |
-| **Tm** | 2023-10-21T15:25:56.740Z |
+## Schema & evolution philosophy
 
-### **Entities**
+MyCloud leans on EDB’s **schema‑as‑data** to describe the characteristics of attributes (types, cardinality, uniqueness, ownership, history), and follows a strict **growth‑only** approach: add, alias, and deprecate—never remove or repurpose names. When an attribute requires a domain‑specific type, **we add a new value type** rather than forcing data into an ill‑fitting existing type. (Example: colors use `uint8` channels instead of overloading `long`.) :contentReference[oaicite:6]{index=6} :contentReference[oaicite:7]{index=7} :contentReference[oaicite:8]{index=8}
 
-An *entity* is a set of *atoms* that are all about the same E.
+---
 
-#### **Example Entity**
+## Value types & composite values (tuples)
 
-| E | A | V | Tx | Op | U | Tm |
-| ----- | ----- | ----- | ----- | :---: | ----- | ----- |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/favorite-color | :blue | e8ba9f4b-7d2d-4d71-af7e-d6f9046a934e | TRUE | f637d8ed-58c7-4494-bd54-74014d630676 | 2023-10-21T15:25:56.740Z |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/first-name | "John" | e8ba9f4b-7d2d-4d71-af7e-d6f9046a934e | TRUE | f637d8ed-58c7-4494-bd54-74014d630677 | 2023-10-21T15:25:56.740Z |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/last-name | "Doe" | e8ba9f4b-7d2d-4d71-af7e-d6f9046a934e | TRUE | f637d8ed-58c7-4494-bd54-74014d630678 | 2023-10-21T15:25:56.740Z |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/favorite-color | :green | c284d833-4b5a-41ff-b8c7-bd0cd0a2c404 | TRUE | f637d8ed-58c7-4494-bd54-74014d630679 | 2024-01-05T15:30:45.123Z |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/favorite-color | :blue | c284d833-4b5a-41ff-b8c7-bd0cd0a2c404 | FALSE | f637d8ed-58c7-4494-bd54-74014d630680 | 2024-01-05T15:30:45.123Z |
+EDB supports a canonical set of scalar value types and **tuple/composite values** for small, fixed‑arity records. MyCloud uses these to represent structured “values” (e.g., colors, geo points, ranges) while keeping **cardinality** at the attribute level.  
+- **New scalar example:** `:db.type/uint8` (0..255), a single byte with numeric sort.  
+- **Composite example:** `:db.type/tuple` with per‑slot types and optional labels for ergonomic Pull rendering. :contentReference[oaicite:9]{index=9} :contentReference[oaicite:10]{index=10} :contentReference[oaicite:11]{index=11}
 
-#### **Point-In-Time Entity Example**
+### Example: Color as RGBA (tuple of `uint8`)
+**Schema (EDN)**
+```clojure
+{:db/ident       :style/color
+ :db/valueType   :db.type/tuple
+ :db/cardinality :db.cardinality/one
+ :db/tupleTypes  [:db.type/uint8 :db.type/uint8 :db.type/uint8 :db.type/uint8]
+ :db/tupleLabels [:r :g :b :a]
+ :db/default     [0 0 0 255]
+ :db/doc         "RGBA; each channel 0..255 (00–FF); a defaults to 255"}
+````
 
-A point-in-time (as-of) view of an entity considers only atoms whose *Op* is true as of a certain Tm. In the example above, John no longer prefers :blue as-of 2024-01-05T15:30:45.123Z, so the point-in-time view as-of 2024-01-05T15:30:45.123Z is:
+**Transact (JSON)**
 
-| E | A | V | Tx | Op | U | Tm |
-| ----- | ----- | ----- | ----- | :---: | ----- | ----- |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/first-name | "John" | e8ba9f4b-7d2d-4d71-af7e-d6f9046a934e | TRUE | f637d8ed-58c7-4494-bd54-74014d630677 | 2023-10-21T15:25:56.740Z |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/last-name | "Doe" | e8ba9f4b-7d2d-4d71-af7e-d6f9046a934e | TRUE | f637d8ed-58c7-4494-bd54-74014d630678 | 2023-10-21T15:25:56.740Z |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/favorite-color | :green | c284d833-4b5a-41ff-b8c7-bd0cd0a2c404 | TRUE | f637d8ed-58c7-4494-bd54-74014d630679 | 2024-01-05T15:30:45.123Z |
+```json
+{"tx":[{"db/id":"temp-1","doc/title":"Welcome","style/color":[120,40,255,128]}]}
+```
 
-#### **Map View Example**
+**Pull**
 
-It is often convenient to consider a point-in-time view as only a three-tuple with Tx and Op elided:
+```clojure
+[:doc/title {:style/color [:r :g :b :a]}]
+;; → {:doc/title "Welcome"
+;;    :style/color {:r 120 :g 40 :b 255 :a 128}}
+```
 
-| E | A | V |
-| ----- | ----- | ----- |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/first-name | "John" |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/last-name | "Doe" |
-| aedb54ac-1b09-497e-a9ab-ef94ae89c330 | :user/favorite-color | :green |
+Tuples are encoded canonically for ordering and hashing; labeled accessors like `(tuple/get ?c :r ?r)` are lowered to positional access at query time. &#x20;
 
-This three-tuple view is very similar to a programming language object where the E is analogous to this or self. The map view of an entity at a particular point in time captures this information more compactly, using the reserved pseudo-attribute name :db/id for E:
+---
 
-{:db/id aedb54ac-1b09-497e-a9ab-ef94ae89c330  
- :user/favorite-color :green  
- :user/first-name "John"  
- :user/last-name "Doe"}
+## Query & composition
 
-### **Universal Schema**
+MyCloud builds features on **Datalog + Pull**:
 
-In a relational database, you must specify a table schema that enumerates in advance the attributes (columns) an entity can have. By contrast, MyCloud requires only that you specify the properties of individual attributes. Any entity can then have any attribute. Because all atoms are part of a single relation, this is called a *universal schema*.
+* Use Datalog for relations, filters, and aggregates; use Pull to materialize structured entity trees (documents with nested blocks/tags).
+* Pull supports forward/reverse navigation, nesting, wildcards, recursion limits, `:as/:default/:limit/:xform`.
+* MyCloud composes views and exports using Pull patterns so rendering is decoupled from storage layout.&#x20;
 
-For example, consider storing an inventory database in MyCloud. All inventory items have a unique string identifier, so you create an :inv/id attribute. In addition, you create other named attributes, specifying the types and cardinalities of each.
+---
 
-You can then store various inventory items in the database, each with different attributes, as shown in the following table.
+## Identity & uniqueness
 
-| E | A | V |
-| ----- | ----- | ----- |
-| d68c9f06-d260-4c16-bdb9-fce8f26d10bd | :inv/id | "SKU-1234" |
-| d68c9f06-d260-4c16-bdb9-fce8f26d10bd | :inv/color | :green |
-| 55543205-b503-4e96-8873-e03ce41f5add | :inv/id | "SKU-5678" |
-| 55543205-b503-4e96-8873-e03ce41f5add | :inv/watts | 60000 |
-| 55543205-b503-4e96-8873-e03ce41f5add | :doc/url | "http:…" |
+Documents and other public objects use **unique identity attributes** (e.g., `:doc/id`) to enable idempotent upserts and stable references. EDB enforces uniqueness on `(a, v)` with appropriate indexes; conflicts are detected deterministically at transact/merge time. &#x20;
 
-Notice that, other than :inv/id, entities *d68c9f06-d260-4c16-bdb9-fce8f26d10bd* and *55543205-b503-4e96-8873-e03ce41f5add* have entirely disjoint attributes.
+---
 
-### **Defining Schema**
+## Storage & indexing
 
-Each MyCloud database has a schema that describes the set and kind of attributes that can be associated with your domain entities.
+MyCloud runs wherever EDB runs:
 
-A schema only defines the characteristics of the attributes themselves. It does not define which attributes can be associated with which entities. Decisions about which attributes apply to which entities are made by users.
+* **Local**: embedded on‑device with SQLite for offline‑first authoring.
+* **Hosted**: Postgres for team workspaces and shared datasets.
 
-This gives applications a great degree of freedom to evolve over time. For example, an application that wants to model a person as an entity does not have to decide up front whether the person is an employee or a customer. It can associate a combination of attributes describing customers and attributes describing employees with the same entity. An application can determine whether an entity represents a particular abstraction, customer or employee, simply by looking for the presence of the appropriate attributes.
+EDB maintains EAVT/AVET/AEVT/VAET covering indexes with compact, typed encodings. Tuples encode to sortable bytes; optional generated columns can accelerate slot‑wise filters. MyCloud benefits from these index strategies without custom storage code. &#x20;
 
-There are two kinds of attributes in MyCloud:
+---
 
-- Domain attributes \- describe aspects of your domain data. You use domain attributes to describe the data about your domain entities.  
-- Schema attributes \- describe aspects of the schema itself. Schema attributes are built-in and cannot be extended. You use schema attributes to define your domain attributes.
+## Sync, offline, and collaboration
 
-For more information see the Schema Documentation.
+MyCloud’s collaboration model is EDB’s P2P sync:
 
-My application’s name is MyCloud. It’s a document based MacOS and iOS application that brings database capabilities to everyone through an intuitive schema and GUI.
+* **Signed DAG** of transactions (author key, timestamp, parents, body), heads advertisement, push/pull by differences, signature verification.
+* **Conflict handling** via unique constraints and clear surfacing in the UI; **snapshots** accelerate catch‑up.
+* **Feature negotiation** allows new types/encodings (e.g., `tuple`, `tuple-enc:v1`, `uint8`) to roll out safely.&#x20;
 
-At a high level MyCloud creates and manipulates HyperDocs which are composed of Blocks which are composed of Tags which are composed of Questions and Answers. It uses Datalog on the backend for querying and composition/editing of JSON files. The Swift App composes groups of “Transactions” which are facts for Datalog to use. Each Transaction must include the following:
+---
 
-TransactionID | Timestamp | Author | Parent | 
+## Security & integrity
 
-Everything in MyCloud is made of data. At its lowest level this data takes two forms:
+EDB provides TLS in transit, optional at‑rest encryption (backend‑specific), **signed transaction envelopes**, deterministic validation (types, cardinality, uniqueness), and a sandbox for deterministic tx functions (WASM). MyCloud inherits these guarantees and exposes them through audit/history views and sharing workflows. &#x20;
 
-1. Questions (Keys)  
-2. Answers (Values)
+---
 
-Questions are formed with Keywords, and can come in one of two types:
+## Observability & operations
 
-1. Univalued  
-2. Multivalued
+EDB exposes metrics (index merge latency, query latencies, sync status) and tx‑report subscriptions. MyCloud builds on these for activity feeds, diagnostics, and backup/restore flows.&#x20;
 
-Answers are formed using swift data primitives.
+---
 
-1. Numbers  
-   1. int  
-   2. float  
-   3. frac  
-2. Letters  
-   1. unicode  
-3. Colors  
-4. Logic  
-   1. is/isn’t  
-   2. is this and that  
-   3. is this or that  
-   4. is not this
+## MVP features (MyCloud)
 
-(Though I haven’t thought out all the core primitives I want to be available to users of the app.)
+1. Create/edit **HyperDocs** with **Blocks** and **Tags** (component modeling).
+2. Schema authoring via UI: define attributes (type, cardinality, uniqueness, docs).
+3. Offline‑first editing; background sync; conflict surfacing.
+4. History/time‑travel views (`as‑of`, `since`, `history`) and replay.
+5. Search, filters, and views built on Datalog + Pull.
+6. Export/import using Pull patterns (JSON/EDN). &#x20;
 
-Questions and Answers are paired together to create Tags. Univalued Questions only accept one answer at a time while Multivalued Questions can accept multiple answers at once. In general tags are meant to enable classification schemes. MovieGenre, MovieTitle, MovieReleaseDate are just some examples. Some other examples include:
+---
 
-1. Name: Jake (Univalued)  
-2. ID:  123e4567-e89b-12d3-a456-426614174000 (Univalued)  
-3. Products: Shoes, Shirts (Multivalued)  
-4. ShirtColors: Red, Green, Blue (Multivalued)
+## Design tenets
 
-At a secondary level MyCloud 
+* **Layering**: MyCloud is a product; EDB is the engine. No shadow engines.
+* **Growth‑only**: evolve via new attributes, aliases, and **new value types/structs** instead of twisting old ones.
+* **Ubiquity**: rely on EDB’s SQLite/Postgres portability and HTTP/gRPC transports.
+* **Determinism**: signed envelopes, canonical encodings, and reproducible queries underpin collaboration at scale. &#x20;
 
-1. ID  
-2. Name  
-3. Type  
-4. Origin  
-5. Genesis  
-6. Authors
+---
 
-The most important questions we ask in the playground are The Six Dubs:
-
-1. Who  
-   1. Authors  
-   2. Editors  
-   3. Viewers  
-2. What  
-   1. Name  
-   2. Unique ID  
-3. When  
-   1. Date  
-   2. Time  
-4. Where  
-   1.   
-5. Why  
-6. With
-
-* `Integers:`  
-  * `Int: A 32-bit integer on 32-bit platforms and a 64-bit integer on 64-bit platforms.`  
-  * `UInt: An unsigned version of Int.`  
-  * `Int8, Int16, Int32, Int64: Signed integers with the specified number of bits.`  
-  * `UInt8, UInt16, UInt32, UInt64: Unsigned integers with the specified number of bits.`  
-* `Floating-Point Numbers:`  
-  * `Float: A 32-bit floating-point number.`  
-  * `Double: A 64-bit floating-point number, with greater precision than Float.`  
-* `Boolean:`  
-  * `Bool: Represents a Boolean value (true or false).`  
-* `String and Character:`  
-  * `String: A collection of characters for text manipulation.`  
-  * `Character: Represents a single character.`  
-* `Collection Types:`  
-  * `Array: An ordered, indexed collection of values.`  
-  * `Dictionary: A collection of key-value pairs.`  
-  * `Set: An unordered collection of unique values.`  
-* `Optional:`  
-  * `Optional: Represents a variable that can hold either a value or nil, indicating the absence of a value.`  
-* `Tuples:`  
-  * `Tuples: Group multiple values into a single compound value. The values within a tuple can be of any type and do not need to be the same type as each other.`  
-* `Range Types:`  
-  * `ClosedRange: Represents a range that includes both its lower and upper value (e.g., 1...5).`  
-  * `Range: Represents a range that includes the lower value but not the upper value (e.g., 1..<5).`  
-  * `PartialRangeFrom, PartialRangeThrough, PartialRangeUpTo: Represent one-sided ranges.`  
-* `Type Alias:`  
-  * `typealias: Define an alternative name for an existing type.`
-
-Numbers:
-
-- Fraction  
-- Unknown(algebraic)  
-- Integer (Negative, Positive)  
-- Decimal  
-- Binary  
-- Date  
-- Quaternion  
-- Angle (Radians, Degrees)
-
-SSH Tunneling with WebSocket Connections:
-
-SSH tunneling can be used to secure WebSocket connections, especially if the WebSocket data needs to be encrypted beyond standard WebSocket security (like WSS \- WebSocket Secure).  
-This can be useful in environments with strict security requirements or where WebSocket traffic needs to be routed securely through an SSH connection.  
+```
+```
