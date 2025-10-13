@@ -7,6 +7,9 @@ Status: Spec-only (MVP). No code.
 - Deterministic, cross-runtime canonicalization for hashing/signing (P2P).
 - Compact, typed, and sortable; optional SQL pushdown via generated columns.
 
+MVP constraint
+- Homogeneous tuples only — all slots share the same scalar type (e.g., RGBA as four `uint8`). Future phases may lift this to allow heterogeneous per-slot types.
+
 ## Wire vs Internal
 - External (EDN/JSON)
   - EDN: vector `[v0 v1 ...]`.
@@ -16,6 +19,7 @@ Status: Spec-only (MVP). No code.
   - `[0xTT(tuple)][0x01(version)][0xAA(arity)][S* (AA slot descriptors)][V* (concatenated slot values)]`
   - Each slot descriptor `S = <type-tag><nullable-flag>`.
   - Ordering compares `V*` lexicographically; header excluded from compare.
+  - MVP note: slot descriptors must all carry the same type tag (homogeneous). Implementations MAY still encode repeated identical descriptors for stability.
 
 ## Scalar Types
 - `:db.type/uint8` — unsigned 8-bit integer (0..255)
@@ -29,6 +33,7 @@ Status: Spec-only (MVP). No code.
 - Changing `:db/tupleTypes` or arity is a breaking schema change; migrate via new attribute + alias.
 - `:db/fulltext` not applicable to tuples.
 - `:db/unique` applies to the whole tuple value.
+- MVP: homogeneous tuples only. Schema sugar `:db/tupleElemType` + `:db/tupleArity` normalizes to a repeated `:db/tupleTypes` vector. Do not specify both `:db/tupleTypes` and `:db/tupleElemType` in one attribute.
 
 ## Datalog Accessors (Spec Only)
 - `(tuple/slot ?t i ?x)` binds slot `i` (0..arity-1) to `?x`.
@@ -41,6 +46,7 @@ Status: Spec-only (MVP). No code.
   - Postgres: `GENERATED ALWAYS AS (tuple_decode_slot(v, i)) STORED` + B-tree indexes.
   - SQLite: generated/virtual columns + UDF; index as needed.
 - Planner rewrites `(> (tuple/slot ?v 0) 200)` to `v_slot0 > 200` when column exists; otherwise fallback.
+ - MVP: pushdown considerations simplify for homogeneous numeric tuples (e.g., uint8 RGBA).
 
 ## Examples
 - RGBA: `:db/tupleTypes [:db.type/uint8 :db.type/uint8 :db.type/uint8 :db.type/uint8]`, labels `[:r :g :b :a]`; internal `V*` = 4 bytes `[r][g][b][a]`.
@@ -51,12 +57,14 @@ Status: Spec-only (MVP). No code.
 - Feature flags: `"tuple"`, `"tuple-enc:v1"`, `"uint8"`.
 - Hashing/signing cover encoded `V` bytes as part of the canonical tx envelope.
 - Older peers without declared support must fail-closed on decode or request downgrade.
+ - Lifting the homogeneous-only constraint will be gated behind a feature flag (TBD) and versioned layout.
 
 ## Cross-references (See also)
 - Requirements: EDB-REQUIREMENTS.md
 - Value types (scalars): value-types.md
 - Indexing strategy: indexing-strategy.md
 - P2P sync MVP: p2p-sync-mvp.md
+ - Schema sugar: see EDB-REQUIREMENTS.md (tupleElemType/tupleArity)
 
 ## Open Questions
 - Index hints per slot to drive generated columns automatically?

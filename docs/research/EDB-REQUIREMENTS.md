@@ -38,13 +38,16 @@ Philosophy
 
 Tuple/Composite Attributes (First-class)
 - `:db/valueType :db.type/tuple`
-- `:db/tupleTypes  [:db.type/uint8 :db.type/uint8 :db.type/uint8 :db.type/uint8]` (per‑slot types)
-- `:db/tupleArity  4` (derived from `:db/tupleTypes`, stored for clarity)
-- `:db/tupleLabels [:r :g :b :a]` (optional; influences JSON/Pull shape)
+- MVP constraint: homogeneous tuples only — all slots share the same scalar type. Future phases may allow heterogeneous per‑slot types.
+- Canonical schema options:
+  - Explicit: `:db/tupleTypes  [:db.type/uint8 :db.type/uint8 :db.type/uint8 :db.type/uint8]` (per‑slot types)
+  - MVP sugar: `:db/tupleElemType :db.type/uint8` + `:db/tupleArity 4` (engine normalizes to `:db/tupleTypes` by repeating the element type `arity` times). Do not specify both `:db/tupleTypes` and `:db/tupleElemType`.
+- `:db/tupleArity  4` (derived from `:db/tupleTypes`, or provided explicitly; stored for clarity)
+- `:db/tupleLabels [:r :g :b :a]` (optional; influences Pull shape)
 - `:db/default     [0 0 0 255]` (optional default value)
 - Works with existing knobs: `:db/cardinality`, `:db/noHistory`, `:db/unique`, `:db/doc`, `:db/alias`, `:db/indexed`, `:db/fulltext=false`.
-- Validation: arity and per-slot type enforced at transact; retractions behave like scalar values.
-- Growth-only: can append labels, add aliases/docs; cannot change arity or slot types in place — use new attribute + alias for migrations.
+- Validation: arity and slot type enforced at transact; for MVP, enforce that every slot value conforms to the single `:db/tupleElemType` (or repeated `:db/tupleTypes`). Retractions behave like scalar values.
+- Growth-only: can append labels, add aliases/docs; cannot change arity or slot type in place — use new attribute + alias for migrations.
 
 Example (schema & data)
 ```clojure
@@ -61,6 +64,18 @@ Example (schema & data)
 [{:db/id -1
   :doc/title "Welcome"
   :style/color [120 40 255 128]}]
+```
+
+MVP sugar equivalent
+```clojure
+{:db/ident :style/color
+ :db/valueType :db.type/tuple
+ :db/cardinality :db.cardinality/one
+ :db/tupleElemType :db.type/uint8
+ :db/tupleArity 4
+ :db/tupleLabels [:r :g :b :a]
+ :db/default [0 0 0 255]
+ :db/doc "RGBA; each channel 0..255 (00–FF); a defaults to 255"}
 ```
 
 JSON wire example (API)
@@ -176,6 +191,7 @@ Observability
 - Arity: no hard cap in spec; initial implementations optimize/testing for common small composites (e.g., RGBA/geo/quaternion/range).
 - `noHistory` semantics on large tuple churn.
 - Full‑text is not applicable to tuples.
+- Homogeneous-only constraint: when and how to lift to heterogeneous tuples; planner/encoding implications; feature flag negotiation when lifting.
 
 ## Rationale (Tuples)
 - Compact, indexed, and queryable way to model small fixed-arity records (RGBA, geo points, ranges) without the overhead of component entities. Improves Pull ergonomics and keeps EAVT/AVET lean.
@@ -185,3 +201,4 @@ Observability
 
 ## Next Steps (Tuples)
 - Specify canonical encoding, tuple accessor grammar; prototype generated columns for hot tuple attributes on Postgres; add cross‑runtime conformance tests; feature negotiation for `tuple`, `tuple-enc:v1`, and `uint8`.
+- Document and implement `:db/tupleElemType`/`:db/tupleArity` sugar (normalize to `:db/tupleTypes`); enforce homogeneous tuples for MVP.

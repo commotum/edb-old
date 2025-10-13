@@ -22,6 +22,7 @@ Evolve (EDB deltas)
 - Free‑text: FTS (SQLite FTS5 / Postgres tsvector)
 - Serialization: EDN/JSON for API; compact internal encoding for values
 - Values: add tuple/composite as first‑class typed values with small, sortable canonical encoding; include `:db.type/uint8` (0..255, 1 byte) for RGBA and similar
+ - Tuples (MVP): restrict to homogeneous slot type with schema sugar `:db/tupleElemType` + `:db/tupleArity` (normalized to `:db/tupleTypes`); per-slot labels optional for Pull rendering
 - DevEx: Pull renders labeled maps for tuples if `:db/tupleLabels` exist; vectors otherwise
 - Modeling guidance: prefer component entities for unbounded/nested structures; use tuples for small, fixed‑arity records (RGBA, geo points, ranges, quaternions)
 - Safety: growth‑only — introduce new tuple attributes rather than mutating arity/types
@@ -49,6 +50,7 @@ Open Questions
 - How to expose tx functions safely across WASM runtimes (deterministic footprint)?
 - Pull recursion limits and performance on SQLite/Postgres schemas?
 - Tuple arity cap; Datalog accessor syntax; cost/benefit of SQL pushdown for tuple slots
+ - When to lift homogeneous-only to heterogeneous tuples; encoding/planner impacts and migration/feature-gating
 
 Next Actions
 - Prototype signed tx envelope and local append‑only log

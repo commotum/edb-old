@@ -55,6 +55,8 @@ Tuple/Composite Value Encoding & Indexing
   - Optimizer can rewrite `(tuple/slot ?v i ?x)` into SQL over generated columns when present.
 - Tradeoffs
   - Generated columns speed slot filters/sorts at storage cost; default to raw BLOB unless a tuple attr is hot for slot queries.
+ - MVP constraint
+   - Homogeneous tuples only (all slots same scalar type). This simplifies validation and optional generated columns (e.g., four `uint8` columns for RGBA) while keeping raw BLOB as the default representation.
 
 <!-- TODO(tuple): Add a small diagram of the encoded layout and example generated column definitions. -->
 
