@@ -29,9 +29,26 @@ Schema & Catalog
 - Support aliases and deprecation metadata; never remove or reuse names (growth‑only).
 - Provide a catalog API to list attributes, schema versions, and annotations.
 
+Schema defaults and identity patterns (borrowed)
+- Growth‑only: never remove or reuse names; introduce aliases and deprecations instead. Prefer adding new attrs/types over mutating semantics.
+- Identity spectrum:
+  - Opaque numeric entity ids
+  - Idents (keywords) for schema and enumerations
+  - Unique identities (:db.unique/identity) for domain keys with idempotent upsert
+  - Unique values (:db.unique/value) for single‑holder keys
+  - Lookup refs [attr value] on unique attrs accepted wherever entity identifiers are accepted
+  - Prefer squuids/UUIDv7 for time‑ordered identifiers
+- Components and lifecycle: :db/isComponent models owned sub‑entities; retracting a parent cascades to components; Pull expands component maps by default.
+- Validation as data: attribute predicates (:db.attr/preds), entity predicates (:db.entity/preds), and entity specs (:db.entity/attrs, :db.entity/preds) enforced via :db/ensure with structured anomalies on failure.
+
 Value Types (overview)
 - See docs/research/value-types.md for the canonical scalar set, external representations (EDN/JSON), and internal encoding/ordering notes.
 - Growth-only: add new value types when they make domain sense (e.g., `:db.type/uint8` for color channels) rather than overloading existing types.
+
+Type limitations and caveats
+- :db.type/bytes is equality‑only; it cannot be unique or used in lookup refs.
+- Floating NaN cannot participate in upsert comparisons; retract then assert a new value.
+- For JSON interop, integers outside JS safe range (|n| > 2^53−1) must be strings (or BigInt in typed APIs).
 
 Philosophy
 - The database evolves by adding sensible data types and structs (tuples) rather than forcing attributes to fit ill‑suited value types. Prefer adding new scalars like `:db.type/uint8` when appropriate.
@@ -119,6 +136,8 @@ Indexing
 - Full‑text support: SQLite FTS5; Postgres tsvector + GIN.
 - Uniqueness enforcement on `(a, v)` for identity/value uniques; idempotent upserts via lookup refs.
 - Tuples: compact, lexicographically sortable internal encoding; comparisons are lexicographic across slots. See docs/research/indexing-strategy.md.
+ - Range predicates (=, !=, <=, <, >, >=) push down to AVET; ensure attrs needed for range have :db/index true or uniqueness enabled.
+ - Maintain a fast in‑memory delta (“memory index”) merged with durable segment trees by background jobs (wide branching factor ⇒ sublinear job times).
 
 Storage Backends
 - SQLite (local) and Postgres (server) as first‑class targets; optional KV (RocksDB/FDB) follow‑up.
@@ -129,10 +148,25 @@ Serialization & Transport
 - HTTP/gRPC endpoints for tx, query, pull, subscribe; streaming tx‑reports (server‑sent events or WebSocket/gRPC stream).
 - Tuples & new scalars (e.g., `uint8`): define canonical encodings for internal storage; EDN/JSON remain numeric vectors (or labeled maps) externally.
 
+Writer, isolation, and sync
+- Single writer composes transactions by set‑union of primitive datoms returned by tx functions — no read/modify/write updates.
+- Strong serializable writes via conditional puts of log/index roots; per‑peer operations are monotonic; cross‑peer reads are serializable.
+- Provide sync(t): given a basis t, return a db value that includes at least t to coordinate read‑your‑writes across processes.
+
+Transaction hints (latency)
+- Provide a with‑like API to compute :hints on the peer (dry‑run). Pass :hints to transact so the writer can prefetch; semantics remain unchanged.
+
+Query & Pull (details)
+- Range predicates (=, !=, <=, <, >, >=) push down to AVET; prefer them over custom predicates for performance.
+- Built‑ins: get‑else, get‑some, ground, missing?, tuple/untuple; user functions must be pure. Support qseq for lazy streaming and rules for reusable logic.
+- Query ergonomics: structural query caching; parameterize inputs; order clauses by selectivity; support timeouts.
+- Pull patterns: forward/reverse attrs (:rel/child, :rel/_child); :as/:default/:limit/:xform; wildcards; recursion limits; component defaults vs non‑component ids. Reverse lookup caveat: avoid leading underscore in the name portion of idents you want to reverse‑navigate.
+
 P2P Sync
 - Signed DAG of txs; advertise heads; push/pull missing txs; verify signatures; apply with validation.
 - Conflict detection/resolution for uniqueness at merge; retries with backoff; snapshots for fast catch‑up.
 - Device identity: per‑device keys; optional user binding; key rotation.
+ - Basis coordination: include basis t in out‑of‑band communications and support sync(t) to align readers across peers/services.
 
 Peers, Caches, Observers
 - Local peer caches for attributes/segments; eviction strategies; invalidation via tx‑reports.
@@ -166,6 +200,10 @@ Portability
 Observability
 - Metrics: index write batches/bytes, merge latency, query latencies, sync status, cache hits/misses.
 - Logs with correlation IDs per tx; structured logs for analysis.
+
+Limitations
+- :db.type/bytes: not unique, not for lookup refs; equality‑only indexing.
+- NaN upsert: retract before assert when changing NaN values.
 
 ## MVP Cut (Phase 1)
 - SQLite + Postgres storage; EAVT/AVET/AEVT/VAET on SQLite, subset on Postgres with covering indexes.

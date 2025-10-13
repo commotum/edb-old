@@ -43,7 +43,8 @@ Initial scalar set (MVP)
 - :db.type/bytes
   - Opaque binary.
   - External: base64 (JSON) or tagged literal (EDN) as appropriate.
-  - Internal: raw bytes; ordered by bytes (note: usually not indexed except equality).
+  - Internal: raw bytes; ordered by bytes (note: equality-only indexing).
+  - Limitations: cannot be unique and cannot be used in lookup refs.
 - :db.type/uint8 (new)
   - Unsigned 8-bit integer; valid range 0..255.
   - External: EDN/JSON integer 0..255.
@@ -120,6 +121,7 @@ Status: Spec-only. These extend the MVP set. Each entry defines external forms (
   - External: EDN/JSON number (advisory; beware precision in JSON). When declared float32, downcast from wider types is explicit.
   - Internal: IEEE 754 binary32. Canonicalization: normalize all NaNs to a single quiet NaN payload 0; map -0.0 → +0.0.
   - Order-preserving byte transform T(u32): let x be the 32-bit pattern; if sign bit set, T = bitwise-NOT(x); else T = x XOR 0x80000000. Compare T as unsigned big-endian.
+  - Upsert caveat: NaN cannot be compared for upsert; retract before asserting a new value when changing from/to NaN.
 
 - :db.type/float16 and :db.type/bfloat16
   - External: tagged literal or string (e.g., #db/float16 "1.5").
@@ -189,3 +191,7 @@ Interoperability guidance
 - JSON: avoid lossy round-trips for 64-bit and larger integers; prefer strings for :db.type/bigint and for :db.type/long when outside JS safe integer. Floats remain JSON numbers.
 - NaN/−0.0 normalization: ensures stable hashing/signing across platforms.
 - Time values: prefer UTC instants for moments in time (:db.type/instant); use date/local-time/local-date-time/duration for calendar math without zone ambiguity.
+
+Limitations & caveats
+- :db.type/bytes: equality-only; not unique; not for lookup refs.
+- NaN cannot be compared for upsert; change by retract then assert.

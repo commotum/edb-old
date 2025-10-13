@@ -4,14 +4,38 @@ North Star
 - What if creating a database were as easy as creating a struct or class — and Datomic’s time‑traveling, replayable model ran everywhere on everyday defaults (WASM, SQLite/Postgres, HTTP/gRPC), with first‑class peer‑to‑peer sync and effortless, evolvable schemas for arbitrary relations and consumers?
 
 Keep (from Datomic)
-- Append‑only tx log with total order (t) and replay
-- Immutable datoms ⟨E A V Tx Op⟩ and entity views
+- Append-only tx log with total order (t) and replay
+- Immutable datoms ⟨E A V Tx Op⟩ and entity views
 - As‑of / since / history time travel
 - Attribute schema: value type, cardinality, uniqueness, noHistory
 - Datalog + Pull, peer caches, read scalability via immutability
 - Background indexing and durable segments (EAVT/AVET/AEVT/VAET)
  - Batched index writes and metrics; segment streaming to peers
  - Tx reports to peers; tempid resolution; catalog of attributes
+
+Borrow (defaults) from Datomic
+- Schema growth-only
+  - Never remove or reuse names; introduce aliases and deprecations instead.
+  - Identity spectrum: entity ids; idents for schema/enums; unique identity attributes for domain keys; lookup refs for upsert/readability; use squuids/UUIDv7 for time‑ordered locality.
+  - Components: model owned sub-entities with :db/isComponent; cascade retract; allow “touch” to eagerly materialize component trees in caches.
+  - Validation without rigid SQL constraints: attribute predicates, entity predicates, and entity specs enforced via :db/ensure.
+- Transactions, time, and ACID
+  - Single writer (transactor); tx is union of primitives returned by tx functions — no read/modify/write updates.
+  - Strong serializable writes via conditional put of roots; per‑peer monotonic operations; cross‑peer reads are serializable. Provide sync(t) to coordinate read‑your‑writes across processes.
+  - Prefer t over txInstant for precision; history view includes retractions; as‑of/since for point‑in‑time queries.
+  - Transaction hints: peers can compute :hints (via with‑like API) to reduce latency without changing semantics.
+- Indexing strategy
+  - Accumulate‑only semantics with immutable log and index trees.
+  - Memory index + background jobs that merge to durable segment trees (wide branching factor ⇒ sublinear job times).
+  - Maintain four covering indexes (EAVT/AEVT/AVET/VAET); enable AVET for attrs marked :db/index or :db/unique.
+- Query and Pull ergonomics
+  - Datalog grammar features: :with; :find return maps; built‑in range predicates (=, !=, <=, <, >, >=) that push down to AVET.
+  - Built‑ins: get‑else, get‑some, ground, missing?, tuple/untuple; query caching; parameterization; clause ordering; timeouts; qseq for lazy streaming; rules for reusable logic.
+  - Pull patterns: forward/reverse attributes, :as/:default/:limit/:xform options, wildcards, recursion limits, component defaults (maps) vs non‑components (ids). “Outer join” patterns via Pull or get‑else.
+- Partitions, synchronization, and ops
+  - Optional partitions (named/implicit) for locality and “new entity scans”; support partition assignment for tempids.
+  - Synchronization via sync(t), not eventual gossip alone.
+  - Clear type limits: bytes cannot be unique / used for lookup refs; NaN cannot participate in upsert; reverse lookup naming caveat (leading underscore on attribute name portion prevents reverse lookup).
 
 Evolve (EDB deltas)
 - Runtimes: WASM/wasi transactor; polyglot peers (JS/Swift/Rust/etc.)

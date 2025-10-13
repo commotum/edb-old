@@ -4,6 +4,12 @@ Goals
 - Preserve Datomic semantics (fast lookups, time travel) on ubiquitous stores.
 - Keep write path simple; allow background merges/compaction.
 
+Borrowed defaults from Datomic
+- Accumulate‑only semantics: immutable log and index segments; changes accumulate rather than update in place.
+- Live view = durable segment trees + in‑memory delta (“memory index”).
+- Background jobs periodically merge the memory index into durable segment trees with a wide branching factor to keep job time sublinear in total size.
+- Maintain four covering indexes (EAVT/AVET/AEVT/VAET); enable AVET for attributes with :db/index true or uniqueness to support fast value/range queries.
+
 Schema Options
 1) Unified datoms table
 - Table: `datoms(e BIGINT, a BIGINT, v BLOB/TEXT/NUMERIC, tx BIGINT, op BOOLEAN)`
@@ -27,12 +33,24 @@ Time Travel
 - `as-of`, `since`, `history` supported by filtering on `tx` and `op`.
 - Snapshot acceleration: periodic checkpoints (materialized views) to skip long scans.
 
+Background Indexing
+- Keep a fast, bounded in‑memory delta of recent datoms for immediate visibility.
+- Run periodic background merges that:
+  - Flush the memory index into sorted segments
+  - Merge with existing trees using a wide branching factor (≈1000) for sublinear work
+  - Write segments in batches; adopt new roots atomically (conditional put)
+- When merges lag, throttle writes to allow indexing to catch up.
+
 Full‑text
 - SQLite: FTS5 side tables referencing `e/a/tx`; Postgres: `tsvector` + GIN.
 
 Uniqueness & Identities
 - Unique identity attributes backed by unique indexes on `(a, v)` and a constraint that `op=true` is current.
 - Enforce via tx check + retry on conflict; for P2P, resolve at merge.
+
+Query pushdown notes
+- Range predicates (=, !=, <=, <, >, >=) should be planned against AVET; ensure AVET is maintained for attributes you intend to range over.
+- Prefer range predicates to custom functions for value ranges; they leverage index order and minimize scans.
 
 Compaction/Merge
 - Background job to coalesce segments and prune retracted current values.

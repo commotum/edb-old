@@ -9,11 +9,13 @@ Model
 - Ordering: causal via parent links; total order per replica via local t; merge resolves by topological order + constraints.
 - Serialization: typed values include tuples; canonical envelope uses CBOR/JSON with deterministic tuple encoding (arity + per-slot canonical encodings). Signatures/hashes cover encoded tuple bytes. Unknown types must fail-closed or negotiate via feature flags.
  - Feature negotiation: peers advertise support for new types/features like "tuple", "tuple-enc:v1", and "uint8" during hello/heads exchange.
+ - Basis coordination: propagate basis t alongside out‑of‑band notifications and expose sync(t) to block until a db value includes at least t (read‑your‑writes across processes).
 
 Replication
 - Transport: HTTP/gRPC as baseline; optional local discovery (mDNS/WebRTC) for LAN.
 - Protocol: request/response by hash ranges; advertise heads; fetch missing txs; verify signatures; apply to local log.
 - Security: TLS in transit; optional payload encryption (per‑db key wrapped for peers).
+ - Snapshots/checkpoints: periodically publish signed snapshots to accelerate catch‑up and bound history scans.
 
 Constraints & Conflicts
 - Uniqueness: per‑attr unique indexes enforce at merge; conflicting txs cause retry or higher‑level resolution policy.
