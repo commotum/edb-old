@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use edb_schema::{AttrCardinality, AttrUnique, Attribute, Catalog};
+use edb_index::EavtIndexer;
 use edb_store_sqlite::{RootStore, SegmentStore, SqliteStore, StoreError};
 use edb_tx::{allocator::TempResolver, grammar::normalize_grammar_ops, model::Value, traits::DbView, validate::normalize_and_validate, SimpleAllocator, TxOp, TxReport, UniquenessResult};
 
@@ -19,13 +20,15 @@ pub struct SqliteTransactor {
     pub store: SqliteStore,
     pub conn: Connection,
     subscribers: Vec<std::sync::mpsc::Sender<TxReport>>,
+    eavt: Option<EavtIndexer>,
 }
 
 impl SqliteTransactor {
     pub fn open(path: &str) -> Result<Self, TxrError> {
         let store = SqliteStore::open(path)?;
         let conn = Connection::open(path)?;
-        let txr = Self { store, conn, subscribers: Vec::new() };
+        let eavt = EavtIndexer::open(path).ok();
+        let txr = Self { store, conn, subscribers: Vec::new(), eavt };
         txr.init_local_tables()?;
         Ok(txr)
     }
@@ -141,6 +144,12 @@ impl SqliteTransactor {
 
         let mut rep = report;
         rep.t = Some(t);
+        // Update EAVT memory and merge for demo purposes
+        if let Some(idx) = self.eavt.as_mut() {
+            let _ = idx.apply_primitives(&rep.primitives, t);
+            // For MVP, merge every tx; later add thresholds
+            let _ = idx.merge();
+        }
         // Broadcast to subscribers; remove dead ones
         self.subscribers.retain(|tx| tx.send(rep.clone()).is_ok());
         Ok(rep)
