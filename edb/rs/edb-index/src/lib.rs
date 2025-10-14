@@ -56,7 +56,8 @@ impl EavtIndexer {
     }
 
     pub fn merge(&mut self) -> Result<String, IndexError> {
-        // Load existing segments (optional). MVP: overwrite with memory only.
+        // Sort memory datoms by E asc, A asc, V asc, T desc
+        self.memory.sort_by(|d1, d2| compare_datom_eavt(d1, d2));
         let encoded = serde_json::to_vec(&self.memory)?;
         let mut hasher = Sha256::new();
         hasher.update(&encoded);
@@ -75,22 +76,33 @@ impl EavtIndexer {
     }
 
     pub fn scan_entity(&self, e: i64) -> Result<Vec<Datom>, IndexError> {
-        let mut out: Vec<Datom> = Vec::new();
-        // Read persisted segments
+        let mut results: Vec<Datom> = Vec::new();
+        // Persisted segments
         if let Some((_rev, root_bytes)) = self.store.get_root("eavt")? {
             if let Ok(root) = serde_json::from_slice::<EavtRootV1>(&root_bytes) {
                 for sid in root.segments {
                     if let Some(bytes) = self.store.get_segment(&sid)? {
                         if let Ok(datoms) = serde_json::from_slice::<Vec<Datom>>(&bytes) {
-                            out.extend(datoms.into_iter().filter(|d| d.e == e));
+                            // binary search on e (segments are sorted)
+                            let slice = &datoms;
+                            let lo = lower_bound_e(slice, e);
+                            let mut i = lo;
+                            while i < slice.len() && slice[i].e == e {
+                                results.push(slice[i].clone());
+                                i += 1;
+                            }
                         }
                     }
                 }
             }
         }
-        // Include memory
-        out.extend(self.memory.iter().cloned().filter(|d| d.e == e));
-        Ok(out)
+        // Include in-memory; memory is maintained sorted after merge
+        for d in self.memory.iter() {
+            if d.e == e { results.push(d.clone()); }
+        }
+        // Sort final results by EAVT (they all share same E, so A/V/T sort applies)
+        results.sort_by(|d1, d2| compare_datom_eavt(d1, d2));
+        Ok(results)
     }
 }
 
@@ -115,3 +127,48 @@ fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
+fn compare_datom_eavt(d1: &Datom, d2: &Datom) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    // E asc
+    match d1.e.cmp(&d2.e) {
+        Equal => {
+            // A asc by keyword encoding bytes
+            let a1 = encode_scalar(ValueType::Keyword, &serde_json::json!(d1.a.as_str())).unwrap();
+            let a2 = encode_scalar(ValueType::Keyword, &serde_json::json!(d2.a.as_str())).unwrap();
+            match a1.cmp(&a2) {
+                Equal => {
+                    // V asc by order-preserving bytes
+                    let v1 = general_purpose::STANDARD_NO_PAD
+                        .decode(d1.v_b64.as_bytes())
+                        .unwrap_or_default();
+                    let v2 = general_purpose::STANDARD_NO_PAD
+                        .decode(d2.v_b64.as_bytes())
+                        .unwrap_or_default();
+                    match v1.cmp(&v2) {
+                        Equal => {
+                            // T desc
+                            d2.t.cmp(&d1.t)
+                        }
+                        other => other,
+                    }
+                }
+                other => other,
+            }
+        }
+        other => other,
+    }
+}
+
+fn lower_bound_e(datoms: &[Datom], e: i64) -> usize {
+    let mut lo = 0usize;
+    let mut hi = datoms.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if datoms[mid].e < e {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}

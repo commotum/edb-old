@@ -8,7 +8,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 base64 = "0.21"
+hex = "0.4"
 edb-encoding = { path = "../edb-encoding" }
 edb-store-sqlite = { path = "../edb-store-sqlite" }
 edb-tx = { path = "../edb-tx" }
-
