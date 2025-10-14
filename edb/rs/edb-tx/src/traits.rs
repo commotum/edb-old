@@ -17,5 +17,6 @@ pub trait DbView {
     fn uniqueness_check(&self, attr_ident: &str, v: &Value) -> UniquenessResult;
     // Fetch attribute metadata by ident
     fn get_attr(&self, ident: &str) -> Option<Attribute>;
+    // Enumerate current attributes and values for an entity (point-in-time)
+    fn entity_attrs(&self, e: i64) -> Vec<(String, Value)>;
 }
-

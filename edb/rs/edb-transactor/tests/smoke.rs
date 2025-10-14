@@ -110,5 +110,34 @@ fn smoke_apply_tx_and_current_state() {
         .unwrap();
     let name_val: edb_tx::model::Value = serde_json::from_str(&name_json).unwrap();
     assert_eq!(name_val, edb_tx::model::Value::String("Alicia".into()));
-}
 
+    // Subscribe to tx-reports and apply another tx
+    let rx = txr.subscribe();
+    let ops4 = vec![json!(["add", e2, ":user/name", "Bobby"])];
+    let rep4 = txr.apply_tx(&ops4).expect("tx4");
+    let got = rx.recv().unwrap();
+    assert_eq!(got.t, rep4.t);
+
+    // Wipe current/unique_idx and replay from log, then verify
+    txr.conn.execute("DELETE FROM current", []).unwrap();
+    txr.conn.execute("DELETE FROM unique_idx", []).unwrap();
+    txr.replay_current_from_log().expect("replay");
+    let name1: String = txr
+        .conn
+        .query_row(
+            "SELECT vjson FROM current WHERE e=?1 AND a=?2",
+            params![e1, ":user/name"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let name2: String = txr
+        .conn
+        .query_row(
+            "SELECT vjson FROM current WHERE e=?1 AND a=?2",
+            params![e2, ":user/name"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(serde_json::from_str::<edb_tx::model::Value>(&name1).unwrap(), edb_tx::model::Value::String("Alicia".into()));
+    assert_eq!(serde_json::from_str::<edb_tx::model::Value>(&name2).unwrap(), edb_tx::model::Value::String("Bobby".into()));
+}

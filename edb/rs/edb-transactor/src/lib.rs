@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use edb_schema::{AttrCardinality, AttrUnique, Attribute, Catalog};
-use edb_store_sqlite::{LogStore, RootStore, SegmentStore, SqliteStore, StoreError};
+use edb_store_sqlite::{RootStore, SegmentStore, SqliteStore, StoreError};
 use edb_tx::{allocator::TempResolver, grammar::normalize_grammar_ops, model::Value, traits::DbView, validate::normalize_and_validate, SimpleAllocator, TxOp, TxReport, UniquenessResult};
 
 #[derive(thiserror::Error, Debug)]
@@ -18,13 +18,14 @@ pub enum TxrError {
 pub struct SqliteTransactor {
     pub store: SqliteStore,
     pub conn: Connection,
+    subscribers: Vec<std::sync::mpsc::Sender<TxReport>>,
 }
 
 impl SqliteTransactor {
     pub fn open(path: &str) -> Result<Self, TxrError> {
         let store = SqliteStore::open(path)?;
         let conn = Connection::open(path)?;
-        let txr = Self { store, conn };
+        let txr = Self { store, conn, subscribers: Vec::new() };
         txr.init_local_tables()?;
         Ok(txr)
     }
@@ -58,6 +59,10 @@ impl SqliteTransactor {
               v TEXT NOT NULL
             );
             INSERT OR IGNORE INTO meta(k,v) VALUES('next_e','1000');
+            CREATE TABLE IF NOT EXISTS aliases(
+              alias TEXT PRIMARY KEY,
+              target TEXT NOT NULL
+            );
             "#,
         )?;
         Ok(())
@@ -121,14 +126,57 @@ impl SqliteTransactor {
                 }
             }
         }
-        // Append log
+        // Append to log within the same transaction for atomicity
         let body = serde_json::to_vec(&report.primitives).unwrap();
-        let t = self.store.append_log(&body)?;
+        tx.execute("INSERT INTO log(val) VALUES(?1)", params![body])?;
+        // Get t for this connection
+        let t: i64 = tx.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
         tx.commit()?;
+
+        // CAS root update after commit (single-writer; race unlikely)
+        let head = self.store.get_root("head")?;
+        let (rev, _) = if let Some((rev, val)) = head { (rev, val) } else { self.store.init_root("head", br#"{"t":0}"#)?; (self.store.get_root("head")?.unwrap().0, vec![]) };
+        let new_head = serde_json::to_vec(&serde_json::json!({"t": t})).unwrap();
+        let _ = self.store.cas_root("head", rev, &new_head)?;
 
         let mut rep = report;
         rep.t = Some(t);
+        // Broadcast to subscribers; remove dead ones
+        self.subscribers.retain(|tx| tx.send(rep.clone()).is_ok());
         Ok(rep)
+    }
+
+    pub fn subscribe(&mut self) -> std::sync::mpsc::Receiver<TxReport> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.subscribers.push(tx);
+        rx
+    }
+
+    pub fn replay_current_from_log(&mut self) -> Result<(), TxrError> {
+        let entries = self.store.read_log_range(1, i64::MAX)?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM current", [])?;
+        tx.execute("DELETE FROM unique_idx", [])?;
+        let dbview = SqliteDbView { conn: &self.conn };
+        for (_seq, bytes) in entries {
+            let primitives: Vec<edb_tx::model::TxPrimitive> = serde_json::from_slice(&bytes).unwrap_or_default();
+            for p in primitives {
+                if p.added {
+                    let vjson = serde_json::to_string(&p.v).unwrap();
+                    tx.execute("INSERT OR REPLACE INTO current(e,a,vjson) VALUES(?,?,?)", params![p.e, &p.a, vjson])?;
+                    if let Some((a, vkey)) = unique_key_for(&dbview, &p.a, &p.v) {
+                        tx.execute("INSERT OR REPLACE INTO unique_idx(a,vkey,e) VALUES(?,?,?)", params![a, vkey, p.e])?;
+                    }
+                } else {
+                    tx.execute("DELETE FROM current WHERE e=?1 AND a=?2", params![p.e, &p.a])?;
+                    if let Some((a, vkey)) = unique_key_for(&dbview, &p.a, &p.v) {
+                        tx.execute("DELETE FROM unique_idx WHERE a=?1 AND vkey=?2", params![a, vkey])?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -168,10 +216,22 @@ impl<'a> DbView for SqliteDbView<'a> {
         }
     }
     fn get_attr(&self, ident: &str) -> Option<Attribute> {
+        // Resolve alias to target ident if needed
+        let target: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT ident FROM attrs WHERE ident=?1 UNION SELECT target FROM aliases WHERE alias=?1 LIMIT 1",
+                params![ident],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let ident_q = target.as_deref().unwrap_or(ident);
         self.conn
             .query_row(
                 "SELECT ident,vt,card,uniq,is_component,no_history,doc FROM attrs WHERE ident=?1",
-                params![ident],
+                params![ident_q],
                 |r| {
                     let ident: String = r.get(0)?;
                     let vt_i: i64 = r.get(1)?;
@@ -213,6 +273,18 @@ impl<'a> DbView for SqliteDbView<'a> {
             .optional()
             .ok()
             .flatten()
+    }
+
+    fn entity_attrs(&self, e: i64) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = self.conn.prepare("SELECT a, vjson FROM current WHERE e=?1") {
+            if let Ok(rows) = stmt.query_map(params![e], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+                for row in rows.flatten() {
+                    if let Ok(v) = serde_json::from_str::<Value>(&row.1) { out.push((row.0, v)); }
+                }
+            }
+        }
+        out
     }
 }
 

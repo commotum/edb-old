@@ -28,6 +28,13 @@ impl DbView for MockDb {
     fn get_attr(&self, ident: &str) -> Option<Attribute> {
         self.attrs.get(ident).cloned()
     }
+    fn entity_attrs(&self, e: i64) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        for ((ee, a), v) in self.current.iter() {
+            if *ee == e { out.push((a.clone(), v.clone())); }
+        }
+        out
+    }
 }
 
 fn value_key(v: &Value) -> String {

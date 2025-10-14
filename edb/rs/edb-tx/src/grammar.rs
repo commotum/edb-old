@@ -4,6 +4,7 @@ use crate::allocator::{EntidAllocator, TempResolver};
 use crate::model::{EntityRef, TempId, TxOp, Value};
 use crate::traits::DbView;
 use edb_encoding::ValueType;
+use edb_schema::Attribute;
 
 fn parse_entity_ref(j: &J) -> EntityRef {
     if let Some(n) = j.as_i64() {
@@ -106,10 +107,33 @@ pub fn normalize_grammar_ops(
                     let v = if list.len() > 3 { Some(parse_scalar_value(&list[3])) } else { None };
                     out.push(TxOp::Retract { e, a, v });
                 }
+                "retract-entity" => {
+                    // Expand retractEntity cascade using DbView
+                    let er = parse_entity_ref(&list[1]);
+                    // Resolve to entid
+                    let eid = match er {
+                        EntityRef::Entid(e) => e,
+                        EntityRef::TempId(t) => temps.resolve_or_alloc(&t, alloc),
+                        EntityRef::LookupRef { attr, value } => db.lookup_by_unique(&attr, &value).unwrap_or_else(|| temps.resolve_or_alloc(&TempId(format!("lkup:{}", attr)), alloc)),
+                    };
+                    fn cascade(db: &dyn DbView, eid: i64, out: &mut Vec<TxOp>) {
+                        let attrs = db.entity_attrs(eid);
+                        for (a, v) in attrs {
+                            // Retract this attribute/value
+                            out.push(TxOp::Retract { e: EntityRef::Entid(eid), a: a.clone(), v: Some(v.clone()) });
+                            // Recurse if component ref
+                            if let Some(attr) = db.get_attr(&a) {
+                                if attr.is_component {
+                                    if let Value::Ref(child) = v { cascade(db, child, out); }
+                                }
+                            }
+                        }
+                    }
+                    cascade(db, eid, &mut out);
+                }
                 _ => {}
             }
         }
     }
     out
 }
-
