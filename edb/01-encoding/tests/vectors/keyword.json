@@ -1,0 +1,9 @@
+{
+  "value_type": "KEYWORD",
+  "vectors": [
+    {
+      "value": ":ns/name",
+      "bytes_hex": "083a6e732f6e616d65"
+    }
+  ]
+}

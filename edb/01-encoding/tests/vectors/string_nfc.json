@@ -1,0 +1,13 @@
+{
+  "value_type": "STRING",
+  "vectors": [
+    {
+      "value": "\u00e9",
+      "bytes_hex": "02c3a9"
+    },
+    {
+      "value": "e\\u0301",
+      "bytes_hex": "02c3a9"
+    }
+  ]
+}
