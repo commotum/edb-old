@@ -150,6 +150,72 @@ def main():
         },
     )
 
+    # instant (epoch micros i64) and ref (entid i64) vectors
+    instants = [
+        ("min_i64", -(1 << 63)),
+        ("0", 0),
+        ("max_i64", (1 << 63) - 1),
+        ("2025-01-01T00:00:00Z", 1735689600000000),
+    ]
+    write_json(
+        out / "instant.json",
+        {
+            "value_type": "INSTANT",
+            "vectors": [
+                {
+                    "value": name,
+                    "bytes_hex": to_hex(enc.encode_scalar(val, enc.ValueType.INSTANT)),
+                }
+                for name, val in instants
+            ],
+        },
+    )
+    refs = [
+        ("min_i64", -(1 << 63)),
+        ("0", 0),
+        ("max_i64", (1 << 63) - 1),
+        ("42", 42),
+    ]
+    write_json(
+        out / "ref.json",
+        {
+            "value_type": "REF",
+            "vectors": [
+                {
+                    "value": name,
+                    "bytes_hex": to_hex(enc.encode_scalar(val, enc.ValueType.REF)),
+                }
+                for name, val in refs
+            ],
+        },
+    )
+
+    # tuple of decimals
+    dec_tuple = ["10.01", "-3.1415"]
+    tb_dec = enc.encode_tuple_v1(dec_tuple, enc.ValueType.DECIMAL)
+    write_json(
+        out / "tuple_decimals.json",
+        {
+            "elem_type": "DECIMAL",
+            "value": dec_tuple,
+            "tuple_bytes_hex": to_hex(tb_dec),
+            "v_bytes_hex": to_hex(enc.tuple_order_bytes(tb_dec)),
+        },
+    )
+
+    # tuple of bigints
+    big_tuple = ["-255", "0", str(1 << 200)]
+    tb_big = enc.encode_tuple_v1([int(big_tuple[0]), int(big_tuple[1]), int(big_tuple[2])], enc.ValueType.BIGINT)
+    write_json(
+        out / "tuple_bigints.json",
+        {
+            "elem_type": "BIGINT",
+            "value": big_tuple,
+            "tuple_bytes_hex": to_hex(tb_big),
+            "v_bytes_hex": to_hex(enc.tuple_order_bytes(tb_big)),
+        },
+    )
+
     print(f"Wrote vectors to {out}")
 
     # bigint

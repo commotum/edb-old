@@ -35,6 +35,10 @@ MVP constraint
 - `:db/unique` applies to the whole tuple value.
 - MVP: homogeneous tuples only. Schema sugar `:db/tupleElemType` + `:db/tupleArity` normalizes to a repeated `:db/tupleTypes` vector. Do not specify both `:db/tupleTypes` and `:db/tupleElemType` in one attribute.
 
+Limitations and recommendations
+- :db.type/bytes is excluded from tuple v1: the scalar encoding for BYTES is raw (no length prefix), so tuple payloads cannot be decoded into slot boundaries. If you need binary slots in tuples, prefer fixed‑size binary types such as `:db.type/bytes-fixed-32` (and 16/64), which are tuple‑friendly and preserve ordering by bytes.
+- For best performance and SQL pushdown, prefer fixed‑width slot types (e.g., `uint8`, `long`, `double`, `float32`, `float16`, `bfloat16`, `uuid`) so tuple byte offsets are O(1). Variable‑length slot types (e.g., `string`, `keyword`, `bigint`, `decimal`) remain supported, but payload size varies.
+
 ## Datalog Accessors (Spec Only)
 - `(tuple/slot ?t i ?x)` binds slot `i` (0..arity-1) to `?x`.
 - `(tuple/get ?t :label ?x)` resolves label to index using `:db/tupleLabels` at algebrize time; lowers to `tuple/slot`.

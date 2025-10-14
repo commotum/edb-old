@@ -1,0 +1,9 @@
+{
+  "elem_type": "DECIMAL",
+  "value": [
+    "10.01",
+    "-3.1415"
+  ],
+  "tuple_bytes_hex": "f101020c0c02bfff7e04100100400083facebea0",
+  "v_bytes_hex": "02bfff7e04100100400083facebea0"
+}
