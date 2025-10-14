@@ -95,3 +95,29 @@ References
 13. CLI/SDKs — see `edb/13-cli/README.md:1`
    - Primary: `datomic-reference/operation/tutorial/2_api.md:1`
    - Helpful: `datomic-reference/programming_with_data_and_edn.md:1`, `datomic-reference/best_practices.md:1`
+
+## Status (MVP tracking)
+
+- [x] 1. Core Value Encoding + Datom Types
+  - Implemented in Python and Rust (edb-encoding). Includes bigint, decimal, float32/16/bfloat16; tuple v1 (homogeneous) with both fixed‑width and variable‑length slot support (BYTES excluded in v1). Golden vectors generated and consumed by Rust tests. CLI `edb-enc` available for ad‑hoc encoding.
+- [x] 2. Transaction Model + Validation Engine
+  - Grammar normalization (list form), tempids, lookup refs, type/cardinality/ref checks, uniqueness (identity/value), cardinality‑one implicit retracts, tx‑fn harness stub. Deterministic normalization and unit tests added.
+- [~] 3. Append‑Only Log + t Assignment (SQLite)
+  - Implemented SQLite store (segments/roots/log) with CAS root support; minimal transactor appends tx to log (monotonic t via rowid). Replay and tx‑report bus are pending; roots CAS integrated at store layer but not adopted by transactor yet.
+- [~] 4. Schema Catalog + Identity/Lookup + Components
+  - Attribute catalog persisted; identity/lookup enforced in validation and DbView. Component cascade retract and aliases not implemented yet (planned).
+- [x] 5. Unique Enforcement (identity/value)
+  - Enforced in validation; unique/identity upsert; unique/value conflict detection; mock and transactor tests.
+- [ ] 6. Memory Index + Background Indexer (EAVT)
+  - Next: implement memory delta + durable segment trees; merge + CAS adoption.
+- [ ] 7. AVET + VAET Indexes
+- [ ] 8. Query Engine (parse → algebrize → plan)
+- [ ] 9. Pull Engine (patterns, reverse, options)
+- [ ] 10. API Server (HTTP/gRPC)
+- [ ] 11. Observability
+- [ ] 12. P2P Sync MVP
+- [ ] 13. CLI/SDKs
+
+Notes
+- We intentionally borrowed from Datomic’s K/V + CAS pattern so both SQLite and Postgres backends can share the same abstraction. Postgres can be plugged later without changing transactor/index code.
+- For tuples, v1 excludes BYTES due to lack of scalar length prefix; bytes‑fixed‑N types are recommended for tuple slots.
