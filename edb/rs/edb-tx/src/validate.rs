@@ -21,6 +21,9 @@ fn type_matches(v: &Value, vt: ValueType) -> bool {
     match (v, vt) {
         (Value::Long(_), ValueType::Long) => true,
         (Value::Double(_), ValueType::Double) => true,
+        (Value::Double(_), ValueType::Float32) => true,
+        (Value::Double(_), ValueType::Float16) => true,
+        (Value::Double(_), ValueType::Bfloat16) => true,
         (Value::Boolean(_), ValueType::Boolean) => true,
         (Value::String(_), ValueType::String) => true,
         (Value::Keyword(_), ValueType::Keyword) => true,
@@ -117,4 +120,3 @@ pub fn normalize_and_validate(
     let tempids = temps.map.into_iter().collect();
     Ok(TxReport { t: None, tx_eid: None, tempids, touched_attrs: touched.into_iter().collect(), primitives })
 }
-
