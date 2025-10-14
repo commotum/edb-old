@@ -1,0 +1,33 @@
+{
+  "value_type": "FLOAT16",
+  "vectors": [
+    {
+      "value": "-inf",
+      "bytes_hex": "03ff"
+    },
+    {
+      "value": "-1.5",
+      "bytes_hex": "41ff"
+    },
+    {
+      "value": "-0.0",
+      "bytes_hex": "8000"
+    },
+    {
+      "value": "0.0",
+      "bytes_hex": "8000"
+    },
+    {
+      "value": "1.5",
+      "bytes_hex": "be00"
+    },
+    {
+      "value": "+inf",
+      "bytes_hex": "fc00"
+    },
+    {
+      "value": "NaN",
+      "bytes_hex": "fe00"
+    }
+  ]
+}

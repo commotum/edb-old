@@ -137,9 +137,110 @@ def main():
         },
     )
 
+    # tuple of strings (homogeneous variable-length)
+    ss = ["a", "é"]
+    tb2 = enc.encode_tuple_v1(ss, enc.ValueType.STRING)
+    write_json(
+        out / "tuple_strings.json",
+        {
+            "elem_type": "STRING",
+            "value": ss,
+            "tuple_bytes_hex": to_hex(tb2),
+            "v_bytes_hex": to_hex(enc.tuple_order_bytes(tb2)),
+        },
+    )
+
     print(f"Wrote vectors to {out}")
+
+    # bigint
+    bigs = [
+        ("-255", -255),
+        ("-1", -1),
+        ("0", 0),
+        ("1", 1),
+        ("255", 255),
+        ("2^200", 1 << 200),
+    ]
+    write_json(
+        out / "bigint.json",
+        {
+            "value_type": "BIGINT",
+            "vectors": [
+                {
+                    "value": name,
+                    "bytes_hex": to_hex(enc.encode_scalar(val, enc.ValueType.BIGINT)),
+                }
+                for name, val in bigs
+            ],
+        },
+    )
+
+    # decimal
+    dec_inputs = ["0", "1.0", "-0.0", "10.01", "-10.0100", "1e10", "-1.2345e-6"]
+    write_json(
+        out / "decimal.json",
+        {
+            "value_type": "DECIMAL",
+            "vectors": [
+                {
+                    "value": s,
+                    "bytes_hex": to_hex(enc.encode_scalar(s, enc.ValueType.DECIMAL)),
+                }
+                for s in dec_inputs
+            ],
+        },
+    )
+
+    # float32/16/bfloat16
+    floats = [
+        ("-inf", float("-inf")),
+        ("-1.5", -1.5),
+        ("-0.0", -0.0),
+        ("0.0", 0.0),
+        ("1.5", 1.5),
+        ("+inf", float("inf")),
+        ("NaN", float("nan")),
+    ]
+    write_json(
+        out / "float32.json",
+        {
+            "value_type": "FLOAT32",
+            "vectors": [
+                {
+                    "value": name,
+                    "bytes_hex": to_hex(enc.encode_scalar(val, enc.ValueType.FLOAT32)),
+                }
+                for name, val in floats
+            ],
+        },
+    )
+    write_json(
+        out / "float16.json",
+        {
+            "value_type": "FLOAT16",
+            "vectors": [
+                {
+                    "value": name,
+                    "bytes_hex": to_hex(enc.encode_scalar(val, enc.ValueType.FLOAT16)),
+                }
+                for name, val in floats
+            ],
+        },
+    )
+    write_json(
+        out / "bfloat16.json",
+        {
+            "value_type": "BFLOAT16",
+            "vectors": [
+                {
+                    "value": name,
+                    "bytes_hex": to_hex(enc.encode_scalar(val, enc.ValueType.BFLOAT16)),
+                }
+                for name, val in floats
+            ],
+        },
+    )
 
 
 if __name__ == "__main__":
     main()
-

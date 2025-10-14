@@ -1,0 +1,33 @@
+{
+  "value_type": "DECIMAL",
+  "vectors": [
+    {
+      "value": "0",
+      "bytes_hex": "01"
+    },
+    {
+      "value": "1.0",
+      "bytes_hex": "02c08000011f"
+    },
+    {
+      "value": "-0.0",
+      "bytes_hex": "01"
+    },
+    {
+      "value": "10.01",
+      "bytes_hex": "02bfff7e041001"
+    },
+    {
+      "value": "-10.0100",
+      "bytes_hex": "00400081fbeffe"
+    },
+    {
+      "value": "1e10",
+      "bytes_hex": "02c0800a011f"
+    },
+    {
+      "value": "-1.2345e-6",
+      "bytes_hex": "00400089faedcba0"
+    }
+  ]
+}
