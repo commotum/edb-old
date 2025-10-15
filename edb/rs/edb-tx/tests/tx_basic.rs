@@ -75,10 +75,10 @@ fn cardinality_one_implicit_retract() {
     let report = normalize_and_validate(&db, &ops, &mut alloc2).expect("ok");
     // Expect retract Old then add New
     assert_eq!(report.primitives.len(), 2);
-    assert_eq!(report.primitives[0].added, false);
+    assert!(!report.primitives[0].added);
     assert_eq!(report.primitives[0].e, 1);
     assert_eq!(report.primitives[0].a, ":user/name");
-    assert_eq!(report.primitives[1].added, true);
+    assert!(report.primitives[1].added);
     assert_eq!(report.primitives[1].v, Value::String("New".into()));
 }
 

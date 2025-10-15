@@ -11,7 +11,8 @@ pub fn encode_tuple_v1(values: &[serde_json::Value], elem_type: ValueType) -> Re
     out.push(TT_TUPLE);
     out.push(TUPLE_VER);
     out.push(arity as u8);
-    out.extend(std::iter::repeat(elem_type as u8).take(arity));
+    let types: Vec<u8> = vec![elem_type as u8; arity];
+    out.extend_from_slice(&types);
     for v in values {
         match elem_type {
             ValueType::Long | ValueType::Instant | ValueType::Ref => {

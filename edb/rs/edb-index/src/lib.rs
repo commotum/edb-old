@@ -51,7 +51,7 @@ impl EavtIndexer {
         for p in prims {
             let vt = value_type_of(&p.v);
             let vjson = value_to_json(&p.v);
-            let v_bytes = encode_scalar(vt, &vjson).map_err(|e| IndexError::Encode(e))?;
+            let v_bytes = encode_scalar(vt, &vjson).map_err(IndexError::Encode)?;
             self.memory.push(Datom::new(p.e, p.a.clone(), v_bytes, t, p.added));
         }
         Ok(())
@@ -59,7 +59,7 @@ impl EavtIndexer {
 
     pub fn merge(&mut self) -> Result<String, IndexError> {
         // Sort memory datoms by E asc, A asc, V asc, T desc
-        self.memory.sort_by(|d1, d2| compare_datom_eavt(d1, d2));
+        self.memory.sort_by(compare_datom_eavt);
         let encoded = serde_json::to_vec(&self.memory)?;
         let mut hasher = Sha256::new();
         hasher.update(&encoded);
@@ -103,7 +103,7 @@ impl EavtIndexer {
             if d.e == e { results.push(d.clone()); }
         }
         // Sort final results by EAVT (they all share same E, so A/V/T sort applies)
-        results.sort_by(|d1, d2| compare_datom_eavt(d1, d2));
+        results.sort_by(compare_datom_eavt);
         Ok(results)
     }
 }

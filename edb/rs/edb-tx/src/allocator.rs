@@ -29,3 +29,7 @@ impl TempResolver {
     }
     pub fn bind(&mut self, t: TempId, e: i64) { self.map.insert(t, e); }
 }
+
+impl Default for TempResolver {
+    fn default() -> Self { Self::new() }
+}

@@ -29,8 +29,8 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: &str) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", &"WAL")?;
-        conn.pragma_update(None, "synchronous", &"FULL")?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
         let s = Self { conn };
         s.init_schema()?;
         Ok(s)
@@ -111,4 +111,3 @@ impl LogStore for SqliteStore {
         Ok(out)
     }
 }
-

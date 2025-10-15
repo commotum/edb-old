@@ -18,24 +18,24 @@ pub enum TxError {
 }
 
 fn type_matches(v: &Value, vt: ValueType) -> bool {
-    match (v, vt) {
-        (Value::Long(_), ValueType::Long) => true,
-        (Value::Double(_), ValueType::Double) => true,
-        (Value::Double(_), ValueType::Float32) => true,
-        (Value::Double(_), ValueType::Float16) => true,
-        (Value::Double(_), ValueType::Bfloat16) => true,
-        (Value::Boolean(_), ValueType::Boolean) => true,
-        (Value::String(_), ValueType::String) => true,
-        (Value::Keyword(_), ValueType::Keyword) => true,
-        (Value::Uuid(_), ValueType::Uuid) => true,
-        (Value::Instant(_), ValueType::Instant) => true,
-        (Value::Ref(_), ValueType::Ref) => true,
-        (Value::Bytes(_), ValueType::Bytes) => true,
-        (Value::Uint8(_), ValueType::Uint8) => true,
-        (Value::Bigint(_), ValueType::Bigint) => true,
-        (Value::Decimal(_), ValueType::Decimal) => true,
-        _ => false,
-    }
+    matches!(
+        (v, vt),
+        (Value::Long(_), ValueType::Long)
+            | (Value::Double(_), ValueType::Double)
+            | (Value::Double(_), ValueType::Float32)
+            | (Value::Double(_), ValueType::Float16)
+            | (Value::Double(_), ValueType::Bfloat16)
+            | (Value::Boolean(_), ValueType::Boolean)
+            | (Value::String(_), ValueType::String)
+            | (Value::Keyword(_), ValueType::Keyword)
+            | (Value::Uuid(_), ValueType::Uuid)
+            | (Value::Instant(_), ValueType::Instant)
+            | (Value::Ref(_), ValueType::Ref)
+            | (Value::Bytes(_), ValueType::Bytes)
+            | (Value::Uint8(_), ValueType::Uint8)
+            | (Value::Bigint(_), ValueType::Bigint)
+            | (Value::Decimal(_), ValueType::Decimal)
+    )
 }
 
 fn resolve_entity(db: &dyn DbView, e: &EntityRef, temps: &mut TempResolver, alloc: &mut dyn EntidAllocator) -> Result<i64, TxError> {
