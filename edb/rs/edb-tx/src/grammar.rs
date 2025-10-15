@@ -4,6 +4,13 @@ use crate::allocator::{EntidAllocator, TempResolver};
 use crate::model::{EntityRef, TempId, TxOp, Value};
 use crate::traits::DbView;
 use edb_encoding::ValueType;
+use crate::txfn::TxFnRegistry;
+
+#[derive(Default)]
+pub struct Normalized {
+    pub ops: Vec<TxOp>,
+    pub meta: Option<J>,
+}
 
 fn parse_entity_ref(j: &J) -> EntityRef {
     if let Some(n) = j.as_i64() {
@@ -89,13 +96,34 @@ fn value_from_json_for_type(
     }
 }
 
-pub fn normalize_grammar_ops(
+fn parse_map_form(
+    db: &dyn DbView,
+    alloc: &mut dyn EntidAllocator,
+    temps: &mut TempResolver,
+    map: &serde_json::Map<String, J>,
+    out: &mut Vec<TxOp>,
+) {
+    let er = map.get("db/id").map(parse_entity_ref).unwrap_or_else(|| EntityRef::TempId(TempId("auto".into())));
+    for (k, vj) in map.iter() {
+        if k == "db/id" { continue; }
+        if k.starts_with(':') {
+            let a = k.clone();
+            let attr = db.get_attr(&a).expect("unknown attribute in map form");
+            let v = value_from_json_for_type(db, temps, alloc, attr.value_type, vj);
+            out.push(TxOp::Add { e: er.clone(), a, v });
+        }
+    }
+}
+
+pub fn normalize_grammar(
     db: &dyn DbView,
     alloc: &mut dyn EntidAllocator,
     temps: &mut TempResolver,
     ops: &[J],
-) -> Vec<TxOp> {
-    let mut out = Vec::new();
+    txfns: Option<&TxFnRegistry>,
+) -> Normalized {
+    let mut out: Vec<TxOp> = Vec::new();
+    let mut meta: Option<J> = None;
     for op in ops {
         if let Some(list) = op.as_array() {
             if list.is_empty() { continue; }
@@ -113,6 +141,35 @@ pub fn normalize_grammar_ops(
                     let a = list[2].as_str().unwrap().to_string();
                     let v = if list.len() > 3 { Some(parse_scalar_value(&list[3])) } else { None };
                     out.push(TxOp::Retract { e, a, v });
+                }
+                "cas" => {
+                    // ["cas", e, a, expected|null, new]
+                    let er = parse_entity_ref(&list[1]);
+                    let a = list[2].as_str().unwrap().to_string();
+                    let attr = db.get_attr(&a).expect("unknown attribute in cas");
+                    let expected = if list[3].is_null() { None } else { Some(value_from_json_for_type(db, temps, alloc, attr.value_type, &list[3])) };
+                    let v = value_from_json_for_type(db, temps, alloc, attr.value_type, &list[4]);
+                    out.push(TxOp::Cas { e: er, a, expected, v });
+                }
+                "tx-fn" => {
+                    if let Some(reg) = txfns {
+                        let fident = list[1].as_str().unwrap_or("").to_string();
+                        if let Some(fun) = reg.get(&fident) {
+                            let mut args: Vec<Value> = Vec::new();
+                            for j in list.iter().skip(2) { args.push(parse_scalar_value(j)); }
+                            if let Ok(mut ops2) = fun.apply(db, &args) { out.append(&mut ops2) }
+                        }
+                    }
+                }
+                "tx-meta" => {
+                    if list.len() > 1 {
+                        if let Some(m) = list[1].as_object() {
+                            let mut merged = meta.take().unwrap_or(J::Object(serde_json::Map::new()));
+                            let obj = merged.as_object_mut().unwrap();
+                            for (k, v) in m.iter() { obj.insert(k.clone(), v.clone()); }
+                            meta = Some(J::Object(obj.clone()));
+                        }
+                    }
                 }
                 "retract-entity" => {
                     // Expand retractEntity cascade using DbView
@@ -140,7 +197,9 @@ pub fn normalize_grammar_ops(
                 }
                 _ => {}
             }
+        } else if let Some(map) = op.as_object() {
+            parse_map_form(db, alloc, temps, map, &mut out);
         }
     }
-    out
+    Normalized { ops: out, meta }
 }

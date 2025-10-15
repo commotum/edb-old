@@ -51,6 +51,7 @@ pub enum EntityRef {
 pub enum TxOp {
     Add { e: EntityRef, a: String, v: Value },
     Retract { e: EntityRef, a: String, v: Option<Value> },
+    Cas { e: EntityRef, a: String, expected: Option<Value>, v: Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,5 +69,6 @@ pub struct TxReport {
     pub tempids: Vec<(TempId, i64)>,
     pub touched_attrs: Vec<String>,
     pub primitives: Vec<TxPrimitive>,
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
 }
-
