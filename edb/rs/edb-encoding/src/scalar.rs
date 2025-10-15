@@ -527,10 +527,10 @@ pub fn decode_scalar_bigint(bytes: &[u8]) -> Result<serde_json::Value, String> {
     let (_len, mag, neg) = if sign == 0x02 {
         let (l, ni) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?;
         i += ni;
-        let L = l as usize;
-        let end = i + L;
+        let len_bytes = l as usize;
+        let end = i + len_bytes;
         if end > bytes.len() { return Err("truncated magnitude".into()); }
-        (L, bytes[i..end].to_vec(), false)
+        (len_bytes, bytes[i..end].to_vec(), false)
     } else if sign == 0x00 {
         // invert varuint then magnitude
         let mut inv = Vec::new();
@@ -542,12 +542,12 @@ pub fn decode_scalar_bigint(bytes: &[u8]) -> Result<serde_json::Value, String> {
             if (invb & 0x80) == 0 { break; }
         }
         let (l, _) = parse_varuint_be(&inv).map_err(|e| e.to_string())?;
-        let L = l as usize;
-        let end = i + L;
+        let len_bytes = l as usize;
+        let end = i + len_bytes;
         if end > bytes.len() { return Err("truncated magnitude".into()); }
         let mag_inv = &bytes[i..end];
         let mag: Vec<u8> = mag_inv.iter().map(|b| !*b).collect();
-        (L, mag, true)
+        (len_bytes, mag, true)
     } else {
         return Err("invalid sign byte".into());
     };
@@ -565,10 +565,10 @@ pub fn decode_bigint_with_consumed(bytes: &[u8]) -> Result<(String, usize), Stri
     let (len, mag, neg) = if sign == 0x02 {
         let (l, ni) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?;
         i += ni;
-        let L = l as usize;
-        let end = i + L;
+        let len_bytes = l as usize;
+        let end = i + len_bytes;
         if end > bytes.len() { return Err("truncated magnitude".into()); }
-        (L, bytes[i..end].to_vec(), false)
+        (len_bytes, bytes[i..end].to_vec(), false)
     } else if sign == 0x00 {
         let mut inv = Vec::new();
         loop {
@@ -579,12 +579,12 @@ pub fn decode_bigint_with_consumed(bytes: &[u8]) -> Result<(String, usize), Stri
             if (invb & 0x80) == 0 { break; }
         }
         let (l, _) = parse_varuint_be(&inv).map_err(|e| e.to_string())?;
-        let L = l as usize;
-        let end = i + L;
+        let len_bytes = l as usize;
+        let end = i + len_bytes;
         if end > bytes.len() { return Err("truncated magnitude".into()); }
         let mag_inv = &bytes[i..end];
         let mag: Vec<u8> = mag_inv.iter().map(|b| !*b).collect();
-        (L, mag, true)
+        (len_bytes, mag, true)
     } else {
         return Err("invalid sign byte".into());
     };
@@ -615,8 +615,8 @@ pub fn encode_scalar_decimal(value: &serde_json::Value) -> Result<Vec<u8>, Strin
     let mut out = Vec::new();
     if neg { out.push(0x00); } else { out.push(0x02); }
     // E = -scale so that value = digits * 10^E
-    let E = -(scale as i128);
-    let eb = (E + (EXP_BIAS as i128)) as u64;
+    let exp = -(scale as i128);
+    let eb = (exp + (EXP_BIAS as i128)) as u64;
     let vu_e = varuint_be(eb);
     // build BCD from digits_str
     let digits: Vec<u8> = digits_str.bytes().map(|ch| (ch - b'0') as u8).collect();
@@ -647,7 +647,7 @@ pub fn decode_scalar_decimal(bytes: &[u8]) -> Result<serde_json::Value, String> 
     let sign = bytes[0];
     if sign == 0x01 { return Ok(serde_json::Value::from("0")); }
     let mut i = 1usize;
-    let (Eb, L, bcd, neg) = if sign == 0x02 {
+    let (eb_i64, l_digits, bcd, neg) = if sign == 0x02 {
         let (eb, ni) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?; i += ni;
         let (l, nj) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?; i += nj;
         let bcd_len = ((l as usize) + 1) / 2;
@@ -665,16 +665,16 @@ pub fn decode_scalar_decimal(bytes: &[u8]) -> Result<serde_json::Value, String> 
         let bcd: Vec<u8> = bcd_inv.iter().map(|b| !*b).collect();
         (eb as i64, l as usize, bcd, true)
     } else { return Err("invalid sign".into()); };
-    let E = Eb - EXP_BIAS;
+    let exp = eb_i64 - EXP_BIAS;
     // reconstruct digits
-    let mut digits: Vec<u8> = Vec::with_capacity(L);
+    let mut digits: Vec<u8> = Vec::with_capacity(l_digits);
     for byte in bcd { digits.push((byte >> 4) & 0xF); digits.push(byte & 0xF); }
-    digits.truncate(L);
+    digits.truncate(l_digits);
     // build coefficient BigInt from digits
     let mut coeff = BigInt::from(0); let ten = BigInt::from(10);
     for d in digits { coeff = coeff * &ten + BigInt::from(d as i32); }
     if neg { coeff = -coeff; }
-    let bd = if E >= 0 { let pow = BigInt::from(10).pow(E as u32); BigDecimal::new(coeff * pow, 0) } else { BigDecimal::new(coeff, (-E) as i64) };
+    let bd = if exp >= 0 { let pow = BigInt::from(10).pow(exp as u32); BigDecimal::new(coeff * pow, 0) } else { BigDecimal::new(coeff, (-exp) as i64) };
     Ok(serde_json::Value::from(bd.to_string()))
 }
 
@@ -684,7 +684,7 @@ pub fn decode_decimal_with_consumed(bytes: &[u8]) -> Result<(String, usize), Str
     if sign == 0x01 { return Ok(("0".to_string(), 1)); }
     let mut i = 1usize;
     let consumed = if sign == 0x02 {
-        let (eb, ni) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?; i += ni;
+        let (_eb, ni) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?; i += ni;
         let (l, nj) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?; i += nj;
         let bcd_len = ((l as usize) + 1) / 2; i + bcd_len
     } else if sign == 0x00 {

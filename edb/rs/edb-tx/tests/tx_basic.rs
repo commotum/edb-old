@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use edb_schema::{AttrCardinality, AttrUnique, Attribute, Catalog};
-use edb_tx::{allocator::TempResolver, normalize_and_validate, normalize_grammar_ops, DbView, EntidAllocator, SimpleAllocator, TxOp, UniquenessResult, Value};
+use edb_schema::{AttrCardinality, AttrUnique, Attribute};
+use edb_tx::{allocator::TempResolver, normalize_and_validate, normalize_grammar_ops, DbView, SimpleAllocator, TxOp, UniquenessResult, Value};
 use serde_json::json;
 
 #[derive(Default, Clone)]

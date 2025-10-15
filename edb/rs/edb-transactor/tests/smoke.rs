@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 
 use edb_encoding::ValueType;
 use edb_schema::{AttrCardinality, AttrUnique, Attribute};
