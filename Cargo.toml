@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "edb/rs/edb-encoding",
+  "edb/rs/edb-schema",
+  "edb/rs/edb-tx",
+  "edb/rs/edb-store-sqlite",
+  "edb/rs/edb-transactor",
+  "edb/rs/edb-index",
+]
+resolver = "2"
+

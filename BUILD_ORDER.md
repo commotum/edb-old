@@ -121,3 +121,100 @@ References
 Notes
 - We intentionally borrowed from Datomic’s K/V + CAS pattern so both SQLite and Postgres backends can share the same abstraction. Postgres can be plugged later without changing transactor/index code.
 - For tuples, v1 excludes BYTES due to lack of scalar length prefix; bytes‑fixed‑N types are recommended for tuple slots.
+
+## Current Implementation Summary
+
+- Encoding (Step 1)
+  - Rust crate `edb/rs/edb-encoding` with canonical, order‑preserving encoders/decoders for scalars and tuple v1.
+  - Python spec runner + golden vectors in `edb/01-encoding/tests/vectors` for cross‑runtime conformance.
+  - CLI `edb-enc` for ad‑hoc encode/decode and tuple inspection.
+- Tx model + validation (Step 2)
+  - Rust crates `edb/rs/edb-schema` and `edb/rs/edb-tx` for schema catalog, grammar normalization, tempids, lookup refs, type/cardinality/ref checks, uniqueness, cardinality‑one implicit retract, and tx‑fn harness stub.
+  - Unit tests under `edb/rs/edb-tx/tests` cover positive/negative fixtures.
+- Append‑only log + t (Step 3)
+  - Storage `edb/rs/edb-store-sqlite` (segments/roots/log) with CAS root updates.
+  - Transactor `edb/rs/edb-transactor` applies txs atomically, appends to log (monotonic t), updates `head` root, supports subscribe() and replay_current_from_log().
+  - Smoke test `edb/rs/edb-transactor/tests/smoke.rs` exercises apply→subscribe→replay.
+- Schema extras (Step 4 essentials)
+  - Aliases table with resolution in DbView.get_attr; grammar supports `retract-entity` with component cascade.
+- Indexing groundwork (Step 6 start)
+  - EAVT indexer `edb/rs/edb-index`: builds sorted segment(s) (E asc, A asc, V asc, T desc) and sets `eavt` root. Integrates with transactor (apply→merge for demo); scan_entity(e) performs per‑segment binary search.
+
+## What’s Left (MVP)
+
+- Step 3
+  - Add explicit tx‑report bus abstraction (in‑process now; wire to API later).
+  - Add `replay` integration tests across restarts (ensure WAL + atomicity holds).
+- Step 4
+  - Add `install_alias(alias, target)` helper and tests.
+  - Add retractEntity tx‑fn wrapper and integrate into grammar layer.
+- Step 6
+  - Flesh out EAVT segment tree (multi‑segment root, compaction/merge policy, seek/scan API for (e,a) and (e,a,vPrefix)).
+  - Switch DbView reads to index for snapshots; keep current tables for validation during transition.
+- Step 7
+  - Implement AVET (attrs with :db/index or :db.unique/*) and VAET (refs) with sorted segments + scans.
+- Step 8–9
+  - Query engine (algebrize→plan) with range predicate pushdown to AVET, joins via EAVT/AEVT; Pull engine (pattern normalization/cache, reverse, options, recursion limits).
+- Step 10–13
+  - API server (tx/db/q/pull/sync/subscribe), observability, P2P MVP, CLI/SDKs.
+
+## Build & Test Instructions (for the next model)
+
+- Prerequisites
+  - Rust toolchain via `rustup` (stable); ensure `cargo` and `rustc` available.
+  - Python 3.10+ (for vector generation) if regenerating vectors.
+
+- One‑time setup
+  - From repo root, create workspace: `Cargo.toml` already lists members.
+  - (Optional) Regenerate vectors: `PYTHONPATH=edb/01-encoding/src python3 edb/01-encoding/tests/generate_vectors.py`
+
+- Build and run tests
+  - `cargo test -q` (from repo root)
+  - Crates and tests:
+    - `edb-encoding` (lib + tests/vectors.rs)
+    - `edb-schema` (lib)
+    - `edb-tx` (lib + tests/tx_basic.rs)
+    - `edb-store-sqlite` (lib)
+    - `edb-transactor` (lib + tests/smoke.rs)
+    - `edb-index` (lib)
+
+- Known compile errors and quick fixes
+  - edb/rs/edb-encoding/src/scalar.rs
+    - `String is a variant, not a module` at string decode (bytes→string)
+      - Cause: bare `String::from_utf8_lossy` conflicts with enum variant names; qualify.
+      - Fix: use `std::string::String::from_utf8_lossy(bytes).to_string()` or add `use std::string::String;` at top.
+      - File: edb/rs/edb-encoding/src/scalar.rs:276
+    - `Uuid is a variant, not a module` inside `encode_scalar` UUID arm
+      - Cause: `Uuid` variant from `ValueType` matches shadows `uuid::Uuid` type.
+      - Fix: fully qualify: `uuid::Uuid::parse_str(s)` or rename import: `use uuid::Uuid as UuidType;` then `UuidType::parse_str`.
+      - File: edb/rs/edb-encoding/src/scalar.rs:250
+    - BigInt/BigDecimal `is_zero` not found
+      - Cause: trait not in scope.
+      - Fix: add `use num_traits::Zero;` at top to bring `is_zero()` into scope for `num_bigint::BigInt` and `bigdecimal::BigDecimal`.
+      - Files: edb/rs/edb-encoding/src/scalar.rs:386, 484
+    - BigInt magnitude bytes
+      - Bug: `n.magnitude().to_bytes_be().1` is wrong; `magnitude().to_bytes_be()` returns `Vec<u8>`.
+      - Fix: use `let (_sign, mag_bytes) = n.to_bytes_be();` and operate on `mag_bytes`.
+      - File: edb/rs/edb-encoding/src/scalar.rs:389
+    - BigDecimal normalization parenthesis warning (optional tidy)
+      - Suggested: `BigDecimal::new(coeff * pow, 0)` (remove extra parentheses)
+      - File: edb/rs/edb-encoding/src/scalar.rs:562
+
+- Optional sanity checks
+  - Run CLI: `cargo run -q -p edb-encoding --bin edb-enc -- encode DOUBLE 1.5`
+  - Run transactor smoke test only: `cargo test -q -p edb-transactor smoke`
+
+## Handoff Checklist (for the next model)
+
+- Fix compile errors flagged in `edb-encoding/src/scalar.rs` as outlined above.
+- Verify `cargo test -q` passes for all crates.
+- EAVT refinement:
+  - Add EA and EAV scan helpers (seek by (e,a) and (e,a,vPrefix)).
+  - Add simple unit tests for comparator and lower_bound behavior with mixed value types.
+- Transactor + index integration:
+  - Replace current/unique_idx reads with EAVT/AVET/VAET for snapshot reads once indexes are robust; keep current for validation during transition.
+- Step 4 polish:
+  - Add `install_alias(alias, target)` in transactor; add tests.
+  - Add a tx-fn wrapper for retractEntity (calls the grammar operation);
+- Step 7 next:
+  - Implement AVET/VAET segment builders and integrate merge thresholds; add scans and tests.
