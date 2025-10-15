@@ -53,3 +53,15 @@ datomic-reference/transactions/
     datomic-reference/transactions/7_synchronization.md
     datomic-reference/transactions/8_partitions.md
     datomic-reference/transactions/9_reducing_latency_with_transaction_hints.md
+
+
+.
+docs/research/build-outline.md
+docs/research/EDB-REQUIREMENTS.md
+docs/research/EDB-RESEARCH.md
+docs/research/indexing-strategy.md
+docs/research/insights.md
+docs/research/MyCloud-Overview.md
+docs/research/p2p-sync-mvp.md
+docs/research/tuple-encoding.md
+docs/research/value-types.md
