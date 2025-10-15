@@ -4,7 +4,6 @@ use crate::allocator::{EntidAllocator, TempResolver};
 use crate::model::{EntityRef, TempId, TxOp, Value};
 use crate::traits::DbView;
 use edb_encoding::ValueType;
-use edb_schema::Attribute;
 
 fn parse_entity_ref(j: &J) -> EntityRef {
     if let Some(n) = j.as_i64() {
@@ -57,8 +56,16 @@ fn value_from_json_for_type(
                 }
             }
         }
-        ValueType::Long => Value::Long(j.as_i64().unwrap_or(0)),
-        ValueType::Instant => Value::Instant(j.as_i64().unwrap_or(0)),
+        ValueType::Long => {
+            if let Some(n) = j.as_i64() { Value::Long(n) }
+            else if let Some(s) = j.as_str() { if let Ok(n) = s.parse::<i64>() { Value::Long(n) } else { Value::String(s.to_string()) } }
+            else { Value::String(j.to_string()) }
+        }
+        ValueType::Instant => {
+            if let Some(n) = j.as_i64() { Value::Instant(n) }
+            else if let Some(s) = j.as_str() { if let Ok(n) = s.parse::<i64>() { Value::Instant(n) } else { Value::String(s.to_string()) } }
+            else { Value::String(j.to_string()) }
+        }
         ValueType::Double | ValueType::Float32 | ValueType::Float16 | ValueType::Bfloat16 => {
             if let Some(s) = j.as_str() {
                 match s {
@@ -67,7 +74,7 @@ fn value_from_json_for_type(
                     "-inf" => Value::Double(f64::NEG_INFINITY),
                     _ => Value::Double(s.parse::<f64>().unwrap_or(0.0)),
                 }
-            } else { Value::Double(j.as_f64().unwrap_or(0.0)) }
+            } else if let Some(f) = j.as_f64() { Value::Double(f) } else { Value::String(j.to_string()) }
         }
         ValueType::Boolean => Value::Boolean(j.as_bool().unwrap_or(false)),
         ValueType::String => Value::String(j.as_str().unwrap_or("").to_string()),

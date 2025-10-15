@@ -32,6 +32,10 @@ pub fn encode_tuple_v1(values: &[serde_json::Value], elem_type: ValueType) -> Re
                 let u = uuid::Uuid::parse_str(s).map_err(|_| "invalid uuid")?;
                 out.extend_from_slice(&encode_scalar_uuid(u));
             }
+            ValueType::String => {
+                let s = v.as_str().ok_or("expected string")?;
+                out.extend_from_slice(&crate::scalar::encode_scalar_string(s));
+            }
             _ => return Err("MVP tuple decode supports fixed-width types only".into()),
         }
     }

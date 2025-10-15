@@ -2,8 +2,9 @@ use std::convert::TryInto;
 
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
+use num_traits::Zero;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum ValueType {
     Long = 1,
@@ -156,8 +157,125 @@ fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
 
+fn unescape_jsonish(s: &str) -> String {
+    // Interpret simple JSON-style escapes within an already-parsed string.
+    // This is used so vector files can keep ASCII via "\\uXXXX" forms.
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek().copied() {
+                Some('u') => {
+                    // consume 'u' and parse 4 hex digits
+                    chars.next();
+                    let mut hex = String::new();
+                    for _ in 0..4 {
+                        if let Some(h) = chars.next() { hex.push(h); } else { break; }
+                    }
+                    if hex.len() == 4 {
+                        if let Ok(cp) = u16::from_str_radix(&hex, 16) {
+                            if let Some(ch) = std::char::from_u32(cp as u32) {
+                                out.push(ch);
+                                continue;
+                            }
+                        }
+                    }
+                    // fallback: write back literal if malformed
+                    out.push('\\'); out.push('u'); out.push_str(&hex);
+                }
+                Some('n') => { chars.next(); out.push('\n'); }
+                Some('r') => { chars.next(); out.push('\r'); }
+                Some('t') => { chars.next(); out.push('\t'); }
+                Some('\"') => { chars.next(); out.push('"'); }
+                Some('\\') => { chars.next(); out.push('\\'); }
+                _ => { out.push(c); }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_i64_or_symbol(s: &str) -> Option<i64> {
+    match s {
+        "min_i64" => Some(i64::MIN),
+        "max_i64" => Some(i64::MAX),
+        _ => s.parse::<i64>().ok(),
+    }
+}
+
+fn parse_rfc3339_us(s: &str) -> Option<i64> {
+    // Parse a minimal subset: YYYY-MM-DDTHH:MM:SSZ (UTC only), return milliseconds since Unix epoch
+    fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+        // Howard Hinnant's algorithm (exact transcription)
+        let y = y - if m <= 2 { 1 } else { 0 };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = (y - era * 400) as i64; // [0, 399]
+        let m_adj = m as i64 + if m > 2 { -3 } else { 9 }; // March=0..Feb=11
+        let doy = (153 * m_adj + 2) / 5 + d as i64 - 1; // [0, 365]
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+        era * 146097 + doe - 719468
+    }
+    if s.len() < 20 { return None; }
+    // YYYY-MM-DDTHH:MM:SSZ
+    if &s[4..5] != "-" || &s[7..8] != "-" || &s[10..11] != "T" || &s[13..14] != ":" || &s[16..17] != ":" { return None; }
+    let z = s.as_bytes()[19];
+    if z != b'Z' { return None; }
+    let year: i64 = s[0..4].parse().ok()?;
+    let month: u32 = s[5..7].parse().ok()?;
+    let day: u32 = s[8..10].parse().ok()?;
+    let hour: i64 = s[11..13].parse().ok()?;
+    let min: i64 = s[14..16].parse().ok()?;
+    let sec: i64 = s[17..19].parse().ok()?;
+    let days = days_from_civil(year, month, day);
+    let secs = days * 86_400 + hour * 3600 + min * 60 + sec;
+    Some(secs * 1_000_000)
+}
+
+fn parse_f64_from_json(value: &serde_json::Value) -> Result<f64, ()> {
+    if let Some(n) = value.as_f64() { return Ok(n); }
+    if let Some(s) = value.as_str() {
+        return Ok(match s {
+            "NaN" => f64::NAN,
+            "+inf" => f64::INFINITY,
+            "-inf" => f64::NEG_INFINITY,
+            _ => s.parse::<f64>().map_err(|_| ())?,
+        });
+    }
+    Err(())
+}
+
+fn parse_f32_from_json(value: &serde_json::Value) -> Result<f32, ()> {
+    if let Some(n) = value.as_f64() { return Ok(n as f32); }
+    if let Some(s) = value.as_str() {
+        return Ok(match s {
+            "NaN" => f32::NAN,
+            "+inf" => f32::INFINITY,
+            "-inf" => f32::NEG_INFINITY,
+            _ => s.parse::<f32>().map_err(|_| ())?,
+        });
+    }
+    Err(())
+}
+
+fn parse_bigint_string(s: &str) -> Option<num_bigint::BigInt> {
+    use num_bigint::BigInt;
+    if let Ok(n) = s.parse::<BigInt>() { return Some(n); }
+    // Support simple exponent form like "2^200"
+    if let Some((base_s, exp_s)) = s.split_once('^') {
+        if let (Ok(base), Ok(exp)) = (base_s.trim().parse::<u64>(), exp_s.trim().parse::<u32>()) {
+            use num_traits::Pow;
+            let b = BigInt::from(base);
+            return Some(b.pow(exp));
+        }
+    }
+    None
+}
+
 pub fn encode_scalar_string(s: &str) -> Vec<u8> {
-    let s_norm = nfc(s);
+    let s_unescaped = unescape_jsonish(s);
+    let s_norm = nfc(&s_unescaped);
     let data = s_norm.into_bytes();
     let mut out = varuint_be(data.len() as u64);
     out.extend_from_slice(&data);
@@ -212,34 +330,28 @@ pub fn decode_scalar_uint8(b: &[u8]) -> Result<u8, String> {
 pub fn encode_scalar(value_type: ValueType, value: &serde_json::Value) -> Result<Vec<u8>, String> {
     use ValueType::*;
     match value_type {
-        Long | Instant | Ref => {
-            let x = value.as_i64().ok_or("expected integer")?;
+        Long | Ref => {
+            let x = if let Some(i) = value.as_i64() { i } else if let Some(s) = value.as_str() { parse_i64_or_symbol(s).ok_or("expected integer")? } else { return Err("expected integer".into()) };
+            Ok(encode_scalar_long(x))
+        }
+        Instant => {
+            let x = if let Some(i) = value.as_i64() { i } else if let Some(s) = value.as_str() { parse_i64_or_symbol(s).or_else(|| parse_rfc3339_us(s)).ok_or("expected integer or RFC3339 instant")? } else { return Err("expected integer or RFC3339 instant".into()) };
             Ok(encode_scalar_long(x))
         }
         Double => {
-            let x = if value.is_number() {
-                value.as_f64().unwrap()
-            } else if value == "NaN" {
-                f64::NAN
-            } else if value == "+inf" {
-                f64::INFINITY
-            } else if value == "-inf" {
-                f64::NEG_INFINITY
-            } else {
-                return Err("expected number or symbolic double".into());
-            };
+            let x = parse_f64_from_json(value).map_err(|_| "expected number or symbolic double")?;
             Ok(encode_scalar_double(x))
         }
         Float32 => {
-            let x = if value.is_number() { value.as_f64().unwrap() as f32 } else if value == "NaN" { f32::NAN } else if value == "+inf" { f32::INFINITY } else if value == "-inf" { f32::NEG_INFINITY } else { return Err("bad float32".into()) };
+            let x = parse_f32_from_json(value).map_err(|_| "bad float32")?;
             Ok(encode_scalar_f32(x))
         }
         Float16 => {
-            let x = if value.is_number() { value.as_f64().unwrap() as f32 } else if value == "NaN" { f32::NAN } else if value == "+inf" { f32::INFINITY } else if value == "-inf" { f32::NEG_INFINITY } else { return Err("bad float16".into()) };
+            let x = parse_f32_from_json(value).map_err(|_| "bad float16")?;
             Ok(encode_scalar_f16(x))
         }
         Bfloat16 => {
-            let x = if value.is_number() { value.as_f64().unwrap() as f32 } else if value == "NaN" { f32::NAN } else if value == "+inf" { f32::INFINITY } else if value == "-inf" { f32::NEG_INFINITY } else { return Err("bad bfloat16".into()) };
+            let x = parse_f32_from_json(value).map_err(|_| "bad bfloat16")?;
             Ok(encode_scalar_bf16(x))
         }
         Boolean => Ok(encode_scalar_boolean(value.as_bool().ok_or("expected bool")?)),
@@ -247,7 +359,7 @@ pub fn encode_scalar(value_type: ValueType, value: &serde_json::Value) -> Result
         Keyword => encode_scalar_keyword(value.as_str().ok_or("expected keyword string")?),
         Uuid => {
             let s = value.as_str().ok_or("expected uuid string")?;
-            let u = Uuid::parse_str(s).map_err(|_| "invalid uuid")?;
+            let u = uuid::Uuid::parse_str(s).map_err(|_| "invalid uuid")?;
             Ok(encode_scalar_uuid(u))
         }
         Bytes => Ok(encode_scalar_bytes(value.as_str().ok_or("expected base64? not supported in vectors")?.as_bytes())),
@@ -273,7 +385,7 @@ pub fn decode_scalar(value_type: ValueType, bytes: &[u8]) -> Result<serde_json::
         String => serde_json::Value::from(decode_scalar_string(bytes)?),
         Keyword => serde_json::Value::from(decode_scalar_keyword(bytes)?),
         Uuid => serde_json::Value::from(decode_scalar_uuid(bytes).map_err(|e| e.to_string())?.to_string()),
-        Bytes => serde_json::Value::from(String::from_utf8_lossy(bytes).to_string()),
+        Bytes => serde_json::Value::from(std::string::String::from_utf8_lossy(bytes).to_string()),
         Uint8 => serde_json::Value::from(decode_scalar_uint8(bytes)? as u64),
         Bigint => serde_json::Value::from(decode_scalar_bigint(bytes)?),
         Decimal => serde_json::Value::from(decode_scalar_decimal(bytes)?),
@@ -382,11 +494,16 @@ pub fn decode_scalar_bf16(b: &[u8]) -> Result<f64, String> {
 
 pub fn encode_scalar_bigint(value: &serde_json::Value) -> Result<Vec<u8>, String> {
     use num_bigint::BigInt;
-    let n: BigInt = if let Some(i) = value.as_i64() { i.into() } else if let Some(s) = value.as_str() { s.parse::<BigInt>().map_err(|_| "invalid bigint")? } else { return Err("expected int or string".into()); };
+    let n: BigInt = if let Some(i) = value.as_i64() {
+        i.into()
+    } else if let Some(s) = value.as_str() {
+        parse_bigint_string(s).ok_or("invalid bigint")?
+    } else {
+        return Err("expected int or string".into());
+    };
     if n.is_zero() { return Ok(vec![0x01]); }
     let neg = n.sign() == num_bigint::Sign::Minus;
-    let mag = n.magnitude().to_bytes_be();
-    let mag_bytes = mag.1; // (signless, bytes)
+    let mag_bytes = n.magnitude().to_bytes_be();
     let mut out = Vec::new();
     if neg {
         out.push(0x00);
@@ -407,7 +524,7 @@ pub fn decode_scalar_bigint(bytes: &[u8]) -> Result<serde_json::Value, String> {
     let sign = bytes[0];
     if sign == 0x01 { return Ok(serde_json::Value::from("0")); }
     let mut i = 1usize;
-    let (len, mag, neg) = if sign == 0x02 {
+    let (_len, mag, neg) = if sign == 0x02 {
         let (l, ni) = parse_varuint_be(&bytes[i..]).map_err(|e| e.to_string())?;
         i += ni;
         let L = l as usize;
@@ -482,30 +599,28 @@ pub fn encode_scalar_decimal(value: &serde_json::Value) -> Result<Vec<u8>, Strin
     let s = if value.is_string() { value.as_str().unwrap().to_string() } else { value.to_string() };
     let mut d: BigDecimal = s.parse().map_err(|_| "invalid decimal")?;
     if d.is_zero() { return Ok(vec![0x01]); }
-    // normalize to remove trailing zeros
+    // normalize and obtain (coefficient, scale) where value = coeff * 10^{-scale}
     d = d.normalized();
-    let (coeff, exp) = d.as_bigint_and_exponent(); // value = coeff * 10^exp
+    let (coeff, mut scale) = d.as_bigint_and_exponent();
     let neg = coeff.sign() == num_bigint::Sign::Minus;
-    let coeff_mag = coeff.magnitude().to_bytes_be().1;
-    if coeff_mag.is_empty() { return Ok(vec![0x01]); }
+    // Build decimal digits from absolute coeff then trim trailing zeros, adjusting scale
+    let mut digits_str = coeff.magnitude().to_str_radix(10);
+    if digits_str.is_empty() { return Ok(vec![0x01]); }
+    let mut trimmed = 0usize;
+    while digits_str.ends_with('0') {
+        digits_str.pop();
+        trimmed += 1;
+    }
+    if trimmed > 0 { scale -= trimmed as i64; }
     let mut out = Vec::new();
     if neg { out.push(0x00); } else { out.push(0x02); }
-    let eb = (exp as i128 + EXP_BIAS as i128) as u64;
-    let mut vu_e = varuint_be(eb);
-    let mut vu_len = varuint_be(coeff_mag.len() as u64);
-    // build BCD
-    let mut digits: Vec<u8> = Vec::new();
-    for byte in coeff_mag.iter() {
-        // convert magnitude bytes to decimal digits by string; simpler path
-        // fallback to string conversion for correctness
-    }
-    let digits_str = {
-        use num_traits::ToPrimitive;
-        let s = coeff.magnitude().to_str_radix(10);
-        s
-    };
-    for ch in digits_str.as_bytes().iter() { digits.push((ch - b'0') as u8); }
-    vu_len = varuint_be(digits.len() as u64);
+    // E = -scale so that value = digits * 10^E
+    let E = -(scale as i128);
+    let eb = (E + (EXP_BIAS as i128)) as u64;
+    let vu_e = varuint_be(eb);
+    // build BCD from digits_str
+    let digits: Vec<u8> = digits_str.bytes().map(|ch| (ch - b'0') as u8).collect();
+    let vu_len = varuint_be(digits.len() as u64);
     let mut bcd: Vec<u8> = Vec::with_capacity((digits.len()+1)/2);
     for i in (0..digits.len()).step_by(2) {
         let hi = digits[i] & 0xF;
@@ -559,7 +674,7 @@ pub fn decode_scalar_decimal(bytes: &[u8]) -> Result<serde_json::Value, String> 
     let mut coeff = BigInt::from(0); let ten = BigInt::from(10);
     for d in digits { coeff = coeff * &ten + BigInt::from(d as i32); }
     if neg { coeff = -coeff; }
-    let bd = if E >= 0 { let pow = BigInt::from(10).pow(E as u32); BigDecimal::new((coeff * pow), 0) } else { BigDecimal::new(coeff, (-E) as i64) };
+    let bd = if E >= 0 { let pow = BigInt::from(10).pow(E as u32); BigDecimal::new(coeff * pow, 0) } else { BigDecimal::new(coeff, (-E) as i64) };
     Ok(serde_json::Value::from(bd.to_string()))
 }
 

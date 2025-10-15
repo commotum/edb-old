@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use edb_encoding::ValueType;
-use edb_schema::{AttrCardinality, AttrUnique, Attribute};
+use edb_schema::{AttrCardinality, AttrUnique};
 
 use crate::allocator::{EntidAllocator, TempResolver};
-use crate::model::{EntityRef, TempId, TxOp, TxPrimitive, TxReport, Value};
+use crate::model::{EntityRef, TxOp, TxPrimitive, TxReport, Value};
 use crate::traits::{DbView, UniquenessResult};
 
 #[derive(thiserror::Error, Debug)]

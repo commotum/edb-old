@@ -63,6 +63,30 @@ fn test_long_vectors() {
 }
 
 #[test]
+fn test_instant_vectors() {
+    let p = vec_path("instant.json");
+    let txt = fs::read_to_string(&p).expect("read");
+    let sv: ScalarVectors = serde_json::from_str(&txt).expect("json");
+    assert_eq!(sv.value_type, "INSTANT");
+    for v in sv.vectors {
+        let bytes = encode_scalar(ValueType::Instant, &v.value).expect("encode");
+        assert_eq!(bytes, hex(&v.bytes_hex));
+    }
+}
+
+#[test]
+fn test_ref_vectors() {
+    let p = vec_path("ref.json");
+    let txt = fs::read_to_string(&p).expect("read");
+    let sv: ScalarVectors = serde_json::from_str(&txt).expect("json");
+    assert_eq!(sv.value_type, "REF");
+    for v in sv.vectors {
+        let bytes = encode_scalar(ValueType::Ref, &v.value).expect("encode");
+        assert_eq!(bytes, hex(&v.bytes_hex));
+    }
+}
+
+#[test]
 fn test_bigint_vectors() {
     let p = vec_path("bigint.json");
     let txt = fs::read_to_string(&p).expect("read");

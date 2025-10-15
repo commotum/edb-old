@@ -12,4 +12,4 @@ edb-encoding = { path = "../edb-encoding" }
 edb-schema = { path = "../edb-schema" }
 edb-tx = { path = "../edb-tx" }
 edb-store-sqlite = { path = "../edb-store-sqlite" }
-
+edb-index = { path = "../edb-index" }

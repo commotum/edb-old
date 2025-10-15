@@ -1,10 +1,8 @@
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
-
-use edb_schema::{AttrCardinality, AttrUnique, Attribute, Catalog};
+use edb_schema::{AttrCardinality, AttrUnique, Attribute};
 use edb_index::EavtIndexer;
-use edb_store_sqlite::{RootStore, SegmentStore, SqliteStore, StoreError};
-use edb_tx::{allocator::TempResolver, grammar::normalize_grammar_ops, model::Value, traits::DbView, validate::normalize_and_validate, SimpleAllocator, TxOp, TxReport, UniquenessResult};
+use edb_store_sqlite::{RootStore, SqliteStore, StoreError, LogStore};
+use edb_tx::{allocator::TempResolver, grammar::normalize_grammar_ops, model::Value, traits::DbView, validate::normalize_and_validate, TxOp, TxReport, UniquenessResult};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TxrError {
@@ -99,12 +97,15 @@ impl SqliteTransactor {
     }
 
     pub fn apply_tx(&mut self, ops_json: &[serde_json::Value]) -> Result<TxReport, TxrError> {
-        let dbview = SqliteDbView { conn: &self.conn };
-        let mut temps = TempResolver::new();
-        let mut alloc = SqliteAllocator { txr: self };
-        let ops: Vec<TxOp> = normalize_grammar_ops(&dbview, &mut alloc, &mut temps, ops_json);
-        let mut alloc2 = SqliteAllocator { txr: self };
-        let report = normalize_and_validate(&dbview, &ops, &mut alloc2)?;
+        // Build and validate outside the write transaction to avoid borrow conflicts
+        let report = {
+            let dbview = SqliteDbView { conn: &self.conn };
+            let mut temps = TempResolver::new();
+            let mut alloc = SqliteAllocator { txr: self };
+            let ops: Vec<TxOp> = normalize_grammar_ops(&dbview, &mut alloc, &mut temps, ops_json);
+            let mut alloc2 = SqliteAllocator { txr: self };
+            normalize_and_validate(&dbview, &ops, &mut alloc2)?
+        };
 
         let tx = self.conn.transaction()?;
         // Apply primitives to current and unique_idx
@@ -115,7 +116,7 @@ impl SqliteTransactor {
                     "INSERT OR REPLACE INTO current(e,a,vjson) VALUES(?,?,?)",
                     params![p.e, &p.a, vjson],
                 )?;
-                if let Some((a, vkey)) = unique_key_for(&dbview, &p.a, &p.v) {
+                if let Some((a, vkey)) = unique_key_for_tx(&tx, &p.a, &p.v) {
                     tx.execute(
                         "INSERT OR REPLACE INTO unique_idx(a,vkey,e) VALUES(?,?,?)",
                         params![a, vkey, p.e],
@@ -124,7 +125,7 @@ impl SqliteTransactor {
             } else {
                 // retract
                 tx.execute("DELETE FROM current WHERE e=?1 AND a=?2", params![p.e, &p.a])?;
-                if let Some((a, vkey)) = unique_key_for(&dbview, &p.a, &p.v) {
+                if let Some((a, vkey)) = unique_key_for_tx(&tx, &p.a, &p.v) {
                     tx.execute("DELETE FROM unique_idx WHERE a=?1 AND vkey=?2", params![a, vkey])?;
                 }
             }
@@ -166,19 +167,18 @@ impl SqliteTransactor {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM current", [])?;
         tx.execute("DELETE FROM unique_idx", [])?;
-        let dbview = SqliteDbView { conn: &self.conn };
         for (_seq, bytes) in entries {
             let primitives: Vec<edb_tx::model::TxPrimitive> = serde_json::from_slice(&bytes).unwrap_or_default();
             for p in primitives {
                 if p.added {
                     let vjson = serde_json::to_string(&p.v).unwrap();
                     tx.execute("INSERT OR REPLACE INTO current(e,a,vjson) VALUES(?,?,?)", params![p.e, &p.a, vjson])?;
-                    if let Some((a, vkey)) = unique_key_for(&dbview, &p.a, &p.v) {
+                    if let Some((a, vkey)) = unique_key_for_tx(&tx, &p.a, &p.v) {
                         tx.execute("INSERT OR REPLACE INTO unique_idx(a,vkey,e) VALUES(?,?,?)", params![a, vkey, p.e])?;
                     }
                 } else {
                     tx.execute("DELETE FROM current WHERE e=?1 AND a=?2", params![p.e, &p.a])?;
-                    if let Some((a, vkey)) = unique_key_for(&dbview, &p.a, &p.v) {
+                    if let Some((a, vkey)) = unique_key_for_tx(&tx, &p.a, &p.v) {
                         tx.execute("DELETE FROM unique_idx WHERE a=?1 AND vkey=?2", params![a, vkey])?;
                     }
                 }
@@ -314,13 +314,16 @@ fn value_key(v: &Value) -> String {
     }
 }
 
-fn unique_key_for(db: &SqliteDbView, a: &str, v: &Value) -> Option<(String, String)> {
-    if let Some(attr) = db.get_attr(a) {
-        if matches!(attr.unique, AttrUnique::Identity | AttrUnique::Value) {
-            return Some((a.to_string(), value_key(v)));
-        }
-    }
-    None
+// unique_key_for_tx: unique key lookup within an active transaction
+
+fn unique_key_for_tx(tx: &rusqlite::Transaction<'_>, a: &str, v: &Value) -> Option<(String, String)> {
+    // Read unique flag directly within the active transaction
+    let uniq_i: Option<i64> = tx
+        .query_row("SELECT uniq FROM attrs WHERE ident=?1", params![a], |r| r.get(0))
+        .optional()
+        .ok()
+        .flatten();
+    if matches!(uniq_i, Some(1 | 2)) { Some((a.to_string(), value_key(v))) } else { None }
 }
 
 struct SqliteAllocator<'a> {

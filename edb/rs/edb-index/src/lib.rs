@@ -11,6 +11,8 @@ pub enum IndexError {
     Store(#[from] StoreError),
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("encode: {0}")]
+    Encode(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +51,7 @@ impl EavtIndexer {
         for p in prims {
             let vt = value_type_of(&p.v);
             let vjson = value_to_json(&p.v);
-            let v_bytes = encode_scalar(vt, &vjson).map_err(|e| serde_json::Error::custom(e))?;
+            let v_bytes = encode_scalar(vt, &vjson).map_err(|e| IndexError::Encode(e))?;
             self.memory.push(Datom::new(p.e, p.a.clone(), v_bytes, t, p.added));
         }
         Ok(())

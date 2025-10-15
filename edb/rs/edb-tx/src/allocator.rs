@@ -24,9 +24,8 @@ pub struct TempResolver {
 
 impl TempResolver {
     pub fn new() -> Self { Self { map: HashMap::new() } }
-    pub fn resolve_or_alloc<A: EntidAllocator>(&mut self, t: &TempId, alloc: &mut A) -> i64 {
+    pub fn resolve_or_alloc<A: EntidAllocator + ?Sized>(&mut self, t: &TempId, alloc: &mut A) -> i64 {
         if let Some(e) = self.map.get(t) { *e } else { let e = alloc.allocate(); self.map.insert(t.clone(), e); e }
     }
     pub fn bind(&mut self, t: TempId, e: i64) { self.map.insert(t, e); }
 }
-
