@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use edb_schema::{AttrCardinality, AttrUnique, Attribute};
+use edb_encoding::ValueType;
 use edb_index::EavtIndexer;
 use edb_store_sqlite::{RootStore, SqliteStore, StoreError, LogStore};
 use edb_tx::{allocator::TempResolver, grammar::normalize_grammar_ops, model::Value, traits::DbView, validate::normalize_and_validate, TxOp, TxReport, UniquenessResult};
@@ -12,6 +13,8 @@ pub enum TxrError {
     Sqlite(#[from] rusqlite::Error),
     #[error("tx: {0}")]
     Tx(#[from] edb_tx::validate::TxError),
+    #[error("invalid schema: {0}")]
+    InvalidSchema(String),
 }
 
 pub struct SqliteTransactor {
@@ -70,6 +73,10 @@ impl SqliteTransactor {
     }
 
     pub fn install_attribute(&self, attr: &Attribute) -> Result<(), TxrError> {
+        // Enforce spec: :db.type/bytes is equality-only; cannot be unique or used for lookup refs.
+        if matches!(attr.value_type, ValueType::Bytes) && !matches!(attr.unique, AttrUnique::None) {
+            return Err(TxrError::InvalidSchema("bytes attributes cannot be unique or used in lookup refs".into()));
+        }
         self.conn.execute(
             "INSERT OR REPLACE INTO attrs(ident,vt,card,uniq,is_component,no_history,doc) VALUES(?,?,?,?,?,?,?)",
             params![

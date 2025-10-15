@@ -1,9 +1,11 @@
 use base64::{engine::general_purpose, Engine as _};
 use edb_encoding::{encode_scalar, ValueType};
+use edb_encoding::scalar::{encode_scalar_string, parse_varuint_be};
 use edb_store_sqlite::{RootStore, SegmentStore, SqliteStore, StoreError};
 use edb_tx::model::{TxPrimitive, Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(thiserror::Error, Debug)]
 pub enum IndexError {
@@ -40,16 +42,19 @@ struct EavtRootV1 {
 pub struct EavtIndexer {
     store: SqliteStore,
     memory: Vec<Datom>,
+    conn: Connection,
 }
 
 impl EavtIndexer {
     pub fn open(path: &str) -> Result<Self, IndexError> {
-        Ok(Self { store: SqliteStore::open(path)?, memory: Vec::new() })
+        let store = SqliteStore::open(path)?;
+        let conn = Connection::open(path).map_err(StoreError::from)?;
+        Ok(Self { store, memory: Vec::new(), conn })
     }
 
     pub fn apply_primitives(&mut self, prims: &[TxPrimitive], t: i64) -> Result<(), IndexError> {
         for p in prims {
-            let vt = value_type_of(&p.v);
+            let vt = self.lookup_value_type(&p.a).unwrap_or_else(|| value_type_of(&p.v));
             let vjson = value_to_json(&p.v);
             let v_bytes = encode_scalar(vt, &vjson).map_err(IndexError::Encode)?;
             self.memory.push(Datom::new(p.e, p.a.clone(), v_bytes, t, p.added));
@@ -134,9 +139,9 @@ fn compare_datom_eavt(d1: &Datom, d2: &Datom) -> std::cmp::Ordering {
     // E asc
     match d1.e.cmp(&d2.e) {
         Equal => {
-            // A asc by keyword encoding bytes
-            let a1 = encode_scalar(ValueType::Keyword, &serde_json::json!(d1.a.as_str())).unwrap();
-            let a2 = encode_scalar(ValueType::Keyword, &serde_json::json!(d2.a.as_str())).unwrap();
+            // A asc by normalized content bytes (drop length prefix)
+            let a1 = attr_sort_key(&d1.a);
+            let a2 = attr_sort_key(&d2.a);
             match a1.cmp(&a2) {
                 Equal => {
                     // V asc by order-preserving bytes
@@ -173,4 +178,44 @@ fn lower_bound_e(datoms: &[Datom], e: i64) -> usize {
         }
     }
     lo
+}
+
+fn attr_sort_key(a: &str) -> Vec<u8> {
+    // Use encoding crate’s NFC normalization, then strip the varuint length prefix
+    let enc = encode_scalar_string(a);
+    let (_len, i) = parse_varuint_be(&enc).unwrap_or((0, 1));
+    enc[i..].to_vec()
+}
+
+impl EavtIndexer {
+    fn lookup_value_type(&self, ident: &str) -> Option<ValueType> {
+        let vt_i: Option<i64> = self
+            .conn
+            .query_row("SELECT vt FROM attrs WHERE ident=?1", params![ident], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        vt_i.and_then(map_vt_i64)
+    }
+}
+
+fn map_vt_i64(v: i64) -> Option<ValueType> {
+    match v {
+        1 => Some(ValueType::Long),
+        2 => Some(ValueType::Double),
+        3 => Some(ValueType::Boolean),
+        4 => Some(ValueType::String),
+        5 => Some(ValueType::Keyword),
+        6 => Some(ValueType::Uuid),
+        7 => Some(ValueType::Instant),
+        8 => Some(ValueType::Ref),
+        9 => Some(ValueType::Bytes),
+        10 => Some(ValueType::Uint8),
+        11 => Some(ValueType::Bigint),
+        12 => Some(ValueType::Decimal),
+        13 => Some(ValueType::Float32),
+        14 => Some(ValueType::Float16),
+        15 => Some(ValueType::Bfloat16),
+        _ => None,
+    }
 }

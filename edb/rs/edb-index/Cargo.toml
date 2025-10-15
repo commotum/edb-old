@@ -13,3 +13,4 @@ edb-encoding = { path = "../edb-encoding" }
 edb-store-sqlite = { path = "../edb-store-sqlite" }
 edb-tx = { path = "../edb-tx" }
 thiserror = "1"
+rusqlite = { version = "0.30", features = ["bundled"] }

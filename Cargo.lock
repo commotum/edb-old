@@ -141,6 +141,7 @@ dependencies = [
  "edb-store-sqlite",
  "edb-tx",
  "hex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
