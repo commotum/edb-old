@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Rust/Cargo
+# Compiled artifacts and build output
+target/
+
+# rustfmt backup files
+**/*.rs.bk
+
+# LLVM coverage profiles (e.g., `-Zinstrument-coverage`)
+*.profraw
+
+# Note: keep `Cargo.lock` committed for binaries/workspaces
