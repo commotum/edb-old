@@ -10,9 +10,9 @@ tags:
 ---
 ## Introduction
 
-Datomic is a general purpose database system designed for data-of-record applications. A Datomic database is a set of immutable atomic facts called datom s. Datomic transaction s add datoms, never updating or removing them, so you have a complete audit trail and the ability to query “as of” points in time. Datomic transactions are serialized in a total order, providing strong ACID guarantees.
+Datomic is a general purpose database system designed for data-of-record applications. A Datomic database is a set of immutable atomic facts called datoms. Datomic transactions add datoms, never updating or removing them, so you have a complete audit trail and the ability to query “as of” points in time. Datomic transactions are serialized in a total order, providing strong ACID guarantees.
 
-Datomic has a powerful and flexible information model. Each Datomic database declares an attribute-level schema, and any entity can possess any attribute. You can query your data with datalog (a logic-based query language), and navigate arbitrary hierarchies with pull. Datomic’s index es automatically support many access patterns common in SQL, column, K/V, hierarchical, and graph databases.
+Datomic has a powerful and flexible information model. Each Datomic database declares an attribute-level schema, and any entity can possess any attribute. You can query your data with datalog (a logic-based query language), and navigate arbitrary hierarchies with pull. Datomic’s indexes automatically support many access patterns common in SQL, column, K/V, hierarchical, and graph databases.
 
 Datomic’s information model scales to a wide variety of different use cases:
 

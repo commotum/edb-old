@@ -65,3 +65,40 @@ docs/research/MyCloud-Overview.md
 docs/research/p2p-sync-mvp.md
 docs/research/tuple-encoding.md
 docs/research/value-types.md
+
+
+
+Can you dig into:
+
+datomic-reference/schema/1_schema.md
+datomic-reference/schema/2_changing_schema.md
+datomic-reference/schema/3_data_modeling.md
+datomic-reference/schema/4_identity_and_uniqueness.md
+datomic-reference/best_practices.md
+datomic-reference/entities.md
+datomic-reference/overview.md
+datomic-reference/programming_with_data_and_edn.md
+datomic-reference/time_in_datomic.md
+datomic-reference/transactions/1_transactions_toc.md
+datomic-reference/transactions/2_transaction_model.md
+datomic-reference/transactions/3_transaction_data.md
+datomic-reference/transactions/4_processing_transactions.md
+datomic-reference/transactions/5_transaction_functions.md
+datomic-reference/transactions/6_acid.md
+datomic-reference/transactions/7_synchronization.md
+datomic-reference/transactions/8_partitions.md
+datomic-reference/transactions/9_reducing_latency_with_transaction_hints.md
+
+and also read up on our original rough draft documents found here:
+
+docs/research/build-outline.md
+docs/research/EDB-REQUIREMENTS.md
+docs/research/EDB-RESEARCH.md
+docs/research/indexing-strategy.md
+docs/research/insights.md
+docs/research/MyCloud-Overview.md
+docs/research/p2p-sync-mvp.md
+docs/research/tuple-encoding.md
+docs/research/value-types.md
+
+To find out what is the best way forward with regards to tx schema?
