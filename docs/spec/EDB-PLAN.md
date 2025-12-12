@@ -27,7 +27,7 @@ Architecture (EDB)
 - Single-writer transactor applies transactions serially; peers/clients read immutable snapshots.
 - Storage backends: SQLite (local) and Postgres (server) as first-class.
 - Log: durable append-only sequence; db state reconstructable via replay.
-- Indexes: EAVT first with in-memory delta + background merges to durable segments; then AVET (+range) and VAET (reverse refs). AEVT optional.
+- Indexes: EAVT first with in-memory delta + background merges to durable segments; AVET (+range) and VAET (reverse refs); AEVT (column) for attribute scans. Roots accumulate segments and periodically compact to keep segment counts bounded.
 - Catalog: attribute definitions stored and queryable; alias mapping supported.
 - Envelope (linear mode): UnsignedEnvelopeV1 (CBOR, canonical) signed with Ed25519. TxId = SHA-256 over unsigned bytes. Store envelopes, verify then apply; maintain heads (single parent = current head).
 
@@ -75,7 +75,7 @@ Tuples / Composites (MVP)
 
 Indexing Strategy
 - EAVT: in-memory delta for recent writes; periodic merge to durable segment trees; CAS root adoption.
-- AVET: enabled for attrs with :db/index true or any :db/unique; supports equality and range predicates with typed ordering.
+- AVET: enabled for attrs with :db/index true or any :db/unique; supports equality and range predicates with typed ordering. AEVT provides attribute and (a,e) scans.
 - VAET: reverse refs to support Pull/navigation efficiently.
 - Query pushdown: prefer range predicates (=, !=, <=, <, >, >=) to leverage AVET order; consider generated columns for hot tuple attrs (advisory).
 

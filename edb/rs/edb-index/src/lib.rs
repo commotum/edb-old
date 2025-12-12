@@ -71,15 +71,19 @@ impl EavtIndexer {
         hasher.update(&encoded);
         let id = hex::encode(hasher.finalize());
         let _ = self.store.put_segment_if_absent(&id, &encoded)?;
-        let root = EavtRootV1 { version: 1, segments: vec![id.clone()] };
+        // Append to existing root segments if present
+        let mut segments: Vec<String> = Vec::new();
+        if let Some((_rev, root_bytes)) = self.store.get_root("eavt")? {
+            if let Ok(root) = serde_json::from_slice::<EavtRootV1>(&root_bytes) { segments = root.segments; }
+        }
+        segments.push(id.clone());
+        let root = EavtRootV1 { version: 1, segments };
         let root_bytes = serde_json::to_vec(&root)?;
         let head = self.store.get_root("eavt");
-        if let Ok(Some((rev, _))) = head {
-            let _ = self.store.cas_root("eavt", rev, &root_bytes)?;
-        } else {
-            self.store.init_root("eavt", &root_bytes)?;
-        }
+        if let Ok(Some((rev, _))) = head { let _ = self.store.cas_root("eavt", rev, &root_bytes)?; } else { self.store.init_root("eavt", &root_bytes)?; }
         self.memory.clear();
+        // Compact if too many segments accumulated
+        let _ = self.compact_if_needed(8)?;
         Ok(id)
     }
 
@@ -313,6 +317,32 @@ impl EavtIndexer {
             .flatten();
         vt_i.and_then(map_vt_i64)
     }
+
+    fn compact_if_needed(&mut self, max_segments: usize) -> Result<Option<String>, IndexError> {
+        if let Some((rev, bytes)) = self.store.get_root("eavt")? {
+            if let Ok(root) = serde_json::from_slice::<EavtRootV1>(&bytes) {
+                if root.segments.len() > max_segments {
+                    let mut all: Vec<Datom> = Vec::new();
+                    for sid in root.segments {
+                        if let Some(seg) = self.store.get_segment(&sid)? {
+                            let mut v: Vec<Datom> = serde_json::from_slice(&seg)?;
+                            all.append(&mut v);
+                        }
+                    }
+                    all.sort_by(compare_datom_eavt);
+                    let encoded = serde_json::to_vec(&all)?;
+                    let mut hasher = Sha256::new(); hasher.update(&encoded);
+                    let id = hex::encode(hasher.finalize());
+                    let _ = self.store.put_segment_if_absent(&id, &encoded)?;
+                    let new_root = EavtRootV1 { version: 1, segments: vec![id.clone()] };
+                    let root_bytes = serde_json::to_vec(&new_root)?;
+                    let _ = self.store.cas_root("eavt", rev, &root_bytes)?;
+                    return Ok(Some(id));
+                }
+            }
+        }
+        Ok(None)
+    }
 }
 
 fn map_vt_i64(v: i64) -> Option<ValueType> {
@@ -388,11 +418,18 @@ impl AvetIndexer {
         hasher.update(&encoded);
         let id = hex::encode(hasher.finalize());
         let _ = self.store.put_segment_if_absent(&id, &encoded)?;
-        let root = AvetRootV1 { version: 1, segments: vec![id.clone()] };
+        let mut segments: Vec<String> = Vec::new();
+        if let Some((_rev, root_bytes)) = self.store.get_root("avet")? {
+            if let Ok(root) = serde_json::from_slice::<AvetRootV1>(&root_bytes) { segments = root.segments; }
+        }
+        segments.push(id.clone());
+        let root = AvetRootV1 { version: 1, segments };
         let root_bytes = serde_json::to_vec(&root)?;
         let head = self.store.get_root("avet");
         if let Ok(Some((rev, _))) = head { let _ = self.store.cas_root("avet", rev, &root_bytes)?; } else { self.store.init_root("avet", &root_bytes)?; }
         self.memory.clear();
+        // Compact if too many segments accumulated
+        let _ = self.compact_if_needed(8)?;
         Ok(id)
     }
 
@@ -519,6 +556,34 @@ fn lower_bound_av_in_range(datoms: &[AvetDatom], v_key: &[u8]) -> usize {
     lo
 }
 
+impl AvetIndexer {
+    fn compact_if_needed(&mut self, max_segments: usize) -> Result<Option<String>, IndexError> {
+        if let Some((rev, bytes)) = self.store.get_root("avet")? {
+            if let Ok(root) = serde_json::from_slice::<AvetRootV1>(&bytes) {
+                if root.segments.len() > max_segments {
+                    let mut all: Vec<AvetDatom> = Vec::new();
+                    for sid in root.segments {
+                        if let Some(seg) = self.store.get_segment(&sid)? {
+                            let mut v: Vec<AvetDatom> = serde_json::from_slice(&seg)?;
+                            all.append(&mut v);
+                        }
+                    }
+                    all.sort_by(compare_datom_avet);
+                    let encoded = serde_json::to_vec(&all)?;
+                    let mut hasher = Sha256::new(); hasher.update(&encoded);
+                    let id = hex::encode(hasher.finalize());
+                    let _ = self.store.put_segment_if_absent(&id, &encoded)?;
+                    let new_root = AvetRootV1 { version: 1, segments: vec![id.clone()] };
+                    let root_bytes = serde_json::to_vec(&new_root)?;
+                    let _ = self.store.cas_root("avet", rev, &root_bytes)?;
+                    return Ok(Some(id));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 // ---------------- VAET (V -> A -> E -> T) for refs ----------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,12 +634,20 @@ impl VaetIndexer {
         let mut hasher = Sha256::new(); hasher.update(&encoded);
         let id = hex::encode(hasher.finalize());
         let _ = self.store.put_segment_if_absent(&id, &encoded)?;
-        let root = VaetRootV1 { version: 1, segments: vec![id.clone()] };
+        let mut segments: Vec<String> = Vec::new();
+        if let Some((_rev, root_bytes)) = self.store.get_root("vaet")? {
+            if let Ok(root) = serde_json::from_slice::<VaetRootV1>(&root_bytes) { segments = root.segments; }
+        }
+        segments.push(id.clone());
+        let root = VaetRootV1 { version: 1, segments };
         let root_bytes = serde_json::to_vec(&root)?;
-        if let Ok(Some((rev,_))) = self.store.get_root("vaet") { let _ = self.store.cas_root("vaet", rev, &root_bytes)?; } else { self.store.init_root("vaet", &root_bytes)?; }
+        let head = self.store.get_root("vaet");
+        if let Ok(Some((rev,_))) = head { let _ = self.store.cas_root("vaet", rev, &root_bytes)?; } else { self.store.init_root("vaet", &root_bytes)?; }
         self.memory.clear();
+        let _ = self.compact_if_needed(8)?;
         Ok(id)
     }
+
 
     pub fn scan_v(&self, v_e: i64) -> Result<Vec<VaetDatom>, IndexError> {
         let mut results: Vec<VaetDatom> = Vec::new();
@@ -619,4 +692,209 @@ fn lower_bound_v(datoms: &[VaetDatom], v_e: i64) -> usize {
     let mut lo = 0usize; let mut hi = datoms.len();
     while lo < hi { let mid = (lo + hi)/2; if datoms[mid].v_e < v_e { lo = mid+1; } else { hi = mid; } }
     lo
+}
+
+impl VaetIndexer {
+    fn compact_if_needed(&mut self, max_segments: usize) -> Result<Option<String>, IndexError> {
+        if let Some((rev, bytes)) = self.store.get_root("vaet")? {
+            if let Ok(root) = serde_json::from_slice::<VaetRootV1>(&bytes) {
+                if root.segments.len() > max_segments {
+                    let mut all: Vec<VaetDatom> = Vec::new();
+                    for sid in root.segments {
+                        if let Some(seg) = self.store.get_segment(&sid)? {
+                            let mut v: Vec<VaetDatom> = serde_json::from_slice(&seg)?;
+                            all.append(&mut v);
+                        }
+                    }
+                    all.sort_by(compare_datom_vaet);
+                    let encoded = serde_json::to_vec(&all)?;
+                    let mut hasher = Sha256::new(); hasher.update(&encoded);
+                    let id = hex::encode(hasher.finalize());
+                    let _ = self.store.put_segment_if_absent(&id, &encoded)?;
+                    let new_root = VaetRootV1 { version: 1, segments: vec![id.clone()] };
+                    let root_bytes = serde_json::to_vec(&new_root)?;
+                    let _ = self.store.cas_root("vaet", rev, &root_bytes)?;
+                    return Ok(Some(id));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+// ---------------- AEVT (A, E, V, T) ----------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AevtDatom {
+    pub a: String,
+    pub e: i64,
+    pub v_b64: String,
+    pub t: i64,
+    pub added: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AevtRootV1 { version: u8, segments: Vec<String> }
+
+pub struct AevtIndexer {
+    store: SqliteStore,
+    memory: Vec<AevtDatom>,
+    conn: Connection,
+    merge_threshold: usize,
+}
+
+impl AevtIndexer {
+    fn compact_if_needed(&mut self, max_segments: usize) -> Result<Option<String>, IndexError> {
+        if let Some((rev, bytes)) = self.store.get_root("aevt")? {
+            if let Ok(root) = serde_json::from_slice::<AevtRootV1>(&bytes) {
+                if root.segments.len() > max_segments {
+                    let mut all: Vec<AevtDatom> = Vec::new();
+                    for sid in root.segments {
+                        if let Some(seg) = self.store.get_segment(&sid)? {
+                            let mut v: Vec<AevtDatom> = serde_json::from_slice(&seg)?;
+                            all.append(&mut v);
+                        }
+                    }
+                    all.sort_by(compare_datom_aevt);
+                    let encoded = serde_json::to_vec(&all)?;
+                    let mut hasher = Sha256::new(); hasher.update(&encoded);
+                    let id = hex::encode(hasher.finalize());
+                    let _ = self.store.put_segment_if_absent(&id, &encoded)?;
+                    let new_root = AevtRootV1 { version: 1, segments: vec![id.clone()] };
+                    let root_bytes = serde_json::to_vec(&new_root)?;
+                    let _ = self.store.cas_root("aevt", rev, &root_bytes)?;
+                    return Ok(Some(id));
+                }
+            }
+        }
+        Ok(None)
+    }
+    pub fn open(path: &str) -> Result<Self, IndexError> {
+        let store = SqliteStore::open(path)?;
+        let conn = Connection::open(path).map_err(StoreError::from)?;
+        Ok(Self { store, memory: Vec::new(), conn, merge_threshold: 1024 })
+    }
+
+    pub fn apply_primitives(&mut self, prims: &[TxPrimitive], t: i64) -> Result<(), IndexError> {
+        for p in prims {
+            let vt = self.lookup_value_type(&p.a).unwrap_or_else(|| value_type_of(&p.v));
+            let vjson = value_to_json(&p.v);
+            let v_bytes = encode_scalar(vt, &vjson).map_err(IndexError::Encode)?;
+            self.memory.push(AevtDatom { a: p.a.clone(), e: p.e, v_b64: general_purpose::STANDARD_NO_PAD.encode(v_bytes), t, added: p.added });
+        }
+        Ok(())
+    }
+
+    pub fn maybe_merge(&mut self) -> Result<Option<String>, IndexError> { if self.memory.len() >= self.merge_threshold { Ok(Some(self.merge()?)) } else { Ok(None) } }
+
+    pub fn merge(&mut self) -> Result<String, IndexError> {
+        self.memory.sort_by(compare_datom_aevt);
+        let encoded = serde_json::to_vec(&self.memory)?;
+        let mut hasher = Sha256::new(); hasher.update(&encoded);
+        let id = hex::encode(hasher.finalize());
+        let _ = self.store.put_segment_if_absent(&id, &encoded)?;
+        let mut segments: Vec<String> = Vec::new();
+        if let Some((_rev, root_bytes)) = self.store.get_root("aevt")? { if let Ok(root) = serde_json::from_slice::<AevtRootV1>(&root_bytes) { segments = root.segments; } }
+        segments.push(id.clone());
+        let root = AevtRootV1 { version: 1, segments };
+        let root_bytes = serde_json::to_vec(&root)?;
+        if let Ok(Some((rev,_))) = self.store.get_root("aevt") { let _ = self.store.cas_root("aevt", rev, &root_bytes)?; } else { self.store.init_root("aevt", &root_bytes)?; }
+        self.memory.clear();
+        let _ = self.compact_if_needed(8)?;
+        Ok(id)
+    }
+
+    pub fn scan_a(&self, a: &str) -> Result<Vec<AevtDatom>, IndexError> {
+        let mut results: Vec<AevtDatom> = Vec::new();
+        let a_key = attr_sort_key(a);
+        if let Some((_rev, root_bytes)) = self.store.get_root("aevt")? {
+            if let Ok(root) = serde_json::from_slice::<AevtRootV1>(&root_bytes) {
+                for sid in root.segments.clone() {
+                    if let Some(bytes) = self.store.get_segment(&sid)? {
+                        if let Ok(datoms) = serde_json::from_slice::<Vec<AevtDatom>>(&bytes) {
+                            let (lo, hi) = bounds_for_aevt_a(&datoms, &a_key);
+                            let mut i = lo;
+                            while i < hi { results.push(datoms[i].clone()); i += 1; }
+                        }
+                    }
+                }
+            }
+        }
+        for d in self.memory.iter() { if attr_sort_key(&d.a).as_slice() == a_key.as_slice() { results.push(d.clone()); } }
+        results.sort_by(compare_datom_aevt);
+        Ok(results)
+    }
+
+    pub fn scan_ae(&self, a: &str, e: i64) -> Result<Vec<AevtDatom>, IndexError> {
+        let mut results: Vec<AevtDatom> = Vec::new();
+        let a_key = attr_sort_key(a);
+        if let Some((_rev, root_bytes)) = self.store.get_root("aevt")? {
+            if let Ok(root) = serde_json::from_slice::<AevtRootV1>(&root_bytes) {
+                for sid in root.segments.clone() {
+                    if let Some(bytes) = self.store.get_segment(&sid)? {
+                        if let Ok(datoms) = serde_json::from_slice::<Vec<AevtDatom>>(&bytes) {
+                            let (lo, hi) = bounds_for_aevt_a(&datoms, &a_key);
+                            if lo < hi {
+                                let start = lower_bound_ae_in_range(&datoms[lo..hi], e) + lo;
+                                let mut i = start;
+                                while i < hi {
+                                    let d = &datoms[i];
+                                    if d.e != e { break; }
+                                    results.push(d.clone());
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for d in self.memory.iter() { if d.a == a && d.e == e { results.push(d.clone()); } }
+        results.sort_by(compare_datom_aevt);
+        Ok(results)
+    }
+
+    fn lookup_value_type(&self, ident: &str) -> Option<ValueType> {
+        let vt_i: Option<i64> = self
+            .conn
+            .query_row("SELECT vt FROM attrs WHERE ident=?1", params![ident], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        vt_i.and_then(map_vt_i64)
+    }
+}
+
+fn compare_datom_aevt(d1: &AevtDatom, d2: &AevtDatom) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match attr_sort_key(&d1.a).cmp(&attr_sort_key(&d2.a)) {
+        Equal => match d1.e.cmp(&d2.e) {
+            Equal => {
+                let v1 = general_purpose::STANDARD_NO_PAD.decode(d1.v_b64.as_bytes()).unwrap_or_default();
+                let v2 = general_purpose::STANDARD_NO_PAD.decode(d2.v_b64.as_bytes()).unwrap_or_default();
+                match v1.cmp(&v2) { Equal => d2.t.cmp(&d1.t), other => other }
+            }
+            other => other,
+        },
+        other => other,
+    }
+}
+
+fn lower_bound_ae_in_range(datoms: &[AevtDatom], e: i64) -> usize {
+    let mut lo = 0usize; let mut hi = datoms.len();
+    while lo < hi { let mid = (lo + hi)/2; if datoms[mid].e < e { lo = mid + 1; } else { hi = mid; } }
+    lo
+}
+
+fn bounds_for_aevt_a(datoms: &[AevtDatom], a_key: &[u8]) -> (usize, usize) {
+    let mut lo = 0usize; let mut hi = datoms.len();
+    while lo < hi {
+        let mid = (lo + hi)/2;
+        let mk = attr_sort_key(&datoms[mid].a);
+        if mk.as_slice() < a_key { lo = mid + 1; } else { hi = mid; }
+    }
+    let start = lo;
+    let mut end = start;
+    while end < datoms.len() && attr_sort_key(&datoms[end].a).as_slice() == a_key { end += 1; }
+    (start, end)
 }

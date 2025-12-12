@@ -4,9 +4,9 @@ Summary
 - Build bottom‑up. Establish canonical encodings and ordering; validate transactions; persist an append‑only log; add schema/identity; enforce uniqueness; add indexes (EAVT → AVET/VAET); layer query and pull; then APIs, observability, P2P, and CLI/SDKs.
 
 Status (current)
-- Completed: 1) Encoding, 2) Tx Model + Validation, 3) Append‑only Log + t, 4) Schema + Identity/Lookup + Components, 5) Unique Enforcement, 6) EAVT (memory + segments, basic scans).
+- Completed: 1) Encoding, 2) Tx Model + Validation, 3) Append‑only Log + t, 4) Schema + Identity/Lookup + Components, 5) Unique Enforcement, 6) EAVT/AEVT/AVET/VAET (memory + segments, scans and ranges).
 - Improvements applied: EAVT sorts A by normalized content bytes (not length‑prefixed) and encodes V using the schema‑declared value type; Bytes value type cannot be unique/used for lookup.
-- Next up: 6a) Transaction enhancements (CAS, tx entity/meta/txInstant, tx‑functions, map‑form tx input, time‑travel view constructors), 6b) Envelope v1 (linear mode: CBOR + Ed25519 + heads), then 7) AVET + VAET, followed by 8–13.
+- Next up: 6a) Transaction enhancements (CAS, tx entity/meta/txInstant, tx‑functions, map‑form tx input, time‑travel view constructors), 6b) Envelope v1 (linear mode: CBOR + Ed25519 + heads), followed by 8–13.
 
 Steps
 1. Core Value Encoding + Datom Types
@@ -21,15 +21,15 @@ Steps
    - Deliver: Attributes as data; idents/enums; lookup refs; components + retractEntity; aliases.
 5. Unique Enforcement (identity/value)
    - Deliver: Upsert on identity, reject on value; current (a,v)->e map.
-6. Live Memory Index + Background Indexer (EAVT)
-   - Deliver: In‑memory delta + durable segment trees; merge and adoption.
+6. Live Memory Index + Background Indexer (EAVT/AEVT/AVET/VAET)
+   - Deliver: In‑memory delta + durable segment trees; merge and adoption; multi‑segment roots with periodic compaction.
 6a. Transaction Enhancements (Datomic parity)
    - Deliver: Compare‑and‑swap (CAS) op; reified transaction entity and `txInstant` (with monotonic override on import); deterministic tx‑functions with registry; map‑form tx input sugar; expose `as‑of/since/history` view constructors.
 6b. Signed Envelope v1 (linear mode)
    - Deliver: UnsignedEnvelopeV1 (CBOR, canonical op ordering), TxId (SHA‑256), Ed25519 signatures; SQLite tables (tx_envelopes, tx_edges, heads); submit/apply envelope path; server‑signed envelopes for JSON txs (temporary transition).
    - Tests: sign/verify round‑trip; envelope apply parity with legacy apply; heads update; bad sig/unknown feature rejection.
-7. AVET + VAET Indexes
-   - Deliver: Value lookup/ranges; reverse edges.
+7. (done) AVET + VAET Indexes; AEVT (column)
+   - Deliver: Value lookup/ranges; reverse edges; attribute/column scans.
 8. Query Engine (parse → algebrize → plan) + Built‑ins
    - Deliver: Datalog subset; plan pushes ranges to AVET; joins via EAVT/AEVT.
 9. Pull Engine (patterns, reverse, options)

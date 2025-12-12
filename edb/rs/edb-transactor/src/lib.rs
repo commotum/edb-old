@@ -22,6 +22,7 @@ pub struct SqliteTransactor {
     pub conn: Connection,
     subscribers: Vec<std::sync::mpsc::Sender<TxReport>>,
     eavt: Option<EavtIndexer>,
+    aevt: Option<edb_index::AevtIndexer>,
     avet: Option<edb_index::AvetIndexer>,
     vaet: Option<edb_index::VaetIndexer>,
     tx_fns: TxFnRegistry,
@@ -69,9 +70,10 @@ impl SqliteTransactor {
         let store = SqliteStore::open(path)?;
         let conn = Connection::open(path)?;
         let eavt = EavtIndexer::open(path).ok();
+        let aevt = edb_index::AevtIndexer::open(path).ok();
         let avet = edb_index::AvetIndexer::open(path).ok();
         let vaet = edb_index::VaetIndexer::open(path).ok();
-        let txr = Self { store, conn, subscribers: Vec::new(), eavt, avet, vaet, tx_fns: TxFnRegistry::new() };
+        let txr = Self { store, conn, subscribers: Vec::new(), eavt, aevt, avet, vaet, tx_fns: TxFnRegistry::new() };
         txr.init_local_tables()?;
         Ok(txr)
     }
@@ -265,6 +267,10 @@ impl SqliteTransactor {
             // Merge opportunistically based on threshold; background merge cadence can be added later
             let _ = idx.maybe_merge();
         }
+        if let Some(idx) = self.aevt.as_mut() {
+            let _ = idx.apply_primitives(&rep.primitives, t);
+            let _ = idx.maybe_merge();
+        }
         if let Some(idx) = self.avet.as_mut() {
             let _ = idx.apply_primitives(&rep.primitives, t);
             let _ = idx.maybe_merge();
@@ -418,8 +424,12 @@ impl SqliteTransactor {
         let (rev, _) = if let Some((rev, val)) = head { (rev, val) } else { self.store.init_root("head", br#"{"t":0}"#)?; (self.store.get_root("head")?.unwrap().0, vec![]) };
         let new_head = serde_json::to_vec(&serde_json::json!({"t": t})).unwrap();
         let _ = self.store.cas_root("head", rev, &new_head)?;
-        // EAVT/AVET/VAET apply/merge
+        // EAVT/AEVT/AVET/VAET apply/merge
         if let Some(idx) = self.eavt.as_mut() {
+            let _ = idx.apply_primitives(&report.primitives, t);
+            let _ = idx.maybe_merge();
+        }
+        if let Some(idx) = self.aevt.as_mut() {
             let _ = idx.apply_primitives(&report.primitives, t);
             let _ = idx.maybe_merge();
         }
