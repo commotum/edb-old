@@ -2,16 +2,18 @@ use axum::{routing::{get, post}, Router, extract::{State, Path}, Json};
 use axum::response::sse::{Sse, Event};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicU64, AtomicI64, Ordering}};
 use edb_transactor::SqliteTransactor;
 use tokio_stream::wrappers::BroadcastStream;
 use futures::StreamExt;
+use std::time::Instant;
 
 #[derive(Clone)]
 struct AppState {
     db_path: Arc<String>,
     cmd_tx: tokio::sync::mpsc::Sender<Command>,
     bcast: tokio::sync::broadcast::Sender<String>,
+    metrics: Arc<Metrics>,
 }
 
 enum Command {
@@ -20,6 +22,12 @@ enum Command {
     GetDb(tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     GetHeads(tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     GetTxEnvelope(Vec<u8>, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
+}
+
+struct Metrics {
+    tx_count: AtomicU64,
+    tx_total_ms: AtomicU64,
+    last_t: AtomicI64,
 }
 
 #[derive(Deserialize)]
@@ -37,7 +45,8 @@ async fn main() {
     let db_path = std::env::var("EDB_SQLITE").unwrap_or_else(|_| "target/edb.sqlite".to_string());
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(128);
     let (bcast, _b_rx) = tokio::sync::broadcast::channel::<String>(128);
-    let state = AppState { db_path: Arc::new(db_path.clone()), cmd_tx: cmd_tx.clone(), bcast: bcast.clone() };
+    let metrics = Arc::new(Metrics { tx_count: AtomicU64::new(0), tx_total_ms: AtomicU64::new(0), last_t: AtomicI64::new(0) });
+    let state = AppState { db_path: Arc::new(db_path.clone()), cmd_tx: cmd_tx.clone(), bcast: bcast.clone(), metrics: metrics.clone() };
 
     // Background worker: single transactor applying commands and broadcasting tx-reports
     tokio::spawn(async move {
@@ -45,14 +54,28 @@ async fn main() {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 Command::Transact(ops, tx) => {
+                    let start = Instant::now();
                     let res = txr.apply_tx(&ops)
-                        .map(|rep| { let _ = bcast.send(serde_json::to_string(&rep).unwrap()); serde_json::to_value(rep).unwrap() })
+                        .map(|rep| {
+                            let _ = bcast.send(serde_json::to_string(&rep).unwrap());
+                            if let Some(t) = rep.t { metrics.last_t.store(t, Ordering::Relaxed); }
+                            metrics.tx_count.fetch_add(1, Ordering::Relaxed);
+                            metrics.tx_total_ms.fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+                            serde_json::to_value(rep).unwrap()
+                        })
                         .map_err(|e| e.to_string());
                     let _ = tx.send(res);
                 }
                 Command::SubmitEnv(unsigned, sig, tx) => {
+                    let start = Instant::now();
                     let res = txr.submit_envelope(&unsigned, &sig)
-                        .map(|rep| { let _ = bcast.send(serde_json::to_string(&rep).unwrap()); serde_json::to_value(rep).unwrap() })
+                        .map(|rep| {
+                            let _ = bcast.send(serde_json::to_string(&rep).unwrap());
+                            if let Some(t) = rep.t { metrics.last_t.store(t, Ordering::Relaxed); }
+                            metrics.tx_count.fetch_add(1, Ordering::Relaxed);
+                            metrics.tx_total_ms.fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+                            serde_json::to_value(rep).unwrap()
+                        })
                         .map_err(|e| e.to_string());
                     let _ = tx.send(res);
                 }
@@ -119,6 +142,7 @@ async fn main() {
         .route("/heads", get(get_heads))
         .route("/tx/:txid", get(get_tx_envelope))
         .route("/subscribe", get(get_subscribe))
+        .route("/metrics", get(get_metrics))
         .with_state(state);
 
     let addr = std::env::var("EDB_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
@@ -209,4 +233,15 @@ async fn get_subscribe(State(state): State<AppState>) -> Sse<impl futures::Strea
         match item { Ok(s) => Some(Ok::<Event, std::convert::Infallible>(Event::default().data(s))), Err(_) => None }
     });
     Sse::new(stream)
+}
+
+#[derive(Serialize)]
+struct MetricsResp { tx_count: u64, avg_tx_ms: f64, last_t: i64 }
+
+async fn get_metrics(State(state): State<AppState>) -> Result<Json<MetricsResp>, (axum::http::StatusCode, String)> {
+    let tx_count = state.metrics.tx_count.load(Ordering::Relaxed);
+    let total_ms = state.metrics.tx_total_ms.load(Ordering::Relaxed);
+    let last_t = state.metrics.last_t.load(Ordering::Relaxed);
+    let avg = if tx_count == 0 { 0.0 } else { (total_ms as f64) / (tx_count as f64) };
+    Ok(Json(MetricsResp { tx_count, avg_tx_ms: avg, last_t }))
 }

@@ -33,7 +33,10 @@ Endpoints
   - Returns `{ tx_id, unsigned_b64, sig_b64, author_pk_hex, authored_at }` for the envelope.
 
 - GET `/subscribe`
-  - Server-Sent Events stream of tx-reports (JSON-serialized), powered by `tokio::broadcast`.
+  - Server-Sent Events stream of tx-reports (JSON-serialized), powered by a background transactor and `tokio::broadcast`.
+
+- GET `/metrics`
+  - Returns `{ tx_count, avg_tx_ms, last_t }`.
 
 Examples
 ```
@@ -47,4 +50,3 @@ curl -N localhost:8080/subscribe
 Notes
 - The server owns a single background transactor to serialize writes; GET endpoints route through the worker for consistency.
 - JSON tx grammar supports add/retract/cas, tempids, lookup refs, tx-meta, and map-form sugar.
-

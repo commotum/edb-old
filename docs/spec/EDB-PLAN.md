@@ -16,7 +16,7 @@ Sources
 
 Guiding Principles
 - Information model: immutable datoms ⟨E A V Tx Op⟩ with add/retract; databases are values.
-- Append-only log and time travel (as-of, since, history). Queries run against a db value.
+- Append-only log and time travel (as-of, since, history). Queries run against a db value. Provide Db view constructors: `db()`, `as_of(t)`, `since(t)`, `history_db()`.
 - Schema-as-data with growth-only evolution (never remove/reuse names; use aliases and new attrs).
 - Public inputs are data, not code: accept JSON (strict mapping) now; EDN can be added later. Always normalize inputs to typed ops before semantics.
 - Identity spectrum: numeric entity ids; idents (keywords); unique identities with upsert; lookup refs.
@@ -84,11 +84,11 @@ Query & Pull
 - Pull: forward/reverse attrs (:rel/_parent), components default to nested maps, non-components as ids; options for :as/:default/:limit; recursion limits.
 
 Observability & Reports
-- Tx-reports include primitives, resolved tempids, touched attrs, tx entity, and tx t/txInstant. Peers can subscribe.
+- Tx-reports include primitives, resolved tempids, touched attrs, tx entity, and tx t/txInstant. Peers can subscribe to a continuous stream of tx-reports.
 - Metrics: index merges (batches/bytes), latencies (tx, query, merge), cache hit rate.
 
 APIs (MVP)
-- HTTP/gRPC endpoints: transact (JSON), db (basis), q, pull, sync(t), subscribe (tx-reports streaming), heads, fetch envelope by TxId.
+- HTTP/gRPC endpoints: transact (JSON), db (basis), q, pull, sync(t), subscribe (tx-reports streaming), heads, fetch envelope by TxId, metrics.
 - Serialization: EDN/JSON externally; canonical internal encodings for values (and tuples) used for hashing/ordering.
   - JSON mapping rules (strict):
     - int64 as JSON number only when |n| ≤ 2^53−1, else string.

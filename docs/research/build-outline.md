@@ -99,7 +99,7 @@ I need you to identify the key components we need to build, and in which order w
 
   10) API Server (HTTP/gRPC: tx, db, q, pull, sync(t), subscribe)
 
-  - What: Endpoints for transact (JSON), db snapshot/basis, q, qseq streaming, pull, sync(t) (read‑your‑writes), tx‑report subscriptions (SSE/WebSocket/gRPC stream), heads, get envelope by id; minimal auth.
+  - What: Endpoints for transact (JSON), db snapshot/basis, q, qseq streaming, pull, sync(t) (read-your-writes), tx-report subscriptions (SSE/WebSocket/gRPC stream), heads, get envelope by id; minimal auth. Subscribe is backed by a background transactor and a broadcast channel.
   - Interfaces: REST/gRPC; consistent schemas; errors mapped deterministically.
   - Dependencies: 2–9.
   - Why now: Makes EDB usable by MyCloud and other clients.
@@ -107,7 +107,7 @@ I need you to identify the key components we need to build, and in which order w
   11) Observability (metrics, tx‑reports, logs)
 
   - What: io‑stats/tx‑stats (writes/bytes/latency), index merge latency, cache hit rate, query latencies, sync status; structured logs with correlation ids; tx‑report bus consumers.
-  - Interfaces: /metrics, logs, tracing hooks.
+  - Interfaces: /metrics (counts/latencies/basis), logs, tracing hooks.
   - Dependencies: 3, 6–10.
   - Why now: Diagnose performance, correctness, and capacity regressions early.
 
