@@ -1,9 +1,0 @@
-{
-  "elem_type": "STRING",
-  "value": [
-    "a",
-    "\u00e9"
-  ],
-  "tuple_bytes_hex": "f101020404016102c3a9",
-  "v_bytes_hex": "016102c3a9"
-}
