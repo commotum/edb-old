@@ -287,7 +287,7 @@ fn lower_bound_ea_in_range(datoms: &[Datom], a_key: &[u8]) -> usize {
     while lo < hi {
         let mid = (lo + hi) / 2;
         let mid_key = attr_sort_key(&datoms[mid].a);
-        if mid_key < a_key {
+        if mid_key.as_slice() < a_key {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -430,6 +430,46 @@ impl AvetIndexer {
         Ok(results)
     }
 
+    /// Scan AV range: for attribute `a`, return datoms with value bytes in [v_start, v_end)
+    /// (when v_end is None, the upper bound is unbounded).
+    pub fn scan_av_range(&self, a: &str, v_start: &[u8], v_end: Option<&[u8]>) -> Result<Vec<AvetDatom>, IndexError> {
+        let mut results: Vec<AvetDatom> = Vec::new();
+        let a_key = attr_sort_key(a);
+        if let Some((_rev, root_bytes)) = self.store.get_root("avet")? {
+            if let Ok(root) = serde_json::from_slice::<AvetRootV1>(&root_bytes) {
+                for sid in root.segments {
+                    if let Some(bytes) = self.store.get_segment(&sid)? {
+                        if let Ok(datoms) = serde_json::from_slice::<Vec<AvetDatom>>(&bytes) {
+                            let (lo, hi) = bounds_for_a(&datoms, &a_key);
+                            if lo < hi {
+                                let start = lower_bound_av_in_range(&datoms[lo..hi], v_start) + lo;
+                                let mut i = start;
+                                while i < hi {
+                                    let d = &datoms[i];
+                                    let v = general_purpose::STANDARD_NO_PAD.decode(d.v_b64.as_bytes()).unwrap_or_default();
+                                    if v.as_slice() < v_start { i += 1; continue; }
+                                    if let Some(end) = v_end { if v.as_slice() >= end { break; } }
+                                    results.push(d.clone());
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for d in self.memory.iter() {
+            if attr_sort_key(&d.a).as_slice() == a_key.as_slice() {
+                let v = general_purpose::STANDARD_NO_PAD.decode(d.v_b64.as_bytes()).unwrap_or_default();
+                if v.as_slice() >= v_start && v_end.map(|end| v.as_slice() < end).unwrap_or(true) {
+                    results.push(d.clone());
+                }
+            }
+        }
+        results.sort_by(compare_datom_avet);
+        Ok(results)
+    }
+
     fn lookup_value_type(&self, ident: &str) -> Option<ValueType> {
         let vt_i: Option<i64> = self
             .conn
@@ -458,14 +498,14 @@ fn compare_datom_avet(d1: &AvetDatom, d2: &AvetDatom) -> std::cmp::Ordering {
 
 fn lower_bound_a(datoms: &[AvetDatom], a_key: &[u8]) -> usize {
     let mut lo = 0usize; let mut hi = datoms.len();
-    while lo < hi { let mid = (lo + hi)/2; let mk = attr_sort_key(&datoms[mid].a); if mk < a_key { lo = mid+1; } else { hi = mid; } }
+    while lo < hi { let mid = (lo + hi)/2; let mk = attr_sort_key(&datoms[mid].a); if mk.as_slice() < a_key { lo = mid+1; } else { hi = mid; } }
     lo
 }
 
 fn bounds_for_a(datoms: &[AvetDatom], a_key: &[u8]) -> (usize, usize) {
     let lo = lower_bound_a(datoms, a_key);
     let mut hi = lo;
-    while hi < datoms.len() && attr_sort_key(&datoms[hi].a) == a_key { hi += 1; }
+    while hi < datoms.len() && attr_sort_key(&datoms[hi].a).as_slice() == a_key { hi += 1; }
     (lo, hi)
 }
 
@@ -474,7 +514,7 @@ fn lower_bound_av_in_range(datoms: &[AvetDatom], v_key: &[u8]) -> usize {
     while lo < hi {
         let mid = (lo + hi)/2;
         let midv = general_purpose::STANDARD_NO_PAD.decode(datoms[mid].v_b64.as_bytes()).unwrap_or_default();
-        if midv < v_key { lo = mid + 1; } else { hi = mid; }
+        if midv.as_slice() < v_key { lo = mid + 1; } else { hi = mid; }
     }
     lo
 }

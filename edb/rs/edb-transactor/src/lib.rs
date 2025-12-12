@@ -226,9 +226,9 @@ impl SqliteTransactor {
         struct EnvV1 {
             magic: String,
             version: u8,
-            parents: Vec<Vec<u8>>,
+            parents: Vec<serde_bytes::ByteBuf>,
             features: Vec<String>,
-            author_pubkey: Vec<u8>,
+            author_pubkey: serde_bytes::ByteBuf,
             authored_at: Option<u64>,
             tx_body: serde_cbor::Value,
         }
@@ -236,7 +236,7 @@ impl SqliteTransactor {
         let env: EnvV1 = serde_cbor::from_slice(unsigned).map_err(|e| TxrError::InvalidSchema(format!("bad envelope: {e}")))?;
         if env.magic != "edb.tx" || env.version != 1 { return Err(TxrError::InvalidSchema("unsupported envelope".into())); }
         // Verify signature
-        if !edb_envelope::verify(unsigned, sig, &env.author_pubkey) { return Err(TxrError::InvalidSchema("bad signature".into())); }
+        if !edb_envelope::verify(unsigned, sig, env.author_pubkey.as_ref()) { return Err(TxrError::InvalidSchema("bad signature".into())); }
         // Compute tx_id
         let tx_id = edb_envelope::tx_id(unsigned);
         // Linear mode: parent must match current head (or genesis if no heads)
@@ -252,22 +252,22 @@ impl SqliteTransactor {
                 return Err(TxrError::InvalidSchema("non-genesis envelope has no current head".into()));
             }
         } else {
-            if env.parents.len() != 1 || env.parents[0] != heads[0] {
+            if env.parents.len() != 1 || env.parents[0].as_ref() != heads[0].as_slice() {
                 return Err(TxrError::InvalidSchema("parent mismatch (linear mode)".into()));
             }
         }
         // Store envelope and edge
         self.conn.execute(
             "INSERT OR IGNORE INTO tx_envelopes(tx_id,unsigned,sig,author_pk,authored_at,applied) VALUES(?1,?2,?3,?4,?5,0)",
-            rusqlite::params![&tx_id[..], unsigned, sig, &env.author_pubkey[..], env.authored_at.map(|x| x as i64)],
+            rusqlite::params![&tx_id[..], unsigned, sig, env.author_pubkey.as_ref(), env.authored_at.map(|x| x as i64)],
         )?;
         if let Some(parent) = env.parents.get(0) {
             self.conn.execute(
                 "INSERT INTO tx_edges(child,parent) VALUES(?1,?2)",
-                rusqlite::params![&tx_id[..], parent],
+                rusqlite::params![&tx_id[..], parent.as_ref()],
             )?;
             // Remove parent from heads
-            self.conn.execute("DELETE FROM heads WHERE tx_id=?1", rusqlite::params![parent])?;
+            self.conn.execute("DELETE FROM heads WHERE tx_id=?1", rusqlite::params![parent.as_ref()])?;
         }
         // Add new head
         self.conn.execute("INSERT OR REPLACE INTO heads(tx_id) VALUES(?1)", rusqlite::params![&tx_id[..]])?;

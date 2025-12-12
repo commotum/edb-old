@@ -22,10 +22,8 @@ pub enum EnvOp {
 pub struct UnsignedEnvelopeV1 {
     pub magic: String,                  // "edb.tx"
     pub version: u8,                    // 1
-    #[serde(with = "serde_bytes"])
     pub parents: Vec<Vec<u8>>,          // each 32 bytes
     pub features: Vec<String>,
-    #[serde(with = "serde_bytes"])
     pub author_pubkey: Vec<u8>,         // 32 bytes
     pub authored_at: Option<u64>,       // micros since epoch
     pub tx_body: Vec<EnvOp>,            // canonical, sorted by CBOR bytes
@@ -91,7 +89,7 @@ fn serde_to_cbor(j: &serde_json::Value) -> CborValue {
         serde_json::Value::Bool(b) => CborValue::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() { CborValue::Integer(i.into()) }
-            else if let Some(u) = n.as_u64() { CborValue::Integer((u as i128).into()) }
+            else if let Some(u) = n.as_u64() { CborValue::Integer(u.into()) }
             else if let Some(f) = n.as_f64() { CborValue::Float(f) } else { CborValue::Null }
         }
         serde_json::Value::String(s) => CborValue::Text(s.clone()),
@@ -109,11 +107,11 @@ pub fn to_unsigned_bytes(env: &UnsignedEnvelopeV1) -> Vec<u8> {
     // Represent the envelope as a CBOR array in fixed field order.
     let v = CborValue::Array(vec![
         CborValue::Text(env.magic.clone()),
-        CborValue::Integer((env.version as i128).into()),
+        CborValue::Integer((env.version as u64).into()),
         CborValue::Array(env.parents.iter().map(|p| CborValue::Bytes(p.clone())).collect()),
         CborValue::Array(env.features.iter().map(|f| CborValue::Text(f.clone())).collect()),
         CborValue::Bytes(env.author_pubkey.clone()),
-        match env.authored_at { Some(x) => CborValue::Integer((x as i128).into()), None => CborValue::Null },
+        match env.authored_at { Some(x) => CborValue::Integer(x.into()), None => CborValue::Null },
         CborValue::Array(env.tx_body.iter().map(|op| {
             // Encode as array form to ensure stable wire (match cbor_bytes_for_op)
             let bytes = cbor_bytes_for_op(op);
@@ -166,4 +164,3 @@ fn entity_ref_to_json(er: &edb_tx::model::EntityRef) -> serde_json::Value {
         edb_tx::model::EntityRef::LookupRef { attr, value } => serde_json::json!(["lookup", attr, value]),
     }
 }
-
