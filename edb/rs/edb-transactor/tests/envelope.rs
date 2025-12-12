@@ -43,5 +43,12 @@ fn submit_envelope_adds_current_and_heads() {
     // Verify head recorded
     let count: i64 = txr.conn.query_row("SELECT COUNT(*) FROM heads", [], |r| r.get(0)).unwrap();
     assert_eq!(count, 1);
-}
 
+    // AVET should contain the (a,v)->e mapping datom in memory/segment
+    if let Some(mut avet) = edb_index::AvetIndexer::open(&path).ok() {
+        // scan equality for :user/name "Alice"
+        let v_bytes = edb_encoding::encode_scalar(edb_encoding::ValueType::String, &serde_json::json!("Alice")).unwrap();
+        let rows = avet.scan_av_eq(":user/name", &v_bytes).unwrap();
+        assert!(rows.iter().any(|d| d.e == 1));
+    }
+}

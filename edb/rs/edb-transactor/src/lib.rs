@@ -22,6 +22,8 @@ pub struct SqliteTransactor {
     pub conn: Connection,
     subscribers: Vec<std::sync::mpsc::Sender<TxReport>>,
     eavt: Option<EavtIndexer>,
+    avet: Option<edb_index::AvetIndexer>,
+    vaet: Option<edb_index::VaetIndexer>,
     tx_fns: TxFnRegistry,
 }
 
@@ -30,7 +32,9 @@ impl SqliteTransactor {
         let store = SqliteStore::open(path)?;
         let conn = Connection::open(path)?;
         let eavt = EavtIndexer::open(path).ok();
-        let txr = Self { store, conn, subscribers: Vec::new(), eavt, tx_fns: TxFnRegistry::new() };
+        let avet = edb_index::AvetIndexer::open(path).ok();
+        let vaet = edb_index::VaetIndexer::open(path).ok();
+        let txr = Self { store, conn, subscribers: Vec::new(), eavt, avet, vaet, tx_fns: TxFnRegistry::new() };
         txr.init_local_tables()?;
         Ok(txr)
     }
@@ -202,6 +206,14 @@ impl SqliteTransactor {
             // Merge opportunistically based on threshold; background merge cadence can be added later
             let _ = idx.maybe_merge();
         }
+        if let Some(idx) = self.avet.as_mut() {
+            let _ = idx.apply_primitives(&rep.primitives, t);
+            let _ = idx.maybe_merge();
+        }
+        if let Some(idx) = self.vaet.as_mut() {
+            let _ = idx.apply_primitives(&rep.primitives, t);
+            let _ = idx.maybe_merge();
+        }
         // Broadcast to subscribers; remove dead ones
         self.subscribers.retain(|tx| tx.send(rep.clone()).is_ok());
         Ok(rep)
@@ -346,8 +358,16 @@ impl SqliteTransactor {
         let (rev, _) = if let Some((rev, val)) = head { (rev, val) } else { self.store.init_root("head", br#"{"t":0}"#)?; (self.store.get_root("head")?.unwrap().0, vec![]) };
         let new_head = serde_json::to_vec(&serde_json::json!({"t": t})).unwrap();
         let _ = self.store.cas_root("head", rev, &new_head)?;
-        // EAVT apply/merge
+        // EAVT/AVET/VAET apply/merge
         if let Some(idx) = self.eavt.as_mut() {
+            let _ = idx.apply_primitives(&report.primitives, t);
+            let _ = idx.maybe_merge();
+        }
+        if let Some(idx) = self.avet.as_mut() {
+            let _ = idx.apply_primitives(&report.primitives, t);
+            let _ = idx.maybe_merge();
+        }
+        if let Some(idx) = self.vaet.as_mut() {
             let _ = idx.apply_primitives(&report.primitives, t);
             let _ = idx.maybe_merge();
         }
@@ -418,6 +438,44 @@ impl SqliteTransactor {
             }
         }
         Ok(cur.into_iter().collect())
+    }
+
+    /// Since view: returns the attribute map for entity `e` considering only datoms
+    /// added by transactions with t > `since_t` (simple helper for consumers/tests).
+    pub fn since_entity_attrs(&self, e: i64, since_t: i64) -> Result<Vec<(String, edb_tx::model::Value)>, TxrError> {
+        let entries = self.store.read_log_range(since_t + 1, i64::MAX)?;
+        use std::collections::HashMap;
+        let mut cur: HashMap<String, edb_tx::model::Value> = HashMap::new();
+        for (_seq, bytes) in entries {
+            #[derive(serde::Deserialize)]
+            struct TxLogEntry { primitives: Vec<edb_tx::model::TxPrimitive> }
+            let primitives: Vec<edb_tx::model::TxPrimitive> = match serde_json::from_slice::<TxLogEntry>(&bytes) {
+                Ok(e) => e.primitives,
+                Err(_) => serde_json::from_slice::<Vec<edb_tx::model::TxPrimitive>>(&bytes).unwrap_or_default(),
+            };
+            for p in primitives.into_iter() {
+                if p.e != e { continue; }
+                if p.added { cur.insert(p.a.clone(), p.v.clone()); } else { cur.remove(&p.a); }
+            }
+        }
+        Ok(cur.into_iter().collect())
+    }
+
+    /// History view: returns all primitives (assertions and retractions) about `e`,
+    /// in transaction order.
+    pub fn history_entity(&self, e: i64) -> Result<Vec<edb_tx::model::TxPrimitive>, TxrError> {
+        let entries = self.store.read_log_range(1, i64::MAX)?;
+        let mut out: Vec< edb_tx::model::TxPrimitive > = Vec::new();
+        for (_seq, bytes) in entries {
+            #[derive(serde::Deserialize)]
+            struct TxLogEntry { primitives: Vec<edb_tx::model::TxPrimitive> }
+            let primitives: Vec<edb_tx::model::TxPrimitive> = match serde_json::from_slice::<TxLogEntry>(&bytes) {
+                Ok(e) => e.primitives,
+                Err(_) => serde_json::from_slice::<Vec<edb_tx::model::TxPrimitive>>(&bytes).unwrap_or_default(),
+            };
+            for p in primitives.into_iter() { if p.e == e { out.push(p); } }
+        }
+        Ok(out)
     }
 }
 

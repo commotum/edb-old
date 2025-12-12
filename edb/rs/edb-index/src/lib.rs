@@ -335,3 +335,248 @@ fn map_vt_i64(v: i64) -> Option<ValueType> {
         _ => None,
     }
 }
+
+// ---------------- AVET (A, V, E, T) ----------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvetDatom {
+    pub a: String,
+    pub v_b64: String,
+    pub e: i64,
+    pub t: i64,
+    pub added: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AvetRootV1 {
+    version: u8,
+    segments: Vec<String>,
+}
+
+pub struct AvetIndexer {
+    store: SqliteStore,
+    memory: Vec<AvetDatom>,
+    conn: Connection,
+    merge_threshold: usize,
+}
+
+impl AvetIndexer {
+    pub fn open(path: &str) -> Result<Self, IndexError> {
+        let store = SqliteStore::open(path)?;
+        let conn = Connection::open(path).map_err(StoreError::from)?;
+        Ok(Self { store, memory: Vec::new(), conn, merge_threshold: 1024 })
+    }
+
+    pub fn apply_primitives(&mut self, prims: &[TxPrimitive], t: i64) -> Result<(), IndexError> {
+        for p in prims {
+            let vt = self.lookup_value_type(&p.a).unwrap_or_else(|| value_type_of(&p.v));
+            let vjson = value_to_json(&p.v);
+            let v_bytes = encode_scalar(vt, &vjson).map_err(IndexError::Encode)?;
+            self.memory.push(AvetDatom { a: p.a.clone(), v_b64: general_purpose::STANDARD_NO_PAD.encode(v_bytes), e: p.e, t, added: p.added });
+        }
+        Ok(())
+    }
+
+    pub fn maybe_merge(&mut self) -> Result<Option<String>, IndexError> {
+        if self.memory.len() >= self.merge_threshold { Ok(Some(self.merge()?)) } else { Ok(None) }
+    }
+
+    pub fn merge(&mut self) -> Result<String, IndexError> {
+        self.memory.sort_by(compare_datom_avet);
+        let encoded = serde_json::to_vec(&self.memory)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&encoded);
+        let id = hex::encode(hasher.finalize());
+        let _ = self.store.put_segment_if_absent(&id, &encoded)?;
+        let root = AvetRootV1 { version: 1, segments: vec![id.clone()] };
+        let root_bytes = serde_json::to_vec(&root)?;
+        let head = self.store.get_root("avet");
+        if let Ok(Some((rev, _))) = head { let _ = self.store.cas_root("avet", rev, &root_bytes)?; } else { self.store.init_root("avet", &root_bytes)?; }
+        self.memory.clear();
+        Ok(id)
+    }
+
+    pub fn scan_av_eq(&self, a: &str, v_bytes: &[u8]) -> Result<Vec<AvetDatom>, IndexError> {
+        let mut results: Vec<AvetDatom> = Vec::new();
+        let a_key = attr_sort_key(a);
+        let v_key = v_bytes.to_vec();
+        if let Some((_rev, root_bytes)) = self.store.get_root("avet")? {
+            if let Ok(root) = serde_json::from_slice::<AvetRootV1>(&root_bytes) {
+                for sid in root.segments {
+                    if let Some(bytes) = self.store.get_segment(&sid)? {
+                        if let Ok(datoms) = serde_json::from_slice::<Vec<AvetDatom>>(&bytes) {
+                            let (lo, hi) = bounds_for_a(&datoms, &a_key);
+                            if lo < hi {
+                                let start = lower_bound_av_in_range(&datoms[lo..hi], &v_key) + lo;
+                                let mut i = start;
+                                while i < hi {
+                                    let d = &datoms[i];
+                                    if general_purpose::STANDARD_NO_PAD.decode(d.v_b64.as_bytes()).unwrap_or_default() != v_key { break; }
+                                    results.push(d.clone());
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for d in self.memory.iter() {
+            if attr_sort_key(&d.a) == a_key {
+                if general_purpose::STANDARD_NO_PAD.decode(d.v_b64.as_bytes()).unwrap_or_default() == v_key { results.push(d.clone()); }
+            }
+        }
+        results.sort_by(compare_datom_avet);
+        Ok(results)
+    }
+
+    fn lookup_value_type(&self, ident: &str) -> Option<ValueType> {
+        let vt_i: Option<i64> = self
+            .conn
+            .query_row("SELECT vt FROM attrs WHERE ident=?1", params![ident], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        vt_i.and_then(map_vt_i64)
+    }
+}
+
+fn compare_datom_avet(d1: &AvetDatom, d2: &AvetDatom) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match attr_sort_key(&d1.a).cmp(&attr_sort_key(&d2.a)) {
+        Equal => {
+            let v1 = general_purpose::STANDARD_NO_PAD.decode(d1.v_b64.as_bytes()).unwrap_or_default();
+            let v2 = general_purpose::STANDARD_NO_PAD.decode(d2.v_b64.as_bytes()).unwrap_or_default();
+            match v1.cmp(&v2) {
+                Equal => match d1.e.cmp(&d2.e) { Equal => d2.t.cmp(&d1.t), other => other },
+                other => other,
+            }
+        }
+        other => other,
+    }
+}
+
+fn lower_bound_a(datoms: &[AvetDatom], a_key: &[u8]) -> usize {
+    let mut lo = 0usize; let mut hi = datoms.len();
+    while lo < hi { let mid = (lo + hi)/2; let mk = attr_sort_key(&datoms[mid].a); if mk < a_key { lo = mid+1; } else { hi = mid; } }
+    lo
+}
+
+fn bounds_for_a(datoms: &[AvetDatom], a_key: &[u8]) -> (usize, usize) {
+    let lo = lower_bound_a(datoms, a_key);
+    let mut hi = lo;
+    while hi < datoms.len() && attr_sort_key(&datoms[hi].a) == a_key { hi += 1; }
+    (lo, hi)
+}
+
+fn lower_bound_av_in_range(datoms: &[AvetDatom], v_key: &[u8]) -> usize {
+    let mut lo = 0usize; let mut hi = datoms.len();
+    while lo < hi {
+        let mid = (lo + hi)/2;
+        let midv = general_purpose::STANDARD_NO_PAD.decode(datoms[mid].v_b64.as_bytes()).unwrap_or_default();
+        if midv < v_key { lo = mid + 1; } else { hi = mid; }
+    }
+    lo
+}
+
+// ---------------- VAET (V -> A -> E -> T) for refs ----------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaetDatom {
+    pub v_e: i64,
+    pub a: String,
+    pub e: i64,
+    pub t: i64,
+    pub added: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaetRootV1 { version: u8, segments: Vec<String> }
+
+pub struct VaetIndexer {
+    store: SqliteStore,
+    memory: Vec<VaetDatom>,
+    conn: Connection,
+    merge_threshold: usize,
+}
+
+impl VaetIndexer {
+    pub fn open(path: &str) -> Result<Self, IndexError> {
+        let store = SqliteStore::open(path)?;
+        let conn = Connection::open(path).map_err(StoreError::from)?;
+        Ok(Self { store, memory: Vec::new(), conn, merge_threshold: 1024 })
+    }
+
+    pub fn apply_primitives(&mut self, prims: &[TxPrimitive], t: i64) -> Result<(), IndexError> {
+        for p in prims {
+            // Only ref attributes are included
+            if let Some(vt) = self.lookup_value_type(&p.a) {
+                if matches!(vt, ValueType::Ref) {
+                    if let Value::Ref(target) = p.v.clone() {
+                        self.memory.push(VaetDatom { v_e: target, a: p.a.clone(), e: p.e, t, added: p.added });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn maybe_merge(&mut self) -> Result<Option<String>, IndexError> { if self.memory.len() >= self.merge_threshold { Ok(Some(self.merge()?)) } else { Ok(None) } }
+
+    pub fn merge(&mut self) -> Result<String, IndexError> {
+        self.memory.sort_by(compare_datom_vaet);
+        let encoded = serde_json::to_vec(&self.memory)?;
+        let mut hasher = Sha256::new(); hasher.update(&encoded);
+        let id = hex::encode(hasher.finalize());
+        let _ = self.store.put_segment_if_absent(&id, &encoded)?;
+        let root = VaetRootV1 { version: 1, segments: vec![id.clone()] };
+        let root_bytes = serde_json::to_vec(&root)?;
+        if let Ok(Some((rev,_))) = self.store.get_root("vaet") { let _ = self.store.cas_root("vaet", rev, &root_bytes)?; } else { self.store.init_root("vaet", &root_bytes)?; }
+        self.memory.clear();
+        Ok(id)
+    }
+
+    pub fn scan_v(&self, v_e: i64) -> Result<Vec<VaetDatom>, IndexError> {
+        let mut results: Vec<VaetDatom> = Vec::new();
+        if let Some((_rev, root_bytes)) = self.store.get_root("vaet")? {
+            if let Ok(root) = serde_json::from_slice::<VaetRootV1>(&root_bytes) {
+                for sid in root.segments {
+                    if let Some(bytes) = self.store.get_segment(&sid)? {
+                        if let Ok(datoms) = serde_json::from_slice::<Vec<VaetDatom>>(&bytes) {
+                            let lo = lower_bound_v(datoms.as_slice(), v_e);
+                            let mut i = lo;
+                            while i < datoms.len() && datoms[i].v_e == v_e { results.push(datoms[i].clone()); i += 1; }
+                        }
+                    }
+                }
+            }
+        }
+        for d in self.memory.iter() { if d.v_e == v_e { results.push(d.clone()); } }
+        results.sort_by(compare_datom_vaet);
+        Ok(results)
+    }
+
+    fn lookup_value_type(&self, ident: &str) -> Option<ValueType> {
+        let vt_i: Option<i64> = self
+            .conn
+            .query_row("SELECT vt FROM attrs WHERE ident=?1", params![ident], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        vt_i.and_then(map_vt_i64)
+    }
+}
+
+fn compare_datom_vaet(d1: &VaetDatom, d2: &VaetDatom) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match d1.v_e.cmp(&d2.v_e) {
+        Equal => match attr_sort_key(&d1.a).cmp(&attr_sort_key(&d2.a)) { Equal => match d1.e.cmp(&d2.e) { Equal => d2.t.cmp(&d1.t), other => other }, other => other },
+        other => other,
+    }
+}
+
+fn lower_bound_v(datoms: &[VaetDatom], v_e: i64) -> usize {
+    let mut lo = 0usize; let mut hi = datoms.len();
+    while lo < hi { let mid = (lo + hi)/2; if datoms[mid].v_e < v_e { lo = mid+1; } else { hi = mid; } }
+    lo
+}
