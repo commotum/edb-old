@@ -59,7 +59,6 @@ The envelope provides:
 Pick one and make it *the* canonical TxId hash.
 
 * **RECOMMENDED:** SHA-256 (ubiquitous, stable, boring)
-* Alternative: BLAKE3 (faster, still widely available)
 
 **This spec assumes SHA-256**:
 
