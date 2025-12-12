@@ -13,3 +13,8 @@ edb-schema = { path = "../edb-schema" }
 edb-tx = { path = "../edb-tx" }
 edb-store-sqlite = { path = "../edb-store-sqlite" }
 edb-index = { path = "../edb-index" }
+edb-envelope = { path = "../edb-envelope" }
+serde_cbor = "0.11"
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }

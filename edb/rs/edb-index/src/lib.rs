@@ -43,13 +43,14 @@ pub struct EavtIndexer {
     store: SqliteStore,
     memory: Vec<Datom>,
     conn: Connection,
+    merge_threshold: usize,
 }
 
 impl EavtIndexer {
     pub fn open(path: &str) -> Result<Self, IndexError> {
         let store = SqliteStore::open(path)?;
         let conn = Connection::open(path).map_err(StoreError::from)?;
-        Ok(Self { store, memory: Vec::new(), conn })
+        Ok(Self { store, memory: Vec::new(), conn, merge_threshold: 1024 })
     }
 
     pub fn apply_primitives(&mut self, prims: &[TxPrimitive], t: i64) -> Result<(), IndexError> {
@@ -82,6 +83,22 @@ impl EavtIndexer {
         Ok(id)
     }
 
+    /// Merge recent in-memory datoms into a durable segment when the
+    /// configured threshold has been reached. Returns Some(segment_id)
+    /// when a merge occurred.
+    pub fn maybe_merge(&mut self) -> Result<Option<String>, IndexError> {
+        if self.memory.len() >= self.merge_threshold {
+            let id = self.merge()?;
+            Ok(Some(id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Configure the in-memory merge threshold (number of datoms buffered
+    /// before triggering a background merge via maybe_merge()).
+    pub fn set_merge_threshold(&mut self, threshold: usize) { self.merge_threshold = threshold; }
+
     pub fn scan_entity(&self, e: i64) -> Result<Vec<Datom>, IndexError> {
         let mut results: Vec<Datom> = Vec::new();
         // Persisted segments
@@ -108,6 +125,80 @@ impl EavtIndexer {
             if d.e == e { results.push(d.clone()); }
         }
         // Sort final results by EAVT (they all share same E, so A/V/T sort applies)
+        results.sort_by(compare_datom_eavt);
+        Ok(results)
+    }
+
+    /// Scan by (e, a): returns datoms for entity `e` and attribute `a`
+    /// ordered by EAVT (T desc within identical E/A/V).
+    pub fn scan_ea(&self, e: i64, a: &str) -> Result<Vec<Datom>, IndexError> {
+        let mut results: Vec<Datom> = Vec::new();
+        // Persisted segments
+        if let Some((_rev, root_bytes)) = self.store.get_root("eavt")? {
+            if let Ok(root) = serde_json::from_slice::<EavtRootV1>(&root_bytes) {
+                let a_key = attr_sort_key(a);
+                for sid in root.segments {
+                    if let Some(bytes) = self.store.get_segment(&sid)? {
+                        if let Ok(datoms) = serde_json::from_slice::<Vec<Datom>>(&bytes) {
+                            let (lo, hi) = bounds_for_e(&datoms, e);
+                            if lo < hi {
+                                let start = lower_bound_ea_in_range(&datoms[lo..hi], &a_key) + lo;
+                                let mut i = start;
+                                while i < hi {
+                                    let d = &datoms[i];
+                                    if attr_sort_key(&d.a) != a_key { break; }
+                                    results.push(d.clone());
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Memory buffer
+        for d in self.memory.iter() {
+            if d.e == e && d.a == a { results.push(d.clone()); }
+        }
+        results.sort_by(compare_datom_eavt);
+        Ok(results)
+    }
+
+    /// Scan by (e, a, v_prefix): returns datoms whose value bytes begin
+    /// with the provided prefix.
+    pub fn scan_eav_prefix(&self, e: i64, a: &str, v_prefix: &[u8]) -> Result<Vec<Datom>, IndexError> {
+        let mut results: Vec<Datom> = Vec::new();
+        if let Some((_rev, root_bytes)) = self.store.get_root("eavt")? {
+            if let Ok(root) = serde_json::from_slice::<EavtRootV1>(&root_bytes) {
+                let a_key = attr_sort_key(a);
+                for sid in root.segments {
+                    if let Some(bytes) = self.store.get_segment(&sid)? {
+                        if let Ok(datoms) = serde_json::from_slice::<Vec<Datom>>(&bytes) {
+                            let (lo, hi) = bounds_for_e(&datoms, e);
+                            if lo < hi {
+                                let start = lower_bound_ea_in_range(&datoms[lo..hi], &a_key) + lo;
+                                let mut i = start;
+                                while i < hi {
+                                    let d = &datoms[i];
+                                    if attr_sort_key(&d.a) != a_key { break; }
+                                    if let Ok(v_bytes) = general_purpose::STANDARD_NO_PAD.decode(d.v_b64.as_bytes()) {
+                                        if v_bytes.starts_with(v_prefix) { results.push(d.clone()); }
+                                    }
+                                    i += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for d in self.memory.iter() {
+            if d.e == e && d.a == a {
+                if let Ok(v_bytes) = general_purpose::STANDARD_NO_PAD.decode(d.v_b64.as_bytes()) {
+                    if v_bytes.starts_with(v_prefix) { results.push(d.clone()); }
+                }
+            }
+        }
         results.sort_by(compare_datom_eavt);
         Ok(results)
     }
@@ -172,6 +263,31 @@ fn lower_bound_e(datoms: &[Datom], e: i64) -> usize {
     while lo < hi {
         let mid = (lo + hi) / 2;
         if datoms[mid].e < e {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+/// Return (lo, hi) bounds for all datoms with entity `e` in a sorted segment slice.
+fn bounds_for_e(datoms: &[Datom], e: i64) -> (usize, usize) {
+    let lo = lower_bound_e(datoms, e);
+    let mut hi = lo;
+    while hi < datoms.len() && datoms[hi].e == e { hi += 1; }
+    (lo, hi)
+}
+
+/// Within a range of a single-entity slice (sorted by A,V,T), return the
+/// first index whose attribute sort key >= `a_key`.
+fn lower_bound_ea_in_range(datoms: &[Datom], a_key: &[u8]) -> usize {
+    let mut lo = 0usize;
+    let mut hi = datoms.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let mid_key = attr_sort_key(&datoms[mid].a);
+        if mid_key < a_key {
             lo = mid + 1;
         } else {
             hi = mid;

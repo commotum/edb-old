@@ -6,7 +6,7 @@ Summary
 Status (current)
 - Completed: 1) Encoding, 2) Tx Model + Validation, 3) Append‑only Log + t, 4) Schema + Identity/Lookup + Components, 5) Unique Enforcement, 6) EAVT (memory + segments, basic scans).
 - Improvements applied: EAVT sorts A by normalized content bytes (not length‑prefixed) and encodes V using the schema‑declared value type; Bytes value type cannot be unique/used for lookup.
-- Next up: 6a) Transaction enhancements (CAS, tx entity/meta/txInstant, tx‑functions, map‑form tx input, time‑travel view constructors), then 7) AVET + VAET, followed by 8–13.
+- Next up: 6a) Transaction enhancements (CAS, tx entity/meta/txInstant, tx‑functions, map‑form tx input, time‑travel view constructors), 6b) Envelope v1 (linear mode: CBOR + Ed25519 + heads), then 7) AVET + VAET, followed by 8–13.
 
 Steps
 1. Core Value Encoding + Datom Types
@@ -25,6 +25,9 @@ Steps
    - Deliver: In‑memory delta + durable segment trees; merge and adoption.
 6a. Transaction Enhancements (Datomic parity)
    - Deliver: Compare‑and‑swap (CAS) op; reified transaction entity and `txInstant` (with monotonic override on import); deterministic tx‑functions with registry; map‑form tx input sugar; expose `as‑of/since/history` view constructors.
+6b. Signed Envelope v1 (linear mode)
+   - Deliver: UnsignedEnvelopeV1 (CBOR, canonical op ordering), TxId (SHA‑256), Ed25519 signatures; SQLite tables (tx_envelopes, tx_edges, heads); submit/apply envelope path; server‑signed envelopes for JSON txs (temporary transition).
+   - Tests: sign/verify round‑trip; envelope apply parity with legacy apply; heads update; bad sig/unknown feature rejection.
 7. AVET + VAET Indexes
    - Deliver: Value lookup/ranges; reverse edges.
 8. Query Engine (parse → algebrize → plan) + Built‑ins
@@ -42,6 +45,7 @@ Steps
 
 Why This Order (plain language)
 - You need stable bytes to compare and hash before you can write or index. A durable log and validation precede “having a database.” Indexes make queries fast; query and pull power apps. APIs make it usable; observability makes it operable. P2P comes last, after single‑node correctness and visibility.
+- Introducing the signed envelope early (linear mode) avoids a painful log format migration later and sets up heads/sync semantics without full multi‑head merging yet.
 
 References
 - `overview.md:1`
@@ -155,13 +159,15 @@ Notes
 
 - Step 6 (EAVT)
   - DONE (MVP): in‑memory + segment merge; entity scans.
-  - Refinements: multi‑segment root/adoption policy; compaction; EA/EAV seek helpers; switch snapshot reads to index where appropriate.
+  - Refinements: merge threshold + background merge cadence; multi‑segment root/adoption policy; compaction; EA/EAV seek helpers; switch snapshot reads to index where appropriate.
 - Step 6a (Transaction Enhancements)
   - Add CAS op to grammar and atomic enforcement in transactor, with structured conflict anomaly.
   - Reify tx entity (tx_eid) and `txInstant`; support monotonic override on import; include tx‑meta in tx‑reports.
   - Wire deterministic tx‑functions via registry; splice expanded ops during normalization.
   - Add map‑form tx input sugar (`{"db/id": ..., ":attr/x": v, ...}`) with lookup/tempid handling.
   - Add `as‑of/since/history` view constructors leveraging t and log.
+- Step 6b (Envelope v1)
+  - Add ed25519/canonical CBOR; unsigned envelope build; sign/verify; tables for tx_envelopes/tx_edges/heads; submit/apply path; server-signed legacy JSON txs (temporary).
 - Step 7
   - Implement AVET (attrs `:db/index` or unique) and VAET (refs) as sorted segments + scans.
 - Step 8–9

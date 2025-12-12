@@ -8,6 +8,7 @@ I need you to identify the key components we need to build, and in which order w
       4. Schema Catalog + Identity/Lookup + Components
       5. Unique Enforcement (identity/value)
       6. Live “Memory Index” + Background Indexer (EAVT)
+      6b. Signed Envelope v1 (linear mode: CBOR + Ed25519 + heads)
       7. AVET + VAET Indexes
       8. Query Engine (parse → algebrize → plan) + Built‑ins
       9. Pull Engine (patterns, reverse, options)
@@ -64,6 +65,14 @@ I need you to identify the key components we need to build, and in which order w
   - Interfaces: scanEAVT([e, a, v], txRange), mergeJob().
   - Dependencies: 3–5.
   - Why now: Immediate correctness with eventual performance; EAVT supports entity‑centric access fast.
+  - Near‑term refinements: merge threshold + periodic background merge; EA/EAV seek helpers; bound memory buffer size.
+
+  6b) Signed Envelope v1 (linear mode)
+
+  - What: UnsignedEnvelopeV1 (CBOR, canonical op ordering), TxId (SHA‑256), Ed25519 signatures; SQLite tables (tx_envelopes, tx_edges, heads). Submit/apply envelope path that verifies then applies using existing normalize_and_validate. Server‑signed envelopes for JSON txs during transition.
+  - Interfaces: build_unsigned_envelope, tx_id, sign, verify, submit_envelope, apply_envelope; GET /heads, GET /tx/{tx_id}.
+  - Dependencies: 1–3 (encoding/log), 2 (normalizer/validator).
+  - Why now: Avoids log format migration later; sets up heads/sync semantics without full multi‑head merging yet.
 
   7) AVET + VAET Indexes
 
@@ -90,7 +99,7 @@ I need you to identify the key components we need to build, and in which order w
 
   10) API Server (HTTP/gRPC: tx, db, q, pull, sync(t), subscribe)
 
-  - What: Endpoints for transact, db snapshot/basis, q, qseq streaming, pull, sync(t) (read‑your‑writes), tx‑report subscriptions (SSE/WebSocket/gRPC stream); minimal auth.
+  - What: Endpoints for transact (JSON), db snapshot/basis, q, qseq streaming, pull, sync(t) (read‑your‑writes), tx‑report subscriptions (SSE/WebSocket/gRPC stream), heads, get envelope by id; minimal auth.
   - Interfaces: REST/gRPC; consistent schemas; errors mapped deterministically.
   - Dependencies: 2–9.
   - Why now: Makes EDB usable by MyCloud and other clients.
@@ -123,6 +132,7 @@ I need you to identify the key components we need to build, and in which order w
   - Validation + log deliver ACID and replay semantics; schema/identity make tx declarative and idempotent.
   - Memory index + background merges produce real‑time views with sublinear maintenance; EAVT first because most access is entity‑centric; AVET next for value lookups/ranges; VAET to support reverse nav and Pull.
   - Query engine and Pull build directly on the indexes; range predicates must push down to AVET to avoid scans.
+  - Introduce the signed envelope early (linear mode) so replication/authorship doesn’t require a breaking migration later.
   - API enables integration; observability is essential to ship a robust MVP.
   - P2P sits on a correct, observable single‑node DB; deferring it avoids coupling initial correctness issues to distributed behavior.
 
@@ -130,4 +140,12 @@ I need you to identify the key components we need to build, and in which order w
 
   - After step 5 (uniques) MyCloud can begin authoring simple data via transact and pull entity trees if you tolerate slower queries.
   - After step 7–9, MyCloud gets fast reverse navigation, ranges, and friendly Pull maps (full UX).
-  - API (10) makes integration stable; observability (11) aids ops; P2P (12) unlocks offline/collab later without blocking MVP.
+  - API (10) makes integration stable; observability (11) aids ops; envelope (6b) enables secure replication later; P2P (12) unlocks offline/collab without blocking MVP.
+
+  Near‑term sprint plan (practical)
+
+  - EAVT hardening: merge threshold + EA/EAV seeks; keep memory bounded.
+  - AVET/VAET: implement builders, scans, range seeks.
+  - Time views: add as‑of/since/history db constructors.
+  - Envelope v1 (linear mode): crate + storage + heads; submit/apply path; server‑signed envelopes for JSON txs.
+  - Minimal HTTP API: tx/db/sync/subscribe; heads, get envelope by id.

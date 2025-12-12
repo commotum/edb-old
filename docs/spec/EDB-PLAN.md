@@ -4,6 +4,11 @@ Status
 - Canonical plan distilled from research docs, build order, and Datomic references.
 - Scope: EDB (extensible database, EAVT model, universal schema) first. MyCloud DAG/author features later.
 
+Update (2025-12)
+- API edge: continue with JSON for client integration now (strict mapping rules), normalize to typed TxOps internally.
+- Canonical durability/replication: adopt a signed CBOR envelope (UnsignedEnvelopeV1) in linear mode early, stored alongside current JSON log during transition.
+- Immediate focus: EAVT hardening (merge threshold + seeks), AVET/VAET, as‑of/since/history views, then envelope storage + heads, minimal HTTP API.
+
 Sources
 - Repo overview: overview.md:1, BUILD_ORDER.md:1
 - Research: docs/research/* (EDB-REQUIREMENTS.md:1, value-types.md:1, tuple-encoding.md:1, indexing-strategy.md:1, insights.md:1, EDB-RESEARCH.md:1, p2p-sync-mvp.md:1, MyCloud-Overview.md:1)
@@ -13,6 +18,7 @@ Guiding Principles
 - Information model: immutable datoms ⟨E A V Tx Op⟩ with add/retract; databases are values.
 - Append-only log and time travel (as-of, since, history). Queries run against a db value.
 - Schema-as-data with growth-only evolution (never remove/reuse names; use aliases and new attrs).
+- Public inputs are data, not code: accept JSON (strict mapping) now; EDN can be added later. Always normalize inputs to typed ops before semantics.
 - Identity spectrum: numeric entity ids; idents (keywords); unique identities with upsert; lookup refs.
 - Components and lifecycle: :db/isComponent implies cascade retract; pull expands components by default.
 - Universal schema: attributes themselves are entities with well-defined meta (valueType, cardinality, uniqueness, etc.).
@@ -23,6 +29,7 @@ Architecture (EDB)
 - Log: durable append-only sequence; db state reconstructable via replay.
 - Indexes: EAVT first with in-memory delta + background merges to durable segments; then AVET (+range) and VAET (reverse refs). AEVT optional.
 - Catalog: attribute definitions stored and queryable; alias mapping supported.
+- Envelope (linear mode): UnsignedEnvelopeV1 (CBOR, canonical) signed with Ed25519. TxId = SHA-256 over unsigned bytes. Store envelopes, verify then apply; maintain heads (single parent = current head).
 
 Schema & Catalog
 - Attribute fields (baseline):
@@ -51,6 +58,7 @@ Transactions (Grammar & Semantics)
   - Cardinality-one implicit retract on change
   - CAS checks expected vs current value
   - Lookup refs resolve against db-before
+  - Signed envelopes: canonicalize/sort ops before signing; reject order-dependent ambiguities (duplicate CAS on same (E,A), conflicting adds on cardinality-one within a tx).
 
 Values & Encoding
 - Scalars (MVP baseline): long, double, boolean, string, keyword, uuid, instant, ref, bytes; include numeric subtypes where implemented (float32, float16, bfloat16) and uint8.
@@ -80,8 +88,13 @@ Observability & Reports
 - Metrics: index merges (batches/bytes), latencies (tx, query, merge), cache hit rate.
 
 APIs (MVP)
-- HTTP/gRPC endpoints: transact, db (basis), q, pull, sync(t), subscribe (tx-reports streaming).
+- HTTP/gRPC endpoints: transact (JSON), db (basis), q, pull, sync(t), subscribe (tx-reports streaming), heads, fetch envelope by TxId.
 - Serialization: EDN/JSON externally; canonical internal encodings for values (and tuples) used for hashing/ordering.
+  - JSON mapping rules (strict):
+    - int64 as JSON number only when |n| ≤ 2^53−1, else string.
+    - BigInt/Decimal as canonical base‑10 strings.
+    - Double as JSON number; allow "NaN", "+inf", "-inf" string sentinels.
+    - Keyword as string ":ns/name"; UUID canonical string; Instant ISO‑8601 or epoch micros (choose one and stick); Bytes base64 string; Tuples as arrays.
 
 Backends
 - SQLite: local, single-file, with FTS5 for strings; table layout for current values, unique index, and log. Background compaction and snapshots optional.
@@ -107,6 +120,8 @@ Build Order (Phased)
    - Table-backed uniqueness with (a,v)→e mapping; reject conflicts, idempotent upserts.
 6) Memory Index + Background Indexer (EAVT)
    - In-memory delta + background merge to durable segments; atomic root adoption.
+6b) Envelope v1 (linear mode)
+   - CBOR unsigned envelope; Ed25519 sign/verify; TxId (SHA‑256); store envelopes and heads; submit/apply envelope path; server‑signed envelopes for JSON txs (temp).
 7) AVET + VAET Indexes
    - AVET for indexed/unique attrs; VAET for reverse refs.
 8) Query Engine
@@ -114,7 +129,7 @@ Build Order (Phased)
 9) Pull Engine
    - Patterns, reverse attrs, components, tuple labels.
 10) API Server (HTTP/gRPC)
-   - Endpoints for tx, q, pull, sync(t), subscribe.
+   - Endpoints for tx, q, pull, sync(t), subscribe, heads, get envelope by id.
 11) Observability
    - Metrics/logging/tx-reports.
 12) P2P Sync MVP (MyCloud)
@@ -128,11 +143,13 @@ Testing Strategy
 - Tx-model tests for tempids, lookup refs, uniqueness, cardinality-one retractions, CAS.
 - Index tests for EAVT/AVET/VAET scans and pushdown behavior.
 - Pull tests for components, reverse attrs, tuple label rendering.
+- Envelope tests: sign/verify round‑trip; deterministic TxId; envelope apply parity with legacy apply; heads update behavior; bad sig/unknown feature rejection.
 
 Decisions (MVP Clarifications)
 - Tx meta: only :db/txInstant is a system attribute in EDB MVP; author/DAG/notes remain out of system schema and will be added by MyCloud/domain later as ordinary attributes.
 - :db.type/bytes cannot be unique or used in lookup refs.
 - Tuples v1 are homogeneous-only; engine normalizes schema sugar to canonical form.
+- JSON at API edge is acceptable short‑term; never sign JSON text. Always sign canonical CBOR envelopes built from normalized ops.
 
 Open Questions
 - Global t strategy for multi-writer/server deployments (HLT vs server sequencing).
@@ -141,7 +158,7 @@ Open Questions
 - Feature negotiation for new types (tuple, uint8) in P2P contexts.
 
 Next Actions
-- Adopt this plan as the baseline in step READMEs/specs; keep per-step acceptance templates in edb/<step>/README.md and link to this file.
+- Adopt this plan in step READMEs/specs; keep per‑step acceptance templates in edb/<step>/README.md and link to this file.
 - Ensure system attribute :db/txInstant is installed automatically on bootstrap.
 - Keep DAG/author/signatures in MyCloud phase; avoid premature system schema expansion.
-
+- Sprint sequence: (1) EAVT hardening (merge threshold + seeks), (2) AVET/VAET, (3) as‑of/since/history, (4) envelope crate+storage+heads (linear mode), (5) minimal HTTP API, (6) schema alias writer, (7) query/pull scaffolding.

@@ -69,6 +69,22 @@ impl SqliteTransactor {
               alias TEXT PRIMARY KEY,
               target TEXT NOT NULL
             );
+            -- Envelope storage (linear mode)
+            CREATE TABLE IF NOT EXISTS tx_envelopes(
+              tx_id BLOB PRIMARY KEY,
+              unsigned BLOB NOT NULL,
+              sig BLOB NOT NULL,
+              author_pk BLOB NOT NULL,
+              authored_at INTEGER,
+              applied INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS tx_edges(
+              child BLOB NOT NULL,
+              parent BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS heads(
+              tx_id BLOB PRIMARY KEY
+            );
             "#,
         )?;
         Ok(())
@@ -183,10 +199,162 @@ impl SqliteTransactor {
         // Update EAVT memory and merge for demo purposes
         if let Some(idx) = self.eavt.as_mut() {
             let _ = idx.apply_primitives(&rep.primitives, t);
-            // For MVP, merge every tx; later add thresholds
-            let _ = idx.merge();
+            // Merge opportunistically based on threshold; background merge cadence can be added later
+            let _ = idx.maybe_merge();
         }
         // Broadcast to subscribers; remove dead ones
+        self.subscribers.retain(|tx| tx.send(rep.clone()).is_ok());
+        Ok(rep)
+    }
+
+    /// Submit a signed CBOR envelope and apply it (linear mode).
+    pub fn submit_envelope(&mut self, unsigned: &[u8], sig: &[u8]) -> Result<TxReport, TxrError> {
+        // Decode envelope to inspect parents/features/author/tx_body
+        #[derive(serde::Deserialize)]
+        struct EnvV1 {
+            magic: String,
+            version: u8,
+            parents: Vec<Vec<u8>>,
+            features: Vec<String>,
+            author_pubkey: Vec<u8>,
+            authored_at: Option<u64>,
+            tx_body: serde_cbor::Value,
+        }
+        // Use serde_cbor for quick decode to Value for this path
+        let env: EnvV1 = serde_cbor::from_slice(unsigned).map_err(|e| TxrError::InvalidSchema(format!("bad envelope: {e}")))?;
+        if env.magic != "edb.tx" || env.version != 1 { return Err(TxrError::InvalidSchema("unsupported envelope".into())); }
+        // Verify signature
+        if !edb_envelope::verify(unsigned, sig, &env.author_pubkey) { return Err(TxrError::InvalidSchema("bad signature".into())); }
+        // Compute tx_id
+        let tx_id = edb_envelope::tx_id(unsigned);
+        // Linear mode: parent must match current head (or genesis if no heads)
+        let heads: Vec<Vec<u8>> = {
+            let mut out = Vec::new();
+            let mut stmt = self.conn.prepare("SELECT tx_id FROM heads")?;
+            let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+            for row in rows { out.push(row?); }
+            out
+        };
+        if heads.is_empty() {
+            if !env.parents.is_empty() {
+                return Err(TxrError::InvalidSchema("non-genesis envelope has no current head".into()));
+            }
+        } else {
+            if env.parents.len() != 1 || env.parents[0] != heads[0] {
+                return Err(TxrError::InvalidSchema("parent mismatch (linear mode)".into()));
+            }
+        }
+        // Store envelope and edge
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tx_envelopes(tx_id,unsigned,sig,author_pk,authored_at,applied) VALUES(?1,?2,?3,?4,?5,0)",
+            rusqlite::params![&tx_id[..], unsigned, sig, &env.author_pubkey[..], env.authored_at.map(|x| x as i64)],
+        )?;
+        if let Some(parent) = env.parents.get(0) {
+            self.conn.execute(
+                "INSERT INTO tx_edges(child,parent) VALUES(?1,?2)",
+                rusqlite::params![&tx_id[..], parent],
+            )?;
+            // Remove parent from heads
+            self.conn.execute("DELETE FROM heads WHERE tx_id=?1", rusqlite::params![parent])?;
+        }
+        // Add new head
+        self.conn.execute("INSERT OR REPLACE INTO heads(tx_id) VALUES(?1)", rusqlite::params![&tx_id[..]])?;
+
+        // Decode tx_body into TxOps
+        // We encoded tx_body as an array of arrays [op, ...]. Here we accept only add/retract/cas/retract-entity.
+        let mut ops: Vec<edb_tx::model::TxOp> = Vec::new();
+        let cbor = env.tx_body;
+        let arr = match cbor { serde_cbor::Value::Array(v) => v, _ => return Err(TxrError::InvalidSchema("tx_body must be array".into())) };
+        for item in arr {
+            let row = match item { serde_cbor::Value::Array(v) => v, _ => return Err(TxrError::InvalidSchema("op must be array".into())) };
+            if row.is_empty() { continue; }
+            let tag = match &row[0] { serde_cbor::Value::Text(s) => s.clone(), _ => return Err(TxrError::InvalidSchema("op tag must be text".into())) };
+            match tag.as_str() {
+                "add" => {
+                    if row.len() != 4 { return Err(TxrError::InvalidSchema("add len".into())); }
+                    let e = cbor_to_entity_ref(&row[1]);
+                    let a = expect_text(&row[2])?;
+                    let v: edb_tx::model::Value = serde_cbor::value::from_value(row[3].clone()).map_err(|_| TxrError::InvalidSchema("bad v".into()))?;
+                    ops.push(edb_tx::model::TxOp::Add { e, a, v });
+                }
+                "retract" => {
+                    if row.len() != 4 { return Err(TxrError::InvalidSchema("retract len".into())); }
+                    let e = cbor_to_entity_ref(&row[1]);
+                    let a = expect_text(&row[2])?;
+                    let v = if matches!(row[3], serde_cbor::Value::Null) { None } else { Some(serde_cbor::value::from_value(row[3].clone()).map_err(|_| TxrError::InvalidSchema("bad v".into()))?) };
+                    ops.push(edb_tx::model::TxOp::Retract { e, a, v });
+                }
+                "cas" => {
+                    if row.len() != 5 { return Err(TxrError::InvalidSchema("cas len".into())); }
+                    let e = cbor_to_entity_ref(&row[1]);
+                    let a = expect_text(&row[2])?;
+                    let expected = if matches!(row[3], serde_cbor::Value::Null) { None } else { Some(serde_cbor::value::from_value(row[3].clone()).map_err(|_| TxrError::InvalidSchema("bad expected".into()))?) };
+                    let v: edb_tx::model::Value = serde_cbor::value::from_value(row[4].clone()).map_err(|_| TxrError::InvalidSchema("bad v".into()))?;
+                    ops.push(edb_tx::model::TxOp::Cas { e, a, expected, v });
+                }
+                "retract-entity" => {
+                    if row.len() != 2 { return Err(TxrError::InvalidSchema("retract-entity len".into())); }
+                    // Expand later via grammar; for now, model as retract all attrs via DbView in normalization/validate path
+                    let e = cbor_to_entity_ref(&row[1]);
+                    // Represent as a grammar op that validate can understand by invoking cascade later.
+                    // Push a special retract with None attribute to signal cascade (handled through grammar earlier); omit here.
+                    // For now, just ignore; clients should prefer explicit retracts.
+                }
+                _ => return Err(TxrError::InvalidSchema("unknown op".into())),
+            }
+        }
+        // Validate and apply (reuse apply_tx core write)
+        let dbview = SqliteDbView { conn: &self.conn };
+        let mut alloc = SqliteAllocator { txr: self };
+        let report = normalize_and_validate(&dbview, &ops, &mut alloc)?;
+        // Apply primitives and log (reuse inner portion of apply_tx)
+        let tx_eid = self.next_entid()?;
+        let tx = self.conn.transaction()?;
+        // txInstant monotonic; use authored_at if provided
+        let last_inst_str: String = tx.query_row("SELECT v FROM meta WHERE k='last_tx_instant'", [], |r| r.get(0))?;
+        let last_inst: i64 = last_inst_str.parse().unwrap_or(0);
+        let mut tx_inst = env.authored_at.map(|x| x as i64).unwrap_or_else(|| {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64
+        });
+        if tx_inst <= last_inst { tx_inst = last_inst + 1; }
+        tx.execute("UPDATE meta SET v=?1 WHERE k='last_tx_instant'", rusqlite::params![tx_inst.to_string()])?;
+        for p in &report.primitives {
+            if p.added {
+                let vjson = serde_json::to_string(&p.v).unwrap();
+                tx.execute("INSERT OR REPLACE INTO current(e,a,vjson) VALUES(?,?,?)", rusqlite::params![p.e, &p.a, vjson])?;
+                if let Some((a, vkey)) = unique_key_for_tx(&tx, &p.a, &p.v) {
+                    tx.execute("INSERT OR REPLACE INTO unique_idx(a,vkey,e) VALUES(?,?,?)", rusqlite::params![a, vkey, p.e])?;
+                }
+            } else {
+                tx.execute("DELETE FROM current WHERE e=?1 AND a=?2", rusqlite::params![p.e, &p.a])?;
+                if let Some((a, vkey)) = unique_key_for_tx(&tx, &p.a, &p.v) {
+                    tx.execute("DELETE FROM unique_idx WHERE a=?1 AND vkey=?2", rusqlite::params![a, vkey])?;
+                }
+            }
+        }
+        // Log JSON body for replay compatibility (temporary)
+        #[derive(serde::Serialize)]
+        struct TxLogEntry<'a> { primitives: &'a [edb_tx::model::TxPrimitive], meta: serde_json::Value, tx_eid: i64, tx_instant: i64 }
+        let body = serde_json::to_vec(&TxLogEntry { primitives: &report.primitives, meta: serde_json::json!({}), tx_eid, tx_instant: tx_inst }).unwrap();
+        tx.execute("INSERT INTO log(val) VALUES(?1)", rusqlite::params![body])?;
+        let t: i64 = tx.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+        tx.commit()?;
+        // Mark envelope applied
+        self.conn.execute("UPDATE tx_envelopes SET applied=1 WHERE tx_id=?1", rusqlite::params![&tx_id[..]])?;
+        // Update head root for demo
+        let head = self.store.get_root("head")?;
+        let (rev, _) = if let Some((rev, val)) = head { (rev, val) } else { self.store.init_root("head", br#"{"t":0}"#)?; (self.store.get_root("head")?.unwrap().0, vec![]) };
+        let new_head = serde_json::to_vec(&serde_json::json!({"t": t})).unwrap();
+        let _ = self.store.cas_root("head", rev, &new_head)?;
+        // EAVT apply/merge
+        if let Some(idx) = self.eavt.as_mut() {
+            let _ = idx.apply_primitives(&report.primitives, t);
+            let _ = idx.maybe_merge();
+        }
+        let mut rep = report;
+        rep.t = Some(t);
+        rep.tx_eid = Some(tx_eid);
+        // Broadcast
         self.subscribers.retain(|tx| tx.send(rep.clone()).is_ok());
         Ok(rep)
     }
@@ -396,4 +564,28 @@ struct SqliteAllocator<'a> {
 
 impl<'a> edb_tx::allocator::EntidAllocator for SqliteAllocator<'a> {
     fn allocate(&mut self) -> i64 { self.txr.next_entid().unwrap() }
+}
+
+fn expect_text(v: &serde_cbor::Value) -> Result<String, TxrError> {
+    match v { serde_cbor::Value::Text(s) => Ok(s.clone()), _ => Err(TxrError::InvalidSchema("expected text".into())) }
+}
+
+fn cbor_to_entity_ref(v: &serde_cbor::Value) -> edb_tx::model::EntityRef {
+    match v {
+        serde_cbor::Value::Integer(i) => edb_tx::model::EntityRef::Entid(i128::from(*i) as i64),
+        serde_cbor::Value::Text(s) => edb_tx::model::EntityRef::TempId(edb_tx::model::TempId(s.clone())),
+        serde_cbor::Value::Array(arr) => {
+            if arr.len() == 3 {
+                if let serde_cbor::Value::Text(tag) = &arr[0] {
+                    if tag == "lookup" {
+                        let a = expect_text(&arr[1]).unwrap_or_default();
+                        let val: edb_tx::model::Value = serde_cbor::value::from_value(arr[2].clone()).unwrap();
+                        return edb_tx::model::EntityRef::LookupRef { attr: a, value: val };
+                    }
+                }
+            }
+            edb_tx::model::EntityRef::TempId(edb_tx::model::TempId("unhandled".into()))
+        }
+        _ => edb_tx::model::EntityRef::TempId(edb_tx::model::TempId("unhandled".into())),
+    }
 }

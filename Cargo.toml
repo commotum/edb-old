@@ -6,6 +6,6 @@ members = [
   "edb/rs/edb-store-sqlite",
   "edb/rs/edb-transactor",
   "edb/rs/edb-index",
+  "edb/rs/edb-envelope",
 ]
 resolver = "2"
-
