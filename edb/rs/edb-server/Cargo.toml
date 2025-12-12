@@ -16,3 +16,8 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 edb-transactor = { path = "../edb-transactor" }
 edb-pull = { path = "../edb-pull" }
 edb-index = { path = "../edb-index" }
+
+[dev-dependencies]
+edb-encoding = { path = "../edb-encoding" }
+edb-schema = { path = "../edb-schema" }
+rusqlite = { version = "0.30", features = ["bundled"] }
