@@ -26,6 +26,11 @@ pub struct SqliteTransactor {
     avet: Option<edb_index::AvetIndexer>,
     vaet: Option<edb_index::VaetIndexer>,
     tx_fns: TxFnRegistry,
+    // Merge/compaction latency accumulators (ms)
+    merges_ms_total: u64,
+    merges_events: u64,
+    compactions_ms_total: u64,
+    compactions_events: u64,
 }
 
 pub enum DbViewKind {
@@ -66,7 +71,16 @@ impl<'a> Db<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct IndexStats { pub eavt: usize, pub aevt: usize, pub avet: usize, pub vaet: usize }
+pub struct IndexStats {
+    pub eavt: usize,
+    pub aevt: usize,
+    pub avet: usize,
+    pub vaet: usize,
+    pub merges_ms_total: u64,
+    pub merges_events: u64,
+    pub compactions_ms_total: u64,
+    pub compactions_events: u64,
+}
 
 impl SqliteTransactor {
     pub fn open(path: &str) -> Result<Self, TxrError> {
@@ -76,7 +90,7 @@ impl SqliteTransactor {
         let aevt = edb_index::AevtIndexer::open(path).ok();
         let avet = edb_index::AvetIndexer::open(path).ok();
         let vaet = edb_index::VaetIndexer::open(path).ok();
-        let txr = Self { store, conn, subscribers: Vec::new(), eavt, aevt, avet, vaet, tx_fns: TxFnRegistry::new() };
+        let txr = Self { store, conn, subscribers: Vec::new(), eavt, aevt, avet, vaet, tx_fns: TxFnRegistry::new(), merges_ms_total: 0, merges_events: 0, compactions_ms_total: 0, compactions_events: 0 };
         txr.init_local_tables()?;
         Ok(txr)
     }
@@ -140,7 +154,7 @@ impl SqliteTransactor {
         self.tx_fns.insert(ident.to_string(), f);
     }
 
-    /// Return lightweight counts of index segments for observability.
+    /// Return counts of index segments and cumulative latency for observability.
     pub fn index_stats(&self) -> Result<IndexStats, TxrError> {
         #[derive(serde::Deserialize)]
         struct RootV1 { version: u8, segments: Vec<String> }
@@ -155,6 +169,10 @@ impl SqliteTransactor {
             aevt: count_segments(&self.store, "aevt"),
             avet: count_segments(&self.store, "avet"),
             vaet: count_segments(&self.store, "vaet"),
+            merges_ms_total: self.merges_ms_total,
+            merges_events: self.merges_events,
+            compactions_ms_total: self.compactions_ms_total,
+            compactions_events: self.compactions_events,
         })
     }
 
@@ -282,23 +300,55 @@ impl SqliteTransactor {
         rep.t = Some(t);
         rep.tx_eid = Some(tx_eid);
         rep.meta = meta_json;
-        // Update EAVT memory and merge for demo purposes
+        // Update indexes and measure merge/compaction latency
+        #[derive(serde::Deserialize)]
+        struct RootV1 { version: u8, segments: Vec<String> }
+        let count_segments = |name: &str| -> usize {
+            match self.store.get_root(name) {
+                Ok(Some((_rev, bytes))) => serde_json::from_slice::<RootV1>(&bytes).map(|r| r.segments.len()).unwrap_or(0),
+                _ => 0,
+            }
+        };
+        use std::time::Instant;
         if let Some(idx) = self.eavt.as_mut() {
             let _ = idx.apply_primitives(&rep.primitives, t);
-            // Merge opportunistically based on threshold; background merge cadence can be added later
-            let _ = idx.maybe_merge();
+            let before = count_segments("eavt");
+            let start = Instant::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments("eavt");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         if let Some(idx) = self.aevt.as_mut() {
             let _ = idx.apply_primitives(&rep.primitives, t);
-            let _ = idx.maybe_merge();
+            let before = count_segments("aevt");
+            let start = Instant::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments("aevt");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         if let Some(idx) = self.avet.as_mut() {
             let _ = idx.apply_primitives(&rep.primitives, t);
-            let _ = idx.maybe_merge();
+            let before = count_segments("avet");
+            let start = Instant::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments("avet");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         if let Some(idx) = self.vaet.as_mut() {
             let _ = idx.apply_primitives(&rep.primitives, t);
-            let _ = idx.maybe_merge();
+            let before = count_segments("vaet");
+            let start = Instant::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments("vaet");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         // Broadcast to subscribers; remove dead ones
         self.subscribers.retain(|tx| tx.send(rep.clone()).is_ok());
@@ -447,22 +497,55 @@ impl SqliteTransactor {
         let (rev, _) = if let Some((rev, val)) = head { (rev, val) } else { self.store.init_root("head", br#"{"t":0}"#)?; (self.store.get_root("head")?.unwrap().0, vec![]) };
         let new_head = serde_json::to_vec(&serde_json::json!({"t": t})).unwrap();
         let _ = self.store.cas_root("head", rev, &new_head)?;
-        // EAVT/AEVT/AVET/VAET apply/merge
+        // EAVT/AEVT/AVET/VAET apply/merge with latency accounting
+        #[derive(serde::Deserialize)]
+        struct RootV1B { version: u8, segments: Vec<String> }
+        let count_segments_b = |name: &str| -> usize {
+            match self.store.get_root(name) {
+                Ok(Some((_rev, bytes))) => serde_json::from_slice::<RootV1B>(&bytes).map(|r| r.segments.len()).unwrap_or(0),
+                _ => 0,
+            }
+        };
+        use std::time::Instant as InstantB;
         if let Some(idx) = self.eavt.as_mut() {
             let _ = idx.apply_primitives(&report.primitives, t);
-            let _ = idx.maybe_merge();
+            let before = count_segments_b("eavt");
+            let start = InstantB::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments_b("eavt");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         if let Some(idx) = self.aevt.as_mut() {
             let _ = idx.apply_primitives(&report.primitives, t);
-            let _ = idx.maybe_merge();
+            let before = count_segments_b("aevt");
+            let start = InstantB::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments_b("aevt");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         if let Some(idx) = self.avet.as_mut() {
             let _ = idx.apply_primitives(&report.primitives, t);
-            let _ = idx.maybe_merge();
+            let before = count_segments_b("avet");
+            let start = InstantB::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments_b("avet");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         if let Some(idx) = self.vaet.as_mut() {
             let _ = idx.apply_primitives(&report.primitives, t);
-            let _ = idx.maybe_merge();
+            let before = count_segments_b("vaet");
+            let start = InstantB::now();
+            if idx.maybe_merge().ok().flatten().is_some() {
+                let dur = start.elapsed().as_millis() as u64;
+                let after = count_segments_b("vaet");
+                if after < before { self.compactions_ms_total += dur; self.compactions_events += 1; } else { self.merges_ms_total += dur; self.merges_events += 1; }
+            }
         }
         let mut rep = report;
         rep.t = Some(t);
