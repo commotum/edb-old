@@ -98,23 +98,23 @@ pub fn normalize_and_validate(
                 if matches!(attr.cardinality, AttrCardinality::One) {
                     if let Some(cur) = db.current_value(e_id, a) {
                         if cur != *v {
-                            // implicit retract
-                            primitives.push(TxPrimitive { added: false, e: e_id, a: a.clone(), v: cur });
+                            // implicit retract (use canonical ident)
+                            primitives.push(TxPrimitive { added: false, e: e_id, a: attr.ident.clone(), v: cur });
                         }
                     }
                 }
-                primitives.push(TxPrimitive { added: true, e: e_id, a: a.clone(), v: v.clone() });
-                touched.insert(a.clone());
+                primitives.push(TxPrimitive { added: true, e: e_id, a: attr.ident.clone(), v: v.clone() });
+                touched.insert(attr.ident.clone());
             }
             TxOp::Retract { e, a, v } => {
-                let _attr = db.get_attr(a).ok_or_else(|| TxError::UnknownAttribute(a.clone()))?;
+                let attr = db.get_attr(a).ok_or_else(|| TxError::UnknownAttribute(a.clone()))?;
                 let e_id = resolve_entity(db, e, &mut temps, alloc)?;
                 if let Some(vv) = v.clone() {
-                    primitives.push(TxPrimitive { added: false, e: e_id, a: a.clone(), v: vv });
+                    primitives.push(TxPrimitive { added: false, e: e_id, a: attr.ident.clone(), v: vv });
                 } else if let Some(cur) = db.current_value(e_id, a) {
-                    primitives.push(TxPrimitive { added: false, e: e_id, a: a.clone(), v: cur });
+                    primitives.push(TxPrimitive { added: false, e: e_id, a: attr.ident.clone(), v: cur });
                 }
-                touched.insert(a.clone());
+                touched.insert(attr.ident.clone());
             }
             TxOp::Cas { e, a, expected, v } => {
                 let attr = db.get_attr(a).ok_or_else(|| TxError::UnknownAttribute(a.clone()))?;
@@ -123,7 +123,7 @@ pub fn normalize_and_validate(
                 }
                 let e_id = resolve_entity(db, e, &mut temps, alloc)?;
                 // Check CAS expected vs current
-                let cur = db.current_value(e_id, a);
+                let cur = db.current_value(e_id, &attr.ident);
                 if &cur != expected {
                     return Err(TxError::CasConflict { attr: a.clone() });
                 }
@@ -142,13 +142,13 @@ pub fn normalize_and_validate(
                 if matches!(attr.cardinality, AttrCardinality::One) {
                     if let Some(curv) = cur {
                         if curv != *v {
-                            primitives.push(TxPrimitive { added: false, e: e_id, a: a.clone(), v: curv });
+                            primitives.push(TxPrimitive { added: false, e: e_id, a: attr.ident.clone(), v: curv });
                         }
                     }
                 }
                 // Add new value if changed or if cardinality many (for now treat as replace for One)
-                primitives.push(TxPrimitive { added: true, e: e_id, a: a.clone(), v: v.clone() });
-                touched.insert(a.clone());
+                primitives.push(TxPrimitive { added: true, e: e_id, a: attr.ident.clone(), v: v.clone() });
+                touched.insert(attr.ident.clone());
             }
         }
     }

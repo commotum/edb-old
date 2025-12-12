@@ -27,6 +27,43 @@ pub struct SqliteTransactor {
     tx_fns: TxFnRegistry,
 }
 
+pub enum DbViewKind {
+    Current,
+    AsOf(i64),
+    Since(i64),
+    History,
+}
+
+pub struct Db<'a> {
+    txr: &'a SqliteTransactor,
+    kind: DbViewKind,
+}
+
+impl<'a> Db<'a> {
+    pub fn entity_attrs(&self, e: i64) -> Result<Vec<(String, Value)>, TxrError> {
+        match self.kind {
+            DbViewKind::Current => {
+                let dbv = SqliteDbView { conn: &self.txr.conn };
+                Ok(edb_tx::traits::DbView::entity_attrs(&dbv, e))
+            }
+            DbViewKind::AsOf(t) => self.txr.as_of_entity_attrs(e, t),
+            DbViewKind::Since(t) => self.txr.since_entity_attrs(e, t),
+            DbViewKind::History => {
+                // For history views, entity_attrs is not well-defined; return current as a reasonable default
+                let dbv = SqliteDbView { conn: &self.txr.conn };
+                Ok(edb_tx::traits::DbView::entity_attrs(&dbv, e))
+            }
+        }
+    }
+
+    pub fn history_entity(&self, e: i64) -> Result<Vec<edb_tx::model::TxPrimitive>, TxrError> {
+        match self.kind {
+            DbViewKind::History => self.txr.history_entity(e),
+            DbViewKind::AsOf(_) | DbViewKind::Since(_) | DbViewKind::Current => self.txr.history_entity(e),
+        }
+    }
+}
+
 impl SqliteTransactor {
     pub fn open(path: &str) -> Result<Self, TxrError> {
         let store = SqliteStore::open(path)?;
@@ -98,6 +135,12 @@ impl SqliteTransactor {
         self.tx_fns.insert(ident.to_string(), f);
     }
 
+    // DB-level constructors for richer API
+    pub fn db<'a>(&'a self) -> Db<'a> { Db { txr: self, kind: DbViewKind::Current } }
+    pub fn as_of<'a>(&'a self, t: i64) -> Db<'a> { Db { txr: self, kind: DbViewKind::AsOf(t) } }
+    pub fn since<'a>(&'a self, t: i64) -> Db<'a> { Db { txr: self, kind: DbViewKind::Since(t) } }
+    pub fn history_db<'a>(&'a self) -> Db<'a> { Db { txr: self, kind: DbViewKind::History } }
+
     pub fn install_attribute(&self, attr: &Attribute) -> Result<(), TxrError> {
         // Enforce spec: :db.type/bytes is equality-only; cannot be unique or used for lookup refs.
         if matches!(attr.value_type, ValueType::Bytes) && !matches!(attr.unique, AttrUnique::None) {
@@ -114,6 +157,22 @@ impl SqliteTransactor {
                 if attr.no_history {1i64} else {0i64},
                 &attr.doc
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Install an alias mapping from `alias` to existing attribute `target`.
+    pub fn install_alias(&self, alias: &str, target: &str) -> Result<(), TxrError> {
+        if alias == target { return Err(TxrError::InvalidSchema("alias equals target".into())); }
+        // Ensure target exists
+        let exists: Option<i64> = self.conn.query_row("SELECT 1 FROM attrs WHERE ident=?1", params![target], |r| r.get(0)).optional()?;
+        if exists.is_none() { return Err(TxrError::InvalidSchema("target ident does not exist".into())); }
+        // Ensure alias is not already a real ident
+        let exists_alias: Option<i64> = self.conn.query_row("SELECT 1 FROM attrs WHERE ident=?1", params![alias], |r| r.get(0)).optional()?;
+        if exists_alias.is_some() { return Err(TxrError::InvalidSchema("alias collides with existing ident".into())); }
+        self.conn.execute(
+            "INSERT OR REPLACE INTO aliases(alias,target) VALUES(?1,?2)",
+            params![alias, target],
         )?;
         Ok(())
     }
@@ -222,6 +281,7 @@ impl SqliteTransactor {
     /// Submit a signed CBOR envelope and apply it (linear mode).
     pub fn submit_envelope(&mut self, unsigned: &[u8], sig: &[u8]) -> Result<TxReport, TxrError> {
         // Decode envelope to inspect parents/features/author/tx_body
+        #[allow(dead_code)]
         #[derive(serde::Deserialize)]
         struct EnvV1 {
             magic: String,
@@ -307,7 +367,7 @@ impl SqliteTransactor {
                 "retract-entity" => {
                     if row.len() != 2 { return Err(TxrError::InvalidSchema("retract-entity len".into())); }
                     // Expand later via grammar; for now, model as retract all attrs via DbView in normalization/validate path
-                    let e = cbor_to_entity_ref(&row[1]);
+                    let _e = cbor_to_entity_ref(&row[1]);
                     // Represent as a grammar op that validate can understand by invoking cascade later.
                     // Push a special retract with None attribute to signal cascade (handled through grammar earlier); omit here.
                     // For now, just ignore; clients should prefer explicit retracts.

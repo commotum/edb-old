@@ -7,5 +7,6 @@ members = [
   "edb/rs/edb-transactor",
   "edb/rs/edb-index",
   "edb/rs/edb-envelope",
+  "edb/rs/edb-server",
 ]
 resolver = "2"
