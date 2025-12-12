@@ -358,6 +358,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "edb-encoding",
+ "edb-index",
  "edb-schema",
  "edb-transactor",
  "edb-tx",

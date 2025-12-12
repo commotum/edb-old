@@ -10,8 +10,8 @@ Update (2025-12)
 - Immediate focus: EAVT hardening (merge threshold + seeks), AVET/VAET, as‑of/since/history views, then envelope storage + heads, minimal HTTP API.
 
 Sources
-- Repo overview: overview.md:1, BUILD_ORDER.md:1
-- Research: docs/research/* (EDB-REQUIREMENTS.md:1, value-types.md:1, tuple-encoding.md:1, indexing-strategy.md:1, insights.md:1, EDB-RESEARCH.md:1, p2p-sync-mvp.md:1, MyCloud-Overview.md:1)
+- Repo overview: DOCS/overview.md, DOCS/spec/BUILD_ORDER.md
+- Research: DOCS/research/* (EDB-REQUIREMENTS.md, value-types.md, tuple-encoding.md, indexing-strategy.md, insights.md, EDB-RESEARCH.md, p2p-sync-mvp.md, MyCloud-Overview.md)
 - Datomic references: datomic-reference/** (schema, transactions, time, best practices, entities, overview)
 
 Guiding Principles
@@ -158,7 +158,7 @@ Open Questions
 - Feature negotiation for new types (tuple, uint8) in P2P contexts.
 
 Next Actions
-- Adopt this plan in step READMEs/specs; keep per‑step acceptance templates in edb/<step>/README.md and link to this file.
+- Keep this file canonical as the plan; track sprint-level status in DOCS/status/.
 - Ensure system attribute :db/txInstant is installed automatically on bootstrap.
 - Keep DAG/author/signatures in MyCloud phase; avoid premature system schema expansion.
 - Sprint sequence: (1) EAVT hardening (merge threshold + seeks), (2) AVET/VAET, (3) as‑of/since/history, (4) envelope crate+storage+heads (linear mode), (5) minimal HTTP API, (6) schema alias writer, (7) query/pull scaffolding.

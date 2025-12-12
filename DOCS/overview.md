@@ -18,8 +18,8 @@ This repository includes a workspace for inspecting and reverse‑engineering po
 - What if creating a database were as easy as creating a struct or class — and Datomic’s time‑traveling, replayable model ran everywhere on everyday defaults (WASM, SQLite/Postgres, HTTP/gRPC), with first‑class peer‑to‑peer sync and effortless, evolvable schemas for arbitrary relations and consumers?
 
 ## Design Docs
-- Value Types (scalars): docs/research/value-types.md — canonical scalar types (including `:db.type/uint8`), external EDN/JSON forms, and internal ordering/encoding notes.
-- Tuple Encoding: docs/research/tuple-encoding.md — spec for canonical tuple/composite encoding, accessors, ordering, and SQL pushdown guidance.
+- Value Types (scalars): DOCS/research/value-types.md — canonical scalar types (including `:db.type/uint8`), external EDN/JSON forms, and internal ordering/encoding notes.
+- Tuple Encoding: DOCS/research/tuple-encoding.md — spec for canonical tuple/composite encoding, accessors, ordering, and SQL pushdown guidance.
 
 ## Purpose
 - Provide a browsable, decompiled view of Datomic Peer (v1.0.7277) internals.

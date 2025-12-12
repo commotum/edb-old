@@ -1,13 +1,13 @@
 [workspace]
 members = [
-  "edb/rs/edb-encoding",
-  "edb/rs/edb-schema",
-  "edb/rs/edb-tx",
-  "edb/rs/edb-store-sqlite",
-  "edb/rs/edb-transactor",
-  "edb/rs/edb-index",
-  "edb/rs/edb-envelope",
-  "edb/rs/edb-server",
-  "edb/rs/edb-pull",
+  "CORE/edb-encoding",
+  "CORE/edb-schema",
+  "CORE/edb-tx",
+  "CORE/edb-store-sqlite",
+  "CORE/edb-transactor",
+  "CORE/edb-index",
+  "CORE/edb-envelope",
+  "CORE/edb-server",
+  "CORE/edb-pull",
 ]
 resolver = "2"

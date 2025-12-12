@@ -13,3 +13,4 @@ edb-encoding = { path = "../edb-encoding" }
 edb-schema = { path = "../edb-schema" }
 edb-transactor = { path = "../edb-transactor" }
 base64 = "0.21"
+edb-index = { path = "../edb-index" }

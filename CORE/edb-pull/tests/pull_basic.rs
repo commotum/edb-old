@@ -41,7 +41,7 @@ fn pull_forward_and_reverse() {
     txr.apply_tx(&ops2).expect("tx2");
 
     // Pull
-    let puller = Puller::new(&txr.conn);
+    let puller = Puller::new_with_path(&txr.conn, &path).with_limit(Some(100));
     let pat = vec![AttrSpec::Attr(":user/name".into()), AttrSpec::Reverse(":user/friend".into())];
     let alice = puller.pull_entity(e1, &pat).expect("pull");
     // name present

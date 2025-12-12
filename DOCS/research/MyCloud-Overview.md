@@ -43,8 +43,8 @@ These mechanics are provided by EDB and surfaced in MyCloud’s UX (history, att
 MyCloud leans on EDB’s **schema‑as‑data** to describe the characteristics of attributes (types, cardinality, uniqueness, ownership, history), and follows a strict **growth‑only** approach: add, alias, and deprecate—never remove or repurpose names. When an attribute requires a domain‑specific type, **we add a new value type** rather than forcing data into an ill‑fitting existing type. (Example: colors use `uint8` channels instead of overloading `long`.)
 
 See also
-- Value types (scalars): `docs/research/value-types.md`
-- Requirements — Schema & Catalog: `docs/research/EDB-REQUIREMENTS.md`
+- Value types (scalars): `DOCS/research/value-types.md`
+- Requirements — Schema & Catalog: `DOCS/research/EDB-REQUIREMENTS.md`
 
 ---
 
@@ -83,8 +83,8 @@ EDB supports a canonical set of scalar value types and **tuple/composite values*
 Tuples are encoded canonically for ordering and hashing; labeled accessors like `(tuple/get ?c :r ?r)` are lowered to positional access at query time.
 
 See also
-- Tuple encoding spec: `docs/research/tuple-encoding.md`
-- Value types (scalars): `docs/research/value-types.md`
+- Tuple encoding spec: `DOCS/research/tuple-encoding.md`
+- Value types (scalars): `DOCS/research/value-types.md`
 
 ---
 
@@ -97,7 +97,7 @@ MyCloud builds features on **Datalog + Pull**:
 * MyCloud composes views and exports using Pull patterns so rendering is decoupled from storage layout.
 
 See also
-- Requirements — Query & Pull: `docs/research/EDB-REQUIREMENTS.md`
+- Requirements — Query & Pull: `DOCS/research/EDB-REQUIREMENTS.md`
 
 ---
 
@@ -117,7 +117,7 @@ MyCloud runs wherever EDB runs:
 EDB maintains EAVT/AVET/AEVT/VAET covering indexes with compact, typed encodings. Tuples encode to sortable bytes; optional generated columns can accelerate slot‑wise filters. MyCloud benefits from these index strategies without custom storage code.
 
 See also
-- Indexing strategy: `docs/research/indexing-strategy.md`
+- Indexing strategy: `DOCS/research/indexing-strategy.md`
 
 ---
 
@@ -130,7 +130,7 @@ MyCloud’s collaboration model is EDB’s P2P sync:
 * **Feature negotiation** allows new types/encodings (e.g., `tuple`, `tuple-enc:v1`, `uint8`) to roll out safely.
 
 See also
-- P2P sync MVP: `docs/research/p2p-sync-mvp.md`
+- P2P sync MVP: `DOCS/research/p2p-sync-mvp.md`
 
 ---
 
@@ -167,8 +167,8 @@ EDB exposes metrics (index merge latency, query latencies, sync status) and tx�
 ---
 
 ## See also
-- Requirements overview: `docs/research/EDB-REQUIREMENTS.md`
-- Value types (scalars): `docs/research/value-types.md`
-- Tuple encoding: `docs/research/tuple-encoding.md`
-- Indexing strategy: `docs/research/indexing-strategy.md`
-- P2P sync MVP: `docs/research/p2p-sync-mvp.md`
+- Requirements overview: `DOCS/research/EDB-REQUIREMENTS.md`
+- Value types (scalars): `DOCS/research/value-types.md`
+- Tuple encoding: `DOCS/research/tuple-encoding.md`
+- Indexing strategy: `DOCS/research/indexing-strategy.md`
+- P2P sync MVP: `DOCS/research/p2p-sync-mvp.md`

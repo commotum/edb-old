@@ -49,10 +49,10 @@ Why This Order (plain language)
 
 References
 - `overview.md:1`
-- `docs/research/EDB-REQUIREMENTS.md:1`
-- `docs/research/value-types.md:1`
-- `docs/research/tuple-encoding.md:1`
-- `docs/research/indexing-strategy.md:1`
+- `DOCS/research/EDB-REQUIREMENTS.md`
+- `DOCS/research/value-types.md`
+- `DOCS/research/tuple-encoding.md`
+- `DOCS/research/indexing-strategy.md`
 - `datomic-reference/*` (read‑only ground truth)
 
 ## Per‑Step Reference Map (Datomic)

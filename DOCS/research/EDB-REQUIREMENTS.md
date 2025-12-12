@@ -42,7 +42,7 @@ Schema defaults and identity patterns (borrowed)
 - Validation as data: attribute predicates (:db.attr/preds), entity predicates (:db.entity/preds), and entity specs (:db.entity/attrs, :db.entity/preds) enforced via :db/ensure with structured anomalies on failure.
 
 Value Types (overview)
-- See docs/research/value-types.md for the canonical scalar set, external representations (EDN/JSON), and internal encoding/ordering notes.
+- See DOCS/research/value-types.md for the canonical scalar set, external representations (EDN/JSON), and internal encoding/ordering notes.
 - Growth-only: add new value types when they make domain sense (e.g., `:db.type/uint8` for color channels) rather than overloading existing types.
 
 Type limitations and caveats
@@ -135,7 +135,7 @@ Indexing
 - Background merge/compaction; snapshots/checkpoints to accelerate reads.
 - Full‑text support: SQLite FTS5; Postgres tsvector + GIN.
 - Uniqueness enforcement on `(a, v)` for identity/value uniques; idempotent upserts via lookup refs.
-- Tuples: compact, lexicographically sortable internal encoding; comparisons are lexicographic across slots. See docs/research/indexing-strategy.md.
+- Tuples: compact, lexicographically sortable internal encoding; comparisons are lexicographic across slots. See DOCS/research/indexing-strategy.md.
  - Range predicates (=, !=, <=, <, >, >=) push down to AVET; ensure attrs needed for range have :db/index true or uniqueness enabled.
  - Maintain a fast in‑memory delta (“memory index”) merged with durable segment trees by background jobs (wide branching factor ⇒ sublinear job times).
 

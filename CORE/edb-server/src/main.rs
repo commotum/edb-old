@@ -1,6 +1,7 @@
 use axum::{routing::{get, post}, Router, extract::{State, Path}, Json};
 use axum::response::sse::{Sse, Event};
 use base64::Engine;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, atomic::{AtomicU64, AtomicI64, Ordering}};
 use edb_transactor::SqliteTransactor;
@@ -23,6 +24,7 @@ enum Command {
     GetHeads(tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     GetTxEnvelope(Vec<u8>, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     Pull(i64, Vec<edb_pull::AttrSpec>, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
+    Query(QueryReq, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
 }
 
 struct Metrics {
@@ -154,10 +156,15 @@ async fn main() {
                     }
                 }
                 Command::Pull(eid, specs, tx) => {
-                    let puller = edb_pull::Puller::new(&txr.conn);
+    let puller = edb_pull::Puller::new_with_path(&txr.conn, &db_path);
                     let res = puller.pull_entity(eid, &specs)
                         .map_err(|e| e.to_string())
                         .map(|v| v);
+                    let _ = tx.send(res);
+                }
+                Command::Query(req, tx) => {
+                    let res = run_query(&txr.conn, &db_path, &req).map_err(|e| e.to_string())
+                        .map(|rows| serde_json::json!({"rows": rows}));
                     let _ = tx.send(res);
                 }
             }
@@ -172,6 +179,8 @@ async fn main() {
         .route("/heads", get(get_heads))
         .route("/tx/:txid", get(get_tx_envelope))
         .route("/pull", post(post_pull))
+        .route("/q", post(post_query))
+        .route("/health", get(get_health))
         .route("/subscribe", get(get_subscribe))
         .route("/metrics", get(get_metrics))
         .with_state(state);
@@ -321,5 +330,102 @@ async fn post_pull(State(state): State<AppState>, Json(req): Json<PullReq>) -> R
     match rx.await.map_err(as_500)? {
         Ok(val) => Ok(Json(val)),
         Err(e) => Err(as_500(e)),
+    }
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
+enum Op { Eq, Ge, Gt, Le, Lt, Between }
+
+#[derive(Deserialize, Clone)]
+struct WhereAV {
+    a: String,
+    #[serde(default = "default_eq")]
+    op: Op,
+    value: Option<serde_json::Value>,
+    ge: Option<serde_json::Value>,
+    lt: Option<serde_json::Value>,
+    le: Option<serde_json::Value>,
+    gt: Option<serde_json::Value>,
+}
+
+fn default_eq() -> Op { Op::Eq }
+
+#[derive(Deserialize, Clone)]
+struct QueryReq {
+    #[serde(rename = "where")]
+    r#where: Vec<WhereAV>,
+}
+
+async fn post_query(State(state): State<AppState>, Json(req): Json<QueryReq>) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.cmd_tx.send(Command::Query(req, tx)).await.map_err(as_500)?;
+    match rx.await.map_err(as_500)? {
+        Ok(val) => Ok(Json(val)),
+        Err(e) => Err(as_500(e)),
+    }
+}
+
+async fn get_health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let txr = SqliteTransactor::open(&state.db_path).map_err(as_500)?;
+    let cur_t: i64 = txr.conn.query_row("SELECT seq FROM log ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap_or(0);
+    Ok(Json(serde_json::json!({"ok": true, "t": cur_t})))
+}
+
+fn run_query(conn: &rusqlite::Connection, db_path: &str, req: &QueryReq) -> Result<Vec<i64>, String> {
+    use edb_encoding::{ValueType, encode_scalar};
+    // Resolve value type for attr
+    let mut acc: Option<std::collections::BTreeSet<i64>> = None;
+    for w in &req.r#where {
+        let vt_i: Option<i64> = conn
+            .query_row("SELECT vt FROM attrs WHERE ident=?1", rusqlite::params![&w.a], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let vt = vt_i.ok_or_else(|| format!("unknown attribute {}", w.a)).and_then(|i| map_vt(i).ok_or("unsupported vt".into()))?;
+        let mut idx = edb_index::AvetIndexer::open(db_path).map_err(|e| e.to_string())?;
+        let encode = |val: &serde_json::Value| -> Result<Vec<u8>, String> { encode_scalar(vt, val).map_err(|e| e) };
+        let mut rows: Vec<i64> = Vec::new();
+        match w.op {
+            Op::Eq => {
+                let v = w.value.as_ref().ok_or("missing value for eq")?;
+                let vb = encode(v)?;
+                for d in idx.scan_av_eq(&w.a, &vb).map_err(|e| e.to_string())? { rows.push(d.e); }
+            }
+            Op::Between => {
+                let ge_v = w.ge.as_ref().ok_or("missing ge")?; let lt_v = w.lt.as_ref().ok_or("missing lt")?;
+                let ge_b = encode(ge_v)?; let lt_b = encode(lt_v)?;
+                for d in idx.scan_av_range(&w.a, &ge_b, Some(&lt_b)).map_err(|e| e.to_string())? { rows.push(d.e); }
+            }
+            Op::Ge => {
+                let ge_v = w.ge.as_ref().or(w.value.as_ref()).ok_or("missing ge")?;
+                let ge_b = encode(ge_v)?;
+                for d in idx.scan_av_range(&w.a, &ge_b, None).map_err(|e| e.to_string())? { rows.push(d.e); }
+            }
+            Op::Gt | Op::Le | Op::Lt => { return Err("operators gt/le/lt not yet implemented".into()); }
+        }
+        let set: std::collections::BTreeSet<i64> = rows.into_iter().collect();
+        acc = Some(match acc { Some(prev) => prev.intersection(&set).cloned().collect(), None => set });
+    }
+    Ok(acc.unwrap_or_default().into_iter().collect())
+}
+
+fn map_vt(i: i64) -> Option<edb_encoding::ValueType> {
+    match i {
+        1 => Some(edb_encoding::ValueType::Long),
+        2 => Some(edb_encoding::ValueType::Double),
+        3 => Some(edb_encoding::ValueType::Boolean),
+        4 => Some(edb_encoding::ValueType::String),
+        5 => Some(edb_encoding::ValueType::Keyword),
+        6 => Some(edb_encoding::ValueType::Uuid),
+        7 => Some(edb_encoding::ValueType::Instant),
+        8 => Some(edb_encoding::ValueType::Ref),
+        9 => Some(edb_encoding::ValueType::Bytes),
+        10 => Some(edb_encoding::ValueType::Uint8),
+        11 => Some(edb_encoding::ValueType::Bigint),
+        12 => Some(edb_encoding::ValueType::Decimal),
+        13 => Some(edb_encoding::ValueType::Float32),
+        14 => Some(edb_encoding::ValueType::Float16),
+        15 => Some(edb_encoding::ValueType::Bfloat16),
+        _ => None,
     }
 }
