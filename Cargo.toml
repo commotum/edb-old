@@ -8,5 +8,6 @@ members = [
   "edb/rs/edb-index",
   "edb/rs/edb-envelope",
   "edb/rs/edb-server",
+  "edb/rs/edb-pull",
 ]
 resolver = "2"

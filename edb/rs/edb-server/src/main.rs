@@ -22,12 +22,19 @@ enum Command {
     GetDb(tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     GetHeads(tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     GetTxEnvelope(Vec<u8>, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
+    Pull(i64, Vec<edb_pull::AttrSpec>, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
 }
 
 struct Metrics {
     tx_count: AtomicU64,
     tx_total_ms: AtomicU64,
     last_t: AtomicI64,
+    merges_total: AtomicU64,
+    compactions_total: AtomicU64,
+    eavt_segments: AtomicU64,
+    aevt_segments: AtomicU64,
+    avet_segments: AtomicU64,
+    vaet_segments: AtomicU64,
 }
 
 #[derive(Deserialize)]
@@ -45,7 +52,17 @@ async fn main() {
     let db_path = std::env::var("EDB_SQLITE").unwrap_or_else(|_| "target/edb.sqlite".to_string());
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(128);
     let (bcast, _b_rx) = tokio::sync::broadcast::channel::<String>(128);
-    let metrics = Arc::new(Metrics { tx_count: AtomicU64::new(0), tx_total_ms: AtomicU64::new(0), last_t: AtomicI64::new(0) });
+    let metrics = Arc::new(Metrics {
+        tx_count: AtomicU64::new(0),
+        tx_total_ms: AtomicU64::new(0),
+        last_t: AtomicI64::new(0),
+        merges_total: AtomicU64::new(0),
+        compactions_total: AtomicU64::new(0),
+        eavt_segments: AtomicU64::new(0),
+        aevt_segments: AtomicU64::new(0),
+        avet_segments: AtomicU64::new(0),
+        vaet_segments: AtomicU64::new(0),
+    });
     let state = AppState { db_path: Arc::new(db_path.clone()), cmd_tx: cmd_tx.clone(), bcast: bcast.clone(), metrics: metrics.clone() };
 
     // Background worker: single transactor applying commands and broadcasting tx-reports
@@ -61,6 +78,9 @@ async fn main() {
                             if let Some(t) = rep.t { metrics.last_t.store(t, Ordering::Relaxed); }
                             metrics.tx_count.fetch_add(1, Ordering::Relaxed);
                             metrics.tx_total_ms.fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+                            if let Ok(stats) = txr.index_stats() {
+                                update_index_metrics(&metrics, stats);
+                            }
                             serde_json::to_value(rep).unwrap()
                         })
                         .map_err(|e| e.to_string());
@@ -74,6 +94,9 @@ async fn main() {
                             if let Some(t) = rep.t { metrics.last_t.store(t, Ordering::Relaxed); }
                             metrics.tx_count.fetch_add(1, Ordering::Relaxed);
                             metrics.tx_total_ms.fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+                            if let Ok(stats) = txr.index_stats() {
+                                update_index_metrics(&metrics, stats);
+                            }
                             serde_json::to_value(rep).unwrap()
                         })
                         .map_err(|e| e.to_string());
@@ -130,6 +153,13 @@ async fn main() {
                         Err(_) => { let _ = tx.send(Err("not found".into())); }
                     }
                 }
+                Command::Pull(eid, specs, tx) => {
+                    let puller = edb_pull::Puller::new(&txr.conn);
+                    let res = puller.pull_entity(eid, &specs)
+                        .map_err(|e| e.to_string())
+                        .map(|v| v);
+                    let _ = tx.send(res);
+                }
             }
         }
     });
@@ -141,6 +171,7 @@ async fn main() {
         .route("/sync", post(post_sync))
         .route("/heads", get(get_heads))
         .route("/tx/:txid", get(get_tx_envelope))
+        .route("/pull", post(post_pull))
         .route("/subscribe", get(get_subscribe))
         .route("/metrics", get(get_metrics))
         .with_state(state);
@@ -236,12 +267,59 @@ async fn get_subscribe(State(state): State<AppState>) -> Sse<impl futures::Strea
 }
 
 #[derive(Serialize)]
-struct MetricsResp { tx_count: u64, avg_tx_ms: f64, last_t: i64 }
+struct MetricsResp {
+    tx_count: u64,
+    avg_tx_ms: f64,
+    last_t: i64,
+    merges_total: u64,
+    compactions_total: u64,
+    eavt_segments: u64,
+    aevt_segments: u64,
+    avet_segments: u64,
+    vaet_segments: u64,
+}
 
 async fn get_metrics(State(state): State<AppState>) -> Result<Json<MetricsResp>, (axum::http::StatusCode, String)> {
     let tx_count = state.metrics.tx_count.load(Ordering::Relaxed);
     let total_ms = state.metrics.tx_total_ms.load(Ordering::Relaxed);
     let last_t = state.metrics.last_t.load(Ordering::Relaxed);
     let avg = if tx_count == 0 { 0.0 } else { (total_ms as f64) / (tx_count as f64) };
-    Ok(Json(MetricsResp { tx_count, avg_tx_ms: avg, last_t }))
+    Ok(Json(MetricsResp {
+        tx_count,
+        avg_tx_ms: avg,
+        last_t,
+        merges_total: state.metrics.merges_total.load(Ordering::Relaxed),
+        compactions_total: state.metrics.compactions_total.load(Ordering::Relaxed),
+        eavt_segments: state.metrics.eavt_segments.load(Ordering::Relaxed),
+        aevt_segments: state.metrics.aevt_segments.load(Ordering::Relaxed),
+        avet_segments: state.metrics.avet_segments.load(Ordering::Relaxed),
+        vaet_segments: state.metrics.vaet_segments.load(Ordering::Relaxed),
+    }))
+}
+
+fn update_index_metrics(metrics: &Metrics, stats: edb_transactor::IndexStats) {
+    let prev_e = metrics.eavt_segments.swap(stats.eavt as u64, Ordering::Relaxed);
+    let prev_aevt = metrics.aevt_segments.swap(stats.aevt as u64, Ordering::Relaxed);
+    let prev_av = metrics.avet_segments.swap(stats.avet as u64, Ordering::Relaxed);
+    let prev_v = metrics.vaet_segments.swap(stats.vaet as u64, Ordering::Relaxed);
+    adjust(metrics, stats.eavt as u64, prev_e);
+    adjust(metrics, stats.aevt as u64, prev_aevt);
+    adjust(metrics, stats.avet as u64, prev_av);
+    adjust(metrics, stats.vaet as u64, prev_v);
+}
+
+fn adjust(metrics: &Metrics, newc: u64, oldc: u64) {
+    if newc > oldc { metrics.merges_total.fetch_add(newc - oldc, Ordering::Relaxed); }
+    if newc < oldc { metrics.compactions_total.fetch_add(oldc - newc, Ordering::Relaxed); }
+}
+#[derive(Deserialize)]
+struct PullReq { eid: i64, specs: Vec<edb_pull::AttrSpec> }
+
+async fn post_pull(State(state): State<AppState>, Json(req): Json<PullReq>) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.cmd_tx.send(Command::Pull(req.eid, req.specs, tx)).await.map_err(as_500)?;
+    match rx.await.map_err(as_500)? {
+        Ok(val) => Ok(Json(val)),
+        Err(e) => Err(as_500(e)),
+    }
 }

@@ -353,6 +353,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "edb-pull"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "edb-encoding",
+ "edb-schema",
+ "edb-transactor",
+ "edb-tx",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "edb-schema"
 version = "0.1.0"
 dependencies = [
@@ -368,6 +383,7 @@ dependencies = [
  "axum",
  "base64",
  "edb-index",
+ "edb-pull",
  "edb-transactor",
  "futures",
  "hex",

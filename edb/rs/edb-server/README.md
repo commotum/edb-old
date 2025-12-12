@@ -36,7 +36,8 @@ Endpoints
   - Server-Sent Events stream of tx-reports (JSON-serialized), powered by a background transactor and `tokio::broadcast`.
 
 - GET `/metrics`
-  - Returns `{ tx_count, avg_tx_ms, last_t }`.
+  - Returns `{ tx_count, avg_tx_ms, last_t, merges_total, compactions_total, eavt_segments, aevt_segments, avet_segments, vaet_segments }`.
+  - Segment counters approximate background merge/compaction activity; they reflect current root segment counts per index.
 
 Examples
 ```
@@ -50,3 +51,6 @@ curl -N localhost:8080/subscribe
 Notes
 - The server owns a single background transactor to serialize writes; GET endpoints route through the worker for consistency.
 - JSON tx grammar supports add/retract/cas, tempids, lookup refs, tx-meta, and map-form sugar.
+- POST `/pull`
+  - Body: `{ "eid": <i64>, "specs": [ {"type":"Attr","data":":ns/attr"}, {"type":"Reverse","data":":ns/ref"}, {"type":"Nested","data":{"attr":":ns/ref","specs":[{"type":"Attr","data":":ns/name"}]}} ] }`
+  - Returns a JSON map of the requested attributes, with reverse attributes keyed as `_:ns/ref`.

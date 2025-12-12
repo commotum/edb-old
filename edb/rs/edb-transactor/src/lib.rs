@@ -65,6 +65,9 @@ impl<'a> Db<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct IndexStats { pub eavt: usize, pub aevt: usize, pub avet: usize, pub vaet: usize }
+
 impl SqliteTransactor {
     pub fn open(path: &str) -> Result<Self, TxrError> {
         let store = SqliteStore::open(path)?;
@@ -135,6 +138,24 @@ impl SqliteTransactor {
 
     pub fn register_tx_fn(&mut self, ident: &str, f: Box<dyn edb_tx::TxFunction + Send + Sync>) {
         self.tx_fns.insert(ident.to_string(), f);
+    }
+
+    /// Return lightweight counts of index segments for observability.
+    pub fn index_stats(&self) -> Result<IndexStats, TxrError> {
+        #[derive(serde::Deserialize)]
+        struct RootV1 { version: u8, segments: Vec<String> }
+        fn count_segments(conn: &edb_store_sqlite::SqliteStore, name: &str) -> usize {
+            match conn.get_root(name) {
+                Ok(Some((_rev, bytes))) => serde_json::from_slice::<RootV1>(&bytes).map(|r| r.segments.len()).unwrap_or(0),
+                _ => 0,
+            }
+        }
+        Ok(IndexStats {
+            eavt: count_segments(&self.store, "eavt"),
+            aevt: count_segments(&self.store, "aevt"),
+            avet: count_segments(&self.store, "avet"),
+            vaet: count_segments(&self.store, "vaet"),
+        })
     }
 
     // DB-level constructors for richer API
@@ -301,6 +322,8 @@ impl SqliteTransactor {
         // Use serde_cbor for quick decode to Value for this path
         let env: EnvV1 = serde_cbor::from_slice(unsigned).map_err(|e| TxrError::InvalidSchema(format!("bad envelope: {e}")))?;
         if env.magic != "edb.tx" || env.version != 1 { return Err(TxrError::InvalidSchema("unsupported envelope".into())); }
+        // Feature gating (MVP): reject any unknown/declared features for now
+        if !env.features.is_empty() { return Err(TxrError::InvalidSchema("unknown/unsupported feature".into())); }
         // Verify signature
         if !edb_envelope::verify(unsigned, sig, env.author_pubkey.as_ref()) { return Err(TxrError::InvalidSchema("bad signature".into())); }
         // Compute tx_id

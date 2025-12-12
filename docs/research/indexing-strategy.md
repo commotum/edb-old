@@ -8,7 +8,19 @@ Borrowed defaults from Datomic
 - Accumulate‑only semantics: immutable log and index segments; changes accumulate rather than update in place.
 - Live view = durable segment trees + in‑memory delta (“memory index”).
 - Background jobs periodically merge the memory index into durable segment trees with a wide branching factor to keep job time sublinear in total size.
-- Maintain four covering indexes (EAVT/AVET/AEVT/VAET); enable AVET for attributes with :db/index true or uniqueness to support fast value/range queries.
+- Maintain four covering indexes (EAVT/AEVT/AVET/VAET); enable AVET for attributes with :db/index true or uniqueness to support fast value/range queries.
+
+Covering indexes and access patterns
+- EAVT (Entity → Attr → Value → Tx desc): entity/row-style access; master–detail locality.
+- AEVT (Attr → Entity → Value → Tx desc): attribute/column scans; “all values of a”.
+- AVET (Attr → Value → Entity → Tx desc): equality and bounded range lookups with typed ordering.
+- VAET (Value(Entity) → Attr → Entity → Tx desc): reverse refs for :db.type/ref powering reverse Pull.
+
+Immutable segments, merges, and compaction
+- New datoms go to a fast in-memory buffer and are visible immediately.
+- Periodic background merges flush the buffer to durable, sorted segments and append the segment id to the index root.
+- Roots accumulate multiple segment ids (append-only adoption). Readers can consume immutable segments without coordination.
+- A simple compaction policy periodically collapses many segments into a single sorted segment to keep root segment counts bounded.
 
 Schema Options
 1) Unified datoms table
