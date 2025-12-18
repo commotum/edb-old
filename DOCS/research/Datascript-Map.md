@@ -57,9 +57,10 @@ Where Each Stage Lives
 
 Typical Call Snippets
 
-- Create a DB and transact
+- Create a DB and transact (immutable and conn)
   - (def db (d/empty-db {:likes {:db/cardinality :db.cardinality/many}}))
-  - (def db2 (:db-after (d/with db [[:db/add -1 :name "Ivan"] [:db/add -1 :likes :pizza]])))
+  - (def db2 (:db-after (d/with db [[:db/add -1 :name "Ivan"]
+                                     [:db/add -1 :likes "pizza"]])))
   - (def conn (d/create-conn {:name {:db/unique :db.unique/identity}}))
   - (d/transact! conn [[:db/add -1 :name "Oleg"]])
 - Query
@@ -68,17 +69,24 @@ Typical Call Snippets
 - Pull
   - (d/pull @conn [:db/id :name {:friends [:db/id :name]}] 1)
   - (d/pull-many @conn [:db/id :name] [1 2 3])
+-- Filtered DB view (cannot transact)
+- Filtered DB view (cannot transact)
+  - (def fdb (d/filter @conn (fn [db datom] (= (:a datom) :likes))))
+  - (d/q '[:find ?e ?v :where [?e :likes ?v]] fdb)
+-- Index lookups
+- Index lookups
+  - (d/datoms @conn :eavt 1)                ; all datoms for entity 1
+  - (d/datoms @conn :aevt :likes)           ; all entities having :likes
+  - (d/index-range @conn :age 18 60)        ; AVET slice by value range
 
 Error Flow
 
-- Parse/Validate
-  - Query parse errors, invalid find/in/with forms, duplicate vars: thrown as ex-info from parser with descriptive messages.
-  - Pull pattern parse errors: ex-info from pull_parser (invalid attr specs, bad map-specs, recursion issues).
-- Transact
-  - Schema/uniqueness/cardinality violations, bad tempids, invalid refs: ex-info from db.cljc transact path (includes context in data map).
-- Query/Pull execution
-  - Built-in predicate arity/type issues, pull against missing entities/attrs: ex-info with message + offending input.
-  - Consumers typically catch Clojure/ClojureScript exceptions; there’s no unified error type (unlike Mentat’s MentatError).
+- Query/pull parsing and execution
+  - Malformed query forms, invalid pull patterns, arity/type mismatches raise ex-info from parser/query/pull layers.
+- Transactions and DB rules
+  - Schema/uniqueness/cardinality violations, lookup ref errors, and tempid misuse raise ex-info from `db/transact-tx-data`.
+- Filtered DB guard
+  - Attempting to transact against a filtered DB raises (ex-info "Filtered DB cannot be modified" {:error :transaction/filtered}) in `datascript.conn/with`.
 
 --------------------------------------------------------------------------------
 
@@ -107,6 +115,44 @@ Modules
 - REFERENCE/datascript/src/datascript/core.cljc: Docs + thin wrappers to internal namespaces.
 - REFERENCE/datascript/src/datascript/conn.cljc: Mutable connection wrapper over immutable DB with transacting and optional storage tail handling.
 - REFERENCE/datascript/src/datascript/js.cljs: CLJS exports for consumers (e.g., foreign JS code).
+
+Details
+
+- Entities & Pull
+  - `entity`, `entid`, `entity-db`, `touch` (lazy, cached entity views; reverse refs via `:_attr`; `touch` for eager fetch, debug-only).
+  - `pull`, `pull-many` return plain maps; recursive selectors, reverse attrs, components, wildcards, aliases.
+- Query
+  - `q` delegates to query engine; supports `(pull ?e pattern)` in :find.
+- DB creation & serialization
+  - `empty-db` (opts: `:branching-factor`, `:ref-type`, optional `:storage`).
+  - `init-db` (fast-path from trusted datoms; no validation).
+  - `datom`, `db?`, `datom?` helpers.
+  - `serializable` / `from-serializable` with customizable freeze/thaw fns.
+  - JVM caveat: `serializable` holds a global lock; serializations don’t run in parallel.
+- Filtered DB
+  - `is-filtered`, `filter` create a view that proxies all reads and applies `(pred db datom)` to results.
+  - Supports entities, pull, queries, index access; not cached; cannot be used with `with`/`db-with`.
+- Changing DB (pure)
+  - `with` returns TxReport for an immutable DB; `db-with` returns the new DB value.
+  - `with-schema` updates schema without validation; must be compatible change.
+- Index access
+  - `datoms`, `find-datom`, `seek-datoms`, `rseek-datoms`, `index-range` over `:eavt|:aevt|:avet`.
+  - `:avet` contains refs, `:db/unique`, or `:db/index` attrs only.
+  - Iterators are lazy and efficient; support `first`, `next`, `reverse`, `seq`.
+- Connections (see Section 6 for internals)
+  - `conn?`, `create-conn`, `conn-from-db`, `conn-from-datoms`.
+  - `transact!`, `reset-conn!`, `reset-schema!`, `listen!`, `unlisten!`.
+  - CLJ: `restore-conn` rehydrates from storage (when available) and tracks a tx tail.
+- Datomic compatibility
+  - `tempid`, `resolve-tempid`, `db` (deref conn), `transact`, `transact-async` (compatibility-first APIs; prefer `@conn` and `transact!`).
+- squuid utilities
+  - `squuid`, `squuid-time-millis` for time-ordered UUIDs.
+- Storage (CLJ only)
+  - `storage`, `store`, `restore`, `addresses`, `collect-garbage`, `file-storage`.
+- JS interop (CLJS)
+  - Exports: `empty_db`, `init_db`, `serializable`, `from_serializable`, `q`, `pull`, `pull_many`, `db_with`, `entity`, `touch`, `entity_db`, `filter`, `is_filtered`, `create_conn`, `conn_from_db`, `conn_from_datoms`, `db`, `transact`, `reset_conn`, `listen`, `unlisten`, `resolve_tempid`, `datoms`, `seek_datoms`, `index_range`, `squuid`, `squuid_time_millis`.
+  - Conversions: schema/entities keywordization, `js->Datom`, `tx-report->js`, `pull-result->js`.
+  - JS `transact` calls internal `-transact!` then notifies listeners (mirrors CLJ behavior).
 
 --------------------------------------------------------------------------------
 
