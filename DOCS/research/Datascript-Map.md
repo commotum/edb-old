@@ -272,6 +272,6 @@ Notes
 
 PROMPT:
 
-I need you to read every file from the following sections in the @REFERENCE/datascript/ folder into the context. After you read the full contents of every file from a section into the context you should provide an executive summary of your understanding. Sound good? Make sure you employ a solid chunking/streaming read process so you can avoid truncation on large files. You need to expand upon what's already there, correct any errors, and make sure it fully covers the contents.
+I need you to read every file from the following sections in the @REFERENCE/datascript/ folder into the context. After you read the full contents of every file from a section into the context you should provide an executive summary of your understanding. Sound good? Make sure you employ a solid chunking/streaming read process so you can avoid truncation on large files. You need to fold this into DOCS/research/Datascript-Map.md, expand upon what's already there, correct any errors, and make sure it fully covers the contents.
 
 ---
