@@ -266,3 +266,12 @@ Notes
 - DB values are immutable; connections provide a mutable façade for convenience.
 - Query/pull parsers and engines are shared between CLJ/CLJS via `.cljc` sources.
 
+
+
+---
+
+PROMPT:
+
+I need you to read every file from the following sections in the @REFERENCE/datascript/ folder into the context. After you read the full contents of every file from a section into the context you should provide an executive summary of your understanding. Sound good? Make sure you employ a solid chunking/streaming read process so you can avoid truncation on large files.
+
+---
