@@ -247,8 +247,8 @@ Executive Summary
 
 - Parser: `parser.cljc` turns query forms into IR (symbols, sources, clauses, find specs, rules), handling pulls in :find, constants, and validation.
 - Built-ins: logical and predicate functions namespace (`=`/`not`/aggregates, etc.).
-- Engine v3: Newer, faster engine (`query_v3.cljc`) that builds relations, resolves clauses, and collects results with composable transducers; uses an LRU query cache.
-- Engine v2: Legacy engine (`query.cljc`) with similar responsibilities and post-processing steps (aggregates, pull post-shaping).
+- Engine v2 (default): `datascript.query/q` is used by `datascript.core/q`; handles rules, aggregates, pull, result shaping, and caching.
+- Engine v3 (alternative): `datascript.query_v3/q` is an optimized engine with array-backed relations and fast joins; not used by default.
 
 Modules
 
@@ -260,6 +260,38 @@ Modules
 Errors & Behavior
 
 - Parser throws ex-info for malformed queries (invalid forms, duplicate vars, pull misuse). Engine throws for arity/type mismatches.
+
+Details
+
+- Parser IR (parser.cljc)
+  - Symbols: `Placeholder` (`_`), `Variable` (`?v`), `SrcVar` (`$db`), `RulesVar` (`%`), `Constant` (non-var), `PlainSymbol` (other symbols).
+  - Bindings: `BindIgnore` (`_`), `BindScalar` (`?v`), `BindTuple` (`[b1 b2 ...]`), `BindColl` (`[b ...]`), `BindRel` (`[[...]]`).
+  - :find: `FindRel` (one or more), `FindColl` (`[elem ...]`), `FindScalar` (`elem .`), `FindTuple` (`[elem ...]`). Elements: `Variable`, `Pull` (`[pull $ ?e pattern]`), `Aggregate` (built-in or custom via `['aggregate' ?fn arg+]`).
+  - Return maps: `:keys`, `:syms`, `:strs` validated against :find arity/shape; not supported for scalar/coll finds.
+  - :with: additional vars to include in uniqueness/grouping but not returned unless in :find.
+  - :in: list of bindings/sources; supports `src-var` (`$`), `rules-var` (`%`), plain symbols, and binding forms. If any clause uses a source, a default `$` is auto-supplied.
+  - :where clauses: data patterns, predicates `[(pred args...)]`, functions with binding `[(fun args...) binding]`, rules `[rule-name args...]`, `not`, `not-join`, `or`, `or-join`, `and`.
+  - Rules: branches grouped by name; each has head `[name rule-vars]` and clauses; required/free vars must be consistent across branches; arity validated.
+  - Validation highlights: distinctness for :in/:with; `:find ∪ :with ⊆ :where ∪ :in`; only one of `:keys/:syms/:strs`; `or`/`or-join` free var checks; `not`/`not-join` join vars non-empty; missing `%` when rules are present.
+
+- Built-ins (built_ins.cljc)
+  - Predicates/functions: arithmetic, comparisons via `db/value-compare`, booleans (`and`, `or`), regex, strings, collections, entity helpers: `-differ?`, `-get-else`, `-get-some`, `missing?`, `ground`, `tuple` (vector), `untuple`.
+  - Aggregates: `sum`, `avg`, `median`, `variance`, `stddev`, `distinct` (set), `min`/`max` (optionally top N), `rand` (optionally N), `sample`, `count`, `count-distinct`.
+
+- Engine v2 (query.cljc)
+  - Context with `rels`, `sources`, `rules`; parsed queries cached (LRU).
+  - Inputs bound via binding forms to relations; sources (`$`) and rules (`%`) resolved.
+  - Patterns: lookup-ref resolution (`entid-strict`), constant substitution, DB search or collection match.
+  - Predicates/functions: functions from built-ins/context/resolved symbols; tuple-level filter or binding to new vars.
+  - Rules: rule expansion with guards (`-differ?`), depth-first solve respecting required/free vars.
+  - Logical forms: `and` reduce; `or`/`or-join` union branches; `not`/`not-join` subtract branch results with binding checks.
+  - Post: aggregates (group-by non-aggregate elements), `pull` elements via `pull_api`, then shape results per find class and optional return-map.
+  - Errors: `:query/inputs`, `:query/where`, `:query/binding` for arity, unknown predicates/functions, insufficient bindings.
+
+- Engine v3 (query_v3.cljc)
+  - Array-backed `IRelation` implementations, fast key extraction, hash-join; inputs converted via `bind` (scalars become constants if single-row).
+  - Patterns/predicates/logic similar in spirit; rules are not implemented here; returns native set of vectors for `:find`+`:with`.
+  - Caches parsed queries in an LRU of size 100.
 
 --------------------------------------------------------------------------------
 
