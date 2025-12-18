@@ -45,7 +45,7 @@ Where Each Stage Lives
 
 - Public API: REFERENCE/datascript/src/datascript/core.cljc
 - Connections and transacting: REFERENCE/datascript/src/datascript/conn.cljc
-- DB internals (datoms, indexes, schema, transact, as-of/since/filter): REFERENCE/datascript/src/datascript/db.cljc
+- DB internals (datoms, indexes, schema, transact, filtered DB): REFERENCE/datascript/src/datascript/db.cljc
 - Query parsing: REFERENCE/datascript/src/datascript/parser.cljc
 - Query engine(s): REFERENCE/datascript/src/datascript/query_v3.cljc, REFERENCE/datascript/src/datascript/query.cljc
 - Pull: REFERENCE/datascript/src/datascript/pull_parser.cljc, REFERENCE/datascript/src/datascript/pull_api.cljc
@@ -65,7 +65,7 @@ Typical Call Snippets
   - (d/transact! conn [[:db/add -1 :name "Oleg"]])
 - Query
   - (d/q '[:find ?e :where [?e :name "Ivan"]] @conn)
-  - (d/q '[:find ?name ?likes :in $ ?x :where [?e :name ?name] [?e :likes ?x] [?e :likes ?likes]] @conn :pizza)
+  - (d/q '[:find ?name ?likes :in $ ?x :where [?e :name ?name] [?e :likes ?x] [?e :likes ?likes]] @conn "pizza")
 - Pull
   - (d/pull @conn [:db/id :name {:friends [:db/id :name]}] 1)
   - (d/pull-many @conn [:db/id :name] [1 2 3])
