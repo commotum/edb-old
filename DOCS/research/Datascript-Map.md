@@ -408,6 +408,32 @@ Modules
 
 - REFERENCE/datascript/src/datascript/conn.cljc
 
+Details
+
+- Conn representation
+  - `Conn` wraps an internal atom map (via `extend-clj.core/deftype-atom`) and derefs to the current `:db` value. Swap/CAS update `:db` in the internal map.
+  - `conn?` returns true for derefable values that either contain a DB or are nil.
+- Creating connections
+  - `create-conn` creates a conn backed by an empty DB (with optional `schema` and `opts` adapted by storage layer); `conn-from-db` wraps an existing DB; `conn-from-datoms` initializes DB via `init-db` and wraps it.
+  - When a DB has storage attached, `conn-from-db` persists it immediately and initializes `:tx-tail []` and `:db-last-stored` for incremental persistence.
+  - CLJ: `restore-conn` reads a DB and pending tail from storage and builds a conn whose `:db` is `db-with-tail` of the restored pair.
+- Pure DB changes
+  - `with` executes a transaction against an immutable DB value and returns a TxReport. On `FilteredDB`, throws `(ex-info "Filtered DB cannot be modified" {:error :transaction/filtered})`.
+  - `db-with` returns `(:db-after (with db tx-data))`.
+- Transacting
+  - `transact!` locks on the conn, runs an internal `-transact!` that swaps `:db` to `:db-after` from the TxReport, then notifies all registered listeners with the same report value.
+  - TxReport shape: `{:db-before … :db-after … :tx-data […] :tempids {...} :tx-meta tx-meta}`.
+  - Storage (CLJ): if a conn has storage, each tx appends datoms to `:tx-tail`. When the tail’s total datom count exceeds the index `:branching-factor`, it flushes the full DB (`store-impl!`), resets `:tx-tail`, and updates `:db-last-stored`; otherwise it writes the incremental tail (`store-tail`).
+- Reset and schema changes
+  - `reset-conn!` replaces the current DB with a provided DB and emits a TxReport that retracts all old datoms and inserts all new ones. Storage-backed conns persist the new DB and reset the tail.
+  - `reset-schema!` applies `db/with-schema`; on CLJ with storage, persists the schema change and clears the tail.
+- Listeners API
+  - `listen!` registers a callback under a key (if none provided, generates one); idempotent per key. `unlisten!` removes it.
+  - Listeners receive TxReports after the conn has been updated. Order follows iteration over the internal map.
+- Thread-safety and gotchas
+  - `transact!` uses `locking` for serialized updates and callbacks.
+  - Avoid transacting on filtered DBs; use `with`/`db-with` on base DBs or filter views for read-only queries.
+
 --------------------------------------------------------------------------------
 
 Section 7: Persistence (Optional)
