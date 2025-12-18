@@ -93,6 +93,23 @@ Typical Call Snippets
 - Pull (via Conn):
     conn.pull_attributes_for_entities(&sqlite_conn, eids, attrs)
 
+Error Flow
+
+- Parse/Validate
+    - EDN parse errors: edn::ParseError → MentatError::EdnParseError
+    - FindQuery validation/algebrizer input errors: query_algebrizer_traits::errors::AlgebrizerError → MentatError::AlgebrizerError
+- Algebrize
+    - Clause processing, unbound vars, invalid :limit/:with/:in: AlgebrizerError → MentatError
+- Translate/Build SQL
+    - SQL AST/build issues (identifier/param rules, builder misuse): sql_traits::errors::SQLError → MentatError::SQLError
+- Execute (rusqlite)
+    - SQLite execution/prep failures: rusqlite::Error → MentatError::RusqliteError
+- Project rows
+    - Row→TypedValue shaping errors (invalid projections, tuple width, conversion): query_projector_traits::errors::ProjectorError → MentatError::ProjectorError
+    - SQL value to typed value conversion failures (bad value_type_tag/value pairs): DbError(DbErrorKind::BadSQLValuePair) → MentatError::DbError
+- Pull
+    - Pull preparation/execution failures (invalid attributes, repeated :db/id): query_pull_traits::errors::PullError → MentatError::PullError
+
 If you want, I can annotate a concrete example query end-to-end and show the generated
 SQL and the projector shape produced.
 
@@ -131,6 +148,8 @@ Modules
 - REFERENCE/mentat/src/lib.rs: Crate entry; re‑exports core types/traits, defines var!
 and kw! macros, re‑exports q_once, exposes Conn, Store, QueryBuilder, and
 Syncable/SyncReport behind features.
+- Errors/Result: re‑exports `public_traits::errors::{Result, MentatError}` so
+  public APIs consistently return a single error type.
 - REFERENCE/mentat/src/conn.rs: Conn encapsulates Metadata and TxObservationService.
 Methods for:
     - Queries (q_once, q_uncached, q_prepare, q_explain) using current schema and
@@ -399,6 +418,13 @@ Executive Summary — Section 3 (db)
         - Applies changes to materialized views (idents/schema) after each tx; flips
         datoms index flags (avet/unique) and checks safety when switching
         cardinalities.
+- Errors & Traits
+    - Errors are defined in `db-traits`: `DbError` wraps `DbErrorKind` variants that
+      capture cardinality and schema constraint violations, input errors, SQL
+      contexts, upsert conflicts, and bootstrap issues. Files:
+      REFERENCE/mentat/db-traits/errors.rs, REFERENCE/mentat/db-traits/lib.rs.
+    - The transaction layer and `Store/Conn` convert `DbError` into the public
+      `MentatError` for consumers.
 - Attribute Caching
     - Caches current attribute state in memory for fast lookups:
         - Forward caches: single/multi value maps of e→v(s).
@@ -489,7 +515,12 @@ read‑only wrapper.
       (ConstantProjector; projects without rows), and Bound (prepared rusqlite
       Statement + SQL args + Projector). All executed via PreparedQuery::run().
     - Lookup helpers: lookup_value(_for_attribute) and lookup_values(_for_attribute)
-    return cached values when attribute is registered, otherwise run minimal queries.
+      return cached values when attribute is registered, otherwise run minimal queries.
+- Errors & Traits
+    - Public-facing methods return `public_traits::errors::Result<T>` and convert
+      subsystem errors (`DbError`, `AlgebrizerError`, `ProjectorError`, `PullError`,
+      `SQLError`) into `MentatError`. Files: REFERENCE/mentat/public-traits/lib.rs,
+      REFERENCE/mentat/public-traits/errors.rs.
 - Metadata: Metadata aggregates generation, PartitionMap, shared Schema, and persistent
 SQLiteAttributeCache; constructed via private new() to constrain initialization.
 
@@ -680,6 +711,10 @@ prunes/extracts types, processes required types, validates/expands ordering need
 - Caching integration: Known (src/lib.rs) abstracts schema + CachedAttributes for reverse/forward lookups, enabling pattern specialization and early failure during algebrization.
 - Tests: cover fulltext, ground variations (including heterogeneous and placeholder cases), predicate/typing behavior (numeric vs instant), OR/NOT validation and semantics, type
 requirement propagation, and tx-log APIs. Utilities in tests/utils/mod.rs help build schemas and run algebrization.
+- Errors & Traits
+    - Returns `query_algebrizer_traits::errors::AlgebrizerError` for parse/validation
+      failures (e.g., unbound variables, invalid limits, invalid :with/:in usage),
+      which the public API maps to `MentatError`. Crate: REFERENCE/mentat/query-algebrizer-traits.
 
 --------------------------------------------------------------------------------
 
@@ -713,6 +748,9 @@ builder and shared types from core, core-traits, sql-traits, and edn.
     DISTINCT, multiple tables, and constraints.
 - Dependencies (Cargo):
     - Bridges to edn, core-traits, mentat_core, mentat_sql, sql-traits, and mentat_query_algebrizer, reflecting its role as the SQL emission layer downstream of algebrization.
+- Errors & Traits
+    - Emits `sql_traits::errors::SQLError` and uses builder-level `BuildQueryResult`.
+      These are converted to the public `MentatError` by higher layers.
 
 --------------------------------------------------------------------------------
 
@@ -744,6 +782,10 @@ Section 8:
     - Identifiers quoted with backticks; errors via SQLError/BuildQueryResult.
     - Unit tests validate SQL composition, quoting, value formatting, dedupe, and arg ordering.
 - Dependencies: rusqlite (with limits, optional sqlcipher), ordered-float, plus Mentat crates core, core-traits, sql-traits.
+- Errors & Traits
+    - Core error type is `sql_traits::errors::SQLError` for invalid param names,
+      potential name collisions, or builder misuse; higher layers convert to
+      `MentatError`.
 
 --------------------------------------------------------------------------------
 
@@ -810,6 +852,10 @@ Section 9:
 - Dependencies & Integration
     - Integrates with algebrizer (query structure), query-sql (SQL AST), db layer (TypedValue conversions), and query-pull (pull execution). Uses rusqlite, indexmap, and core Mentat
     crates.
+- Errors & Traits
+    - Projector-specific failures surface as
+      `query_projector_traits::errors::ProjectorError` (invalid projections,
+      tuple width mismatch, conversions); mapped into `MentatError` for public APIs.
 
 --------------------------------------------------------------------------------
 
@@ -863,3 +909,6 @@ Section 10:
     - Current implementation focuses on flat attribute fetching; nested/recursive pull is architected to be done in stages, but recursion limits and deeper nesting behaviors are
     stubbed in design comments.
     - Wildcard pulls use schema’s attribute map to include all attributes; aliases respected where provided.
+- Errors & Traits
+    - Pull errors are exposed via `query_pull_traits::errors::PullError` (invalid
+      attributes, repeated :db/id, prep failures); public APIs return `MentatError`.
