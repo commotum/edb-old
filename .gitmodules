@@ -1,0 +1,11 @@
+[submodule "REFERENCE/datascript"]
+	path = REFERENCE/datascript
+	url = git@github.com:tonsky/datascript.git
+
+[submodule "REFERENCE/datomic-reverse-engineer/tools/tools.decompiler"]
+	path = REFERENCE/datomic-reverse-engineer/tools/tools.decompiler
+	url = https://github.com/Bronsa/tools.decompiler.git
+
+[submodule "REFERENCE/mentat"]
+	path = REFERENCE/mentat
+	url = git@github.com:mozilla/mentat.git
