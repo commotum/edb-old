@@ -455,6 +455,40 @@ Modules
 - REFERENCE/datascript/src/datascript/storage.clj, REFERENCE/datascript/src/datascript/storage.cljs
 - REFERENCE/datascript/src/datascript/serialize.cljc
 
+Details
+
+- IStorage protocol (storage.clj)
+  - Methods: `-store [[addr data] ...]`, `-restore addr`, `-list-addresses`, `-delete addrs-seq`.
+  - Addresses are 64‑bit integers. Two reserved addresses: root (0) and tail (1).
+  - Default implementation: `file-storage dir` writes each address to a file; configurable via options:
+    - `:freeze-fn` / `:thaw-fn` for values, or low-level `:write-fn` / `:read-fn` over streams
+    - `:addr->filename-fn` / `:filename->addr-fn` for path mapping
+- Storage adapter and persistence
+  - `StorageAdapter` bridges persistent-sorted-set’s `IStorage` to an external `IStorage` by serializing nodes as EDN-like maps:
+    - Node data: `{:level n, :keys [[e a v tx] ...], :addresses [...]}` (addresses only for branches)
+  - `store-impl!` serializes `:eavt/:aevt/:avet` roots to addresses and writes a root meta:
+    - `{:schema, :max-eid, :max-tx, :eavt, :aevt, :avet, :max-addr, <settings>}` and resets tail to an empty vector
+  - `store` persists a DB to its existing storage or to a provided one (guards against switching storage mid-life)
+  - `store-tail` appends a vector of tx datom groups to the tail address (used for incremental persistence)
+  - `restore-impl` loads root and tail, rebuilds indices via `set/restore-by` using the adapter, and returns `[db tail]`
+  - `db-with-tail` replays tail groups on the DB (with `db/with-datom`) and bumps `:max-tx` after each group
+  - `restore` convenience returns a DB with tail applied
+- Addresses and GC
+  - `addresses` walks all nodes in all three indices of given DBs and includes root/tail; returns the set of in-use addresses
+  - `collect-garbage` loads the current DB (to protect it), discovers all addresses in use (including weakly referenced DBs), and deletes any others via `-delete`
+  - Weak references are kept for previously stored DBs to assist GC discovery
+- CLJS stubs
+  - `storage.cljs` is a placeholder in CLJS (persistence is CLJ‑only)
+
+- Serialization format (serialize.cljc)
+  - serializable(db, opts): returns a platform‑neutral data structure with keys:
+    - `"count"`, `"tx0"`, `"max-eid"`, `"max-tx"`, `"schema"` (via `:freeze-fn`, default `pr-str`/edn),
+      `"attrs"` (attribute keywords table), `"keywords"` (other keywords table),
+      `"eavt"` (array of [e a-idx v tx-offset]), `"aevt"`/`"avet"` (arrays of indices pointing into `eavt`), and (CLJ) `"branching-factor"`, `"ref-type"` from settings
+  - Values encoding: numbers/strings/booleans inlined; special markers for `##Inf`/`##-Inf`/`##NaN`; keywords use indexes; other types via `:freeze-fn`
+  - from-serializable(data, opts): reconstructs datoms and indexes, thaws schema/keywords, and builds a DB via `db/restore-db`; merges optional settings `:branching-factor`/`:ref-type`
+  - JVM caveat: serializable uses a global lock to serialize one DB at a time
+
 --------------------------------------------------------------------------------
 
 Section 8: Utilities & Support
