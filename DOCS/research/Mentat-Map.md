@@ -189,3 +189,383 @@ Status
 
 - This project is archived/unmaintained. Expect to fork for new development, update dependencies, and make local decisions about optional features (e.g., whether to keep sync or the CLI).
 
+
+
+MORE
+----
+
+› looking at all of the subfolders in the REFERENCE/mentat/ subfolder can you help me understand kind of a mental model of what each one is? what are the traits folders? which
+  folders have a README.md and which don't? Why is that? What's the common link there? is my understanding correct that the most important subfolders are db, edn, query-algebrizer,
+  query-projector, sql, and transaction, but maybe I'm missing something?
+
+    List mentat
+
+• Ran python - << 'PY'
+
+
+• Explored
+  └ Search ^\[package\]|^name\s*=|^description\s*= in Cargo.toml
+    Read README.md
+    List public-traits
+    List core-traits
+    Read README.md, lib.rs, errors.rs
+    List core
+    Read lib.rs
+    Read Cargo.toml
+    Search ^(pub )?mod |^pub fn|struct |enum  in transaction
+    Read README.md, lib.rs, errors.rs
+    List automation
+    Search . in automation
+    List sdks
+    List tools
+    List cli
+
+─ Worked for 2m 59s ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Here’s a concise map of the Mentat workspace and how the pieces fit.
+
+  Mental Model
+
+  - src (REFERENCE/mentat/src): Main “mentat” crate that glues everything together into a public API (store, connection, transactions, queries).
+  - core (REFERENCE/mentat/core): Core types and schema mechanics shared across the project (schema maps, SQL/typed value bridging).
+  - db (REFERENCE/mentat/db): The storage engine on top of SQLite: bootstraps schema, transacts data, maintains caches, timelines, and watchers.
+  - transaction (REFERENCE/mentat/transaction): The in-progress transaction and query execution context; builders, prepared queries, and planning.
+  - edn (REFERENCE/mentat/edn): EDN parser and conversion into transactable forms (Mentat uses EDN for data and queries).
+  - query-algebrizer (REFERENCE/mentat/query-algebrizer): Turns parsed Datalog/EDN queries into an algebrized form bound to the current schema and facts.
+  - query-sql (REFERENCE/mentat/query-sql): Mentat’s structured representation of a SQL query (bridges the algebrizer output to SQL-building).
+  - sql (REFERENCE/mentat/sql): A small SQL builder that turns the query representation into SQL text and bound parameters.
+  - query-projector (REFERENCE/mentat/query-projector): Maps SQL row results into Datalog projections (find results) and shapes them for the caller.
+  - query-pull (REFERENCE/mentat/query-pull): Implements Datomic-style pull expressions for fetching nested/graph-shaped entity data.
+  - ffi (REFERENCE/mentat/ffi): FFI boundary (C ABI) used by Android/iOS SDKs.
+  - tolstoy (REFERENCE/mentat/tolstoy): Sync prototype: log-based reconciliation of local and remote timelines.
+  - Support/infrastructure:
+      - core-traits, db-traits, public-traits, query-*-traits, sql-traits, tolstoy-traits: Lightweight interface/error crates used for decoupling (see below).
+      - docs: Jekyll docs site; sdks: platform SDKs; tools/cli: CLI; automation, build, scripts: CI/Docker/build helpers; fixtures, tests: test data.
+
+  Traits Crates
+
+  - Purpose: Separate minimal interfaces and shared error types out of heavy crates to avoid cyclic deps, speed compile times, and allow feature-gated builds.
+  - Examples:
+      - core-traits (REFERENCE/mentat/core-traits): Fundamental shared types (e.g., value typing) used across crates.
+      - db-traits (REFERENCE/mentat/db-traits): DB-layer errors and small interfaces.
+      - query-algebrizer-traits, query-projector-traits, query-pull-traits (REFERENCE/mentat/query-*-traits): Error/result types and small interfaces for each query stage.
+      - sql-traits (REFERENCE/mentat/sql-traits): SQL builder error types.
+      - public-traits (REFERENCE/mentat/public-traits): Public Mentat error surface aggregating errors from all the above.
+      - tolstoy-traits (REFERENCE/mentat/tolstoy-traits): Sync-related errors and interfaces.
+
+  Which Subfolders Have README.md
+
+  - Have README.md:
+      - REFERENCE/mentat/README.md (top-level overview)
+      - REFERENCE/mentat/db/README.md
+      - REFERENCE/mentat/docs/README.md
+      - REFERENCE/mentat/edn/README.md
+      - REFERENCE/mentat/ffi/README.md
+      - REFERENCE/mentat/query-algebrizer/README.md
+      - REFERENCE/mentat/query-projector/README.md
+      - REFERENCE/mentat/sql/README.md
+      - REFERENCE/mentat/tolstoy/README.md
+  - Do not have README.md:
+      - Core/internal crates: core, transaction, query-sql, query-pull
+
+  Why that pattern? READMEs appear where external orientation is most helpful: public-facing or conceptually big crates (db, edn, query-{algebrizer, projector}, sql builder, ffi,
+  sync) and the top-level workspace. Traits crates and many internal building blocks are intentionally minimal and rely on inline docs and the top-level README’s “What are all of
+  these crates?” section.
+
+  Are These The Most Important?
+
+
+• Explored
+  └ Read query.rs
+    Search parse_find_string|algebrize_with_inputs|AlgebraicQuery|Known|query_to_select|ProjectedSelect|to_sql_query|SQLQuery|projector\.project in mentat
+    Search struct SQLQuery|impl .*SQLQuery|to_sql_query\( in query-sql
+    Read lib.rs
+    Read lib.rs
+    Search mod translate|fn query_to_select|enum ProjectedSelect in query-projector
+    Read translate.rs
+    Read translate.rs
+    Search ^pub fn parse_find_string\(|^pub fn algebrize_with_inputs\( in query-algebrizer
+    Read lib.rs
+    Read lib.rs
+    Read lib.rs
+    Search pub enum QueryOutput|pub enum QueryResults|struct ConstantProjector|trait Projector|pub type Result<|project\( in query-projector
+    Read mod.rs
+    Search struct SQLQuery|struct QueryBuilder|SQLiteQueryBuilder|push_sql\( in sql
+    Read lib.rs
+    Search pub fn pull_attributes_for_entity\( in lib.rs
+    Read lib.rs
+    Search pull_attributes_for_entity\( in lib.rs
+    Search pub fn pull\(|struct Puller|TwoStagePull|prepare\( in query-pull
+    Read lib.rs
+
+─ Worked for 1m 20s ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Here’s the end-to-end flow from an EDN Datalog query to results, plus how pull works.
+
+  Find Query Flow
+
+  - Entrypoint
+      - Call q_once/q_prepare from the public API (re-exported): REFERENCE/mentat/src/lib.rs:1
+      - Implementation lives in mentat_transaction::query:
+          - q_once: REFERENCE/mentat/transaction/src/query.rs:366
+          - q_prepare: REFERENCE/mentat/transaction/src/query.rs:391
+  - Parse EDN into a FindQuery
+      - parse_find_string uses mentat_core::parse_query to parse EDN text: REFERENCE/mentat/query-algebrizer/src/lib.rs:399
+  - Algebrize (bind to schema, check inputs)
+      - algebrize_with_inputs turns the parsed query into an AlgebraicQuery by walking where-clauses, deriving types, pruning, and validating order/limit: REFERENCE/mentat/query-
+        algebrizer/src/lib.rs:274
+      - AlgebraicQuery carries the FindSpec, ConjoiningClauses, order/limit, and can short-circuit emptiness: REFERENCE/mentat/query-algebrizer/src/lib.rs:340
+  - Early exit cases
+      - Known-empty queries skip SQL entirely and return an empty QueryOutput: REFERENCE/mentat/transaction/src/query.rs:335
+      - Known-constant queries project without rows: REFERENCE/mentat/transaction/src/query.rs:342
+  - Translate to a SQL-shaped plan + projector
+      - query_to_select(schema, algebrized) yields either:
+          - ProjectedSelect::Constant(ConstantProjector), or
+          - ProjectedSelect::Query { query: SelectQuery, projector }
+      - Implementation (SQL shape + projector choice) is in the projector translator:
+          - REFERENCE/mentat/query-projector/src/translate.rs:495
+          - Enum ProjectedSelect: REFERENCE/mentat/query-projector/src/translate.rs:253
+  - Build SQL text + bound args
+      - SelectQuery::to_sql_query() uses the SQL builder to emit a SQLQuery { sql, args }:
+          - REFERENCE/mentat/query-sql/src/lib.rs:647
+      - The builder (SQLiteQueryBuilder) applies SQLite-specific quoting, parameter names, and value serialization: REFERENCE/mentat/sql/src/lib.rs:86, REFERENCE/mentat/sql/src/
+        lib.rs:101, REFERENCE/mentat/sql/src/lib.rs:151
+  - Execute with rusqlite
+      - Prepare statement, bind args, and step rows:
+          - q_once path: REFERENCE/mentat/transaction/src/query.rs:351
+          - q_prepare path stores statement, args, projector: REFERENCE/mentat/transaction/src/query.rs:421
+  - Project rows into Datalog results
+      - The Projector (chosen earlier) reads Rows, converts SQLite values to TypedValue (via schema + mentat_db conversions), and shapes them per FindSpec:
+          - Trait method: REFERENCE/mentat/query-projector/src/projectors/mod.rs:23
+      - Return QueryOutput { spec, results }, then helpers convert to scalar/tuple/coll/rel forms:
+          - IntoResult helpers on QueryExecutionResult: REFERENCE/mentat/transaction/src/query.rs:312
+  - Notes on caching and inputs
+      - Known { schema, cache } provides an optional attribute cache that the algebrizer/translator consult to pruning or avoid SQL in some cases: REFERENCE/mentat/query-algebrizer/
+        src/lib.rs:316 and REFERENCE/mentat/query-algebrizer/src/lib.rs:274
+
+  Pull Flow
+
+  - Embedded pull in :find
+      - If the query uses (pull …), the translator selects a two-stage projector (fetch rows, then pull nested data) such as ScalarTwoStagePullProjector, RelTwoStagePullProjector,
+        etc.: REFERENCE/mentat/query-projector/src/projectors/mod.rs:41
+      - The first stage is a regular SQL query; the second stage uses the pull engine to fetch attributes for the bound entity IDs.
+  - Direct pull API
+      - Prepare a Puller and fetch a map of entity → structured map:
+          - Puller::prepare: REFERENCE/mentat/query-pull/src/lib.rs:156
+          - pull_attributes_for_entities: REFERENCE/mentat/query-pull/src/lib.rs:127
+      - The puller iteratively fetches attribute layers using the schema and DB connection, shaping results into nested maps keyed by attribute keywords.
+
+  Where Each Stage Lives
+
+  - Parsing: mentat_core::parse_query (re-export), invoked from query-algebrizer parse wrapper: REFERENCE/mentat/query-algebrizer/src/lib.rs:399
+  - Algebrizer: REFERENCE/mentat/query-algebrizer/src/lib.rs:274
+  - Translator (to SQL shape + projector): REFERENCE/mentat/query-projector/src/translate.rs:495
+  - SQL representation: REFERENCE/mentat/query-sql/src/lib.rs:1
+  - SQL builder (text + bindings): REFERENCE/mentat/sql/src/lib.rs:46
+  - Execution wrapper + prepared queries: REFERENCE/mentat/transaction/src/query.rs:366
+  - Projectors (row → Datalog): REFERENCE/mentat/query-projector/src/projectors/mod.rs:23
+  - Pull engine: REFERENCE/mentat/query-pull/src/lib.rs:141
+
+  Typical Call Snippets
+
+  - One-shot query: q_once(conn, Known::new(&schema, cache_opt), "[:find ?e :where [?e :person/name \"Alice\"]]", None) → QueryOutput (see REFERENCE/mentat/transaction/src/
+    query.rs:366)
+  - Prepared query: q_prepare(conn, Known::new(&schema, cache_opt), q, inputs)?.run(None) (see REFERENCE/mentat/transaction/src/query.rs:391)
+  - Pull: Puller::prepare(&schema, attrs)?.pull(&schema, &conn, entities) (see REFERENCE/mentat/query-pull/src/lib.rs:156)
+
+  If you want, I can annotate a concrete example query end-to-end and show the generated SQL and the projector shape produced.
+
+
+
+
+I need you to read every file from the following sections in the @REFERENCE/mentat/ folder into the context. After you read the full contents of every file from a section into the context you should provide an executive summary of your understanding. Sound good? Make sure you employ a solid chunking/streaming read process so you can avoid truncation on large files.
+
+
+--------------------------------------------------------------------------------
+
+Section 1:
+ 
+  ├── src/
+  │   ├── conn.rs
+  │   ├── lib.rs
+  │   ├── query_builder.rs
+  │   ├── store.rs
+  │   ├── sync.rs
+  │   └── vocabulary.rs
+
+--------------------------------------------------------------------------------
+ 
+Section 2:
+
+  ├── core/
+  │   ├── Cargo.toml
+  │   └── src/
+  │       ├── cache.rs
+  │       ├── counter.rs
+  │       ├── lib.rs
+  │       ├── sql_types.rs
+  │       ├── tx_report.rs
+  │       ├── types.rs
+  │       └── util.rs
+  ├── core-traits/
+  │   ├── Cargo.toml
+  │   ├── lib.rs
+  │   ├── value_type_set.rs
+  │   └── values.rs
+
+--------------------------------------------------------------------------------
+
+Section 3:
+
+  ├── db/
+  │   ├── README.md
+  │   ├── Cargo.toml
+  │   ├── src/
+  │   │   ├── add_retract_alter_set.rs
+  │   │   ├── bootstrap.rs
+  │   │   ├── debug.rs
+  │   │   ├── entids.rs
+  │   │   ├── internal_types.rs
+  │   │   ├── lib.rs
+  │   │   ├── metadata.rs
+  │   │   ├── schema.rs
+  │   │   ├── timelines.rs
+  │   │   ├── tx.rs
+  │   │   ├── tx_checking.rs
+  │   │   ├── tx_observer.rs
+  │   │   ├── types.rs
+  │   │   ├── upsert_resolution.rs
+  │   │   └── watcher.rs
+  │   └── tests/
+  │       └── value_tests.rs
+
+--------------------------------------------------------------------------------
+
+Section 4:
+
+  ├── transaction/
+  │   ├── Cargo.toml
+  │   └── src/
+  │       ├── entity_builder.rs
+  │       ├── lib.rs
+  │       ├── metadata.rs
+  │       └── query.rs
+
+--------------------------------------------------------------------------------
+
+Section 5:
+
+  ├── edn/
+  │   ├── README.md
+  │   ├── build.rs
+  │   ├── Cargo.toml
+  │   ├── src/
+  │   │   ├── edn.rustpeg
+  │   │   ├── entities.rs
+  │   │   ├── intern_set.rs
+  │   │   ├── lib.rs
+  │   │   ├── matcher.rs
+  │   │   ├── namespaceable_name.rs
+  │   │   ├── pretty_print.rs
+  │   │   ├── query.rs
+  │   │   ├── symbols.rs
+  │   │   ├── types.rs
+  │   │   ├── utils.rs
+  │   │   └── value_rc.rs
+  │   └── tests/
+  │       ├── query_tests.rs
+  │       ├── serde_support.rs
+  │       └── tests.rs
+
+--------------------------------------------------------------------------------
+
+Section 6:
+
+  ├── query-algebrizer/
+  │   ├── README.md
+  │   ├── Cargo.toml
+  │   ├── src/
+  │   │   ├── lib.rs
+  │   │   ├── types.rs
+  │   │   ├── validate.rs
+  │   │   └── clauses/
+  │   │       ├── convert.rs
+  │   │       ├── fulltext.rs
+  │   │       ├── ground.rs
+  │   │       ├── inputs.rs
+  │   │       ├── mod.rs
+  │   │       ├── not.rs
+  │   │       ├── or.rs
+  │   │       ├── predicate.rs
+  │   │       ├── resolve.rs
+  │   │       ├── tx_log_api.rs
+  │   │       └── where_fn.rs
+  │   └── tests/
+  │       ├── fulltext.rs
+  │       ├── ground.rs
+  │       ├── predicate.rs
+  │       ├── type_reqs.rs
+  │       └── utils/
+  │           └── mod.rs
+
+--------------------------------------------------------------------------------
+
+Section 7:
+
+  ├── query-sql/
+  │   ├── Cargo.toml
+  │   └── src/
+  │       └── lib.rs
+
+--------------------------------------------------------------------------------
+
+Section 8:
+
+  ├── sql/
+  │   ├── README.md
+  │   ├── Cargo.toml
+  │   └── src/
+  │       └── lib.rs
+
+--------------------------------------------------------------------------------
+
+Section 9:
+
+  ├── query-projector/
+  │   ├── README.md
+  │   ├── Cargo.toml
+  │   └── src/
+  │       ├── binding_tuple.rs
+  │       ├── lib.rs
+  │       ├── project.rs
+  │       ├── pull.rs
+  │       ├── relresult.rs
+  │       ├── translate.rs
+  │       └── projectors/
+  │           ├── constant.rs
+  │           ├── mod.rs
+  │           ├── pull_two_stage.rs
+  │           └── simple.rs
+
+--------------------------------------------------------------------------------
+
+Section 10:
+
+  ├── query-pull/
+  │   ├── Cargo.toml
+  │   └── src/
+  │       └── lib.rs
+
+--------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
