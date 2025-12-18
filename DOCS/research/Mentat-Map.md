@@ -4,16 +4,20 @@ Mentat Repository Map
 Purpose: Provide a clear map of this repository – what each crate/module does, how the pieces fit together, and the reasoning behind the major design choices. Mentat is an unmaintained Rust project that implements a persistent, embedded knowledge base inspired by Datomic/DataScript. The project favors strong separation of concerns via multiple sub‑crates, typed EDN values, and SQLite as the storage engine.
 
 
+
 Big Picture
 -----------
+
 - Mentat models facts and queries with Datalog semantics, stores data in SQLite, and exposes a convenient API for transactions and query (including pull). 
 - The codebase is organized as a Rust workspace of many small crates to speed up builds, enforce encapsulation, and enable optional features (e.g., sync). 
 - EDN is used as a rich interchange format for both data and queries. 
 - The query engine is staged: parse EDN → algebrize against schema → translate/project → emit SQL → execute → project results back to rich types.
 
 
+
 Design Principles & Rationale
 -----------------------------
+
 - Separate crates for clearer boundaries and faster iteration
   - Incremental builds: change isolation dramatically improves compile times on a large codebase.
   - Encapsulation: depending on a crate boundary is a stronger signal than `mod use`; it stabilizes interfaces and discourages tight coupling.
@@ -39,8 +43,10 @@ Design Principles & Rationale
   - Inspired by log‑centric architectures to support timelines and offline/device sync without entangling the core database.
 
 
+
 Crate Map (What each crate does)
 ---------------------------------
+
 Foundations
 - edn/: EDN parsing and value representation. PEG grammar (`edn.rustpeg`), keyword/symbol handling, query EDN utilities. Provides the typed external format that Mentat consumes and produces.
 - core/ (mentat_core): Core types/utilities used across the system (e.g., `TypedValue`, `ValueType`, SQL type mapping, tx reports, small shared utilities).
@@ -101,8 +107,10 @@ Automation & Development Tools
 - .vscode/: Workspace settings, tasks, and test runner configuration for contributors.
 
 
+
 How the Pieces Fit (data and control flow)
 ------------------------------------------
+
 1) Input and data model
    - Application code prepares EDN data and/or EDN‑shaped queries. Keywords and variables are constructed ergonomically (`kw!`, `var!`).
 
@@ -120,8 +128,10 @@ How the Pieces Fit (data and control flow)
    - If enabled, `tolstoy` tracks local transactions, communicates with a remote log, and merges remote updates back into the local store.
 
 
+
 Dependency Highlights (local path dependencies)
 -----------------------------------------------
+
 The workspace uses path dependencies to maintain a layered architecture. A simplified build order (dependencies first):
 
 ```
@@ -134,8 +144,10 @@ Key relationships:
 - Trait crates (`*_traits`, `public-traits`, `sql-traits`, `db-traits`, `tolstoy-traits`) define interfaces and errors to reduce coupling and allow optional compilation of heavy features.
 
 
+
 Why these choices?
 ------------------
+
 - Rust rewrite (from earlier Clojure/JS Datomish) 
   - Goals: smaller binaries, better performance, stronger type guarantees, better tooling, and mobile/Firefox embedding ease.
 
@@ -152,8 +164,10 @@ Why these choices?
   - Keeps core lean for apps that don’t need sync, while enabling a log‑based model for those that do.
 
 
+
 Working in this Repo
 --------------------
+
 - Build everything: `cargo build`
 - Run all tests: `cargo test --all`
 - Work on a single crate: `cargo test -p mentat_query_algebrizer` (or `cargo build -p …`)
@@ -162,6 +176,7 @@ Working in this Repo
 
 At a Glance
 -----------
+
 - Use `mentat` for the API surface.
 - Storage lives in `mentat_db`; EDN parsing in `edn`.
 - Query is staged across `query-algebrizer` → `query-sql`/`sql` → `query-projector` and `query-pull`.
@@ -171,5 +186,6 @@ At a Glance
 
 Status
 ------
+
 - This project is archived/unmaintained. Expect to fork for new development, update dependencies, and make local decisions about optional features (e.g., whether to keep sync or the CLI).
 
