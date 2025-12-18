@@ -360,11 +360,34 @@ Section 5: Entities (Lazy Views)
 Executive Summary
 
 - Entities are lazy, map-like views over DB; attributes are fetched on-demand and cached per-entity.
-- Reverse refs via `:_attr`/`:ns/_attr`, component refs collapse to a single entity; entity equality is by id.
+- Reverse refs via `:_attr`/`:ns/_attr`, component refs collapse to a single entity; entity equality is by the pair (DB identity, entity id).
 
 Modules
 
 - REFERENCE/datascript/src/datascript/impl/entity.cljc
+
+Details
+
+- Construction and identity
+  - `datascript.impl.entity/entity db eid` resolves `eid` (number, lookup-ref, or keyword `:db/ident`) and returns an `Entity` only if the numeric eid exists in DB.
+  - Equality and hashing use both DB identity and eid; entities from different DB values or versions are not equal even with the same eid.
+- Read-only, map-like interface
+  - Implements associative lookup (`(:attr e)` / `(get e :attr not-found)`), `IFn` call syntax `(e :attr)`, `ILookup`, `ISeqable`, `ICounted`.
+  - Unsupported mutations: `assoc`, `cons`, `empty` throw.
+  - Printing and seq/count expose only cached attributes; `touch` populates cache first.
+- Attribute value shapes
+  - Cardinality many scalars → set of values.
+  - Cardinality many refs → set of Entities.
+  - Single ref → Entity; single scalar → value.
+  - Reverse refs (`:_attr`/`:ns/_attr`): set of Entities unless `:db/isComponent`, in which case a single Entity.
+  - Special key `:db/id` returns eid.
+- Caching and `touch`
+  - First lookup for a forward attr queries DB and caches the result in the entity-local cache; subsequently returned from cache.
+  - `touch` eagerly loads all forward attrs via `db/-search [eid]`, partitions by attr, computes values with the same shape rules, and recursively touches component refs.
+  - Reverse refs are computed on demand and are not cached on the entity.
+- JS interop (CLJS)
+  - Entities behave as JS Maps: `keys()`, `entries()`, `values()`, `has(k)`, `get(k)`; multival results are converted to arrays for JS.
+  - `get(":db/id")` returns eid; reverse get uses `"_attr"` naming; iteration yields currently cached attributes (use `touch` to prefill).
 
 --------------------------------------------------------------------------------
 
