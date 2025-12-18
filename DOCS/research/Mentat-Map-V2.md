@@ -647,3 +647,45 @@ Section 6:
 
 --------------------------------------------------------------------------------
 
+- Purpose: Transforms parsed Datalog (EDN) queries into an algebraic form (AlgebraicQuery) suitable for deterministic SQL generation over Mentat’s schema. Central entry is src/
+lib.rs.
+- Core types: src/types.rs defines SQL-facing concepts (DatomsTable, Column, QualifiedAlias), logical constraints (ColumnConstraint, ColumnIntersection/ColumnAlternation),
+comparison ops (Inequality), computed sources (ComputedTable: Subquery, Union, NamedValues), and evolved query shapes (Evolved*).
+- ConjoiningClauses engine: src/clauses/mod.rs holds the main state machine for algebrization. It:
+    - Tracks FROM sources, computed tables, WHERE intersections/alternations, variable→column bindings, value bindings, known/extracted types, and required type sets.
+    - Aliases tables, binds columns/values, narrows/broadens ValueTypeSet, processes type requirements into HasTypes constraints, expands inter-column equalities, prunes extracted
+    types.
+    - Orchestrates clause application order and pattern evolution and marks query “known empty” (EmptyBecause) for impossible constraints.
+- Pattern handling: src/clauses/pattern.rs converts EDN patterns to EvolvedPattern using schema/caches, chooses tables (Datoms/AllDatoms/Fulltext*) based on attribute/value/
+fulltext, binds appropriate columns, and enforces type congruence.
+- Predicates and type annotations: src/clauses/predicate.rs resolves inequality predicates (<, <=, >, >=, !=) with type inference and intersection of supported types, plus
+TypeAnnotation constraints (type ?v …).
+- Logical operators:
+    - OR/OR-join: src/clauses/or.rs detects “simple” ORs (same shape/table) and compiles to alternations over one alias, or else builds UNIONs of sub-CCs with consistent projection
+    and optional per-arm type-tag projection.
+    - NOT/NOT-join: src/clauses/not.rs builds NOT EXISTS subqueries, enforcing that join vars are bound in the outer CC (or error if unbound).
+    - Validation of unify vars is in src/validate.rs.
+- Data grounding and functions:
+    - ground: src/clauses/ground.rs supports scalar/tuple/collection/relation groundings; materializes NamedValues computed tables, propagates/validates types, and filters
+    impossible rows.
+    - fulltext: src/clauses/fulltext.rs builds FTS join (FulltextValues + Datoms) matching text, binding entity/value/tx/score with appropriate type constraints.
+    - tx-log API: src/clauses/tx_log_api.rs implements (tx-ids) and (tx-data) via Transactions table, exposing e/a/v/tx/added and range constraints.
+    - where-fn dispatch in src/clauses/where_fn.rs; argument resolvers (numeric/instant/ref) in src/clauses/resolve.rs; FnArg→TypedValue conversion in src/clauses/convert.rs.
+    - Query inputs: src/clauses/inputs.rs models input variable types/values with validation (QueryInputs).
+- Algebrization flow: src/lib.rs parses/validates find query, seeds CC with inputs, derives types from find spec (e.g., pull vars→Ref), applies clauses, expands binding equalities,
+prunes/extracts types, processes required types, validates/expands ordering needs (OrderBy + type tags), finalizes AlgebraicQuery and simplifies variable limits.
+- Caching integration: Known (src/lib.rs) abstracts schema + CachedAttributes for reverse/forward lookups, enabling pattern specialization and early failure during algebrization.
+- Tests: cover fulltext, ground variations (including heterogeneous and placeholder cases), predicate/typing behavior (numeric vs instant), OR/NOT validation and semantics, type
+requirement propagation, and tx-log APIs. Utilities in tests/utils/mod.rs help build schemas and run algebrization.
+
+--------------------------------------------------------------------------------
+
+Section 7:
+
+  ├── query-sql/
+  │   ├── Cargo.toml
+  │   └── src/
+  │       └── lib.rs
+
+--------------------------------------------------------------------------------
+
