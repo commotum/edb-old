@@ -3,11 +3,11 @@ Here’s the end-to-end flow from an EDN Datalog query to results, plus how pull
 Find Query Flow
 
 - Entrypoint
-    - Call q_once/q_prepare from the public API (re-exported): REFERENCE/mentat/src/
-    lib.rs:1
-    - Implementation lives in mentat_transaction::query:
-        - q_once: REFERENCE/mentat/transaction/src/query.rs:366
-        - q_prepare: REFERENCE/mentat/transaction/src/query.rs:391
+    - One-shot queries are re-exported at the top-level: use mentat::q_once.
+    - Prepared/explain/uncached query entrypoints live in mentat_transaction::query
+      and are exposed via Conn/Store wrappers (e.g., Conn::q_prepare, Conn::q_explain,
+      Conn::q_uncached).
+    - Implementations are in REFERENCE/mentat/transaction/src/query.rs.
 - Parse EDN into a FindQuery
     - parse_find_string uses mentat_core::parse_query to parse EDN text: REFERENCE/
     mentat/query-algebrizer/src/lib.rs:399
@@ -72,26 +72,26 @@ Pull Flow
 
 Where Each Stage Lives
 
-- Parsing: mentat_core::parse_query (re-export), invoked from query-algebrizer parse
-wrapper: REFERENCE/mentat/query-algebrizer/src/lib.rs:399
-- Algebrizer: REFERENCE/mentat/query-algebrizer/src/lib.rs:274
-- Translator (to SQL shape + projector): REFERENCE/mentat/query-projector/src/
-translate.rs:495
-- SQL representation: REFERENCE/mentat/query-sql/src/lib.rs:1
-- SQL builder (text + bindings): REFERENCE/mentat/sql/src/lib.rs:46
-- Execution wrapper + prepared queries: REFERENCE/mentat/transaction/src/query.rs:366
-- Projectors (row → Datalog): REFERENCE/mentat/query-projector/src/projectors/mod.rs:23
-- Pull engine: REFERENCE/mentat/query-pull/src/lib.rs:141
+- Parsing: mentat_core::parse_query (re-export), invoked from algebrizer parse
+  wrapper: REFERENCE/mentat/query-algebrizer/src/lib.rs
+- Algebrizer: REFERENCE/mentat/query-algebrizer/src/lib.rs
+- Translator (to SQL shape + projector): REFERENCE/mentat/query-projector/src/translate.rs
+- SQL representation: REFERENCE/mentat/query-sql/src/lib.rs
+- SQL builder (text + bindings): REFERENCE/mentat/sql/src/lib.rs
+- Execution wrapper + prepared queries: REFERENCE/mentat/transaction/src/query.rs
+- Projectors (row → Datalog): REFERENCE/mentat/query-projector/src/projectors/mod.rs
+- Pull engine: REFERENCE/mentat/query-pull/src/lib.rs
 
 Typical Call Snippets
 
-- One-shot query: q_once(conn, Known::new(&schema, cache_opt), "[:find ?e :where [?
-e :person/name \"Alice\"]]", None) → QueryOutput (see REFERENCE/mentat/transaction/
-src/query.rs:366)
-- Prepared query: q_prepare(conn, Known::new(&schema, cache_opt), q, inputs)?.run(None)
-(see REFERENCE/mentat/transaction/src/query.rs:391)
-- Pull: Puller::prepare(&schema, attrs)?.pull(&schema, &conn, entities) (see REFERENCE/
-mentat/query-pull/src/lib.rs:156)
+- One-shot query (top-level):
+    mentat::q_once(conn, Known::new(&schema, cache_opt),
+                   "[:find ?e :where [?e :person/name \"Alice\"]]", None)
+      → QueryOutput
+- Prepared query (via Conn):
+    conn.q_prepare(&sqlite_conn, query_str, inputs)?.run(None)
+- Pull (via Conn):
+    conn.pull_attributes_for_entities(&sqlite_conn, eids, attrs)
 
 If you want, I can annotate a concrete example query end-to-end and show the generated
 SQL and the projector shape produced.
@@ -129,8 +129,8 @@ core decoupled from these concerns.
 Modules
 
 - REFERENCE/mentat/src/lib.rs: Crate entry; re‑exports core types/traits, defines var!
-and kw! macros, exposes Conn, Store, QueryBuilder, and Syncable/SyncReport behind
-features.
+and kw! macros, re‑exports q_once, exposes Conn, Store, QueryBuilder, and
+Syncable/SyncReport behind features.
 - REFERENCE/mentat/src/conn.rs: Conn encapsulates Metadata and TxObservationService.
 Methods for:
     - Queries (q_once, q_uncached, q_prepare, q_explain) using current schema and
@@ -485,6 +485,9 @@ read‑only wrapper.
     - Query execution: q_once, q_uncached, q_prepare (validated no unbound vars), and
     q_explain (returns SQLQuery + EQP steps). Uses algebrizer to transform EDN
     queries to SQL, projector to map rows to TypedValue structures.
+    - PreparedQuery shapes: Empty (known empty, carries FindSpec), Constant
+      (ConstantProjector; projects without rows), and Bound (prepared rusqlite
+      Statement + SQL args + Projector). All executed via PreparedQuery::run().
     - Lookup helpers: lookup_value(_for_attribute) and lookup_values(_for_attribute)
     return cached values when attribute is registered, otherwise run minimal queries.
 - Metadata: Metadata aggregates generation, PartitionMap, shared Schema, and persistent
