@@ -506,6 +506,38 @@ Executive Summary
 - `lru.cljc`: small generic LRU cache (used by query/pull caches).
 - `js.cljs`: exports DataScript API to JS runtime for CLJS builds (q, pull, pull_many, entity, etc.).
 
+Details
+
+- util.cljc
+  - Debug/log: `*debug*` dynamic flag. `log` macro prints only when JVM system property `datascript.debug` is set and `*debug*` is true.
+  - Errors: `raise` macro constructs `ex-info` with a concatenated message; non-strings are `pr-str`’d; last arg is data map.
+  - Flow macros: `if+` extends `and` with inline `:let` bindings available downstream and in then-branch. `cond+` adds `:do`, `:let`, `:some` clauses and delegates to `if+`.
+  - Convenience: `some-of`, `distinct-by`, `find`, `single`, `concatv`, `zip`, `removem`, `conjv`/`conjs`, `reduce-indexed`.
+  - squuid: `squuid` (time-ordered UUID) and `squuid-time-millis` (extraction); CLJS helpers for hex formatting.
+
+- lru.cljc
+  - `LRU` stores key→gen and gen→key to implement eviction by generation; `assoc-lru` refreshes on access; `cleanup-lru` removes the oldest when over limit.
+  - `cache limit` returns `ICache` with `-get key compute-fn`: returns cached (refreshing gen) or computes, caches, and returns value. Used for parser/pull/query caches.
+
+- js.cljs (CLJS interop)
+  - Conversions:
+    - `schema->clj` keywordizes strings like ":name" and deeply keywordizes values.
+    - `entity-map->clj` rewrites JS maps with string key ":db/id" into keyword `:db/id`.
+    - `entity->clj` converts tx forms; supports `:db.fn/call` by wrapping a function to convert returned entities back to CLJ.
+    - `entities->clj` maps a collection; `js->Datom` accepts arrays/objects.
+    - `tx-report->js` shapes reports for JS; `pull-result->js` stringifies keywords.
+  - Exported API:
+    - DB: `empty_db`, `init_db`, `serializable` (uses `{:freeze-kw identity}`), `from_serializable` (uses `{:thaw-kw identity}`), `db_with`.
+    - Entities: `entity`, `touch`, `entity_db`, `filter`, `is_filtered`.
+    - Connections: `create_conn`, `conn_from_db`, `conn_from_datoms`, `db`, `transact`, `reset_conn`, `listen`, `unlisten`.
+    - Query/Pull: `q` (EDN string), `pull`, `pull_many`.
+    - Index: `datoms`, `seek_datoms`, `index_range`.
+    - Misc: `resolve_tempid`, `squuid`, `squuid_time_millis`.
+  - Behavior:
+    - `transact` calls internal `conn/-transact!` and then notifies listeners with the JS-shaped report; returns immediately (realized future analogue).
+    - `pull`/`pull_many` parse EDN pattern strings; results are JS with keywords stringified.
+    - `datoms` returns JS arrays; `resolve_tempid` expects string keys.
+
 Notes
 
 - DataScript is in-memory by default; persistence is optional and primarily for CLJ.
