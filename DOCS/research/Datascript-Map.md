@@ -172,7 +172,7 @@ Executive Summary
   - `Datom` type and accessors; rich comparators and slices for index scans.
   - Schema map with flags: `:db/unique`, `:db.cardinality/*`, `:db/isComponent`, ref types.
   - Transact pipeline (`transact-tx-data`): validates tx-data, applies adds/retracts, resolves lookup refs and tempids, updates indexes, returns TxReport.
-  - Time/filters: as-of, since, and filtered DB views.
+  - Filters: filtered DB views via a `FilteredDB` wrapper.
 - Performance helpers: JIT-friendly defrecords/defn+, array-backed collections and tight loops.
 
 Modules
@@ -180,6 +180,56 @@ Modules
 - REFERENCE/datascript/src/datascript/db.cljc: Datom/DB definitions, indices, schema, transact and DB view operations.
 - REFERENCE/datascript/src/datascript/util.cljc: Small utilities (logging, collections, predicates).
 - REFERENCE/datascript/src/datascript/lru.cljc: Small LRU cache (used by query/pull parsing).
+
+Details
+
+- Types and printing
+  - `Datom` (fields: `e`, `a`, `v`, `tx`, plus internal `idx`/`_hash`). `datom` constructor and `datom?` predicate.
+  - Hashing/equality/lookup/indexed implemented for both CLJ/CLJS; `datom-tx` returns absolute tx, `datom-added` true when addition.
+  - Readers/printers: `datom-from-reader` for `#datascript/Datom [...]`; DB printers/readers (`db-from-reader`).
+- Comparators and indices
+  - Comparators: `cmp-datoms-eavt|aevt|avet` and faster `*-quick` variants; used by B-tree indices.
+  - Index API: `-datoms`, `-seek-datoms`, `-rseek-datoms`, `-index-range` via `IIndexAccess`; `find-datom` helper.
+  - `:avet` requires `:db/index` (or implied by `:db/unique`/ref/tuple); validated by `validate-indexed`.
+- DB structure
+  - `DB` record: `schema`, `rschema` (derived properties), `eavt`, `aevt`, `avet`, `max-eid`, `max-tx`, LRU caches (`pull-patterns`, `pull-attrs`), hash atom.
+  - Builders: `empty-db` (fresh sorted sets), `init-db` (from trusted datoms; sorts arrays to sets; computes `max-eid`/`max-tx`), `restore-db`.
+  - Transient/persistent helpers for indices; hash caching and `clojure.data/Diff` support.
+- Filtered DB
+  - `FilteredDB` wraps a base DB and proxies reads (`ISearch`, `IIndexAccess`, `IDB`), applying a predicate to results; cannot be mutated.
+- Schema model and validation
+  - `rschema` derives sets: `:db/unique`, `:db.unique/{identity,value}`, `:db/index`, `:db.cardinality/many`, `:db.type/ref`, `:db/isComponent`, `:db.type/tuple`; plus `:db/attrTuples` mapping tuple sources to tuples.
+  - Validation:
+    - `:db/isComponent true` requires `:db/valueType :db.type/ref`.
+    - `:db/unique` ∈ `{ :db.unique/value, :db.unique/identity }`.
+    - `:db/valueType` supports `:db.type/ref` and `:db.type/tuple` here.
+    - `:db/cardinality` ∈ `{ :db.cardinality/one, :db.cardinality/many }`.
+    - `:db/tupleAttrs` must be a non-empty sequential; cannot reference tuple attrs or cardinality many attrs; tuple attrs imply `:db/index`.
+- Entity id resolution
+  - `entid` resolves: positive numbers, lookup refs `[unique-attr value]` (including tuple attrs), and keywords via `:db/ident`.
+  - `entid-strict` throws on missing; `numeric-eid-exists?` helper.
+- Transactions pipeline
+  - `TxReport` fields: `:db-before`, `:db-after`, `:tx-data`, `:tempids`, `:tx-meta`.
+  - Tempids: negative ints, strings, and `AutoTempid`; tracked in `:tempids` (plus reverse mapping for upsert conflict checks).
+  - Prepass: `assoc-auto-tempids` injects `:db/id` or nested tempids; supports reverse attrs and nested entity maps.
+  - Operations:
+    - `:db/add` adds or overwrites attribute (multi-valued adds accumulate); uniqueness enforced by `validate-datom` on adds.
+    - `:db/retract` removes a specific datom; `:db.fn/retractAttribute` removes all datoms for an attr; `:db.fn/retractEntity` removes entity and inbound refs.
+    - `:db.fn/cas`/`:db/cas` compare-and-set against current value(s) (multi-valued and single cases differ).
+    - Tuple attrs cannot be directly modified unless the full tuple matches current DB values; tuples are queued and flushed via `::queued-tuples` and `flush-tuples`.
+    - Component refs (`:db/isComponent`) trigger cascading retracts.
+    - Transaction id use (`:db/current-tx` alias) auto-allocates the current tx entity id when used as `e` or `v` in refs.
+  - Upserts: identity attrs may route an entity to an existing eid; `resolve-upserts`/`validate-upserts` enforce consistency or raise conflicts.
+  - Value tempids: detects tempids used only as values and errors unless resolved by added datoms.
+  - Finalization: sets `:db/current-tx` in `:tempids`, increments `:max-tx`, strips `AutoTempid` keys from `:tempids`.
+- Errors (ex-info data)
+  - Schema: `:schema/validation`.
+  - Index access: `:index-access`.
+  - Lookup refs and entity ids: `:lookup-ref/syntax`, `:lookup-ref/unique`, `:entity-id`, `:entity-id/syntax`, `:entity-id/missing`.
+  - Transact: `:transact/syntax`, `:transact/unique`, `:transact/cas`, `:transact/upsert`.
+- Utilities and caches
+  - `datascript.util`: `raise`, `log`, `cond+`/`if+`, `squuid`, `squuid-time-millis`, `distinct-by`, `find`, `single`, `concatv`, `zip`, `removem`, `conjv`, `conjs`, `reduce-indexed`.
+  - `datascript.lru`: `LRU` map and `ICache` with `cache` for small, hot-path caches (used for pull pattern/attrs caches in `DB`).
 
 --------------------------------------------------------------------------------
 
