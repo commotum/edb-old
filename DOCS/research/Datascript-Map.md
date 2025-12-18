@@ -313,6 +313,41 @@ Modules
 - REFERENCE/datascript/src/datascript/pull_parser.cljc: `parse-pattern`, attr and map-spec parsing, reverse attrs, defaults.
 - REFERENCE/datascript/src/datascript/pull_api.cljc: `pull`, `pull-many`, and internal `pull-impl` used from query engine.
 
+Details
+
+- Pattern grammar (pull_parser.cljc)
+  - Pattern: sequence of items: attr-spec, map-spec, or wildcard (`*`, `"*"`, or `:*`).
+  - Attr-spec forms:
+    - `attr-name`: keyword or string naming an attribute; may be reverse (e.g. `:_friend`).
+    - `attr-expr`: `[attr-name :as k :limit n|nil :default v :xform sym-or-fn]+`.
+    - Legacy: `['limit attr-name n|nil]`, `['default attr-name v]`.
+  - Map-spec: `{attr-spec (pattern | recursion-limit)}`; recursion-limit is positive number or `'...` (unbounded).
+  - Attribute metadata derived from schema: `:ref?`, `:component?`, `:multival?`. Reverse names validated to be refs.
+  - Defaults:
+    - `:limit` defaults to 1000 for multival attrs; only allowed on `:db.cardinality/many` attrs.
+    - `:xform` defaults to `identity`; resolved from built-ins or (CLJ) requiring-resolve of namespaced symbol.
+    - For ref attrs without explicit subpattern: default is `[:db/id]`; for component refs: default is wildcard of the target entity.
+    - When wildcard is present in a pattern and `:db/id` is not explicitly included, `:db/id` is auto-inserted.
+  - Pattern normalization: attributes are sorted; `PullPattern` stores `:first-attr`/`:last-attr` for efficient index scans and holds forward attrs and `:reverse-attrs` separately.
+
+- Execution model (pull_api.cljc)
+  - Public API: `pull` and `pull-many` accept optional `{:visitor f}`. Visitor receives four args for each touch:
+    - `(:db.pull/attr e a nil)` when scanning a forward attr
+    - `(:db.pull/wildcard e nil nil)` when encountering wildcard expansion
+    - `(:db.pull/reverse nil a v)` when scanning a reverse attr
+  - Engine: stack of frames implementing `IFrame`:
+    - `AttrsFrame`: walks forward attrs, pairs them with datoms, applies `:default` when missing, and `:xform` on values (including `nil` if no datom).
+    - `MultivalAttrFrame`: collects scalar multi-valued attributes with `:limit` enforcement.
+    - `MultivalRefAttrFrame`: collects ref multi-valued attributes and spawns nested frames per id.
+    - `ReverseAttrsFrame`: walks `:reverse-attrs` after forward pass, scanning inbound references (uses `:avet` on DB when available).
+    - `ResultFrame`: carries a completed value plus any pending datoms for merging.
+  - Recursion and cycles:
+    - For recursive or auto-expanding component refs with wildcard subpattern, the engine tracks `seen` ids to break cycles and `recursion-limits` per attribute.
+    - Unbounded recursion via `'...` or bounded via a positive integer; when limit hits 0, traversal for that attr stops.
+  - Index use: on `DB`, uses `:eavt` for forward and `:avet` for reverse scans with narrow slices; otherwise falls back to `db/-search`/`-seek-datoms`.
+  - Wildcard expansion: for unmatched datoms before the next explicit attr, dynamically parses the datom’s attribute into a `PullAttr` (cached via LRU) and emits it.
+  - Merge rules: alias `:as` is the output key; `:default` is used when no datom; `:xform` is applied to values (including `nil`).
+
 --------------------------------------------------------------------------------
 
 Section 5: Entities (Lazy Views)
