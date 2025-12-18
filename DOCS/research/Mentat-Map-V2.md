@@ -689,3 +689,174 @@ Section 7:
 
 --------------------------------------------------------------------------------
 
+- Purpose: query-sql renders SQL from the algebrized query representation. It turns Mentat’s query IR (from query-algebrizer) into parameterized SQLite SQL using the mentat_sql
+builder and shared types from core, core-traits, sql-traits, and edn.
+- Core data model:
+    - ColumnOrExpression, Expression: Uniform representation of SQL “things” that can appear in projections/constraints, including columns (QualifiedAlias), constants (Entid,
+    TypedValue, ints), and unary expressions.
+    - Projection: Columns(Vec<ProjectedColumn>), Star, One to shape SELECT lists, with aliasing via sanitized identifiers.
+    - Constraint: Logical/relational predicates (Infix, And, Or, In, IsNull, IsNotNull, NotExists, TypeCheck) mapped to SQL with correct grouping and operator placement.
+    - Source model: TableOrSubquery covers physical tables (SourceAlias), Union of queries, nested Subquery, and inline Values relations (both Unnamed and Named forms).
+    - From/joins: TableList is shorthand for comma-separated inner joins; Join with JoinOp::Inner is present (constraints-on-join noted as TODO).
+    - Query shape: SelectQuery gathers distinct, projection, from, constraints, group_by, order (using OrderBy + Direction + VariableColumn), and limit (Limit::None|Fixed|Variable).
+- SQL generation:
+    - Implementations of QueryFragment for all the above pieces push SQL fragments into a QueryBuilder with proper identifier quoting and parameter binding.
+    - Helpers: qualified_alias_push_sql and source_alias_push_sql render qualified names and aliased sources. format_select_var produces stable, SQL-safe names for variables used in
+    projections and bind parameters (e.g., ?foo-1 → ifoo_1).
+    - Type affinity checks (TypeCheck) emit typeof(value) = '…' comparisons using SQLTypeAffinity derived from Mentat’s ValueType.
+    - SelectQuery::to_sql_query() produces a final SQLQuery with SQL text and bound args via SQLiteQueryBuilder.
+- Tests (in-module):
+    - Validate rendering for IN, AND parenthesization, VALUES (unnamed and named with headers), full-text MATCHES, equality against datoms columns, and end-to-end SELECT with
+    DISTINCT, multiple tables, and constraints.
+- Dependencies (Cargo):
+    - Bridges to edn, core-traits, mentat_core, mentat_sql, sql-traits, and mentat_query_algebrizer, reflecting its role as the SQL emission layer downstream of algebrization.
+
+--------------------------------------------------------------------------------
+
+Section 8:
+
+  ├── sql/
+  │   ├── README.md
+  │   ├── Cargo.toml
+  │   └── src/
+  │       └── lib.rs
+
+--------------------------------------------------------------------------------
+
+- Purpose: Tiny SQLite-focused SQL builder that safely composes SQL strings and named parameters; distilled from Diesel’s QueryBuilder.
+- Main files: REFERENCE/mentat/sql/Cargo.toml, REFERENCE/mentat/sql/README.md, REFERENCE/mentat/sql/src/lib.rs.
+- Core types:
+    - SQLQuery: final SQL plus ordered (name, Rc<Value>) args.
+    - QueryBuilder trait: push raw SQL, identifiers, TypedValues, named bind params, then finish.
+    - QueryFragment trait: composable pieces write themselves into a QueryBuilder.
+    - SQLiteQueryBuilder: concrete builder with backtick-escaped identifiers and generated $vN params.
+- Value handling (core_traits::TypedValue):
+    - Int/bool inline; doubles formatted in scientific notation to avoid integer coercion in SQLite.
+    - Instants via ToMicros; UUIDs, strings, keywords become parameters or static args.
+    - Strings/blobs deduped using internal maps; consolidated at finish.
+- Parameter rules:
+    - Named parameters only; push_bind_param validates names and forbids collisions with generated $vN.
+    - finish merges static + deduped args and sorts by name for deterministic order.
+- Safety/correctness:
+    - Identifiers quoted with backticks; errors via SQLError/BuildQueryResult.
+    - Unit tests validate SQL composition, quoting, value formatting, dedupe, and arg ordering.
+- Dependencies: rusqlite (with limits, optional sqlcipher), ordered-float, plus Mentat crates core, core-traits, sql-traits.
+
+--------------------------------------------------------------------------------
+
+Section 9:
+
+  ├── query-projector/
+  │   ├── README.md
+  │   ├── Cargo.toml
+  │   └── src/
+  │       ├── binding_tuple.rs
+  │       ├── lib.rs
+  │       ├── project.rs
+  │       ├── pull.rs
+  │       ├── relresult.rs
+  │       ├── translate.rs
+  │       └── projectors/
+  │           ├── constant.rs
+  │           ├── mod.rs
+  │           ├── pull_two_stage.rs
+  │           └── simple.rs
+
+--------------------------------------------------------------------------------
+
+- Purpose
+    - Bridges algebrized queries to executable SQL plus Datalog result shaping. Produces both the SQL projection (what columns and how) and a Datalog “projector” that converts
+    SQLite rows into Mentat bindings.
+- Core Types
+    - QueryOutput and QueryResults (src/lib.rs): Encapsulate a query’s FindSpec and its results in one of four shapes: Scalar, Tuple, Coll, Rel. Conversions enforce expected shapes
+    with clear errors.
+    - BindingTuple (src/binding_tuple.rs): Converts tuple results into Rust tuples (1–6) or Vec; validates expected width.
+    - CombinedProjection (src/lib.rs): Holds SQL projection, optional pre-aggregate projection (for nested queries), group-by columns, and a Datalog projector; flips DISTINCT off
+    when LIMIT 1.
+    - ProjectedElements (src/project.rs): Intermediate build product with inner/outer SQL projections, templates (TypedIndex), pulls, and GROUP BY info.
+    - TypedIndex (src/lib.rs): Knows where in a row to read a value and whether a type tag column is needed (Known vs Unknown).
+- Projection & Aggregation
+    - project_elements (src/project.rs): Walks FindSpec elements, producing inner SQL columns, outer references, typed templates, pulls, and tracking aggregates. Handles:
+        - Variable vs Corresponding (the ?x) semantics (min/max disambiguation).
+        - Type-tag projection when variables are not of uniquely known type.
+        - :with variables, ORDER BY named projection, and grouping.
+    - query_projection (src/lib.rs): Returns either a ConstantProjector for known-empty or fully unit-bound queries, or a CombinedProjection with the right projector. Aggregates
+    trigger a two-layer (inner distinct, outer aggregate) plan.
+- Translation to SQL
+    - translate.rs: Converts ConjoiningClauses to query-sql’s SelectQuery. Key pieces:
+        - Constraint building from column intersections/alternations and column constraints.
+        - Type constraints via value_type_tag and SQL type affinities (possible_affinities).
+        - cc_to_select_query constructs the SelectQuery with projection, from, constraints, group_by, order, and limit.
+        - re_project builds nested queries to apply DISTINCT correctly relative to aggregates and LIMIT/ORDER semantics.
+        - cc_to_exists yields a minimal “exists” query for CCs.
+- Projectors
+    - Simple projectors (src/projectors/simple.rs):
+        - ScalarProjector, TupleProjector, RelProjector, CollProjector.
+        - Decode row values via TypedIndex to Mentat Bindings, assembling the target shape.
+        - Distinct is avoided when already implied (e.g., aggregate inner or all columns are unit).
+    - Two-stage pull projectors (src/projectors/pull_two_stage.rs):
+        - ScalarTwoStagePullProjector, TupleTwoStagePullProjector, RelTwoStagePullProjector, CollTwoStagePullProjector.
+        - Stage 1: Collect entity IDs from rows. Stage 2: Use Puller (mentat_query_pull) to expand requested attributes and splice pulled maps into bindings.
+- Pull Support
+    - pull.rs: PullOperation (pattern), PullTemplate (indices + operation), PullConsumer collects eids from rows, executes pull, and expands/produces results.
+- Utilities & Results
+    - RelResult (src/relresult.rs): Strided container for relational results; supports reference access, iteration, and ownership conversion; includes tests for correctness.
+- Error Handling
+    - ProjectorError covers invalid projections (duplicates, conflicting (the ?x) usage), tuple width mismatches, unexpected result type conversions, and “not yet implemented” for
+    complex aggregates.
+- Dependencies & Integration
+    - Integrates with algebrizer (query structure), query-sql (SQL AST), db layer (TypedValue conversions), and query-pull (pull execution). Uses rusqlite, indexmap, and core Mentat
+    crates.
+
+--------------------------------------------------------------------------------
+
+Section 10:
+
+  ├── query-pull/
+  │   ├── Cargo.toml
+  │   └── src/
+  │       └── lib.rs
+
+--------------------------------------------------------------------------------
+
+- Purpose
+    - Implements “pull” evaluation: given a schema, SQLite connection, a set of entity IDs, and a pull spec (attributes and nested patterns), produce structured maps for each entity
+    with requested attributes, including nested and multi-valued attributes.
+- Key Types
+    - Puller: Core engine. Built via Puller::prepare(schema, attrs), which resolves attribute specs and aliases; internally derives an AttributeSpec for caching and optional :db/id
+    aliasing.
+    - PullResults: BTreeMap<Entid, ValueRc<StructuredMap>> mapping each entity to its result map.
+    - PullAttributeSpec / NamedPullAttribute / PullConcreteAttribute: Pull spec AST nodes imported from edn::query.
+- API Entry Points
+    - pull_attributes_for_entity(schema, db, entity, attributes) -> Result<StructuredMap>: Convenience to pull a given list of attributes for a single entity.
+    - pull_attributes_for_entities(schema, db, entities, attributes) -> Result<PullResults>: Bulk version for multiple entities.
+    - Puller::prepare(schema, attrs) -> Result<Puller>: Convert specs (idents or entids, optional aliasing, wildcard) into a ready-to-run puller.
+    - Puller::pull(schema, db, entities) -> Result<PullResults>: Executes the pull over a set of entities.
+- How Pull Works
+    - Preparation:
+        - Resolves attribute identifiers to entids via the schema, handles optional aliasing; supports wildcard [*] to include all attributes.
+        - Special-cases :db/id (ensures specified at most once) and supports aliasing of :db/id.
+        - Builds a cache::AttributeSpec describing requested attributes for efficient fetching.
+    - Execution:
+        - Materializes a set of entity IDs, constructs AttributeCaches via mentat_db::cache::make_cache_for_entities_and_attributes.
+        - Initializes result maps, seeding :db/id (aliased if requested).
+        - Iterates through requested attributes, looks up cached values per entity, and inserts Binding values into each entity’s StructuredMap.
+- Data Representation
+    - Values are Bindings, wrapping TypedValue or nested Map (ValueRc<StructuredMap>) to support sharing (pulled maps may appear multiple times or recursively).
+    - Uses ValueRc to allow interior mutation during assembly while retaining shared references for output.
+- Errors & Validation
+    - PullError for repeated :db/id, invalid attributes, and general failures.
+    - Preparation phase validates attribute existence; wildcard enumerates all attributes from the schema’s attribute map.
+- Integration & Dependencies
+    - Relies on:
+        - mentat_db::cache for constructing attribute caches from SQLite.
+        - mentat_core for schema, keywords, and ValueRc.
+        - edn::query for pull AST types.
+        - core_traits for typed values and entity IDs.
+        - rusqlite for DB access.
+    - Serves the query-projector’s two-stage pull projectors: projector collects entity IDs from SQL rows, then uses Puller to expand attributes and splice results into query
+    bindings.
+- Notes
+    - Current implementation focuses on flat attribute fetching; nested/recursive pull is architected to be done in stages, but recursion limits and deeper nesting behaviors are
+    stubbed in design comments.
+    - Wildcard pulls use schema’s attribute map to include all attributes; aliases respected where provided.
