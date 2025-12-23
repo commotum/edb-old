@@ -1,4 +1,5 @@
 use edb_encoding::ValueType;
+use crate::value_type_set::ValueTypeSet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -51,6 +52,11 @@ pub trait HasSchema {
     fn attribute_for_ident(&self, ident: &str) -> Option<&Attribute>;
     fn canonical_ident(&self, ident: &str) -> Option<String>;
     fn component_attributes(&self) -> Vec<String>;
+
+    fn attribute_value_type_set(&self, ident: &str) -> Option<ValueTypeSet> {
+        self.attribute_for_ident(ident)
+            .map(|attr| ValueTypeSet::of_one(attr.value_type))
+    }
 
     fn identifies_attribute(&self, ident: &str) -> bool {
         self.attribute_for_ident(ident).is_some()

@@ -44,6 +44,7 @@ EDB is a single-node, SQLite-backed database with:
 - Core types: `Attribute`, `Catalog`, `AttrCardinality`, `AttrUnique`.
 - SQLite adapter (feature `sqlite`): `SchemaCatalog` loads `attrs` and `aliases` tables into a `Catalog` plus alias map.
 - Mentat-style access trait: `HasSchema` exposes `attribute_for_ident`, `canonical_ident`, `identifies_attribute`, and `component_attributes`.
+- Type inference helper: `ValueTypeSet` supports unions/intersections and numeric type sets.
 - Alias resolution: `HasSchema::attribute_for_ident` resolves alias idents to canonical idents.
 - Used as the canonical schema source for query/algebrizer integration, with component attr list precomputed.
 
