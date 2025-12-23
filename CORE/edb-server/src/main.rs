@@ -524,24 +524,7 @@ fn run_query(conn: &rusqlite::Connection, db_path: &str, req: &QueryReq) -> Resu
 }
 
 fn map_vt(i: i64) -> Option<edb_encoding::ValueType> {
-    match i {
-        1 => Some(edb_encoding::ValueType::Long),
-        2 => Some(edb_encoding::ValueType::Double),
-        3 => Some(edb_encoding::ValueType::Boolean),
-        4 => Some(edb_encoding::ValueType::String),
-        5 => Some(edb_encoding::ValueType::Keyword),
-        6 => Some(edb_encoding::ValueType::Uuid),
-        7 => Some(edb_encoding::ValueType::Instant),
-        8 => Some(edb_encoding::ValueType::Ref),
-        9 => Some(edb_encoding::ValueType::Bytes),
-        10 => Some(edb_encoding::ValueType::Uint8),
-        11 => Some(edb_encoding::ValueType::Bigint),
-        12 => Some(edb_encoding::ValueType::Decimal),
-        13 => Some(edb_encoding::ValueType::Float32),
-        14 => Some(edb_encoding::ValueType::Float16),
-        15 => Some(edb_encoding::ValueType::Bfloat16),
-        _ => None,
-    }
+    edb_encoding::ValueType::try_from(i).ok()
 }
 
 #[cfg(test)]

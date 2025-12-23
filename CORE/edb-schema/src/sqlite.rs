@@ -124,22 +124,5 @@ impl HasSchema for SchemaCatalog {
 }
 
 fn map_value_type(v: i64) -> Option<ValueType> {
-    match v {
-        1 => Some(ValueType::Long),
-        2 => Some(ValueType::Double),
-        3 => Some(ValueType::Boolean),
-        4 => Some(ValueType::String),
-        5 => Some(ValueType::Keyword),
-        6 => Some(ValueType::Uuid),
-        7 => Some(ValueType::Instant),
-        8 => Some(ValueType::Ref),
-        9 => Some(ValueType::Bytes),
-        10 => Some(ValueType::Uint8),
-        11 => Some(ValueType::Bigint),
-        12 => Some(ValueType::Decimal),
-        13 => Some(ValueType::Float32),
-        14 => Some(ValueType::Float16),
-        15 => Some(ValueType::Bfloat16),
-        _ => None,
-    }
+    ValueType::try_from(v).ok()
 }

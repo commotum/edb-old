@@ -24,6 +24,31 @@ pub enum ValueType {
     Bfloat16 = 15,
 }
 
+impl TryFrom<i64> for ValueType {
+    type Error = ();
+
+    fn try_from(v: i64) -> Result<Self, Self::Error> {
+        match v {
+            1 => Ok(ValueType::Long),
+            2 => Ok(ValueType::Double),
+            3 => Ok(ValueType::Boolean),
+            4 => Ok(ValueType::String),
+            5 => Ok(ValueType::Keyword),
+            6 => Ok(ValueType::Uuid),
+            7 => Ok(ValueType::Instant),
+            8 => Ok(ValueType::Ref),
+            9 => Ok(ValueType::Bytes),
+            10 => Ok(ValueType::Uint8),
+            11 => Ok(ValueType::Bigint),
+            12 => Ok(ValueType::Decimal),
+            13 => Ok(ValueType::Float32),
+            14 => Ok(ValueType::Float16),
+            15 => Ok(ValueType::Bfloat16),
+            _ => Err(()),
+        }
+    }
+}
+
 fn varuint_be(mut n: u64) -> Vec<u8> {
     if n == 0 {
         return vec![0u8];

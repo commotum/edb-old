@@ -74,6 +74,7 @@ Transaction primitives are the normalized, concrete datoms applied to storage:
 `ValueType` enumerates the system value types:
 
 - Long, Double, Boolean, String, Keyword, Uuid, Instant, Ref, Bytes, Uint8, Bigint, Decimal, Float32, Float16, Bfloat16
+- Centralized `attrs.vt` decoding via `ValueType::try_from(i64)` to avoid duplicate mapping tables.
 
 ### Ordering-Preserving Binary Encodings
 

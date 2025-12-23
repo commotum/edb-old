@@ -730,24 +730,8 @@ impl<'a> DbView for SqliteDbView<'a> {
                 |r| {
                     let ident: String = r.get(0)?;
                     let vt_i: i64 = r.get(1)?;
-                    let vt = match vt_i {
-                        1 => edb_encoding::ValueType::Long,
-                        2 => edb_encoding::ValueType::Double,
-                        3 => edb_encoding::ValueType::Boolean,
-                        4 => edb_encoding::ValueType::String,
-                        5 => edb_encoding::ValueType::Keyword,
-                        6 => edb_encoding::ValueType::Uuid,
-                        7 => edb_encoding::ValueType::Instant,
-                        8 => edb_encoding::ValueType::Ref,
-                        9 => edb_encoding::ValueType::Bytes,
-                        10 => edb_encoding::ValueType::Uint8,
-                        11 => edb_encoding::ValueType::Bigint,
-                        12 => edb_encoding::ValueType::Decimal,
-                        13 => edb_encoding::ValueType::Float32,
-                        14 => edb_encoding::ValueType::Float16,
-                        15 => edb_encoding::ValueType::Bfloat16,
-                        _ => edb_encoding::ValueType::String,
-                    };
+                    let vt = edb_encoding::ValueType::try_from(vt_i)
+                        .unwrap_or(edb_encoding::ValueType::String);
                     let card_i: i64 = r.get(2)?;
                     let uniq_i: i64 = r.get(3)?;
                     let is_comp: i64 = r.get(4)?;
