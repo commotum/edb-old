@@ -1,6 +1,15 @@
-# Plan: Full Datalog Pipeline (Mentat-style)
+# Plan: Full Datalog Pipeline (Mentat/Datomic EDN)
 
-Goal: Support full EDN Datalog queries (Mentat/Datomic syntax) and execute them via EDB’s index stack (EAVT/AVET/AEVT/VAET), including joins, predicates, aggregates, or/not, and pull in `:find`.
+Goal: Support full EDN Datalog queries (Datomic/Mentat syntax) and execute them via EDB’s index stack (EAVT/AVET/AEVT/VAET), including joins, predicates, aggregates, or/not, rules, and pull in `:find`.
+
+This plan is updated with Datomic reference requirements from:
+- query grammar and clauses
+- query execution APIs and result shapes
+- pull syntax and semantics
+- EDN data types
+- entity semantics (for result shaping)
+- index model (EAVT/AEVT/AVET/VAET)
+- time filters (as-of/since/history)
 
 ## Scope
 
@@ -8,25 +17,71 @@ In scope:
 - EDN query parsing and validation.
 - Full Datalog planning and execution over index scans.
 - Pull in `:find` with nested specs.
-- Query result shaping (scalar/tuple/coll/rel).
+- Return map specs (`:keys`, `:strs`, `:syms`).
+- Rules and rule inputs.
+- Time filters (as-of/since/history) in query context.
 
 Out of scope (covered by other plans):
 - EDN transactions (map form and `:db/add` vectors).
-- Schema/vocabulary tooling beyond what is needed for querying.
+- Schema/vocabulary tooling beyond query needs.
 
 ## Constraints and Compatibility
 
-- Semantics should match Mentat/Datomic where possible.
-- The query planner must be Rust/WASM-friendly (no non-portable dependencies).
-- Query execution should prefer index scans over raw SQL to stay aligned with EDB’s indexes and future non-SQL backends.
-- Deviations from Datomic/Mentat must be explicitly documented.
+- Semantics should match Datomic/Mentat where possible.
+- Query planner must be Rust/WASM-friendly (no JVM/Clojure dependencies).
+- Prefer index scans over SQL to align with EDB indexes and future non-SQL backends.
+- Deviations from Datomic/Mentat must be documented and tested.
 
-## Target Pipeline Stages
+## Datomic Query Grammar Coverage (Parity Checklist)
+
+Target full support for:
+
+- `:find` shapes
+  - relation (`:find ?a ?b`)
+  - collection (`:find [?a ...]`)
+  - tuple (`:find [?a ?b]`)
+  - scalar (`:find ?a .`)
+  - pull expressions (`(pull ?e pattern)`)
+  - aggregates (`(count ?e)`, `(max ?v)`, etc)
+- `:with` clause to control duplicate collapse (bag semantics for aggregates).
+- `:in` clause
+  - `$` src-var
+  - scalar/tuple/coll/rel bindings
+  - pattern name for pull pattern inputs
+  - rules var `%`
+- `:where` clauses
+  - data patterns `[src? e a v tx? added?]` with blanks `_`
+  - predicate expressions `[(< ?x 10)]` (range predicates, 2-arg only)
+  - function expressions `[(+ ?x 1) ?y]` with binding forms
+  - rule expressions `[rule-name ?x ?y]`
+  - `or`, `or-join`, `and` (inside or)
+  - `not`, `not-join`
+- rules
+  - rule head + body clauses
+  - multiple rule heads (logical OR)
+  - required bindings
+
+## EDN Data Type Semantics (Query Literals)
+
+EDN parsing must match Datomic expectations:
+
+- bigint: `123N`
+- bigdec: `123.45M` (requires EDN parser support)
+- double/float: numeric literals (no suffix)
+- instant: `#inst "..."` (RFC 3339)
+- uuid: `#uuid "..."`
+- symbols and keywords are first-class (vars `?x`, attrs `:ns/attr`).
+- commas treated as whitespace.
+
+Open decision: whether to extend Mentat EDN for `M` bigdec literals or tag form.
+
+## Pipeline Stages
 
 1) Parse EDN query
    - Parse EDN into Mentat query AST (`edn::query::FindQuery`).
+   - Support list and map form query representations.
 2) Algebrize
-   - Bind to schema, derive types, validate inputs and `:find`, produce an algebraic query.
+   - Bind to schema, derive types, validate inputs, find spec, with/limit/order.
 3) Plan
    - Compile algebraic query into an index-scan execution plan (no SQL).
 4) Execute
@@ -34,36 +89,49 @@ Out of scope (covered by other plans):
 5) Project
    - Shape results per `:find` spec; apply pull if requested.
 
-## Architecture Approach
+## Index Planning (From Datomic Index Model)
 
-### Parsing and Algebrization
+- EAVT: entity-centric scans and `?e`-bound patterns.
+- AEVT: attribute-centric scans and `has`/attribute existence.
+- AVET: attribute+value scans and range predicates (`=`, `!=`, `<`, `<=`, `>`, `>=`).
+- VAET: reverse ref scans for ref joins and reverse navigation.
 
-- Reuse Mentat’s EDN parser and query AST (`REFERENCE/mentat/edn` and `REFERENCE/mentat/query-algebrizer`) to preserve semantics and validation rules.
-- Build an EDB schema adapter that feeds Mentat algebrizer the EDB schema from `attrs` (value types, cardinality, uniqueness, component, etc).
+Planning rules to align with Datomic behavior:
 
-### Index-Plan Compiler (EDB-specific)
+- Range predicates must use AVET (2-arg only).
+- Missing/exists should prefer AEVT.
+- Data patterns can elide trailing positions; treat omitted as implicit blanks.
+- Use `t` and `added` positions for history queries.
 
-Replace Mentat’s SQL translator with an EDB index-plan compiler that targets:
+## Pull in `:find` (Datomic Semantics)
 
-- EAVT for entity-first scans, and `:e` + `:a` constraints.
-- AVET for value constraints and range scans.
-- AEVT for `has` (attribute existence) scans.
-- VAET for reverse ref lookups or ref-joins.
+Pull grammar support:
 
-Plan nodes (initial set):
-- `ScanEavt`, `ScanAvet`, `ScanAevt`, `ScanVaet`.
-- `Join` (hash/nested-loop depending on selectivity).
-- `Filter` (predicates, type constraints).
-- `Or`, `Not`, `NotJoin` (subplans).
-- `Aggregate` (count, min, max, avg, sum).
-- `Project` (find spec, distinct, order, limit).
+- attribute names, reverse attrs (`:attr/_rev`), wildcard `*`.
+- map specs for nested pulls `{ :attr [..] }`.
+- attr options: `:as`, `:limit`, `:default`, `:xform` (xform may be deferred or limited to built-ins).
+- recursion limits: number or `...` with cycle safety.
 
-### Execution Model
+Semantics:
 
-- Scan nodes return bindings keyed by variables.
-- Joins unify variables; predicate evaluation happens after unification.
-- Range predicates use ordered bytes from `edb-encoding` via AVET.
-- Pull in `:find` triggers a second-stage fetch from `edb-pull`.
+- Default limit for cardinality-many is 1000; `:limit nil` returns all.
+- Missing attrs omitted (unless `:default`).
+- Wildcard pulls all attributes and recurses through component refs.
+- Non-component refs default to `:db/id` only.
+
+## Time Filters (as-of / since / history)
+
+- `as-of` and `since` are filters on a database value; queries should accept multiple db inputs.
+- `history` exposes both assertions and retractions; data patterns use `tx` and `added` slots.
+- History queries should be supported via explicit db input (e.g., `$history`) and should not produce entity views.
+
+## Execution API Requirements
+
+- `q` equivalent: execute query and return realized results.
+- `qseq` equivalent: lazy/streamed results (optional but useful for pull heavy queries).
+- Support parameterized queries with stable cache keys.
+- Optional timeout handling.
+- Clause ordering should be optimizer-driven (do not require user ordering).
 
 ## Milestones and Deliverables
 
@@ -71,80 +139,141 @@ Plan nodes (initial set):
 
 - Integrate Mentat EDN parser.
 - Parse EDN query strings into Mentat AST.
-- Tests for query parsing and EDN literals (`#inst`, `#uuid`, bigint).
+- Tests for EDN literals and query forms.
 
-Deliverables:
-- `edb-edn` crate or module for parsing queries.
+Deliverable:
+- `edb-edn` query parser module.
 
 ### M2: Schema Adapter for Algebrizer
 
-- Map EDB `attrs` rows to Mentat schema and attribute structures.
-- Implement `HasSchema` and required type metadata.
-- Unit tests against a minimal schema.
+- Map EDB `attrs` rows to Mentat schema/attribute structures.
+- Provide `HasSchema` and type/tag metadata.
+- Unit tests on minimal schema.
 
-Deliverables:
+Deliverable:
 - `edb-mentat-schema` adapter layer (name TBD).
 
 ### M3: Algebrize Queries
 
-- Use Mentat algebrizer to produce algebraic queries.
-- Validate `:find`, `:in`, `:where`, `:order`, `:limit`, and typing rules.
-- Capture algebrized form for planner input.
+- Use Mentat algebrizer to validate and type-check.
+- Support `:find`, `:with`, `:in`, `:where`, `:order`, `:limit`.
+- Support rules (`%`) and pattern inputs.
 
-Deliverables:
-- `edb-query-algebrize` wrapper that returns algebraic queries.
+Deliverable:
+- `edb-query-algebrize` wrapper returning algebraic queries.
 
 ### M4: Index Plan Compiler
 
 - Compile algebraic queries into index scan plans.
-- Choose access paths based on bound variables and constraints.
-- Support `or`, `not`, `not-join`, and `ground` forms.
+- Implement plan nodes for or/or-join/not/not-join/ground.
+- Enforce AVET usage for range predicates.
 
-Deliverables:
-- `edb-query-plan` module producing an executable plan tree.
+Deliverable:
+- `edb-query-plan` module producing executable plan trees.
 
 ### M5: Query Executor
 
 - Execute plan nodes over EAVT/AVET/AEVT/VAET.
-- Implement join strategies and predicate evaluation.
+- Join strategies (hash or nested-loop) with selectivity heuristics.
+- Apply `:with` bag semantics and aggregates.
 - Add ordering, distinct, and limit.
 
-Deliverables:
+Deliverable:
 - `edb-query-exec` module returning raw bindings.
 
 ### M6: Projection + Pull
 
-- Implement result shaping per `:find` spec.
-- Add two-stage pull expansion for `pull` in `:find`.
+- Implement result shaping per find spec and return maps.
+- Two-stage pull expansion for pull expressions in `:find`.
 
-Deliverables:
+Deliverable:
 - `edb-query-project` module + integration with `edb-pull`.
 
-### M7: Public API and Server Integration
+### M7: Time-Aware Queries
 
-- Expose `Conn::q` or similar API for in-process query execution.
+- Wire `as-of`, `since`, and `history` db inputs to filters over indexes.
+- Expose `t`/`added` in data pattern matching.
+- Add query forms that join `:db/txInstant` via log if needed.
+
+Deliverable:
+- Query context and filtered db support.
+
+### M8: Public API and Server Integration
+
+- Expose `Conn::q` / `Db::q` for in-process execution.
 - Update `/q` endpoint to accept EDN and return result shapes.
+- Optional streaming API for `qseq`-style execution.
 
-Deliverables:
+Deliverable:
 - `edb-server` EDN query support.
-- `edb-conn` API surface (if added in a later plan).
 
-### M8: Testing and Benchmarks
+### M9: Tests and Benchmarks
 
-- Coverage for joins, predicates, aggregates, or/not, pull in `:find`.
-- Compare results with Mentat on shared fixtures where possible.
-- Add microbenchmarks for scan selection and join strategies.
+- Coverage for joins, predicates, aggregates, or/not, rules, and pull.
+- Time filter queries (as-of/since/history) with `t/added`.
+- Compare results vs Mentat on shared fixtures.
 
 ## Open Questions
 
-1) Decimal/bytes EDN representation for query literals (tagged vs string).
-2) Extent of Mentat algebrizer reuse vs custom EDB algebrizer.
-3) Which join strategy is the default (hash vs nested loop) for EDB’s data sizes.
-4) How to represent and query history (`t`/`added`) in Datalog (history db).
+1) Bigdec EDN literal support (`M` suffix vs tagged string).
+2) Built-in function coverage (ground, missing?, get-else, get-some, tuple/untuple, tx-ids/tx-data).
+3) Default join strategy for EDB’s data sizes.
+4) Plan caching strategy (compiled query cache keyed by normalized EDN).
 
 ## Immediate Next Steps
 
-1) Confirm EDN literal policy for decimal/bytes in queries.
-2) Stand up a minimal EDN query parser + schema adapter prototype.
-3) Build a tiny index-plan prototype for `[:find ?e :where [?e :a 1]]` and verify scan selection.
+1) Confirm bigdec/bytes EDN literal policy.
+2) Prototype EDN query parsing + schema adapter.
+3) Build a minimal plan/executor for `[:find ?e :where [?e :a 1]]` using AVET/EAVT.
 
+
+## Mentat Reference Files to Reuse
+
+These files are the most relevant sources to copy or adapt for a Mentat-style pipeline. The list is derived from `DOCS/research/STAGE-2/REF/Mentat-Map.md`.
+
+EDN parsing and query AST:
+- `REFERENCE/mentat/edn/src/edn.rustpeg`
+- `REFERENCE/mentat/edn/src/lib.rs`
+- `REFERENCE/mentat/edn/src/query.rs`
+- `REFERENCE/mentat/edn/src/types.rs`
+- `REFERENCE/mentat/edn/src/entities.rs`
+
+Algebrizer and clause processing:
+- `REFERENCE/mentat/query-algebrizer/src/lib.rs`
+- `REFERENCE/mentat/query-algebrizer/src/types.rs`
+- `REFERENCE/mentat/query-algebrizer/src/validate.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/mod.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/pattern.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/inputs.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/or.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/not.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/predicate.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/ground.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/fulltext.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/tx_log_api.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/where_fn.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/resolve.rs`
+- `REFERENCE/mentat/query-algebrizer/src/clauses/convert.rs`
+
+Projection and pull integration:
+- `REFERENCE/mentat/query-projector/src/translate.rs`
+- `REFERENCE/mentat/query-projector/src/project.rs`
+- `REFERENCE/mentat/query-projector/src/lib.rs`
+- `REFERENCE/mentat/query-projector/src/projectors/mod.rs`
+- `REFERENCE/mentat/query-projector/src/projectors/simple.rs`
+- `REFERENCE/mentat/query-projector/src/projectors/pull_two_stage.rs`
+- `REFERENCE/mentat/query-pull/src/lib.rs`
+
+SQL stack (if any translation is reused or referenced):
+- `REFERENCE/mentat/query-sql/src/lib.rs`
+- `REFERENCE/mentat/sql/src/lib.rs`
+
+Schema and type system:
+- `REFERENCE/mentat/core/src/lib.rs`
+- `REFERENCE/mentat/core/src/sql_types.rs`
+- `REFERENCE/mentat/core-traits/lib.rs`
+- `REFERENCE/mentat/core-traits/value_type_set.rs`
+- `REFERENCE/mentat/core-traits/values.rs`
+
+Execution wrappers (query APIs and result shaping):
+- `REFERENCE/mentat/transaction/src/query.rs`
