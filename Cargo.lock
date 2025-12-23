@@ -419,6 +419,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "edb-query"
+version = "0.1.0"
+dependencies = [
+ "edb-edn",
+ "edb-encoding",
+ "edb-index",
+ "edb-schema",
+ "edb-transactor",
+ "rusqlite",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "edb-schema"
 version = "0.1.0"
 dependencies = [

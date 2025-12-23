@@ -11,6 +11,17 @@ pub enum SchemaError {
     UnknownValueType(i64),
 }
 
+impl std::fmt::Display for SchemaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SchemaError::Sqlite(err) => write!(f, "sqlite: {}", err),
+            SchemaError::UnknownValueType(v) => write!(f, "unknown value type {}", v),
+        }
+    }
+}
+
+impl std::error::Error for SchemaError {}
+
 impl From<rusqlite::Error> for SchemaError {
     fn from(err: rusqlite::Error) -> Self {
         SchemaError::Sqlite(err)

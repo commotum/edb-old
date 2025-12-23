@@ -1,0 +1,16 @@
+[package]
+name = "edb-query"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "0.30", features = ["bundled"] }
+serde_json = "1"
+edb-edn = { path = "../edb-edn" }
+edb-encoding = { path = "../edb-encoding" }
+edb-index = { path = "../edb-index" }
+edb-schema = { path = "../edb-schema", features = ["sqlite"] }
+thiserror = "1"
+
+[dev-dependencies]
+edb-transactor = { path = "../edb-transactor" }

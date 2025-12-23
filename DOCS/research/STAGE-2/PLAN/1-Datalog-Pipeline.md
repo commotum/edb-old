@@ -79,7 +79,7 @@ EDN parsing must match Datomic expectations:
 - symbols and keywords are first-class (vars `?x`, attrs `:ns/attr`).
 - commas treated as whitespace.
 
-Open decision: whether to extend Mentat EDN for `M` bigdec literals or tag form.
+Bytes policy: EDN string literals are treated as raw bytes for `ValueType::Bytes` (no base64 tag yet).
 
 ## Pipeline Stages
 
@@ -144,7 +144,7 @@ Semantics:
 
 - M1 (EDN parsing): implemented in `CORE/edb-edn` with list/map form parsing, `:in` bindings, rules var `%`, rule expressions, return maps, pull pattern inputs, `:order`, `:limit`, and decimal `M` literals. Tests in `CORE/edb-edn/tests/parse.rs`.
 - M2 (schema adapter): core schema types live in `CORE/edb-schema`; SQLite loader/alias resolution in `CORE/edb-schema/src/sqlite.rs` (feature `sqlite`) with tests in `CORE/edb-schema/tests/schema_load.rs`. Mentat-style `HasSchema` trait exists, but algebrizer-specific type inference is still missing.
-- M3 (algebrize): not implemented; only the minimal `/q` planner in `CORE/edb-server/src/main.rs`.
+- M3 (algebrize): not implemented; only the minimal `/q` planner in `CORE/edb-server/src/main.rs` and a prototype EDN equality query in `CORE/edb-query`.
 - M4 (plan compiler): not implemented; index scan APIs exist in `CORE/edb-index`.
 - M5 (executor): not implemented; `/q` runs a small SQL/index-based path with a single ref-var join.
 - M6 (projection + pull): `CORE/edb-pull` implements pull against `current` and indexes, but no query result integration yet.
@@ -240,16 +240,16 @@ Deliverable:
 
 ## Open Questions
 
-1) Bigdec EDN literal support (`M` suffix vs tagged string).
+1) Whether to support tagged bytes literals (e.g., `#bytes`/base64) beyond string literals.
 2) Built-in function coverage (ground, missing?, get-else, get-some, tuple/untuple, tx-ids/tx-data).
 3) Default join strategy for EDB’s data sizes.
 4) Plan caching strategy (compiled query cache keyed by normalized EDN).
 
 ## Immediate Next Steps
 
-1) Confirm bytes EDN literal policy (bigdec `M` is already supported).
-2) Build the algebrizer-facing schema adapter on top of `edb-schema::sqlite`.
-3) Prototype a minimal plan/executor for `[:find ?e :where [?e :a 1]]` using AVET/EAVT.
+1) Build the algebrizer-facing schema adapter on top of `edb-schema::sqlite`.
+2) Expand the `edb-query` prototype beyond single-pattern equality.
+3) Prototype a minimal plan/executor for `[:find ?e :where [?e :a 1]]` using AVET/EAVT (extend to multiple clauses).
 
 
 ## Mentat Reference Files to Reuse

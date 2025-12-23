@@ -246,6 +246,7 @@ Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_sca
 - Vector values expand into multiple ops for cardinality-many attributes.
 - Ref values resolve tempids and lookup refs during normalization.
 - EDN tx functions, CAS, and nested map notation are not yet implemented.
+- Bytes policy: EDN string literals are treated as raw bytes for `ValueType::Bytes`.
 
 ### Validation
 
@@ -349,6 +350,12 @@ Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_sca
 - Uses AEVT for existence constraints (`has`).
 - Supports a single ref-var join for `Ref` attributes.
 - Produces either entity sets or joined pairs.
+
+### Minimal EDN Query Prototype (`edb-query`)
+
+- `edb-query` provides a prototype EDN path for `[:find ?e :where [?e :a v]]` using AVET scans.
+- Uses `edb-edn` parsing and `edb-schema::sqlite` for attribute/type lookup.
+- Returns entity ids for constant equality; no joins, rules, or aggregates yet.
 
 ## Cross-Cutting Invariants and Ordering Rules
 
