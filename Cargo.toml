@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "CORE/edb-edn",
   "CORE/edb-encoding",
   "CORE/edb-schema",
   "CORE/edb-tx",

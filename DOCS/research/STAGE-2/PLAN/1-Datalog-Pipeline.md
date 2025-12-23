@@ -46,6 +46,7 @@ Target full support for:
 - `:with` clause to control duplicate collapse (bag semantics for aggregates).
 - `:in` clause
   - `$` src-var
+  - default `:in $` when omitted
   - scalar/tuple/coll/rel bindings
   - pattern name for pull pattern inputs
   - rules var `%`
@@ -59,7 +60,12 @@ Target full support for:
 - rules
   - rule head + body clauses
   - multiple rule heads (logical OR)
-  - required bindings
+  - required bindings (fail if not bound)
+  - rule scoping by `src-var`
+
+- list vs map query forms
+  - list form with positional sections
+  - map form with explicit `:find`/`:in`/`:where` keys
 
 ## EDN Data Type Semantics (Query Literals)
 
@@ -128,10 +134,11 @@ Semantics:
 ## Execution API Requirements
 
 - `q` equivalent: execute query and return realized results.
-- `qseq` equivalent: lazy/streamed results (optional but useful for pull heavy queries).
+- `qseq` equivalent: lazy/streamed results (useful for pull-heavy queries).
 - Support parameterized queries with stable cache keys.
 - Optional timeout handling.
 - Clause ordering should be optimizer-driven (do not require user ordering).
+- Query cache keyed by normalized EDN (avoid dynamic query churn).
 
 ## Milestones and Deliverables
 
@@ -158,6 +165,8 @@ Deliverable:
 - Use Mentat algebrizer to validate and type-check.
 - Support `:find`, `:with`, `:in`, `:where`, `:order`, `:limit`.
 - Support rules (`%`) and pattern inputs.
+ - Validate required bindings for not/or rules and `or-join`/`not-join`.
+ - Respect `:limit` variable binding (when provided in `:in`).
 
 Deliverable:
 - `edb-query-algebrize` wrapper returning algebraic queries.
