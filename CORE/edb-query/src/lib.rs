@@ -2,13 +2,19 @@ use std::collections::BTreeMap;
 
 use base64::{engine::general_purpose, Engine as _};
 use edb_edn::query::{
+    ContainsVariables,
     Element,
     FindSpec,
+    FnArg,
     Limit,
+    NotJoin,
+    OrJoin,
+    OrWhereClause,
     Pattern,
     PatternNonValuePlace,
     PatternValuePlace,
     ParsedQuery,
+    Predicate,
     WhereClause,
 };
 use edb_schema::HasSchema;
@@ -71,15 +77,44 @@ fn evaluate_where(
     schema: &edb_schema::sqlite::SchemaCatalog,
     clauses: &[WhereClause],
 ) -> Result<Vec<Binding>, QueryError> {
-    let mut iter = clauses.iter();
-    let first = match iter.next() {
-        Some(clause) => clause_bindings(db_path, schema, clause)?,
-        None => return Err(QueryError::Unsupported("missing :where clauses")),
-    };
-    let mut acc = first;
-    for clause in iter {
-        let next = clause_bindings(db_path, schema, clause)?;
-        acc = join_bindings(&acc, &next);
+    evaluate_where_with_seed(db_path, schema, clauses, vec![Binding::new()])
+}
+
+fn evaluate_where_with_seed(
+    db_path: &str,
+    schema: &edb_schema::sqlite::SchemaCatalog,
+    clauses: &[WhereClause],
+    mut acc: Vec<Binding>,
+) -> Result<Vec<Binding>, QueryError> {
+    if clauses.is_empty() {
+        return Err(QueryError::Unsupported("missing :where clauses"));
+    }
+    for clause in clauses {
+        match clause {
+            WhereClause::Pattern(p) => {
+                let next = bindings_for_pattern(db_path, schema, p)?;
+                acc = join_bindings(&acc, &next);
+            }
+            WhereClause::OrJoin(o) => {
+                let next = bindings_for_or_join(db_path, schema, o)?;
+                acc = join_bindings(&acc, &next);
+            }
+            WhereClause::Pred(p) => {
+                acc = filter_predicate(acc, p)?;
+            }
+            WhereClause::NotJoin(n) => {
+                acc = filter_not_join(db_path, schema, n, acc)?;
+            }
+            WhereClause::WhereFn(_) => {
+                return Err(QueryError::Unsupported("where-fn clauses are not supported yet"));
+            }
+            WhereClause::RuleExpr(_) => {
+                return Err(QueryError::Unsupported("rule expressions are not supported yet"));
+            }
+            WhereClause::TypeAnnotation(_) => {
+                return Err(QueryError::Unsupported("type annotations are not supported yet"));
+            }
+        }
         if acc.is_empty() {
             break;
         }
@@ -87,15 +122,147 @@ fn evaluate_where(
     Ok(acc)
 }
 
-fn clause_bindings(
+fn bindings_for_or_join(
     db_path: &str,
     schema: &edb_schema::sqlite::SchemaCatalog,
-    clause: &WhereClause,
+    or_join: &OrJoin,
 ) -> Result<Vec<Binding>, QueryError> {
-    match clause {
-        WhereClause::Pattern(p) => bindings_for_pattern(db_path, schema, p),
-        _ => Err(QueryError::Unsupported("only data patterns are supported")),
+    let mut out = Vec::new();
+    for arm in &or_join.clauses {
+        let bindings = match arm {
+            OrWhereClause::Clause(clause) => {
+                evaluate_where_with_seed(db_path, schema, std::slice::from_ref(clause), vec![Binding::new()])?
+            }
+            OrWhereClause::And(clauses) => {
+                evaluate_where_with_seed(db_path, schema, clauses, vec![Binding::new()])?
+            }
+        };
+        out.extend(bindings);
     }
+    Ok(out)
+}
+
+fn filter_not_join(
+    db_path: &str,
+    schema: &edb_schema::sqlite::SchemaCatalog,
+    not_join: &NotJoin,
+    acc: Vec<Binding>,
+) -> Result<Vec<Binding>, QueryError> {
+    let mentioned = not_join.collect_mentioned_variables();
+    let mut out = Vec::new();
+    for binding in acc {
+        if !vars_bound(&binding, &mentioned) {
+            return Err(QueryError::Unsupported("not-join requires bound variables"));
+        }
+        let matches = evaluate_where_with_seed(db_path, schema, &not_join.clauses, vec![binding.clone()])?;
+        if matches.is_empty() {
+            out.push(binding);
+        }
+    }
+    Ok(out)
+}
+
+fn filter_predicate(bindings: Vec<Binding>, pred: &Predicate) -> Result<Vec<Binding>, QueryError> {
+    let mut out = Vec::new();
+    for binding in bindings {
+        if eval_predicate(pred, &binding)? {
+            out.push(binding);
+        }
+    }
+    Ok(out)
+}
+
+fn eval_predicate(pred: &Predicate, binding: &Binding) -> Result<bool, QueryError> {
+    let op = pred.operator.0.as_str();
+    let args: Vec<JsonValue> = pred
+        .args
+        .iter()
+        .map(|arg| fn_arg_to_json(arg, binding))
+        .collect::<Result<_, _>>()?;
+    match op {
+        "=" => {
+            ensure_arity(&args, 2)?;
+            Ok(args[0] == args[1])
+        }
+        "!=" => {
+            ensure_arity(&args, 2)?;
+            Ok(args[0] != args[1])
+        }
+        "<" => {
+            ensure_arity(&args, 2)?;
+            Ok(compare_json(&args[0], &args[1])?.is_lt())
+        }
+        "<=" => {
+            ensure_arity(&args, 2)?;
+            Ok(!compare_json(&args[0], &args[1])?.is_gt())
+        }
+        ">" => {
+            ensure_arity(&args, 2)?;
+            Ok(compare_json(&args[0], &args[1])?.is_gt())
+        }
+        ">=" => {
+            ensure_arity(&args, 2)?;
+            Ok(!compare_json(&args[0], &args[1])?.is_lt())
+        }
+        _ => Err(QueryError::Unsupported("unsupported predicate operator")),
+    }
+}
+
+fn ensure_arity(args: &[JsonValue], n: usize) -> Result<(), QueryError> {
+    if args.len() == n {
+        Ok(())
+    } else {
+        Err(QueryError::Unsupported("predicate arity not supported"))
+    }
+}
+
+fn compare_json(a: &JsonValue, b: &JsonValue) -> Result<std::cmp::Ordering, QueryError> {
+    if let (Some(la), Some(lb)) = (numeric_value(a), numeric_value(b)) {
+        return la
+            .partial_cmp(&lb)
+            .ok_or(QueryError::Unsupported("numeric predicate failed"));
+    }
+    if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
+        return Ok(sa.cmp(sb));
+    }
+    Err(QueryError::Unsupported(
+        "predicate operands must be numeric or string",
+    ))
+}
+
+fn numeric_value(v: &JsonValue) -> Option<f64> {
+    match v {
+        JsonValue::Number(n) => n.as_f64(),
+        JsonValue::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn fn_arg_to_json(arg: &FnArg, binding: &Binding) -> Result<JsonValue, QueryError> {
+    use edb_edn::query::NonIntegerConstant;
+    Ok(match arg {
+        FnArg::Variable(v) => binding
+            .get(&v.to_string())
+            .cloned()
+            .ok_or(QueryError::Unsupported("predicate variable not bound"))?,
+        FnArg::EntidOrInteger(i) => JsonValue::from(*i),
+        FnArg::IdentOrKeyword(k) => JsonValue::from(k.to_string()),
+        FnArg::Constant(c) => match c {
+            NonIntegerConstant::Boolean(v) => JsonValue::from(*v),
+            NonIntegerConstant::Float(v) => JsonValue::from(v.into_inner()),
+            NonIntegerConstant::BigInteger(v) => JsonValue::from(v.to_string()),
+            NonIntegerConstant::Decimal(v) => JsonValue::from(v.to_string()),
+            NonIntegerConstant::Text(s) => JsonValue::from(s.to_string()),
+            NonIntegerConstant::Instant(i) => JsonValue::from(i.timestamp_micros()),
+            NonIntegerConstant::Uuid(u) => JsonValue::from(u.to_string()),
+        },
+        FnArg::SrcVar(_) => {
+            return Err(QueryError::Unsupported("src vars in predicates are not supported"));
+        }
+        FnArg::Vector(_) => {
+            return Err(QueryError::Unsupported("vector predicate args are not supported"));
+        }
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -337,6 +504,10 @@ fn bindings_compatible(left: &Binding, right: &Binding) -> bool {
         }
     }
     true
+}
+
+fn vars_bound(binding: &Binding, vars: &std::collections::BTreeSet<edb_edn::query::Variable>) -> bool {
+    vars.iter().all(|v| binding.contains_key(&v.to_string()))
 }
 
 fn project_results(

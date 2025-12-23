@@ -358,8 +358,9 @@ Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_sca
 - `edb-query` provides a prototype EDN path for conjunctive data patterns (multiple `:where` clauses).
 - Uses AVET for value-constant scans, EAVT for entity-constant scans, and AEVT for attribute scans.
 - Supports entity/value variables and `_` placeholders with equality joins across shared variables.
+- Supports basic predicates (`=`, `!=`, `<`, `<=`, `>`, `>=`) plus `or` and `not` over data patterns.
 - Uses `edb-edn` parsing and `edb-schema::sqlite` for attribute/type lookup.
-- `:find` supports variables only (rel/coll/tuple/scalar), with fixed `:limit`; no `:in`, `:with`, `:order`, rules, or predicates yet.
+- `:find` supports variables only (rel/coll/tuple/scalar), with fixed `:limit`; no `:in`, `:with`, `:order`, rules, or where-fn bindings yet.
 
 ## Cross-Cutting Invariants and Ordering Rules
 
