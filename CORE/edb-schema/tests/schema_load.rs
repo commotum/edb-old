@@ -1,8 +1,8 @@
 #![cfg(feature = "sqlite")]
 
 use edb_encoding::ValueType;
-use edb_schema::sqlite::{SchemaCatalog, SchemaError, SchemaLookup};
-use edb_schema::{AttrCardinality, AttrUnique};
+use edb_schema::sqlite::{SchemaCatalog, SchemaError};
+use edb_schema::{AttrCardinality, AttrUnique, SchemaLookup};
 use rusqlite::{params, Connection};
 
 fn setup_db(conn: &Connection) {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use edb_encoding::ValueType;
 use rusqlite::Connection;
 
-use crate::schema::{AttrCardinality, AttrUnique, Attribute, Catalog};
+use crate::schema::{AttrCardinality, AttrUnique, Attribute, Catalog, SchemaLookup};
 
 #[derive(Debug)]
 pub enum SchemaError {
@@ -21,11 +21,6 @@ impl From<rusqlite::Error> for SchemaError {
 pub struct SchemaCatalog {
     catalog: Catalog,
     alias_to_ident: HashMap<String, String>,
-}
-
-pub trait SchemaLookup {
-    fn attribute(&self, ident: &str) -> Option<&Attribute>;
-    fn canonical_ident(&self, ident: &str) -> Option<String>;
 }
 
 impl SchemaCatalog {

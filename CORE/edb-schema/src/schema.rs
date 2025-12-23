@@ -29,6 +29,7 @@ pub struct Attribute {
 
 impl Attribute {
     pub fn is_unique(&self) -> bool { matches!(self.unique, AttrUnique::Identity | AttrUnique::Value) }
+    pub fn is_ref(&self) -> bool { self.value_type == ValueType::Ref }
 }
 
 #[derive(Debug, Default)]
@@ -46,3 +47,28 @@ impl Catalog {
     pub fn get(&self, ident: &str) -> Option<&Attribute> { self.by_ident.get(ident) }
 }
 
+pub trait SchemaLookup {
+    fn attribute(&self, ident: &str) -> Option<&Attribute>;
+    fn canonical_ident(&self, ident: &str) -> Option<String>;
+}
+
+impl SchemaLookup for Catalog {
+    fn attribute(&self, ident: &str) -> Option<&Attribute> {
+        if let Some(attr) = self.by_ident.get(ident) {
+            return Some(attr);
+        }
+        self.by_ident
+            .values()
+            .find(|attr| attr.aliases.iter().any(|alias| alias == ident))
+    }
+
+    fn canonical_ident(&self, ident: &str) -> Option<String> {
+        if self.by_ident.contains_key(ident) {
+            return Some(ident.to_string());
+        }
+        self.by_ident
+            .values()
+            .find(|attr| attr.aliases.iter().any(|alias| alias == ident))
+            .map(|attr| attr.ident.clone())
+    }
+}
