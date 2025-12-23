@@ -7,4 +7,7 @@ edition = "2021"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["std"] }
 edb-encoding = { path = "../edb-encoding" }
+rusqlite = { version = "0.30", features = ["bundled"], optional = true }
 
+[features]
+sqlite = ["rusqlite"]

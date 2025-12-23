@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use edb_encoding::ValueType;
-use edb_schema::{AttrCardinality, AttrUnique, Attribute, Catalog};
 use rusqlite::Connection;
+
+use crate::schema::{AttrCardinality, AttrUnique, Attribute, Catalog};
 
 #[derive(Debug)]
 pub enum SchemaError {

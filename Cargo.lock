@@ -419,19 +419,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "edb-query-schema"
-version = "0.1.0"
-dependencies = [
- "edb-encoding",
- "edb-schema",
- "rusqlite",
-]
-
-[[package]]
 name = "edb-schema"
 version = "0.1.0"
 dependencies = [
  "edb-encoding",
+ "rusqlite",
  "serde",
  "uuid",
 ]

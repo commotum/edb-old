@@ -1,5 +1,7 @@
+#![cfg(feature = "sqlite")]
+
 use edb_encoding::ValueType;
-use edb_query_schema::{SchemaCatalog, SchemaError, SchemaLookup};
+use edb_schema::sqlite::{SchemaCatalog, SchemaError, SchemaLookup};
 use edb_schema::{AttrCardinality, AttrUnique};
 use rusqlite::{params, Connection};
 
