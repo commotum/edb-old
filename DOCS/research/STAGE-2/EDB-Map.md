@@ -1,111 +1,335 @@
+# EDB Core Map (Stage 2)
 
----
+This document is a consolidated, technically detailed map of the EDB core crates reviewed so far. It focuses on architecture, data flow, core invariants, and the responsibilities of each module.
 
-EDB/CORE/edb-encoding
+## Scope and Sources
 
-- edb-encoding is a Rust crate that defines a sortable, deterministic binary encoding for scalar values and a v1 tuple format; it exposes encode_scalar, decode_scalar, encode_tuple_v1, decode_tuple_v1, and
-tuple_order_bytes via src/lib.rs.
-- Scalar encoding (src/scalar.rs) is built around order-preserving byte transforms: i64 is biased into unsigned big-endian; floats use sign-bit flipping/inversion with canonical NaN and -0→+0; strings are NFC-
-normalized, length-prefixed with a big-endian varuint, and JSON-ish \uXXXX escapes are unescaped for vector files.
-- Supported scalar types include long, double, boolean, string, keyword (:-prefixed), uuid (16 bytes), instant/ref (long), bytes (raw), uint8, bigint, decimal, float32/float16/bfloat16. Bigint and decimal use
-sign markers and varuint lengths; negatives invert encoded bytes for ordering; decimals store biased exponent and BCD digits length.
-- Tuple v1 (src/tuple.rs) encodes a header 0xF1 0x01, arity, type code(s), then concatenated element encodings; decoding is type-homogeneous with payload length validation; tuple_order_bytes returns the
-payload region for ordering.
-- CLI tool (src/bin/edb-enc.rs) provides encode, decode, and encode-tuple for hex I/O, with simple parsing for symbolic floats and string/uuid/decimal/bigint values.
-- Tests (tests/vectors.rs) load JSON vector fixtures (current or legacy path) to validate scalar and tuple encodings, including NFC string normalization and tuple ordering bytes.
+- CORE/edb-encoding
+- CORE/edb-envelope
+- CORE/edb-index
+- CORE/edb-pull
+- CORE/edb-schema
+- CORE/edb-server
+- CORE/edb-store-sqlite
+- CORE/edb-transactor
+- CORE/edb-tx
 
----
+## System Overview
 
-EDB/CORE/edb-envelope
+EDB is a single-node, SQLite-backed database with:
 
-- edb-envelope defines a CBOR-based transaction envelope format with deterministic ordering and signing/verification helpers.
-- EnvOp is a canonicalized, serde-tagged enum of transaction operations (add, retract, cas, retract-entity) that serialize as CBOR arrays for stable wire representation.
-- UnsignedEnvelopeV1 contains metadata (magic string, version, parents, features, author pubkey, authored_at) and a tx_body of ops; constructor sorts ops by their CBOR byte representation to ensure canonical
-ordering.
-- CBOR encoding is explicitly constructed to enforce field order and deterministic map ordering; JSON values are converted to CBOR with key sorting for stability.
-- to_unsigned_bytes emits a fixed-order CBOR array representing the envelope; tx_id hashes the unsigned bytes with SHA-256; sign/verify use Ed25519.
-- Helper env_ops_from_txops converts edb_tx::model::TxOp into EnvOp, with entity refs serialized into JSON (entid, tempid, or lookup tuple).
+- A deterministic binary encoding for ordered value bytes (`edb-encoding`).
+- A transaction model and validation pipeline (`edb-tx`).
+- A transactor that writes current state, unique indexes, and a durable log, and updates secondary indexes (`edb-transactor`).
+- A small SQLite segment store for index segments and metadata (`edb-store-sqlite`).
+- Multiple read indexes (EAVT, AEVT, AVET, VAET) for scanning and range queries (`edb-index`).
+- A pull API for structured entity projections, including reverse refs and nested traversal (`edb-pull`).
+- A CBOR-based envelope format for signed transactions (`edb-envelope`).
+- An HTTP server exposing transact, pull, query, and streaming APIs (`edb-server`).
 
----
+## Core Data Model
 
-EDB/CORE/edb-index
+### Entities, Attributes, and Values
 
-- CORE/edb-index/src/lib.rs implements four indexers over datoms using a shared pattern: in‑memory buffering, deterministic sorting, JSON‑encoded segment storage in edb_store_sqlite, root pointers per index
-name, and compaction when segment count exceeds a threshold.
-- Index types and sort order:
-    - EAVT (EavtIndexer): sort by entity, attribute (NFC-normalized bytes), value bytes, then transaction time descending; supports scans by entity, by entity+attribute, and by entity+attribute+value prefix.
-    - AVET (AvetIndexer): sort by attribute, value bytes, entity, time desc; supports equality and range scans on value bytes.
-    - VAET (VaetIndexer): only ref attributes; sort by referenced entity, attribute, entity, time desc; supports scan by referenced entity.
-    - AEVT (AevtIndexer): sort by attribute, entity, value bytes, time desc; supports scan by attribute and by attribute+entity.
-- Values are encoded using edb-encoding into order-preserving byte sequences, then stored as base64 (no padding) strings; attribute sort keys are the NFC-encoded string bytes with the varuint length prefix
-stripped.
-- All indexers optionally look up attribute value types from an attrs SQLite table to ensure consistent encoding (and to detect ref types for VAET).
-- Tests validate scan behavior, range queries across numeric types (double, instant, bigint, decimal), and that AEVT compaction preserves results.
+- Entities are identified by `i64` entids.
+- Attributes are defined in schema with ident, value type, cardinality, uniqueness, and component semantics.
+- Values are strongly typed via `edb_tx::model::Value` and mapped to `edb_encoding::ValueType`.
 
----
+### Transaction Operations
 
-EDB/CORE/edb-pull
+Supported operations (at the model level):
 
-- edb-pull implements a Datomic-style pull API over a SQLite-backed store, returning JSON projections of entities based on an attribute spec tree with forward, reverse, nested, aliasing, defaults, and per-spec
-limits.
-- AttrSpec supports direct attributes, reverse refs (_attr), nested forward/reverse pulls, limit/max-depth overrides per spec, aliases, and default values.
-- Puller queries attribute metadata from attrs/aliases, reads current values from current, and uses edb-index (EAVT) when a DB path is provided to support multi-valued and ref scans with deduping/added
-semantics.
-- Component refs are expanded by default: if an attribute is Ref and is_component, the pull returns a nested object for the referenced entity (with recursive depth control).
-- Values are normalized to plain JSON via to_plain_json, decoding edb_tx::model::Value or raw JSON; bytes are base64 encoded.
-- Tests cover forward/reverse pulls, nested refs, alias/default behavior, per-spec limits, and component expansion.
+- `Add { e, a, v }`
+- `Retract { e, a, v? }`
+- `Cas { e, a, expected?, v }`
 
----
+Transaction primitives are the normalized, concrete datoms applied to storage:
 
-EDB/CORE/edb-schema
+- `TxPrimitive { added, e, a, v }`
 
-- edb-schema defines the core schema types used across the system.
-- AttrCardinality and AttrUnique model cardinality (one/many) and uniqueness constraints (none/identity/value).
-- Attribute captures schema metadata for a datom attribute: ident, value type (edb-encoding::ValueType), cardinality, uniqueness, component flag, no-history, doc, and alias idents; it also exposes is_unique.
-- Catalog is a minimal in-memory registry keyed by ident with upsert_attribute and get.
-- src/lib.rs re-exports the schema types for external crates.
+### Uniqueness and Cardinality
 
----
+- Uniqueness is enforced during validation (`AttrUnique::Identity` or `AttrUnique::Value`).
+- Cardinality-one attributes imply implicit retract of previous value when a new value is asserted.
+- Uniqueness uses a computed `value_key` in the `unique_idx` table.
 
-EDB/CORE/edb-server
+## Encoding Layer (`edb-encoding`)
 
-- edb-server is a single-node HTTP server (Axum/Tokio) wrapping SqliteTransactor with a background worker that serializes writes and broadcasts tx-reports over SSE.
-- Endpoints include /transact, /submit-envelope, /db, /sync, /heads, /tx/:txid, /subscribe, /metrics, /pull, /q, and /health; README.md documents request/response formats and examples.
-- The main loop uses a command channel to the worker for all operations; responses flow via oneshot channels, ensuring consistent DB access and centralized metrics updates.
-- Metrics track tx counts/latency, segment counts per index, and merge/compaction event counts with average merge/compaction latencies.
-- /pull delegates to edb_pull::Puller with the DB path to resolve refs via indexes; /q implements a minimal query planner over AVET/AEVT with eq/between/ge/has and a single ref-var join.
-- Envelope submission verifies Ed25519 signatures and enforces linear heads through SqliteTransactor::submit_envelope, and /tx/:txid exposes stored envelope blobs.
+### Value Types
 
----
+`ValueType` enumerates the system value types:
 
-EDB/CORE/edb-store-sqlite
+- Long, Double, Boolean, String, Keyword, Uuid, Instant, Ref, Bytes, Uint8, Bigint, Decimal, Float32, Float16, Bfloat16
 
-- edb-store-sqlite is a minimal SQLite-backed storage layer providing segment, root, and log primitives used by higher-level components.
-- Defines traits: SegmentStore (get/put-by-id), RootStore (get/init/CAS with revision), and LogStore (append/read ranges).
-- SqliteStore initializes schema (segments, roots, log) with WAL and FULL synchronous pragmas for durability.
-- put_segment_if_absent uses INSERT OR IGNORE for idempotent segment writes; roots support optimistic CAS via rev.
-- Log entries are append-only with autoincrementing seq and range reads ordered by sequence.
+### Ordering-Preserving Binary Encodings
 
----
+Primary goal: produce bytes that sort correctly lexicographically to preserve value ordering.
 
-EDB/CORE/edb-transactor
+Key rules:
 
-- edb-transactor is the core SQLite transactor: it normalizes/validates tx ops (via edb_tx), writes current and unique_idx, appends a log entry, updates a head root, and incrementally feeds EAVT/AEVT/AVET/VAET
-indexers with merge/compaction latency accounting.
-- Schema/metadata live in local tables (attrs, current, unique_idx, meta, aliases) with monotonic txInstant tracking; alias resolution is enforced for reads and writes, with validation to prevent collisions.
-- Provides DB view helpers (db, as_of, since, history_db) and log-based reconstruction (replay_current_from_log, as_of_entity_attrs, since_entity_attrs, history_entity) built on the durable log.
-- Envelope submission supports signed CBOR envelopes: verifies signature, enforces linear head, stores envelope + edges, decodes CBOR ops into TxOps, applies them, and marks envelopes applied.
-- Uniqueness keys are derived from value type (e.g., S:, L:); bytes use length only in value_key.
-- Tests cover smoke flows (tempids, lookups, subscribe, replay), alias behavior, monotonic t and txInstant meta, as‑of/since/history views, log replay, and envelope validation (bad sig, unknown feature, parent mismatch).
+- `Long` (i64): bias by `2^63` and encode as big-endian u64.
+- `Double` (f64): canonicalize NaN, map -0.0 to +0.0, then sign-bit flip/invert for ordering.
+- `Float32/Float16/Bfloat16`: similar sign-bit treatment with canonical NaN and zero normalization.
+- `String`: NFC-normalize, length-prefix with big-endian varuint, then UTF-8 bytes.
+- `Keyword`: same as String but enforced `:` prefix.
+- `Uuid`: 16 bytes.
+- `Bytes`: raw bytes (no length, used carefully in tuple decoding).
+- `Uint8`: 1 byte.
+- `Bigint`: sign byte, varuint length, magnitude bytes; negative values invert bytes for order.
+- `Decimal`: sign byte, biased exponent, length, BCD digits; negative values invert bytes.
 
----
+### Tuple Encoding (v1)
 
-EDB/CORE/edb-tx
+- Header: `0xF1 0x01` + arity + repeated type codes.
+- Payload: concatenated element encodings.
+- `tuple_order_bytes` returns payload region for ordering.
 
-- edb-tx defines the transaction model (Value, EntityRef, TxOp, TxPrimitive, TxReport), the DbView trait for accessing current state, and a normalization/validation pipeline.
-- grammar.rs parses JSON tx forms into TxOps: supports array ops (add, retract, cas, tx-fn, tx-meta, retract-entity cascade) and map-form entity assertions; resolves refs with tempids/lookup refs and coerces
-values based on attribute ValueType.
-- validate.rs performs type checking, uniqueness enforcement, CAS checks, and expands implicit retracts for cardinality-one; also binds tempids via unique identity pre-pass and resolves entity refs.
-- allocator.rs provides entid allocation and tempid resolution; txfn.rs allows custom tx functions via TxFnRegistry.
-- ValueType mapping is consistent with edb-encoding (including Bigint/Decimal), with float types treated as Value::Double at validation time.
-- Tests cover grammar parsing, map form, tx-fn expansion, cardinality-one retracts, type mismatch errors, lookup ref resolution, unique identity upserts, unique value conflicts, and CAS semantics.
+### CLI Tool
+
+`edb-enc` supports:
+
+- `encode <TYPE> <VALUE>`
+- `encode-tuple <TYPE> <CSV_VALUES>`
+- `decode <TYPE> <HEX>`
+
+### Tests
+
+Vector tests validate deterministic encodings, including NFC string normalization and tuple ordering bytes.
+
+## Envelope Layer (`edb-envelope`)
+
+### Envelope Format
+
+`UnsignedEnvelopeV1` fields:
+
+- `magic`: "edb.tx"
+- `version`: 1
+- `parents`: vec of 32-byte hashes
+- `features`: declared feature flags (must be empty for now)
+- `author_pubkey`: 32 bytes
+- `authored_at`: optional timestamp
+- `tx_body`: canonical, CBOR-sorted ops
+
+### Canonicalization
+
+- Each `EnvOp` is encoded as a CBOR array `[op, args...]`.
+- Ops are sorted by their CBOR byte representation before inclusion.
+- JSON objects are converted to CBOR with keys sorted for determinism.
+
+### Signing and Verification
+
+- `to_unsigned_bytes` emits a fixed-order CBOR array.
+- `tx_id` is SHA-256 of unsigned bytes.
+- `sign` and `verify` use Ed25519.
+
+### Conversion Helper
+
+`env_ops_from_txops` converts `edb_tx::model::TxOp` into `EnvOp`, serializing entity refs as JSON (entid, tempid, lookup tuple).
+
+## Storage Layer (`edb-store-sqlite`)
+
+### Tables
+
+- `segments(id, val)` for immutable segment blobs.
+- `roots(name, rev, val)` for CAS-protected root pointers.
+- `log(seq, val)` for append-only transaction log.
+
+### Traits
+
+- `SegmentStore`: `get_segment`, `put_segment_if_absent`.
+- `RootStore`: `get_root`, `init_root`, `cas_root`.
+- `LogStore`: `append_log`, `read_log_range`.
+
+### Behavior
+
+- WAL + FULL synchronous for durability.
+- Roots support optimistic CAS using `rev`.
+- Log seq is autoincremented and used for ordered reads.
+
+## Index Layer (`edb-index`)
+
+### Common Pattern
+
+Each indexer:
+
+- Buffers datoms in memory.
+- Sorts deterministically.
+- Writes sorted segments as JSON into `edb-store-sqlite`.
+- Maintains a root listing segment IDs.
+- Compacts when segments exceed a threshold.
+
+Datoms store value bytes as base64 (no padding).
+
+### Attribute Sort Key
+
+Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_scalar_string`, with the varuint length prefix stripped.
+
+### Indexes and Ordering
+
+- EAVT: (E, A, V, T desc)
+  - `scan_entity(e)`
+  - `scan_ea(e, a)`
+  - `scan_eav_prefix(e, a, v_prefix)`
+
+- AVET: (A, V, E, T desc)
+  - `scan_av_eq(a, v_bytes)`
+  - `scan_av_range(a, v_start, v_end)`
+
+- VAET (refs only): (V, A, E, T desc)
+  - `scan_v(v_e)`
+
+- AEVT: (A, E, V, T desc)
+  - `scan_a(a)`
+  - `scan_ae(a, e)`
+
+### Value Encoding
+
+- Values are encoded using `edb-encoding` with ordered bytes, then stored as base64 strings.
+
+## Transaction Layer (`edb-tx`)
+
+### Model Types
+
+- `Value`: strongly typed scalar values.
+- `EntityRef`: entid, tempid, or lookup ref.
+- `TxOp`: add/retract/cas.
+- `TxPrimitive`: concrete datom-level operations.
+- `TxReport`: tx metadata, tempids, touched attrs, primitives, meta.
+
+### Grammar Normalization
+
+`normalize_grammar` supports:
+
+- Array ops: `add`, `retract`, `cas`, `tx-fn`, `tx-meta`, `retract-entity`.
+- Map-form entities: `{ "db/id": ..., ":ns/attr": ... }`.
+- Tempids and lookup refs.
+- Type-coerced values based on schema.
+
+`retract-entity` cascades over component refs using `DbView.entity_attrs`.
+
+### Validation
+
+`normalize_and_validate` enforces:
+
+- Attribute existence.
+- Type matching vs `ValueType`.
+- Uniqueness (`Identity`, `Value`).
+- CAS expected-vs-current.
+- Cardinality-one implicit retracts.
+
+### Allocation
+
+- `EntidAllocator` and `TempResolver` manage new entids and tempid bindings.
+
+## Transactor Layer (`edb-transactor`)
+
+### Storage Tables
+
+- `attrs`: schema definitions.
+- `current`: current value per (e, a).
+- `unique_idx`: uniqueness index keyed by `value_key`.
+- `meta`: counters and txInstant tracking.
+- `aliases`: alias -> canonical ident.
+- Envelope tables: `tx_envelopes`, `tx_edges`, `heads`.
+
+### Apply Transaction Flow
+
+1. Normalize grammar and validate ops.
+2. Allocate `tx_eid` and compute monotonic `txInstant`.
+3. Apply primitives to `current` and `unique_idx`.
+4. Append log entry `{ primitives, meta, tx_eid, tx_instant }`.
+5. Update `head` root.
+6. Apply primitives to indexes (EAVT/AEVT/AVET/VAET).
+7. Record merge/compaction latency stats.
+8. Broadcast `TxReport` to subscribers.
+
+### Envelope Submission (Linear Mode)
+
+- Decode CBOR envelope; verify `magic`/`version` and empty `features`.
+- Verify Ed25519 signature.
+- Compute `tx_id` and enforce `parents` == current head (or genesis).
+- Store envelope and edges; update `heads`.
+- Decode CBOR ops into `TxOp`, validate, and apply primitives.
+- Mark envelope as applied.
+
+### Database Views
+
+- `db()`: current view.
+- `as_of(t)`: reconstruct state using log up to `t`.
+- `since(t)`: state changes after `t`.
+- `history_db()`: all primitives for entity.
+
+### Replay
+
+`replay_current_from_log` rebuilds `current` and `unique_idx` from the log.
+
+## Pull Layer (`edb-pull`)
+
+### Attribute Specs
+
+`AttrSpec` supports:
+
+- Direct `Attr` and `Reverse`.
+- `Nested` and `ReverseNested` with sub-specs.
+- `AttrAs` (alias) and `AttrDefault`.
+- `NestedLimit` and `ReverseNestedLimit` with per-spec `limit` and `max_depth`.
+
+### Puller Behavior
+
+- Reads schema from `attrs`/`aliases`.
+- Uses `current` for scalar values.
+- Uses `edb-index::EavtIndexer` when DB path is provided for multi-valued and ref scans.
+- Expands component refs by default.
+- Produces JSON output with reverse refs prefixed by `_`.
+
+## Server Layer (`edb-server`)
+
+### Runtime Model
+
+- Single background worker serializes all DB operations.
+- SSE stream (`/subscribe`) broadcasts tx reports.
+- Metrics track tx rates and index merge/compaction behavior.
+
+### HTTP Endpoints
+
+- `POST /transact`: JSON tx ops.
+- `POST /submit-envelope`: signed envelope submission.
+- `GET /db`: current basis `t`.
+- `POST /sync`: wait for basis >= target.
+- `GET /heads`: current tx heads.
+- `GET /tx/:txid`: stored envelope.
+- `POST /pull`: structured pull queries.
+- `POST /q`: minimal query planner.
+- `GET /metrics`, `GET /health`.
+
+### Query Planner (`/q`)
+
+- Uses AVET for value constraints (eq, between, ge).
+- Uses AEVT for existence constraints (`has`).
+- Supports a single ref-var join for `Ref` attributes.
+- Produces either entity sets or joined pairs.
+
+## Cross-Cutting Invariants and Ordering Rules
+
+- Attribute ordering uses NFC-normalized bytes (string encoding sans length prefix).
+- Value ordering relies on `edb-encoding` ordered byte encodings.
+- Log ordering is authoritative for `as_of`, `since`, and `history` views.
+- Index segments are immutable; roots point to segment lists with CAS updates.
+- Envelope mode is currently linear (single head).
+
+## Test Coverage Highlights
+
+- Encoding vectors for all scalar and tuple formats.
+- Index scan correctness and range behavior.
+- Pull behavior for nested specs and component expansion.
+- Transactor flows: tempids, lookups, replay, aliases, txInstant monotonicity.
+- Envelope validation and linear-head enforcement.
+- Query joins and existence checks.
+
+## Notes and Open Points
+
+- Float types are normalized to `Value::Double` for validation, and encoding preserves ordering.
+- `Bytes` values are equality-only in schema; uniqueness is disallowed at install time.
+- Envelope `features` are currently rejected if non-empty.
+- Query planner does not implement gt/lt/le yet and supports only one ref-var join.
+
