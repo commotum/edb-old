@@ -4,6 +4,7 @@ pub mod allocator;
 pub mod validate;
 pub mod grammar;
 pub mod txfn;
+pub mod edn;
 
 pub use allocator::{EntidAllocator, SimpleAllocator};
 pub use model::{TempId, TxOp, TxPrimitive, TxReport, Value};
@@ -11,6 +12,7 @@ pub use traits::{DbView, UniquenessResult};
 pub use validate::{normalize_and_validate, TxError};
 pub use grammar::{normalize_grammar, Normalized};
 pub use txfn::{TxFnRegistry, TxFunction};
+pub use edn::{normalize_edn, EdnTxError};
 
 // Back-compat wrapper returning only ops (no tx meta, no tx-fns)
 pub fn normalize_grammar_ops(

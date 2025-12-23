@@ -3,7 +3,7 @@ use edb_schema::{AttrCardinality, AttrUnique, Attribute};
 use edb_encoding::ValueType;
 use edb_index::EavtIndexer;
 use edb_store_sqlite::{RootStore, SqliteStore, StoreError, LogStore};
-use edb_tx::{allocator::TempResolver, normalize_grammar, model::Value, traits::DbView, validate::normalize_and_validate, TxOp, TxReport, UniquenessResult, TxFnRegistry};
+use edb_tx::{allocator::TempResolver, normalize_edn, normalize_grammar, model::Value, traits::DbView, validate::normalize_and_validate, EdnTxError, TxOp, TxReport, UniquenessResult, TxFnRegistry};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TxrError {
@@ -13,6 +13,8 @@ pub enum TxrError {
     Sqlite(#[from] rusqlite::Error),
     #[error("tx: {0}")]
     Tx(#[from] edb_tx::validate::TxError),
+    #[error("edn: {0}")]
+    Edn(#[from] EdnTxError),
     #[error("invalid schema: {0}")]
     InvalidSchema(String),
 }
@@ -157,7 +159,7 @@ impl SqliteTransactor {
     /// Return counts of index segments and cumulative latency for observability.
     pub fn index_stats(&self) -> Result<IndexStats, TxrError> {
         #[derive(serde::Deserialize)]
-        struct RootV1 { version: u8, segments: Vec<String> }
+        struct RootV1 { #[serde(rename = "version")] _version: u8, segments: Vec<String> }
         fn count_segments(conn: &edb_store_sqlite::SqliteStore, name: &str) -> usize {
             match conn.get_root(name) {
                 Ok(Some((_rev, bytes))) => serde_json::from_slice::<RootV1>(&bytes).map(|r| r.segments.len()).unwrap_or(0),
@@ -241,6 +243,24 @@ impl SqliteTransactor {
             let _rep = normalize_and_validate(&dbview, &ops, &mut alloc2)?;
             (ops, normalized.meta)
         };
+        self.apply_tx_ops(ops, meta_json)
+    }
+
+    pub fn apply_tx_edn(&mut self, input: &str) -> Result<TxReport, TxrError> {
+        let (ops, meta_json) = {
+            let dbview = SqliteDbView { conn: &self.conn };
+            let mut temps = TempResolver::new();
+            let mut alloc = SqliteAllocator { txr: self };
+            let normalized = normalize_edn(&dbview, &mut alloc, &mut temps, input)?;
+            let ops: Vec<TxOp> = normalized.ops;
+            let mut alloc2 = SqliteAllocator { txr: self };
+            let _rep = normalize_and_validate(&dbview, &ops, &mut alloc2)?;
+            (ops, normalized.meta)
+        };
+        self.apply_tx_ops(ops, meta_json)
+    }
+
+    fn apply_tx_ops(&mut self, ops: Vec<TxOp>, meta_json: Option<serde_json::Value>) -> Result<TxReport, TxrError> {
         let dbview = SqliteDbView { conn: &self.conn };
         let mut alloc2 = SqliteAllocator { txr: self };
         let report = normalize_and_validate(&dbview, &ops, &mut alloc2)?;
@@ -302,7 +322,7 @@ impl SqliteTransactor {
         rep.meta = meta_json;
         // Update indexes and measure merge/compaction latency
         #[derive(serde::Deserialize)]
-        struct RootV1 { version: u8, segments: Vec<String> }
+        struct RootV1 { #[serde(rename = "version")] _version: u8, segments: Vec<String> }
         let count_segments = |name: &str| -> usize {
             match self.store.get_root(name) {
                 Ok(Some((_rev, bytes))) => serde_json::from_slice::<RootV1>(&bytes).map(|r| r.segments.len()).unwrap_or(0),
@@ -499,7 +519,7 @@ impl SqliteTransactor {
         let _ = self.store.cas_root("head", rev, &new_head)?;
         // EAVT/AEVT/AVET/VAET apply/merge with latency accounting
         #[derive(serde::Deserialize)]
-        struct RootV1B { version: u8, segments: Vec<String> }
+        struct RootV1B { #[serde(rename = "version")] _version: u8, segments: Vec<String> }
         let count_segments_b = |name: &str| -> usize {
             match self.store.get_root(name) {
                 Ok(Some((_rev, bytes))) => serde_json::from_slice::<RootV1B>(&bytes).map(|r| r.segments.len()).unwrap_or(0),

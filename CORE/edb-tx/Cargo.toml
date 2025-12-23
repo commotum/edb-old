@@ -10,3 +10,4 @@ uuid = { version = "1", features = ["std", "serde"] }
 thiserror = "1"
 edb-encoding = { path = "../edb-encoding" }
 edb-schema = { path = "../edb-schema" }
+edb-edn = { path = "../edb-edn" }

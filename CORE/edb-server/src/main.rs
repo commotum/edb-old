@@ -1,4 +1,4 @@
-use axum::{routing::{get, post}, Router, extract::{State, Path}, Json};
+use axum::{routing::{get, post}, Router, extract::{State, Path}, Json, body::Bytes};
 use axum::response::sse::{Sse, Event};
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -19,6 +19,7 @@ struct AppState {
 
 enum Command {
     Transact(Vec<serde_json::Value>, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
+    TransactEdn(String, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     SubmitEnv(Vec<u8>, Vec<u8>, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     GetDb(tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
     GetHeads(tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>),
@@ -83,6 +84,22 @@ async fn main() {
                 Command::Transact(ops, tx) => {
                     let start = Instant::now();
                     let res = txr.apply_tx(&ops)
+                        .map(|rep| {
+                            let _ = bcast.send(serde_json::to_string(&rep).unwrap());
+                            if let Some(t) = rep.t { metrics.last_t.store(t, Ordering::Relaxed); }
+                            metrics.tx_count.fetch_add(1, Ordering::Relaxed);
+                            metrics.tx_total_ms.fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+                            if let Ok(stats) = txr.index_stats() {
+                                update_index_metrics(&metrics, stats);
+                            }
+                            serde_json::to_value(rep).unwrap()
+                        })
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(res);
+                }
+                Command::TransactEdn(input, tx) => {
+                    let start = Instant::now();
+                    let res = txr.apply_tx_edn(&input)
                         .map(|rep| {
                             let _ = bcast.send(serde_json::to_string(&rep).unwrap());
                             if let Some(t) = rep.t { metrics.last_t.store(t, Ordering::Relaxed); }
@@ -181,6 +198,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/transact", post(post_transact))
+        .route("/transact-edn", post(post_transact_edn))
         .route("/submit-envelope", post(post_submit_envelope))
         .route("/db", get(get_db))
         .route("/sync", post(post_sync))
@@ -204,6 +222,16 @@ async fn post_transact(State(state): State<AppState>, Json(body): Json<serde_jso
     let ops = match body.as_array() { Some(a) => a.clone(), None => return Err((axum::http::StatusCode::BAD_REQUEST, "expected array".into())) };
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.cmd_tx.send(Command::Transact(ops, tx)).await.map_err(as_500)?;
+    match rx.await.map_err(as_500)? {
+        Ok(val) => Ok(Json(val)),
+        Err(e) => Err(as_500(e)),
+    }
+}
+
+async fn post_transact_edn(State(state): State<AppState>, body: Bytes) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let input = std::str::from_utf8(&body).map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.cmd_tx.send(Command::TransactEdn(input.to_string(), tx)).await.map_err(as_500)?;
     match rx.await.map_err(as_500)? {
         Ok(val) => Ok(Json(val)),
         Err(e) => Err(as_500(e)),
@@ -368,7 +396,9 @@ struct WhereAV {
     value: Option<serde_json::Value>,
     ge: Option<serde_json::Value>,
     lt: Option<serde_json::Value>,
+    #[allow(dead_code)]
     le: Option<serde_json::Value>,
+    #[allow(dead_code)]
     gt: Option<serde_json::Value>,
     #[serde(default)]
     var: Option<String>,
@@ -408,7 +438,7 @@ fn run_query(conn: &rusqlite::Connection, db_path: &str, req: &QueryReq) -> Resu
     for w in &req.r#where {
         // Allow 'has' (exists) using AEVT, which does not require a value type
         if matches!(w.op, Op::Has) {
-            let mut aidx = edb_index::AevtIndexer::open(db_path).map_err(|e| e.to_string())?;
+            let aidx = edb_index::AevtIndexer::open(db_path).map_err(|e| e.to_string())?;
             let mut rows: Vec<i64> = Vec::new();
             let mut seen = std::collections::BTreeSet::<(i64, String)>::new();
             for d in aidx.scan_a(&w.a).map_err(|e| e.to_string())? {

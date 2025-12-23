@@ -5,6 +5,7 @@ This document is a consolidated, technically detailed map of the EDB core crates
 ## Scope and Sources
 
 - CORE/edb-encoding
+- CORE/edb-edn
 - CORE/edb-envelope
 - CORE/edb-index
 - CORE/edb-pull
@@ -19,6 +20,7 @@ This document is a consolidated, technically detailed map of the EDB core crates
 EDB is a single-node, SQLite-backed database with:
 
 - A deterministic binary encoding for ordered value bytes (`edb-encoding`).
+- An EDN parser for values, queries, and tx entity forms (`edb-edn`).
 - A transaction model and validation pipeline (`edb-tx`).
 - A transactor that writes current state, unique indexes, and a durable log, and updates secondary indexes (`edb-transactor`).
 - A small SQLite segment store for index segments and metadata (`edb-store-sqlite`).
@@ -95,6 +97,25 @@ Key rules:
 ### Tests
 
 Vector tests validate deterministic encodings, including NFC string normalization and tuple ordering bytes.
+
+## EDN Layer (`edb-edn`)
+
+### Parsing and Types
+
+- PEG-based EDN parser (peg 0.8) for values, queries, and tx entity forms.
+- Scalars: nil, booleans, integers, bigints (`N`), decimals (`M`), floats, strings, keywords, symbols, instants (`#inst`), UUIDs (`#uuid`).
+- Collections: lists, vectors, maps, sets; commas as whitespace; line comments.
+
+### Query Parsing
+
+- List-form queries `[:find ... :where ...]` parsed into `edb_edn::query::ParsedQuery`.
+- Map-form queries `{:find [...] :where [...]}` normalized to list-form semantics for parsing.
+  - `:find` vectors expand to relation find-elems; collection `...` vectors are preserved.
+- Supports `or`/`or-join`, `not`/`not-join`, predicates, function bindings, type annotations, and pull in `:find`.
+
+### Transaction Entity Parsing
+
+- Parses EDN tx entities `[:db/add ...]`, `[:db/retract ...]`, and map notation `{:db/id ... :attr ...}` into `edb_edn::entities`.
 
 ## Envelope Layer (`edb-envelope`)
 
@@ -207,6 +228,15 @@ Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_sca
 
 `retract-entity` cascades over component refs using `DbView.entity_attrs`.
 
+### EDN Normalization
+
+`normalize_edn` supports:
+
+- EDN tx forms `[:db/add ...]`, `[:db/retract ...]`, and map notation `{:db/id ... :attr ...}`.
+- Vector values expand into multiple ops for cardinality-many attributes.
+- Ref values resolve tempids and lookup refs during normalization.
+- EDN tx functions, CAS, and nested map notation are not yet implemented.
+
 ### Validation
 
 `normalize_and_validate` enforces:
@@ -293,6 +323,7 @@ Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_sca
 ### HTTP Endpoints
 
 - `POST /transact`: JSON tx ops.
+- `POST /transact-edn`: EDN tx entities.
 - `POST /submit-envelope`: signed envelope submission.
 - `GET /db`: current basis `t`.
 - `POST /sync`: wait for basis >= target.
@@ -332,4 +363,3 @@ Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_sca
 - `Bytes` values are equality-only in schema; uniqueness is disallowed at install time.
 - Envelope `features` are currently rejected if non-empty.
 - Query planner does not implement gt/lt/le yet and supports only one ref-var join.
-
