@@ -156,7 +156,7 @@ const ALL_VALUE_TYPES: [ValueType; 15] = [
     ValueType::Bfloat16,
 ];
 
-const NUMERIC_TYPES: [ValueType; 7] = [
+const NUMERIC_TYPES: [ValueType; 8] = [
     ValueType::Long,
     ValueType::Double,
     ValueType::Uint8,
@@ -164,6 +164,7 @@ const NUMERIC_TYPES: [ValueType; 7] = [
     ValueType::Decimal,
     ValueType::Float32,
     ValueType::Float16,
+    ValueType::Bfloat16,
 ];
 
 const fn bit(vt: ValueType) -> u32 {
