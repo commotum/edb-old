@@ -1,7 +1,40 @@
 # Primary
 
-- /home/jake/Developer/EDB/REFERENCE/mentat/<primary-reference>.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/edn/src/edn.rustpeg
+- /home/jake/Developer/EDB/REFERENCE/mentat/edn/src/lib.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/edn/src/query.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/edn/src/types.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/edn/src/entities.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/lib.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/types.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/validate.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/mod.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/pattern.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/inputs.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/or.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/not.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/predicate.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/ground.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/where_fn.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/resolve.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/convert.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/tx_log_api.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-algebrizer/src/clauses/fulltext.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-projector/src/lib.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-projector/src/project.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-projector/src/translate.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-projector/src/projectors/mod.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-projector/src/projectors/simple.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-projector/src/projectors/pull_two_stage.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-pull/src/lib.rs
 
 # Secondary
 
-- /home/jake/Developer/EDB/REFERENCE/mentat/<secondary-reference>.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/query-sql/src/lib.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/sql/src/lib.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/core/src/lib.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/core/src/sql_types.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/core-traits/lib.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/core-traits/value_type_set.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/core-traits/values.rs
+- /home/jake/Developer/EDB/REFERENCE/mentat/transaction/src/query.rs
