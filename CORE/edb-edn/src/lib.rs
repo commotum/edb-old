@@ -99,6 +99,18 @@ fn map_query_to_list(map: &std::collections::BTreeMap<ValueAndSpan, ValueAndSpan
         parts.push(":find".to_string());
         push_find_spec(&mut parts, v);
     }
+    if let Some(v) = keyed.remove(":keys") {
+        parts.push(":keys".to_string());
+        push_collection_parts(&mut parts, v);
+    }
+    if let Some(v) = keyed.remove(":strs") {
+        parts.push(":strs".to_string());
+        push_collection_parts(&mut parts, v);
+    }
+    if let Some(v) = keyed.remove(":syms") {
+        parts.push(":syms".to_string());
+        push_collection_parts(&mut parts, v);
+    }
     if let Some(v) = keyed.remove(":with") {
         parts.push(":with".to_string());
         push_collection_parts(&mut parts, v);

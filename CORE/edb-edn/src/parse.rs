@@ -300,6 +300,22 @@ peg::parser! {
     rule query_function() -> query::QueryFunction
         = __ n:$(symbol_name()) __ {? query::QueryFunction::from_symbol(&PlainSymbol::plain(n)).ok_or("expected query function") }
 
+    rule plain_symbol() -> PlainSymbol
+        = __ n:$(symbol_name()) __ {?
+            let sym = PlainSymbol::plain(n);
+            if sym.is_var_symbol() || sym.is_src_symbol() || sym.0.as_str() == "%" {
+                Err("expected plain symbol")
+            } else {
+                Ok(sym)
+            }
+        }
+
+    rule key_keyword() -> Keyword
+        = __ k:raw_keyword() __ { k }
+
+    rule string_literal() -> String
+        = __ s:raw_text() __ { s }
+
     rule fn_arg() -> query::FnArg
         = v:value() {? query::FnArg::from_value(&v).ok_or("expected query function argument") }
         / __ "[" args:fn_arg()+ "]" __ { query::FnArg::Vector(args) }
@@ -307,7 +323,12 @@ peg::parser! {
     rule find_elem() -> query::Element
         = __ v:variable() __ { query::Element::Variable(v) }
         / __ "(" __ "the" v:variable() ")" __ { query::Element::Corresponding(v) }
-        / __ "(" __ "pull" var:variable() "[" patterns:pull_attribute()+ "]" __ ")" __ { query::Element::Pull(query::Pull { var, patterns }) }
+        / __ "(" __ "pull" var:variable() "[" patterns:pull_attribute()+ "]" __ ")" __ {
+            query::Element::Pull(query::Pull { var, pattern: query::PullPattern::Inline(patterns) })
+        }
+        / __ "(" __ "pull" var:variable() name:plain_symbol() __ ")" __ {
+            query::Element::Pull(query::Pull { var, pattern: query::PullPattern::Named(name) })
+        }
         / __ "(" func:query_function() args:fn_arg()* ")" __ { query::Element::Aggregate(query::Aggregate { func, args }) }
 
     rule find_spec() -> query::FindSpec
@@ -329,7 +350,8 @@ peg::parser! {
         }
 
     rule limit() -> query::Limit
-        = __ v:variable() __ { query::Limit::Variable(v) }
+        = __ "nil" __ { query::Limit::None }
+        / __ v:variable() __ { query::Limit::Variable(v) }
         / __ n:(raw_octalinteger() / raw_hexinteger() / raw_basedinteger() / raw_integer()) __ {?
             if n > 0 {
                 Ok(query::Limit::Fixed(n as u64))
@@ -349,6 +371,22 @@ peg::parser! {
 
     rule pattern_non_value_place() -> query::PatternNonValuePlace
         = v:value() {? query::PatternNonValuePlace::from_value(&v).ok_or("expected pattern_non_value_place") }
+
+    rule rule_arg() -> query::RuleArg
+        = v:value() {? query::RuleArg::from_value(&v).ok_or("expected rule argument") }
+
+    rule rule_name() -> PlainSymbol
+        = plain_symbol()
+
+    rule rule_expr() -> query::WhereClause
+        = __ "[" src:src_var()? name:rule_name() args:rule_arg()+ "]" __ {
+            query::WhereClause::RuleExpr(
+                query::RuleExpr {
+                    source: src,
+                    name,
+                    args,
+                })
+        }
 
     rule pattern() -> query::WhereClause
         = __ "["
@@ -457,7 +495,8 @@ peg::parser! {
 
     rule where_clause() -> query::WhereClause
         // Right now we only support patterns and predicates. See #239 for more.
-        = pattern()
+        = rule_expr()
+        / pattern()
         / or_join_clause()
         / or_clause()
         / not_join_clause()
@@ -466,9 +505,24 @@ peg::parser! {
         / pred()
         / where_fn()
 
+    rule rules_var() -> query::QueryInput
+        = __ "%" __ { query::QueryInput::RulesVar }
+
+    rule input() -> query::QueryInput
+        = rules_var()
+        / src:src_var() { query::QueryInput::SrcVar(src) }
+        / b:binding() { query::QueryInput::Binding(b) }
+        / name:plain_symbol() { query::QueryInput::PatternName(name) }
+
+    rule return_map_spec() -> query::QueryPart
+        = __ ":keys" ks:plain_symbol()+ { query::QueryPart::ReturnMap(query::ReturnMapSpec::Keys(ks)) }
+        / __ ":strs" ss:string_literal()+ { query::QueryPart::ReturnMap(query::ReturnMapSpec::Strs(ss)) }
+        / __ ":syms" ss:plain_symbol()+ { query::QueryPart::ReturnMap(query::ReturnMapSpec::Syms(ss)) }
+
     rule query_part() -> query::QueryPart
         = __ ":find" fs:find_spec() { query::QueryPart::FindSpec(fs) }
-        / __ ":in" in_vars:variable()+ { query::QueryPart::InVars(in_vars) }
+        / return_map_spec()
+        / __ ":in" inputs:input()+ { query::QueryPart::Inputs(inputs) }
         / __ ":limit" l:limit() { query::QueryPart::Limit(l) }
         / __ ":order" os:order()+ { query::QueryPart::Order(os) }
         / __ ":where" ws:where_clause()+ { query::QueryPart::WhereClauses(ws) }

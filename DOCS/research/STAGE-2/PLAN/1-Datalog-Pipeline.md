@@ -144,9 +144,13 @@ Semantics:
 
 ### M1: EDN Query Parsing
 
-- Integrate Mentat EDN parser.
-- Parse EDN query strings into Mentat AST.
-- Tests for EDN literals and query forms.
+- Parse EDN query strings into the EDB query AST (list + map forms).
+- Support full `:in` binding forms (scalar/coll/tuple/rel), rules var `%`, and pattern-name inputs.
+- Parse rule expressions in `:where`.
+- Support return maps (`:keys`, `:strs`, `:syms`) and pull pattern inputs in `:find`.
+- Parse `:with`, `:order` (asc/desc), and `:limit` (including `nil`).
+- Tests for EDN literals (including decimal `M`) and query forms.
+- Note: `:keys` uses symbols (Datomic-style), e.g. `:keys [e name]`.
 
 Deliverable:
 - `edb-edn` query parser module.

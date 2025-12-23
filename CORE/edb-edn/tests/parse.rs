@@ -1,5 +1,5 @@
 use edb_edn::{parse_query, parse_value};
-use edb_edn::query::FindSpec;
+use edb_edn::query::{FindSpec, QueryInput, PullPattern, ReturnMapSpec, WhereClause};
 
 #[test]
 fn parse_edn_value_basic() {
@@ -32,9 +32,51 @@ fn parse_edn_decimal_basic() {
 
 #[test]
 fn parse_edn_query_map_form() {
-    let q = parse_query("{:find [?e ?name] :where [[?e :user/name ?name]]}").expect("query");
+    let q = parse_query("{:find [?e ?name] :keys [e name] :where [[?e :user/name ?name]]}").expect("query");
     match q.find_spec {
         FindSpec::FindRel(ref elems) => assert_eq!(elems.len(), 2),
         other => panic!("expected find-rel, got {other:?}"),
+    }
+    match q.return_map {
+        Some(ReturnMapSpec::Keys(ref keys)) => assert_eq!(keys.len(), 2),
+        other => panic!("expected return map, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_edn_query_in_bindings_and_rules() {
+    let q = parse_query("[:find ?e :in $ ?name [?age ...] [[?e ?a]] % pattern :where [rule-name ?e ?name]]").expect("query");
+    assert_eq!(q.inputs.len(), 6);
+    assert!(matches!(q.inputs[0], QueryInput::SrcVar(_)));
+    assert!(matches!(q.inputs[1], QueryInput::Binding(_)));
+    assert!(matches!(q.inputs[2], QueryInput::Binding(_)));
+    assert!(matches!(q.inputs[3], QueryInput::Binding(_)));
+    assert!(matches!(q.inputs[4], QueryInput::RulesVar));
+    assert!(matches!(q.inputs[5], QueryInput::PatternName(_)));
+    assert!(matches!(q.where_clauses[0], WhereClause::RuleExpr(_)));
+}
+
+#[test]
+fn parse_edn_query_return_maps() {
+    let q = parse_query("[:find ?e ?name :strs \"e\" \"name\" :where [?e :user/name ?name]]").expect("query");
+    match q.return_map {
+        Some(ReturnMapSpec::Strs(ref strs)) => assert_eq!(strs.len(), 2),
+        other => panic!("expected return map, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_edn_query_pull_pattern_name() {
+    let q = parse_query("[:find (pull ?e pattern) :in $ pattern :where [?e :user/id 1]]").expect("query");
+    let elem = match q.find_spec {
+        FindSpec::FindRel(ref elems) => elems.first().expect("elem"),
+        _ => panic!("expected find-rel"),
+    };
+    match elem {
+        edb_edn::query::Element::Pull(pull) => match &pull.pattern {
+            PullPattern::Named(_) => {}
+            other => panic!("expected named pattern, got {other:?}"),
+        },
+        other => panic!("expected pull element, got {other:?}"),
     }
 }

@@ -237,6 +237,51 @@ pub enum FnArg {
     Vector(Vec<FnArg>),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuleArg {
+    Placeholder,
+    Variable(Variable),
+    EntidOrInteger(i64),
+    IdentOrKeyword(Keyword),
+    Constant(NonIntegerConstant),
+}
+
+impl FromValue<RuleArg> for RuleArg {
+    fn from_value(v: &ValueAndSpan) -> Option<RuleArg> {
+        use crate::SpannedValue::*;
+        match v.inner {
+            Integer(x) =>
+                Some(RuleArg::EntidOrInteger(x)),
+            PlainSymbol(ref x) if x.0.as_str() == "_" =>
+                Some(RuleArg::Placeholder),
+            PlainSymbol(ref x) =>
+                Variable::from_symbol(x).map(RuleArg::Variable),
+            Keyword(ref x) =>
+                Some(RuleArg::IdentOrKeyword(x.clone())),
+            Instant(x) =>
+                Some(RuleArg::Constant(NonIntegerConstant::Instant(x))),
+            Uuid(x) =>
+                Some(RuleArg::Constant(NonIntegerConstant::Uuid(x))),
+            Boolean(x) =>
+                Some(RuleArg::Constant(NonIntegerConstant::Boolean(x))),
+            Float(x) =>
+                Some(RuleArg::Constant(NonIntegerConstant::Float(x))),
+            BigInteger(ref x) =>
+                Some(RuleArg::Constant(NonIntegerConstant::BigInteger(x.clone()))),
+            Decimal(ref x) =>
+                Some(RuleArg::Constant(NonIntegerConstant::Decimal(x.clone()))),
+            Text(ref x) =>
+                Some(RuleArg::Constant(x.clone().into())),
+            Nil |
+            NamespacedSymbol(_) |
+            Vector(_) |
+            List(_) |
+            Set(_) |
+            Map(_) => None,
+        }
+    }
+}
+
 impl FromValue<FnArg> for FnArg {
     fn from_value(v: &ValueAndSpan) -> Option<FnArg> {
         use crate::SpannedValue::*;
@@ -555,7 +600,13 @@ impl std::fmt::Display for PullAttributeSpec {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pull {
     pub var: Variable,
-    pub patterns: Vec<PullAttributeSpec>,
+    pub pattern: PullPattern,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PullPattern {
+    Inline(Vec<PullAttributeSpec>),
+    Named(PlainSymbol),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -602,13 +653,20 @@ impl std::fmt::Display for Element {
             &Element::Variable(ref var) => {
                 write!(f, "{}", var)
             },
-            &Element::Pull(Pull { ref var, ref patterns }) => {
-                write!(f, "(pull {} [ ", var)?;
-                for p in patterns.iter() {
-                    write!(f, "{} ", p)?;
+            &Element::Pull(Pull { ref var, ref pattern }) => {
+                match pattern {
+                    &PullPattern::Inline(ref patterns) => {
+                        write!(f, "(pull {} [ ", var)?;
+                        for p in patterns.iter() {
+                            write!(f, "{} ", p)?;
+                        }
+                        write!(f, "])")
+                    }
+                    &PullPattern::Named(ref name) => {
+                        write!(f, "(pull {} {})", var, name)
+                    }
                 }
-                write!(f, "])")
-            },
+            }
             &Element::Aggregate(ref agg) => {
                 match agg.args.len() {
                     0 => write!(f, "({})", agg.func),
@@ -761,6 +819,21 @@ pub enum Binding {
     BindColl(Variable),
     BindRel(Vec<VariableOrPlaceholder>),
     BindTuple(Vec<VariableOrPlaceholder>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryInput {
+    SrcVar(SrcVar),
+    Binding(Binding),
+    RulesVar,
+    PatternName(PlainSymbol),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReturnMapSpec {
+    Keys(Vec<PlainSymbol>),
+    Strs(Vec<String>),
+    Syms(Vec<PlainSymbol>),
 }
 
 impl Binding {
@@ -971,6 +1044,13 @@ pub struct TypeAnnotation {
     pub variable: Variable,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleExpr {
+    pub source: Option<SrcVar>,
+    pub name: PlainSymbol,
+    pub args: Vec<RuleArg>,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WhereClause {
@@ -978,7 +1058,7 @@ pub enum WhereClause {
     OrJoin(OrJoin),
     Pred(Predicate),
     WhereFn(WhereFn),
-    RuleExpr,
+    RuleExpr(RuleExpr),
     Pattern(Pattern),
     TypeAnnotation(TypeAnnotation),
 }
@@ -989,20 +1069,22 @@ pub struct ParsedQuery {
     pub find_spec: FindSpec,
     pub default_source: SrcVar,
     pub with: Vec<Variable>,
-    pub in_vars: Vec<Variable>,
+    pub inputs: Vec<QueryInput>,
     pub in_sources: BTreeSet<SrcVar>,
     pub limit: Limit,
     pub where_clauses: Vec<WhereClause>,
     pub order: Option<Vec<Order>>,
+    pub return_map: Option<ReturnMapSpec>,
 }
 
 pub(crate) enum QueryPart {
     FindSpec(FindSpec),
     WithVars(Vec<Variable>),
-    InVars(Vec<Variable>),
+    Inputs(Vec<QueryInput>),
     Limit(Limit),
     WhereClauses(Vec<WhereClause>),
     Order(Vec<Order>),
+    ReturnMap(ReturnMapSpec),
 }
 
 /// A `ParsedQuery` represents a parsed but potentially invalid query to the query algebrizer.
@@ -1015,10 +1097,11 @@ impl ParsedQuery {
     pub(crate) fn from_parts(parts: Vec<QueryPart>) -> std::result::Result<ParsedQuery, &'static str> {
         let mut find_spec: Option<FindSpec> = None;
         let mut with: Option<Vec<Variable>> = None;
-        let mut in_vars: Option<Vec<Variable>> = None;
+        let mut inputs: Option<Vec<QueryInput>> = None;
         let mut limit: Option<Limit> = None;
         let mut where_clauses: Option<Vec<WhereClause>> = None;
         let mut order: Option<Vec<Order>> = None;
+        let mut return_map: Option<ReturnMapSpec> = None;
 
         for part in parts.into_iter() {
             match part {
@@ -1034,11 +1117,11 @@ impl ParsedQuery {
                     }
                     with = Some(x)
                 },
-                QueryPart::InVars(x) => {
-                    if in_vars.is_some() {
+                QueryPart::Inputs(x) => {
+                    if inputs.is_some() {
                         return Err("find query has repeated :in");
                     }
-                    in_vars = Some(x)
+                    inputs = Some(x)
                 },
                 QueryPart::Limit(x) => {
                     if limit.is_some() {
@@ -1058,6 +1141,12 @@ impl ParsedQuery {
                     }
                     order = Some(x)
                 },
+                QueryPart::ReturnMap(x) => {
+                    if return_map.is_some() {
+                        return Err("find query has repeated return map");
+                    }
+                    return_map = Some(x)
+                }
             }
         }
 
@@ -1065,11 +1154,12 @@ impl ParsedQuery {
             find_spec: find_spec.ok_or("expected :find")?,
             default_source: SrcVar::DefaultSrc,
             with: with.unwrap_or(vec![]),
-            in_vars: in_vars.unwrap_or(vec![]),
+            inputs: inputs.unwrap_or(vec![]),
             in_sources: BTreeSet::default(),
             limit: limit.unwrap_or(Limit::None),
             where_clauses: where_clauses.ok_or("expected :where")?,
             order,
+            return_map,
         })
     }
 }
@@ -1123,7 +1213,7 @@ impl ContainsVariables for WhereClause {
             &NotJoin(ref n)        => n.accumulate_mentioned_variables(acc),
             &WhereFn(ref f)        => f.accumulate_mentioned_variables(acc),
             &TypeAnnotation(ref a) => a.accumulate_mentioned_variables(acc),
-            &RuleExpr              => (),
+            &RuleExpr(ref r)       => r.accumulate_mentioned_variables(acc),
         }
     }
 }
@@ -1134,6 +1224,16 @@ impl ContainsVariables for OrWhereClause {
         match self {
             &And(ref clauses) => for clause in clauses { clause.accumulate_mentioned_variables(acc) },
             &Clause(ref clause) => clause.accumulate_mentioned_variables(acc),
+        }
+    }
+}
+
+impl ContainsVariables for RuleExpr {
+    fn accumulate_mentioned_variables(&self, acc: &mut BTreeSet<Variable>) {
+        for arg in self.args.iter() {
+            if let RuleArg::Variable(ref v) = arg {
+                acc.insert(v.clone());
+            }
         }
     }
 }
