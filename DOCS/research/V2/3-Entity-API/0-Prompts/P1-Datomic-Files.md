@@ -4,7 +4,9 @@ folder, are relevant to the:
 /home/jake/Developer/EDB/DOCS/research/V2/PLAN/3-Entity-API.md
 stage of our implementation.
 
-To understand the context you will need to review:
+To understand the context you will need to review the files from:
+/home/jake/Developer/EDB/CORE
+as outlined in:
 /home/jake/Developer/EDB/DOCS/research/V2/REF/EDB-Map.md
 /home/jake/Developer/EDB/DOCS/research/V2/REF/EDB-CORE.md
 
