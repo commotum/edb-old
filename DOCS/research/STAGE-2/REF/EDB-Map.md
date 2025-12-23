@@ -37,6 +37,13 @@ EDB is a single-node, SQLite-backed database with:
 - Attributes are defined in schema with ident, value type, cardinality, uniqueness, and component semantics.
 - Values are strongly typed via `edb_tx::model::Value` and mapped to `edb_encoding::ValueType`.
 
+### Schema Layer (`edb-schema`)
+
+- Core types: `Attribute`, `Catalog`, `AttrCardinality`, `AttrUnique`.
+- SQLite adapter (feature `sqlite`): `SchemaCatalog` loads `attrs` and `aliases` tables into a `Catalog` plus alias map.
+- Alias resolution: `SchemaLookup::attribute` resolves alias idents to canonical idents.
+- Used as the canonical schema source for query/algebrizer integration.
+
 ### Transaction Operations
 
 Supported operations (at the model level):
@@ -111,6 +118,8 @@ Vector tests validate deterministic encodings, including NFC string normalizatio
 - List-form queries `[:find ... :where ...]` parsed into `edb_edn::query::ParsedQuery`.
 - Map-form queries `{:find [...] :where [...]}` normalized to list-form semantics for parsing.
   - `:find` vectors expand to relation find-elems; collection `...` vectors are preserved.
+- Supports `:in` binding forms (scalar/coll/tuple/rel), rules var `%`, pattern-name inputs, and rule expressions in `:where`.
+- Supports return maps (`:keys`, `:strs`, `:syms`), `:order` (asc/desc), and `:limit` (including `nil`).
 - Supports `or`/`or-join`, `not`/`not-join`, predicates, function bindings, type annotations, and pull in `:find`.
 
 ### Transaction Entity Parsing
