@@ -6,6 +6,7 @@ members = [
   "CORE/edb-tx",
   "CORE/edb-store-sqlite",
   "CORE/edb-transactor",
+  "CORE/edb-query-schema",
   "CORE/edb-index",
   "CORE/edb-envelope",
   "CORE/edb-server",

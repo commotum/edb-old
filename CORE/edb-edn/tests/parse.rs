@@ -1,5 +1,5 @@
 use edb_edn::{parse_query, parse_value};
-use edb_edn::query::{FindSpec, QueryInput, PullPattern, ReturnMapSpec, WhereClause};
+use edb_edn::query::{Direction, FindSpec, Limit, PullPattern, QueryInput, ReturnMapSpec, WhereClause};
 
 #[test]
 fn parse_edn_value_basic() {
@@ -79,4 +79,35 @@ fn parse_edn_query_pull_pattern_name() {
         },
         other => panic!("expected pull element, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_edn_query_order_forms() {
+    let q = parse_query("[:find ?e :order ?e (desc ?e) (asc ?e) :where [?e :user/id 1]]").expect("query");
+    let order = q.order.expect("order");
+    assert_eq!(order.len(), 3);
+    assert!(matches!(order[0].0, Direction::Ascending));
+    assert!(matches!(order[1].0, Direction::Descending));
+    assert!(matches!(order[2].0, Direction::Ascending));
+}
+
+#[test]
+fn parse_edn_query_limit_forms() {
+    let q = parse_query("[:find ?e :limit 10 :where [?e :user/id 1]]").expect("query");
+    assert!(matches!(q.limit, Limit::Fixed(10)));
+
+    let q = parse_query("[:find ?e :limit nil :where [?e :user/id 1]]").expect("query");
+    assert!(matches!(q.limit, Limit::None));
+
+    let q = parse_query("[:find ?e :in ?lim :limit ?lim :where [?e :user/id 1]]").expect("query");
+    match q.limit {
+        Limit::Variable(ref var) => assert_eq!(var.to_string(), "?lim"),
+        other => panic!("expected limit variable, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_edn_query_limit_zero_rejected() {
+    let res = parse_query("[:find ?e :limit 0 :where [?e :user/id 1]]");
+    assert!(res.is_err());
 }
