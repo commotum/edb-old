@@ -47,13 +47,18 @@ impl Catalog {
     pub fn get(&self, ident: &str) -> Option<&Attribute> { self.by_ident.get(ident) }
 }
 
-pub trait SchemaLookup {
-    fn attribute(&self, ident: &str) -> Option<&Attribute>;
+pub trait HasSchema {
+    fn attribute_for_ident(&self, ident: &str) -> Option<&Attribute>;
     fn canonical_ident(&self, ident: &str) -> Option<String>;
+    fn component_attributes(&self) -> Vec<String>;
+
+    fn identifies_attribute(&self, ident: &str) -> bool {
+        self.attribute_for_ident(ident).is_some()
+    }
 }
 
-impl SchemaLookup for Catalog {
-    fn attribute(&self, ident: &str) -> Option<&Attribute> {
+impl HasSchema for Catalog {
+    fn attribute_for_ident(&self, ident: &str) -> Option<&Attribute> {
         if let Some(attr) = self.by_ident.get(ident) {
             return Some(attr);
         }
@@ -70,5 +75,16 @@ impl SchemaLookup for Catalog {
             .values()
             .find(|attr| attr.aliases.iter().any(|alias| alias == ident))
             .map(|attr| attr.ident.clone())
+    }
+
+    fn component_attributes(&self) -> Vec<String> {
+        let mut components: Vec<String> = self
+            .by_ident
+            .values()
+            .filter(|attr| attr.is_component)
+            .map(|attr| attr.ident.clone())
+            .collect();
+        components.sort();
+        components
     }
 }

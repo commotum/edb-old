@@ -2,7 +2,7 @@
 
 use edb_encoding::ValueType;
 use edb_schema::sqlite::{SchemaCatalog, SchemaError};
-use edb_schema::{AttrCardinality, AttrUnique, SchemaLookup};
+use edb_schema::{AttrCardinality, AttrUnique, HasSchema};
 use rusqlite::{params, Connection};
 
 fn setup_db(conn: &Connection) {
@@ -48,7 +48,7 @@ fn load_schema_with_aliases() {
     .unwrap();
 
     let schema = SchemaCatalog::load(&conn).expect("schema");
-    let attr = schema.attribute(":user/uid").expect("alias attr");
+    let attr = schema.attribute_for_ident(":user/uid").expect("alias attr");
     assert_eq!(attr.ident, ":user/id");
     assert_eq!(attr.cardinality, AttrCardinality::One);
     assert_eq!(attr.unique, AttrUnique::Identity);

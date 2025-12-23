@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use edb_encoding::ValueType;
 use rusqlite::Connection;
 
-use crate::schema::{AttrCardinality, AttrUnique, Attribute, Catalog, SchemaLookup};
+use crate::schema::{AttrCardinality, AttrUnique, Attribute, Catalog, HasSchema};
 
 #[derive(Debug)]
 pub enum SchemaError {
@@ -21,6 +21,7 @@ impl From<rusqlite::Error> for SchemaError {
 pub struct SchemaCatalog {
     catalog: Catalog,
     alias_to_ident: HashMap<String, String>,
+    component_attributes: Vec<String>,
 }
 
 impl SchemaCatalog {
@@ -63,7 +64,11 @@ impl SchemaCatalog {
             alias_to_ident.insert(alias, target);
         }
 
-        Ok(SchemaCatalog { catalog, alias_to_ident })
+        let mut component_attributes: Vec<String> = catalog
+            .component_attributes();
+        component_attributes.sort();
+
+        Ok(SchemaCatalog { catalog, alias_to_ident, component_attributes })
     }
 
     pub fn aliases_for(&self, ident: &str) -> Vec<String> {
@@ -88,8 +93,8 @@ impl SchemaCatalog {
     }
 }
 
-impl SchemaLookup for SchemaCatalog {
-    fn attribute(&self, ident: &str) -> Option<&Attribute> {
+impl HasSchema for SchemaCatalog {
+    fn attribute_for_ident(&self, ident: &str) -> Option<&Attribute> {
         let target = self.alias_to_ident.get(ident).map(|s| s.as_str()).unwrap_or(ident);
         self.catalog.get(target)
     }
@@ -100,6 +105,10 @@ impl SchemaLookup for SchemaCatalog {
         } else {
             self.alias_to_ident.get(ident).cloned()
         }
+    }
+
+    fn component_attributes(&self) -> Vec<String> {
+        self.component_attributes.clone()
     }
 }
 
