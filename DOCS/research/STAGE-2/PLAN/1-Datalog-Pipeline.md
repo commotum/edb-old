@@ -1,143 +1,150 @@
-# Plan: EDN + Full Datalog in EDB
+# Plan: Full Datalog Pipeline (Mentat-style)
 
-Goal: Add EDN support for transactions and full Datalog queries, staying as close to Datomic/Mentat semantics as possible while remaining Rust/WASM-friendly.
+Goal: Support full EDN Datalog queries (Mentat/Datomic syntax) and execute them via EDB’s index stack (EAVT/AVET/AEVT/VAET), including joins, predicates, aggregates, or/not, and pull in `:find`.
 
-## Decisions and Constraints
+## Scope
 
-- Transaction syntax: EDN map-form and `:db/add`-style vectors (Datomic style).
-- Query syntax: full EDN Datalog (Mentat-style `[:find ... :where ...]`).
-- WASM constraint: avoid heavy runtime dependencies that are not WASM-safe; keep the EDN parser and query stack pure Rust.
-- Compatibility target: Datomic/Mentat semantics where feasible; deviations must be explicit.
+In scope:
+- EDN query parsing and validation.
+- Full Datalog planning and execution over index scans.
+- Pull in `:find` with nested specs.
+- Query result shaping (scalar/tuple/coll/rel).
 
-## Phase 0: Confirm EDN Type Semantics (Open Decision)
+Out of scope (covered by other plans):
+- EDN transactions (map form and `:db/add` vectors).
+- Schema/vocabulary tooling beyond what is needed for querying.
 
-We need a Datomic-leaning mapping for non-core types and bytes/decimal behavior.
+## Constraints and Compatibility
 
-Options (choose one):
+- Semantics should match Mentat/Datomic where possible.
+- The query planner must be Rust/WASM-friendly (no non-portable dependencies).
+- Query execution should prefer index scans over raw SQL to stay aligned with EDB’s indexes and future non-SQL backends.
+- Deviations from Datomic/Mentat must be explicitly documented.
 
-1) Datomic-like tagged forms (preferred for fidelity)
-   - `#inst` for instants (already supported by Mentat EDN)
-   - `#uuid` for UUIDs (already supported)
-   - `#bigint` or `123N` for BigInt (already supported as `N`)
-   - Proposed additions:
-     - `#bigdec "1.23"` for Decimal
-     - `#bytes "BASE64"` for Bytes
+## Target Pipeline Stages
 
-2) String conventions (lower parser complexity, lower fidelity)
-   - Decimal and Bytes expressed as strings (e.g., `"1.23"`, `"BASE64"`) and coerced by schema.
+1) Parse EDN query
+   - Parse EDN into Mentat query AST (`edn::query::FindQuery`).
+2) Algebrize
+   - Bind to schema, derive types, validate inputs and `:find`, produce an algebraic query.
+3) Plan
+   - Compile algebraic query into an index-scan execution plan (no SQL).
+4) Execute
+   - Run scan/join pipeline over EAVT/AVET/AEVT/VAET.
+5) Project
+   - Shape results per `:find` spec; apply pull if requested.
 
-Recommendation: pick (1) to match Datomic/Mentat expectations, but it requires extending the EDN grammar for `#bigdec` and `#bytes`.
+## Architecture Approach
 
-## Phase 1: EDN Parser Integration (Mentat EDN)
+### Parsing and Algebrization
 
-1) Add a new crate/module (e.g., `edb-edn`) that depends on `REFERENCE/mentat/edn`.
-2) Expose EDN parsing entry points:
-   - `parse_value(edn_str) -> edn::Value`
-   - `parse_query(edn_str) -> edn::query::FindQuery` (Mentat query AST)
-3) If using tagged `#bigdec` / `#bytes`, extend `REFERENCE/mentat/edn/src/edn.rustpeg` and EDN Value types accordingly.
+- Reuse Mentat’s EDN parser and query AST (`REFERENCE/mentat/edn` and `REFERENCE/mentat/query-algebrizer`) to preserve semantics and validation rules.
+- Build an EDB schema adapter that feeds Mentat algebrizer the EDB schema from `attrs` (value types, cardinality, uniqueness, component, etc).
 
-Deliverable:
-- A small EDN parsing layer with tests verifying keyword, symbol, list, vector, map, set, `#inst`, `#uuid`, bigint, and any new tags.
+### Index-Plan Compiler (EDB-specific)
 
-## Phase 2: EDN Transactions in EDB
+Replace Mentat’s SQL translator with an EDB index-plan compiler that targets:
 
-Add EDN-to-TxOp normalization that mirrors `edb-tx` JSON grammar but accepts Datomic forms:
+- EAVT for entity-first scans, and `:e` + `:a` constraints.
+- AVET for value constraints and range scans.
+- AEVT for `has` (attribute existence) scans.
+- VAET for reverse ref lookups or ref-joins.
 
-Supported transaction forms:
+Plan nodes (initial set):
+- `ScanEavt`, `ScanAvet`, `ScanAevt`, `ScanVaet`.
+- `Join` (hash/nested-loop depending on selectivity).
+- `Filter` (predicates, type constraints).
+- `Or`, `Not`, `NotJoin` (subplans).
+- `Aggregate` (count, min, max, avg, sum).
+- `Project` (find spec, distinct, order, limit).
 
-- Vector ops:
-  - `[:db/add e a v]`
-  - `[:db/retract e a v]`
-  - `[:db/cas e a expected v]`
-  - `[:db/retractEntity e]` (optional; may expand to component cascade)
-  - `[:db.fn/call fn-ident args...]` (optional; if we map to `tx-fn`)
-  - `[:db/txInstant <inst>]` or `[:tx-meta {:db/txInstant ...}]`
+### Execution Model
 
-- Map form:
-  - `{:db/id <e>, :ns/attr v, :ns/ref {:db/id ...}, ...}`
-  - Expand to Add ops using schema to coerce types.
+- Scan nodes return bindings keyed by variables.
+- Joins unify variables; predicate evaluation happens after unification.
+- Range predicates use ordered bytes from `edb-encoding` via AVET.
+- Pull in `:find` triggers a second-stage fetch from `edb-pull`.
 
-Implementation steps:
+## Milestones and Deliverables
 
-1) Add `edb-tx` entry points:
-   - `normalize_grammar_edn(db, alloc, temps, edn_values, txfns)`
-2) EDN value conversions:
-   - Integer, float, boolean, string, keyword, uuid, instants, bigint, decimal, bytes.
-   - Use schema (`DbView.get_attr`) to coerce for ref/uuid/keyword/decimal/bytes.
-3) Map-form expansion:
-   - Treat `:db/id` as entity ref; expand other attrs to `TxOp::Add`.
-   - Follow component semantics for nested maps (if component attribute).
-4) Transaction meta:
-   - Support `:db/txInstant` mapping to `tx-meta`.
+### M1: EDN Query Parsing
 
-Deliverable:
-- `SqliteTransactor::apply_tx_edn(edn_str)`
-- Server support for `Content-Type: application/edn` (or `/transact-edn`).
+- Integrate Mentat EDN parser.
+- Parse EDN query strings into Mentat AST.
+- Tests for query parsing and EDN literals (`#inst`, `#uuid`, bigint).
 
-## Phase 3: Full EDN Datalog Queries
+Deliverables:
+- `edb-edn` crate or module for parsing queries.
 
-We want Mentat-style `[:find ... :where ...]` and pull in `:find`.
+### M2: Schema Adapter for Algebrizer
 
-Approach options:
+- Map EDB `attrs` rows to Mentat schema and attribute structures.
+- Implement `HasSchema` and required type metadata.
+- Unit tests against a minimal schema.
 
-A) Integrate Mentat query pipeline (closest to Datomic semantics)
-   - Parse EDN query to Mentat AST (`edn::query`).
-   - Algebrize with Mentat schema and cached attributes.
-   - Translate to SQL via Mentat query-sql.
-   - Project rows using Mentat projectors.
-   - Use Mentat pull (or adapt EDB pull) for two-stage pull projections.
+Deliverables:
+- `edb-mentat-schema` adapter layer (name TBD).
 
-B) Implement a smaller Datalog engine over EDB indexes
-   - Use EAVT/AVET/AEVT/VAET to evaluate patterns.
-   - Implement joins, predicates, and `:find` shaping manually.
-   - More work and risk; less Datomic parity.
+### M3: Algebrize Queries
 
-Recommendation: start with A to maximize compatibility and reduce semantic drift.
+- Use Mentat algebrizer to produce algebraic queries.
+- Validate `:find`, `:in`, `:where`, `:order`, `:limit`, and typing rules.
+- Capture algebrized form for planner input.
 
-Integration outline for A:
+Deliverables:
+- `edb-query-algebrize` wrapper that returns algebraic queries.
 
-1) Create an EDB-backed Mentat schema adapter:
-   - Map EDB schema (`attrs` table) to Mentat `Schema` and `Attribute` shapes.
-   - Provide `HasSchema` and any required type-tag mappings.
-2) Provide Mentat DB adapter:
-   - Implement Mentat query execution interfaces backed by EDB SQLite.
-   - Ensure Mentat SQL builder uses EDB schema and value tags.
-3) Pull integration:
-   - Use Mentat `query-pull` if feasible; otherwise map Mentat pull AST to `edb-pull::AttrSpec` and execute with EDB puller.
+### M4: Index Plan Compiler
 
-Deliverable:
-- `/q` endpoint accepts EDN query text and returns Mentat-shaped results.
+- Compile algebraic queries into index scan plans.
+- Choose access paths based on bound variables and constraints.
+- Support `or`, `not`, `not-join`, and `ground` forms.
 
-## Phase 4: EDN Pull API
+Deliverables:
+- `edb-query-plan` module producing an executable plan tree.
 
-1) Parse EDN pull specs (Datomic syntax) into `edb-pull::AttrSpec`.
-2) Support nested pulls, reverse refs, limit/max-depth where feasible.
-3) Integrate with server:
-   - `POST /pull` accepts EDN via `Content-Type: application/edn`.
+### M5: Query Executor
 
-## Phase 5: WASM Readiness
+- Execute plan nodes over EAVT/AVET/AEVT/VAET.
+- Implement join strategies and predicate evaluation.
+- Add ordering, distinct, and limit.
 
-1) Ensure EDN parser and query pipeline avoid non-WASM dependencies.
-2) Gate sqlite-specific code behind server/transactor crates; keep query planning logic portable.
-3) Add WASM-compatible test harness for parsing and query planning.
+Deliverables:
+- `edb-query-exec` module returning raw bindings.
 
-## Phase 6: Tests and Validation
+### M6: Projection + Pull
 
-- EDN transaction parsing (map form + vector form).
-- EDN query parsing and execution against a small schema.
-- Pull in `:find` and direct pull API.
-- Decimal/bytes tag coverage if implemented.
+- Implement result shaping per `:find` spec.
+- Add two-stage pull expansion for `pull` in `:find`.
 
-## Open Questions to Resolve Early
+Deliverables:
+- `edb-query-project` module + integration with `edb-pull`.
 
-1) Decide decimal/bytes representation (tagged vs string conventions).
-2) Choose EDN tx function mapping (`:db.fn/call` vs `tx-fn`).
-3) Confirm whether to adopt Mentat query pipeline wholesale or integrate selectively.
+### M7: Public API and Server Integration
+
+- Expose `Conn::q` or similar API for in-process query execution.
+- Update `/q` endpoint to accept EDN and return result shapes.
+
+Deliverables:
+- `edb-server` EDN query support.
+- `edb-conn` API surface (if added in a later plan).
+
+### M8: Testing and Benchmarks
+
+- Coverage for joins, predicates, aggregates, or/not, pull in `:find`.
+- Compare results with Mentat on shared fixtures where possible.
+- Add microbenchmarks for scan selection and join strategies.
+
+## Open Questions
+
+1) Decimal/bytes EDN representation for query literals (tagged vs string).
+2) Extent of Mentat algebrizer reuse vs custom EDB algebrizer.
+3) Which join strategy is the default (hash vs nested loop) for EDB’s data sizes.
+4) How to represent and query history (`t`/`added`) in Datalog (history db).
 
 ## Immediate Next Steps
 
-1) Confirm decision for decimal/bytes (Phase 0).
-2) Implement `edb-edn` crate with Mentat EDN parser.
-3) Add EDN transaction normalization in `edb-tx`.
-4) Add server endpoint or content-type branch for EDN transact.
+1) Confirm EDN literal policy for decimal/bytes in queries.
+2) Stand up a minimal EDN query parser + schema adapter prototype.
+3) Build a tiny index-plan prototype for `[:find ?e :where [?e :a 1]]` and verify scan selection.
 
