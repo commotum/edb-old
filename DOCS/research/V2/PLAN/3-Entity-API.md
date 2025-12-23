@@ -16,6 +16,11 @@ Pull grammar support:
 - attr options: `:as`, `:limit`, `:default`, `:xform` (xform may be deferred or limited to built-ins).
 - recursion limits: number or `...` with cycle safety.
 
+Phasing:
+
+- Phase 1: wildcard, reverse attrs, map specs, and `:limit`/`:default`.
+- Phase 2: recursion and `:xform` expansion.
+
 Semantics:
 
 - Default limit for cardinality-many is 1000; `:limit nil` returns all.

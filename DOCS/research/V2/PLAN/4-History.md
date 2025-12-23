@@ -36,6 +36,7 @@ Deliverable:
 ## Open Questions
 
 1) Built-in history function coverage (tx-ids/tx-data).
+2) Allow Added slot in data patterns outside history and tx-data views.
 
 ## Datomic Reference Files
 

@@ -17,6 +17,7 @@ Deliverable:
 ## Immediate Next Steps
 
 1) Extend schema metadata for algebrizer needs (index/fulltext flags or equivalents, if required).
+2) Expand supported value types: bigint, bigdec, bytes, float.
 
 ## Current Core Inventory
 

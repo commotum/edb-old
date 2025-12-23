@@ -14,6 +14,7 @@
 - Support parameterized queries with stable cache keys.
 - Optional timeout handling.
 - Query cache keyed by normalized EDN (avoid dynamic query churn).
+- Rules input `%` and rule evaluation (subset; recursion TBD).
 
 ## Public API and Server Integration (M8)
 
@@ -32,6 +33,8 @@ Deliverable:
 ## Open Questions
 
 1) Plan caching strategy (compiled query cache keyed by normalized EDN).
+2) Define canonical `/q` payload shape, error format, and streaming semantics.
+3) Confirm rules subset (no rules vs non-recursive vs recursive).
 
 ## Datomic Reference Files
 

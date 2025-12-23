@@ -1,0 +1,258 @@
+# A. Overview
+- Provide a read-only Datalog query pipeline for EDN input, including parse, validate, plan, and execute steps against immutable database values.
+- Support Datomic-style query semantics where possible, plus documented extensions (for example :order, :limit, fulltext, tx log functions, and corresponding find elements).
+- Accept query input as EDN text or native EDN data structures; return results as relation, collection, tuple, or scalar, with structured maps for pull.
+- Offer optional HTTP query access that mirrors in-process behavior without changing semantics.
+- Operate without JVM/Clojure dependencies and remain WASM-friendly; behavior MUST be deterministic for a fixed database value and inputs except where ordering is unspecified.
+- Be optimized for index-backed access patterns (EAVT/AEVT/AVET/VAET) while keeping those internals invisible to callers.
+
+# B. Glossary & Terminology (generic names)
+- **Core Data**
+- Database Value: immutable snapshot of all visible datoms for a point in time.
+- Datom: atomic fact represented as (E, A, V, Tx, Added).
+- Entity Identifier: entity id (long), ident (keyword), or lookup ref (attr, value).
+- Attribute: schema entity describing value type, cardinality, and optional constraints.
+- Transaction: atomic set of datoms with a unique tx id and a :db/txInstant.
+- **Query Terms**
+- Query: EDN structure with :find and :where plus optional clauses.
+- Binding: mapping from variables to values from :in or function bindings.
+- Source: named database input (the default is $).
+- Pull Pattern: list of attribute specs describing what to retrieve for an entity.
+- Time Filter: derived database view (as-of, since, history).
+- Rule Set: named rule collection bound via % when supported.
+
+# C. Public Surface (Canonical Names that must be preserved, if any)
+- **Query Clause Keywords**
+- :find
+- :where
+- :in
+- :with
+- :order
+- :limit
+- :keys
+- :strs
+- :syms
+- **Clause Operators**
+- not
+- not-join
+- or
+- or-join
+- and
+- **Variable and Find Markers**
+- ? (variable prefix)
+- $ (default source)
+- % (rules input)
+- _ (placeholder)
+- . and ... (find scalar and find collection)
+- **Find Elements and Order Specifiers**
+- pull
+- the
+- asc
+- desc
+- * (pull wildcard)
+- **Comparison Predicates**
+- <
+- <=
+- >
+- >=
+- !=
+- **Pairing and Tx Predicates**
+- differ
+- unpermute
+- tx-after
+- tx-before
+- **Built-in Functions**
+- fulltext
+- ground
+- tx-ids
+- tx-data
+- type
+- **Pull Pattern Keywords**
+- :as
+- :limit
+- :default
+- :db/id
+- :db/ident
+- :db/txInstant
+- **EDN Tags**
+- #inst
+- #instmillis
+- #instmicros
+- #uuid
+
+# D. Inputs & Outputs (by entry point)
+- **Query Parsing (in-process)**
+- Inputs: EDN text or EDN data structure representing a query.
+- Outputs: parsed query object or error with location metadata.
+- EDN commas are treated as whitespace; line comments begin with ;.
+- Side effects: none.
+- Determinism: identical inputs MUST produce equivalent parsed structures.
+- **Query Execution (in-process)**
+- Inputs: database value, query (text or structure), optional inputs, optional rule set.
+- Outputs: relation/collection/tuple/scalar; pull expressions yield structured maps; return-map specs (:keys/:strs/:syms) return maps keyed to the :find elements.
+- Side effects: none except optional metrics/logging.
+- Notes: results are distinct by default; ordering is only guaranteed with :order.
+- Notes: if :in is omitted, the default source $ is assumed.
+- **Pull (standalone)**
+- Inputs: database value, entity id or collection of entity ids, pull pattern.
+- Outputs: map per entity (empty map if nothing matches), or map collection when multiple entities are requested.
+- Side effects: none.
+- Pattern support: attribute names, reverse attrs (:_name), wildcard *, map specs, :as, :limit, and :default.
+- Default limit for cardinality-many is 1000; :limit nil returns all values.
+- **Time Filters**
+- Inputs: database value plus time spec for as-of or since; history requires no time input.
+- Time spec MAY be a tx id, basis-t value, or RFC3339 instant.
+- Outputs: new database value with filtered visibility.
+- Side effects: none.
+- **HTTP Query Endpoint (if enabled)**
+- Inputs: POST /q with Content-Type application/edn or application/json.
+- EDN request body: {:query <edn> :args [<edn>...] :timeout <ms>?} where :query MAY be EDN data or an EDN string.
+- JSON request body: {"query": "<edn>", "args": ["<edn>", "..."], "timeout_ms": <number>?}.
+- Outputs: EDN response mirrors in-process shapes; JSON response is {"type": "rel|coll|tuple|scalar", "results": <value>}.
+- Side effects: network I/O, request logging, and auth checks if configured.
+- **Optional Explain/Plan**
+- Inputs: database value and query.
+- Outputs: plan summary with clause order and estimated cost or index usage hints.
+- Side effects: none beyond diagnostics.
+
+# E. Data Model (observable structures only)
+- **Datoms and Entities**
+- Datom fields are E, A, V, Tx, and Added; Added is true for current db values and may be false in history.
+- E and A are entity identifiers; V is a typed value; Tx is a transaction id.
+- Entity identifiers include entity ids (long), idents (keywords), and lookup refs where allowed.
+- Lookup refs MUST reference a unique attribute and are valid in inputs, not inside query patterns.
+- **Schema Attributes**
+- :db/ident, :db/valueType, and :db/cardinality are required for attributes.
+- :db/unique, :db/index, :db/fulltext, :db/isComponent, and :db/noHistory are optional schema flags.
+- :db/unique requires :db.cardinality/one; fulltext requires string type and index.
+- Schema changes MUST NOT alter :db/valueType after attribute creation.
+- **Value Types**
+- Supported types MUST include boolean, long, double, string, keyword, uuid, instant, ref, and uri.
+- EDN inputs MUST parse #inst, #instmillis, #instmicros, and #uuid into the corresponding types.
+- Values supplied to patterns and inputs MUST match the declared attribute type or raise a type error.
+- **Query Results**
+- Relation: collection of tuples ordered by :find element order.
+- Collection: list of the first find element from each row.
+- Tuple: single row with N elements or nil if no row.
+- Scalar: single value or nil if no row.
+- Return Map: map keyed by :keys (keywords), :strs (strings), or :syms (symbols), aligned to :find element order.
+
+# F. State Machine / Lifecycle
+- **Engine Lifecycle**
+- Uninitialized -> Ready -> Closed; queries MUST NOT run after Closed.
+- Schema updates create new database values; existing values remain valid and immutable.
+- **Database Value Lifecycle**
+- A database value is immutable and thread-safe; it can be shared across concurrent queries.
+- Time filters (as-of, since, history) create new database values derived from a base value.
+- **Prepared Query (optional)**
+- Prepared -> Executable -> Released; prepared queries are bound to a schema version and may reject incompatible schemas.
+- **Concurrency Semantics**
+- Query execution is reentrant and safe across threads; shared state is read-only.
+- Results reflect the point-in-time database value passed to the query.
+
+# G. Error Model
+- **Parse and Validation Errors**
+- ParseError: invalid EDN syntax or unsupported tag.
+- QuerySyntaxError: missing required clause, repeated clause, or malformed grammar.
+- ReturnMapArityMismatch: :keys/:strs/:syms count does not match :find element count.
+- UnboundVariable: variable used in :order, predicates, or :limit without a binding.
+- InvalidBinding: mismatched binding shapes or repeated variables in a binding.
+- VariableSetMismatch: or/not branches refer to different variable sets without explicit joins.
+- **Type and Semantics Errors**
+- TypeError: value type mismatch for attribute, predicate, or aggregate.
+- InvalidAggregate: aggregate used on unsupported types or without required grouping.
+- InvalidFulltext: attribute not fulltext or search term not a string.
+- InvalidLimit: :limit value is missing, non-integer, or non-positive.
+- UnsupportedFeature: rules or pull recursion/xform that are not implemented.
+- **Runtime Errors**
+- TimeoutOrCanceled: query exceeded a timeout or was canceled.
+- ResourceExhaustion: memory, result size, or index availability limits exceeded.
+- InternalFailure: unexpected engine fault.
+- **Error Representation**
+- In-process APIs MUST return structured errors with category, message, and optional location.
+- HTTP APIs SHOULD map errors to 400 (parse), 422 (validation), 408/504 (timeout), 500 (internal), and 503 (resource).
+
+# H. Constraints, Invariants, and Determinism
+- **Logical Semantics**
+- Variables with the same name MUST unify to the same value across clauses.
+- The placeholder _ MUST NOT bind or unify.
+- Results are distinct by default; :with extends the distinctness set.
+- Aggregates group by non-aggregate find variables; (the ?v) is valid only with min or max.
+- If an aggregate yields null over zero rows, the entire result row MUST be dropped.
+- Return-map specs MUST have the same arity as the :find element list.
+- **Ordering and Limiting**
+- :order sorts rows by one or more bound variables; default is ascending.
+- :limit is applied after distinctness and ordering and MUST be a positive integer.
+- If :limit is a variable, it MUST appear in :in and be bound at execution.
+- Without :order, output ordering is unspecified and MUST NOT be relied upon.
+- **Type and Schema Constraints**
+- Attribute value types MUST be enforced at query time.
+- fulltext predicates require :db/fulltext true and :db.type/string.
+- Reverse attributes (:_name) are valid only for ref attributes and invert E/V roles.
+- Lookup refs are valid only for unique attributes and only in inputs.
+- **Pull Semantics**
+- :default MUST cause a key to appear with the default when the attribute is missing.
+- Without :default, missing attributes MUST be omitted from the result map.
+- :limit applies to cardinality-many attributes; :limit nil disables limiting.
+- Reverse pull attributes return referencing entities.
+- Wildcard * includes all direct attributes for the entity.
+- **Time Semantics**
+- as-of includes datoms with tx <= time; since includes datoms with tx > time.
+- history exposes additions and retractions and includes the Added flag.
+- Entity views and pull are defined only on point-in-time database values.
+- as-of and since are filters on a base database value and do not create time branches.
+- **Performance Expectations**
+- Equality and range predicates SHOULD leverage value-ordered indexes when available.
+- Queries SHOULD remain stable under concurrent reads and avoid unbounded memory growth.
+- Index ordering semantics follow EAVT/AEVT/AVET/VAET; planners SHOULD exploit them.
+- Planners SHOULD avoid full scans when an applicable index can constrain the search space.
+
+# I. Edge Cases & Undefined/Implementation-Choice Areas (explicitly mark ambiguity)
+- Rule sets (%) and rule invocation are optional; if unsupported they MUST raise UnsupportedFeature.
+- Pull advanced features (recursion, :xform) are optional and unspecified.
+- Data pattern 5th component (Added) is optional outside tx-data and history views.
+- Additional value types (bigdec, bigint, bytes, float) are not required; behavior is implementation-defined.
+- Nested query function (q) and helper functions (get-else, get-some, missing?, tuple, untuple) are not required.
+
+# J. Security/Robustness Considerations (generic)
+- The engine MUST reject unknown EDN tags and enforce size limits on literals and collections.
+- Queries MUST be read-only and MUST NOT allow side-effecting functions.
+- Implementations SHOULD enforce timeouts and maximum result sizes to mitigate denial-of-service.
+- fulltext searches SHOULD be sanitized and bound to indexed attributes only.
+- HTTP endpoints MUST validate content type and SHOULD require authentication and authorization.
+
+# K. Conformance Test Plan (spec-derived)
+- **Must-pass Examples**
+- Basic query returns a relation with width equal to :find element count and distinct rows.
+- :find [?e ...] returns a collection; when paired with :order, the collection is sorted accordingly.
+- Scalar and tuple queries return nil when there are no rows and non-nil when there is at least one.
+- :with causes duplicate rows to be preserved across otherwise identical find results.
+- Return-map specs (:keys/:strs/:syms) return maps keyed to :find elements with the expected key types.
+- fulltext returns a relation with entity, value, tx, and score columns when bound with four vars.
+- tx-ids returns tx ids in [after, before) order when ordered explicitly.
+- Pull with :limit truncates cardinality-many results; :default fills missing attributes.
+- **Property Tests**
+- Unification property: if a variable appears in two patterns, all rows satisfy equality.
+- Placeholder property: using _ in multiple places does not constrain equality.
+- Distinctness property: without :with, duplicates are removed regardless of input ordering.
+- Limit property: result count is <= :limit for any query.
+- Order property: :order (asc ?v) yields non-decreasing values for ?v.
+- **Negative Tests**
+- Missing :find or :where MUST raise QuerySyntaxError.
+- :order with an unbound variable MUST raise UnboundVariable.
+- :limit with a non-positive or non-integer value MUST raise InvalidLimit.
+- Return-map arity mismatch MUST raise ReturnMapArityMismatch.
+- fulltext on a non-fulltext attribute MUST raise InvalidFulltext.
+- Using (the ?v) without min or max MUST raise InvalidAggregate.
+- **Fuzzing Strategy**
+- Fuzz EDN parsing with random tokens and nested structures; no panics or hangs.
+- Fuzz query ASTs with randomized clause combinations; must return validation errors, not crashes.
+- Fuzz pull patterns with random keywords and aliases; must not corrupt results.
+- Stress with large inputs to validate timeout and resource limits.
+
+# L. Open Questions / Decisions Needed (if any)
+- Deferred decisions tracked in plan docs.
+- Rules/recursion subset: `DOCS/research/V2/PLAN/2-DB-Conn-API.md`.
+- Pull recursion and :xform: `DOCS/research/V2/PLAN/3-Entity-API.md`.
+- Added slot outside history/tx-data: `DOCS/research/V2/PLAN/4-History.md`.
+- Extra value types (bigdec/bigint/bytes/float): `DOCS/research/V2/PLAN/5-Schema.md`.
