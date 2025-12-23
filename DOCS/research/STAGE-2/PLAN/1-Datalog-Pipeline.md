@@ -144,7 +144,7 @@ Semantics:
 
 - M1 (EDN parsing): implemented in `CORE/edb-edn` with list/map form parsing, `:in` bindings, rules var `%`, rule expressions, return maps, pull pattern inputs, `:order`, `:limit`, and decimal `M` literals. Tests in `CORE/edb-edn/tests/parse.rs`.
 - M2 (schema adapter): core schema types live in `CORE/edb-schema`; SQLite loader/alias resolution in `CORE/edb-schema/src/sqlite.rs` (feature `sqlite`) with tests in `CORE/edb-schema/tests/schema_load.rs`. Mentat-style `HasSchema` trait exists, but algebrizer-specific type inference is still missing.
-- M3 (algebrize): not implemented; only the minimal `/q` planner in `CORE/edb-server/src/main.rs` and a prototype EDN equality query in `CORE/edb-query`.
+- M3 (algebrize): not implemented; only the minimal `/q` planner in `CORE/edb-server/src/main.rs` and a prototype EDN conjunctive-pattern executor in `CORE/edb-query` (variables/placeholders, no rules/predicates).
 - M4 (plan compiler): not implemented; index scan APIs exist in `CORE/edb-index`.
 - M5 (executor): not implemented; `/q` runs a small SQL/index-based path with a single ref-var join.
 - M6 (projection + pull): `CORE/edb-pull` implements pull against `current` and indexes, but no query result integration yet.
@@ -247,9 +247,9 @@ Deliverable:
 
 ## Immediate Next Steps
 
-1) Build the algebrizer-facing schema adapter on top of `edb-schema::sqlite`.
-2) Expand the `edb-query` prototype beyond single-pattern equality.
-3) Prototype a minimal plan/executor for `[:find ?e :where [?e :a 1]]` using AVET/EAVT (extend to multiple clauses).
+1) Extend the schema adapter with algebrizer-facing type inference (value type sets, component attr flags).
+2) Add query features beyond data-pattern conjunctions (predicates, or/not, rules) in `edb-query` or the forthcoming algebrizer.
+3) Prototype the AVET/EAVT plan/executor around the new algebraic query layer.
 
 
 ## Mentat Reference Files to Reuse

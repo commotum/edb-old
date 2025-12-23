@@ -422,6 +422,7 @@ dependencies = [
 name = "edb-query"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "edb-edn",
  "edb-encoding",
  "edb-index",

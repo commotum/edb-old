@@ -9,6 +9,7 @@ This document is a consolidated, technically detailed map of the EDB core crates
 - CORE/edb-envelope
 - CORE/edb-index
 - CORE/edb-pull
+- CORE/edb-query
 - CORE/edb-schema
 - CORE/edb-server
 - CORE/edb-store-sqlite
@@ -21,6 +22,7 @@ EDB is a single-node, SQLite-backed database with:
 
 - A deterministic binary encoding for ordered value bytes (`edb-encoding`).
 - An EDN parser for values, queries, and tx entity forms (`edb-edn`).
+- A minimal EDN query executor for conjunctive patterns over indexes (`edb-query`).
 - A transaction model and validation pipeline (`edb-tx`).
 - A transactor that writes current state, unique indexes, and a durable log, and updates secondary indexes (`edb-transactor`).
 - A small SQLite segment store for index segments and metadata (`edb-store-sqlite`).
@@ -353,9 +355,11 @@ Attributes are ordered using NFC-normalized bytes from `edb-encoding::encode_sca
 
 ### Minimal EDN Query Prototype (`edb-query`)
 
-- `edb-query` provides a prototype EDN path for `[:find ?e :where [?e :a v]]` using AVET scans.
+- `edb-query` provides a prototype EDN path for conjunctive data patterns (multiple `:where` clauses).
+- Uses AVET for value-constant scans, EAVT for entity-constant scans, and AEVT for attribute scans.
+- Supports entity/value variables and `_` placeholders with equality joins across shared variables.
 - Uses `edb-edn` parsing and `edb-schema::sqlite` for attribute/type lookup.
-- Returns entity ids for constant equality; no joins, rules, or aggregates yet.
+- `:find` supports variables only (rel/coll/tuple/scalar), with fixed `:limit`; no `:in`, `:with`, `:order`, rules, or predicates yet.
 
 ## Cross-Cutting Invariants and Ordering Rules
 

@@ -1,4 +1,16 @@
-use edb_edn::query::{PatternNonValuePlace, PatternValuePlace, ParsedQuery, WhereClause};
+use std::collections::BTreeMap;
+
+use base64::{engine::general_purpose, Engine as _};
+use edb_edn::query::{
+    Element,
+    FindSpec,
+    Limit,
+    Pattern,
+    PatternNonValuePlace,
+    PatternValuePlace,
+    ParsedQuery,
+    WhereClause,
+};
 use edb_schema::HasSchema;
 use rusqlite::Connection;
 use serde_json::Value as JsonValue;
@@ -7,7 +19,7 @@ use serde_json::Value as JsonValue;
 pub enum QueryError {
     #[error("parse: {0}")]
     Parse(#[from] edb_edn::ParseError),
-    #[error("schema: {0:?}")]
+    #[error("schema: {0}")]
     Schema(#[from] edb_schema::sqlite::SchemaError),
     #[error("index: {0}")]
     Index(String),
@@ -17,37 +29,393 @@ pub enum QueryError {
     UnknownAttribute(String),
 }
 
-pub fn execute_simple_edn(db_path: &str, query: &str) -> Result<Vec<i64>, QueryError> {
+type Binding = BTreeMap<String, JsonValue>;
+
+pub fn execute_edn(db_path: &str, query: &str) -> Result<JsonValue, QueryError> {
     let parsed = edb_edn::parse_query(query)?;
-    execute_simple(db_path, &parsed)
+    execute(db_path, &parsed)
 }
 
-pub fn execute_simple(db_path: &str, query: &ParsedQuery) -> Result<Vec<i64>, QueryError> {
-    let pattern = extract_single_pattern(query)?;
-    let attr_ident = attr_ident_from_pattern(&pattern.attribute)?;
+pub fn execute(db_path: &str, query: &ParsedQuery) -> Result<JsonValue, QueryError> {
+    validate_query(query)?;
 
     let conn = Connection::open(db_path).map_err(|e| QueryError::Index(e.to_string()))?;
     let schema = edb_schema::sqlite::SchemaCatalog::load(&conn)?;
+
+    let bindings = evaluate_where(db_path, &schema, &query.where_clauses)?;
+    project_results(&query.find_spec, &bindings, &query.limit)
+}
+
+fn validate_query(query: &ParsedQuery) -> Result<(), QueryError> {
+    if !query.inputs.is_empty() {
+        return Err(QueryError::Unsupported(":in inputs are not supported yet"));
+    }
+    if !query.with.is_empty() {
+        return Err(QueryError::Unsupported(":with is not supported yet"));
+    }
+    if query.return_map.is_some() {
+        return Err(QueryError::Unsupported("return maps are not supported yet"));
+    }
+    if query.order.is_some() {
+        return Err(QueryError::Unsupported(":order is not supported yet"));
+    }
+    match query.limit {
+        Limit::None | Limit::Fixed(_) => {}
+        Limit::Variable(_) => return Err(QueryError::Unsupported(":limit var is not supported yet")),
+    }
+    Ok(())
+}
+
+fn evaluate_where(
+    db_path: &str,
+    schema: &edb_schema::sqlite::SchemaCatalog,
+    clauses: &[WhereClause],
+) -> Result<Vec<Binding>, QueryError> {
+    let mut iter = clauses.iter();
+    let first = match iter.next() {
+        Some(clause) => clause_bindings(db_path, schema, clause)?,
+        None => return Err(QueryError::Unsupported("missing :where clauses")),
+    };
+    let mut acc = first;
+    for clause in iter {
+        let next = clause_bindings(db_path, schema, clause)?;
+        acc = join_bindings(&acc, &next);
+        if acc.is_empty() {
+            break;
+        }
+    }
+    Ok(acc)
+}
+
+fn clause_bindings(
+    db_path: &str,
+    schema: &edb_schema::sqlite::SchemaCatalog,
+    clause: &WhereClause,
+) -> Result<Vec<Binding>, QueryError> {
+    match clause {
+        WhereClause::Pattern(p) => bindings_for_pattern(db_path, schema, p),
+        _ => Err(QueryError::Unsupported("only data patterns are supported")),
+    }
+}
+
+#[derive(Clone, Debug)]
+enum EntitySpec {
+    Const(i64),
+    Var(String),
+    Placeholder,
+}
+
+#[derive(Clone, Debug)]
+enum ValueSpec {
+    Const(JsonValue),
+    Var(String),
+    Placeholder,
+}
+
+fn bindings_for_pattern(
+    db_path: &str,
+    schema: &edb_schema::sqlite::SchemaCatalog,
+    pattern: &Pattern,
+) -> Result<Vec<Binding>, QueryError> {
+    if pattern.source.is_some() {
+        return Err(QueryError::Unsupported("src vars are not supported yet"));
+    }
+    if !matches!(pattern.tx, PatternNonValuePlace::Placeholder) {
+        return Err(QueryError::Unsupported("tx/added positions are not supported yet"));
+    }
+
+    let attr_ident = attr_ident_from_pattern(&pattern.attribute)?;
     let attr = schema
         .attribute_for_ident(&attr_ident)
         .ok_or_else(|| QueryError::UnknownAttribute(attr_ident.clone()))?;
-    let value_json = pattern_value_to_json(&pattern.value)?;
-    let v_bytes = edb_encoding::encode_scalar(attr.value_type, &value_json)
-        .map_err(QueryError::Index)?;
 
-    let idx = edb_index::AvetIndexer::open(db_path).map_err(|e| QueryError::Index(e.to_string()))?;
-    let datoms = idx.scan_av_eq(&attr_ident, &v_bytes).map_err(|e| QueryError::Index(e.to_string()))?;
-    Ok(current_entities_from_avet(datoms))
+    let entity_spec = entity_spec_from_place(&pattern.entity)?;
+    let value_spec = value_spec_from_place(&pattern.value)?;
+
+    let mut bindings = match (&entity_spec, &value_spec) {
+        (_, ValueSpec::Const(value_json)) => {
+            let v_bytes = edb_encoding::encode_scalar(attr.value_type, value_json)
+                .map_err(QueryError::Index)?;
+            let idx = edb_index::AvetIndexer::open(db_path)
+                .map_err(|e| QueryError::Index(e.to_string()))?;
+            let datoms = idx
+                .scan_av_eq(&attr_ident, &v_bytes)
+                .map_err(|e| QueryError::Index(e.to_string()))?;
+            let datoms = current_avet(datoms);
+            bindings_from_avet(datoms, &entity_spec, &value_spec, attr.value_type)
+        }
+        (EntitySpec::Const(e), _) => {
+            let idx = edb_index::EavtIndexer::open(db_path)
+                .map_err(|e| QueryError::Index(e.to_string()))?;
+            let datoms = idx
+                .scan_ea(*e, &attr_ident)
+                .map_err(|e| QueryError::Index(e.to_string()))?;
+            let datoms = current_eavt(datoms);
+            bindings_from_eavt(datoms, &entity_spec, &value_spec, attr.value_type)
+        }
+        _ => {
+            let idx = edb_index::AevtIndexer::open(db_path)
+                .map_err(|e| QueryError::Index(e.to_string()))?;
+            let datoms = idx
+                .scan_a(&attr_ident)
+                .map_err(|e| QueryError::Index(e.to_string()))?;
+            let datoms = current_aevt(datoms);
+            bindings_from_aevt(datoms, &entity_spec, &value_spec, attr.value_type)
+        }
+    }?;
+
+    if bindings.iter().all(|b| b.is_empty()) {
+        if bindings.is_empty() {
+            return Ok(Vec::new());
+        }
+        bindings = vec![Binding::new()];
+    }
+
+    Ok(bindings)
 }
 
-fn extract_single_pattern(query: &ParsedQuery) -> Result<edb_edn::query::Pattern, QueryError> {
-    if query.where_clauses.len() != 1 {
-        return Err(QueryError::Unsupported("expected exactly one :where clause"));
+fn entity_spec_from_place(place: &PatternNonValuePlace) -> Result<EntitySpec, QueryError> {
+    Ok(match place {
+        PatternNonValuePlace::Entid(e) => EntitySpec::Const(*e),
+        PatternNonValuePlace::Variable(v) => EntitySpec::Var(v.to_string()),
+        PatternNonValuePlace::Placeholder => EntitySpec::Placeholder,
+        PatternNonValuePlace::Ident(_) => {
+            return Err(QueryError::Unsupported("entity idents are not supported yet"));
+        }
+    })
+}
+
+fn value_spec_from_place(place: &PatternValuePlace) -> Result<ValueSpec, QueryError> {
+    Ok(match place {
+        PatternValuePlace::Variable(v) => ValueSpec::Var(v.to_string()),
+        PatternValuePlace::Placeholder => ValueSpec::Placeholder,
+        _ => ValueSpec::Const(pattern_value_to_json(place)?),
+    })
+}
+
+fn bindings_from_avet(
+    datoms: Vec<edb_index::AvetDatom>,
+    entity_spec: &EntitySpec,
+    value_spec: &ValueSpec,
+    value_type: edb_encoding::ValueType,
+) -> Result<Vec<Binding>, QueryError> {
+    let mut out = Vec::new();
+    for d in datoms {
+        if let EntitySpec::Const(e) = entity_spec {
+            if d.e != *e {
+                continue;
+            }
+        }
+        let mut binding = Binding::new();
+        if let EntitySpec::Var(var) = entity_spec {
+            binding.insert(var.clone(), JsonValue::from(d.e));
+        }
+        if let ValueSpec::Var(var) = value_spec {
+            let value_json = decode_value(&d.v_b64, value_type)?;
+            binding.insert(var.clone(), value_json);
+        }
+        out.push(binding);
     }
-    match &query.where_clauses[0] {
-        WhereClause::Pattern(p) => Ok(p.clone()),
-        _ => Err(QueryError::Unsupported("expected a single data pattern")),
+    Ok(out)
+}
+
+fn bindings_from_aevt(
+    datoms: Vec<edb_index::AevtDatom>,
+    entity_spec: &EntitySpec,
+    value_spec: &ValueSpec,
+    value_type: edb_encoding::ValueType,
+) -> Result<Vec<Binding>, QueryError> {
+    let mut out = Vec::new();
+    for d in datoms {
+        if let EntitySpec::Const(e) = entity_spec {
+            if d.e != *e {
+                continue;
+            }
+        }
+        let mut binding = Binding::new();
+        if let EntitySpec::Var(var) = entity_spec {
+            binding.insert(var.clone(), JsonValue::from(d.e));
+        }
+        if let ValueSpec::Var(var) = value_spec {
+            let value_json = decode_value(&d.v_b64, value_type)?;
+            binding.insert(var.clone(), value_json);
+        }
+        out.push(binding);
     }
+    Ok(out)
+}
+
+fn bindings_from_eavt(
+    datoms: Vec<edb_index::Datom>,
+    entity_spec: &EntitySpec,
+    value_spec: &ValueSpec,
+    value_type: edb_encoding::ValueType,
+) -> Result<Vec<Binding>, QueryError> {
+    let mut out = Vec::new();
+    for d in datoms {
+        let mut binding = Binding::new();
+        if let EntitySpec::Var(var) = entity_spec {
+            binding.insert(var.clone(), JsonValue::from(d.e));
+        }
+        if let ValueSpec::Var(var) = value_spec {
+            let value_json = decode_value(&d.v_b64, value_type)?;
+            binding.insert(var.clone(), value_json);
+        }
+        out.push(binding);
+    }
+    Ok(out)
+}
+
+fn decode_value(v_b64: &str, value_type: edb_encoding::ValueType) -> Result<JsonValue, QueryError> {
+    let bytes = general_purpose::STANDARD_NO_PAD
+        .decode(v_b64.as_bytes())
+        .map_err(|e| QueryError::Index(e.to_string()))?;
+    edb_encoding::decode_scalar(value_type, &bytes).map_err(QueryError::Index)
+}
+
+fn current_avet(datoms: Vec<edb_index::AvetDatom>) -> Vec<edb_index::AvetDatom> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for d in datoms {
+        let key = (d.e, d.v_b64.clone());
+        if seen.insert(key) && d.added {
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn current_aevt(datoms: Vec<edb_index::AevtDatom>) -> Vec<edb_index::AevtDatom> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for d in datoms {
+        let key = (d.e, d.v_b64.clone());
+        if seen.insert(key) && d.added {
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn current_eavt(datoms: Vec<edb_index::Datom>) -> Vec<edb_index::Datom> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for d in datoms {
+        let key = (d.e, d.v_b64.clone());
+        if seen.insert(key) && d.added {
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn join_bindings(left: &[Binding], right: &[Binding]) -> Vec<Binding> {
+    if left.is_empty() || right.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for l in left {
+        for r in right {
+            if bindings_compatible(l, r) {
+                let mut merged = l.clone();
+                for (k, v) in r {
+                    merged.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                out.push(merged);
+            }
+        }
+    }
+    out
+}
+
+fn bindings_compatible(left: &Binding, right: &Binding) -> bool {
+    for (k, v) in left {
+        if let Some(rv) = right.get(k) {
+            if rv != v {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn project_results(
+    find_spec: &FindSpec,
+    bindings: &[Binding],
+    limit: &Limit,
+) -> Result<JsonValue, QueryError> {
+    match find_spec {
+        FindSpec::FindRel(elements) => {
+            let rows = project_rel(elements, bindings)?;
+            let mut out: Vec<JsonValue> = rows.into_iter().map(JsonValue::Array).collect();
+            out = apply_limit(out, limit);
+            Ok(JsonValue::Array(out))
+        }
+        FindSpec::FindTuple(elements) => {
+            let mut rows = project_rel(elements, bindings)?;
+            if let Limit::Fixed(n) = limit {
+                if *n == 0 {
+                    return Ok(JsonValue::Null);
+                }
+            }
+            Ok(rows.pop().map(JsonValue::Array).unwrap_or(JsonValue::Null))
+        }
+        FindSpec::FindColl(element) => {
+            let mut rows = project_rel(&vec![element.clone()], bindings)?;
+            let mut values: Vec<JsonValue> = rows
+                .drain(..)
+                .filter_map(|mut row| row.pop())
+                .collect();
+            values = apply_limit(values, limit);
+            Ok(JsonValue::Array(values))
+        }
+        FindSpec::FindScalar(element) => {
+            let mut rows = project_rel(&vec![element.clone()], bindings)?;
+            if let Limit::Fixed(n) = limit {
+                if *n == 0 {
+                    return Ok(JsonValue::Null);
+                }
+            }
+            Ok(rows
+                .pop()
+                .and_then(|mut row| row.pop())
+                .unwrap_or(JsonValue::Null))
+        }
+    }
+}
+
+fn project_rel(elements: &[Element], bindings: &[Binding]) -> Result<Vec<Vec<JsonValue>>, QueryError> {
+    let vars: Vec<String> = elements
+        .iter()
+        .map(element_variable)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut rows: Vec<Vec<JsonValue>> = Vec::new();
+    for binding in bindings {
+        let mut row = Vec::with_capacity(vars.len());
+        for var in &vars {
+            let val = binding
+                .get(var)
+                .cloned()
+                .ok_or(QueryError::Unsupported("unbound variable in :find"))?;
+            row.push(val);
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn element_variable(elem: &Element) -> Result<String, QueryError> {
+    match elem {
+        Element::Variable(v) => Ok(v.to_string()),
+        _ => Err(QueryError::Unsupported("only variable find elements are supported")),
+    }
+}
+
+fn apply_limit<T: Clone>(mut rows: Vec<T>, limit: &Limit) -> Vec<T> {
+    if let Limit::Fixed(n) = limit {
+        rows.truncate(*n as usize);
+    }
+    rows
 }
 
 fn attr_ident_from_pattern(place: &PatternNonValuePlace) -> Result<String, QueryError> {
@@ -71,22 +439,8 @@ fn pattern_value_to_json(value: &PatternValuePlace) -> Result<JsonValue, QueryEr
             NonIntegerConstant::Instant(i) => JsonValue::from(i.timestamp_micros()),
             NonIntegerConstant::Uuid(u) => JsonValue::from(u.to_string()),
         },
-        PatternValuePlace::Variable(_) => {
-            return Err(QueryError::Unsupported("value must be a constant for simple queries"));
-        }
-        PatternValuePlace::Placeholder => {
-            return Err(QueryError::Unsupported("value must be a constant for simple queries"));
+        PatternValuePlace::Variable(_) | PatternValuePlace::Placeholder => {
+            return Err(QueryError::Unsupported("value must be a constant here"));
         }
     })
-}
-
-fn current_entities_from_avet(datoms: Vec<edb_index::AvetDatom>) -> Vec<i64> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for d in datoms {
-        if seen.insert(d.e) && d.added {
-            out.push(d.e);
-        }
-    }
-    out
 }
