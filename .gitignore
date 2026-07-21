@@ -20,3 +20,4 @@ target/
 *.profraw
 
 # Note: keep `Cargo.lock` committed for binaries/workspaces
+.DS_Store
