@@ -1,0 +1,274 @@
+kind	value	namespace	count
+configuration	(clojure.core/fn [db e a ov nv] (datomic.builtins/compare-and-swap db e a ov nv))	datomic.db	1
+configuration	(clojure.core/fn [db e] (datomic.builtins/build-retract-args db e))	datomic.db	1
+configuration	(datomic.objectCacheMax + datomic.memoryIndexMax) exceeds 75% of JVM RAM	datomic.config	1
+configuration	.amazonaws.com	datomic.aws	1
+configuration	API for a durable atom-like reference type with an\nin-memory copy of the latest known value.\n\nDurable atoms support reset!/swap-vals!/swap!, similar to in-memory\natoms but returning a channel. They also implement clojure.lang.IRef.\n\natom.logged provides a reference implementation of durable atoms\nbacked by a datomic.core2.log.\n\nDurable atom providers must implement spi/DurableAtom and\nclojure.lang.IRef.	datomic.core2.atom	1
+configuration	Administer system. Takes an options map with a required :action key.\n   Throws on failure. Actions include:\n   \n   Release Object Cache\n   :action      :release-object-cache  \n\n   Effect: Clear all entries from the Object Cache.\n\n   Upgrade Schema\n   :action      :upgrade-schema\n   :uri         a URI as per connect\n\n   Effect: Upgrades the base schema of a database to the latest version.\n   NOTE: Read https://docs.datomic.com/operation/deployment.html before calling.	datomic.api	1
+configuration	Connects to the specified database, returing a Connection.\n   URI syntax ({} indicate place holders to fill in, [] indicate optional):\n\n   DynamoDB using roles:\n   datomic:ddb://{aws-region}/{dynamodb-table}/{db-name}\n\n   DynamoDB using keys (use roles if possible):\n   datomic:ddb://{aws-region}/{dynamodb-table}/{db-name}?aws_access_key_id={XXX}&aws_secret_key={YYY}\n\n   DynamoDB Local\n   datomic:ddb-local://{endpoint:port}/{dynamodb-table}/{db-name}?aws_access_key_id={XXX}&aws_secret_key={YYY}\n\n   Couchbase:\n   datomic:couchbase://{host}/{bucket}/{dbname}[?password={xxx}]\n\n   SQL:\n   datomic:sql://{db-name}?{jdbc-url}\n\n   Infinispan:\n   datomic:inf://{cluster-member-host}:{port}/{db-name}\n\n   Cassandra:\n   datomic:cass://{cluster-member-host}[:{port}]/{keyspace}.{table}/{db-name}[?user={user}&password={pwd}][&ssl=true]\n\n   Cassandra3:\n   datomic:cass3://{cluster-member-host}[:{port}]/{keyspace}.{table}/{db-name}[?user={user}&password={pwd}][&ssl=true][&local-datacenter=datacenter1]\n\n   Dev Appliance: \n   datomic:dev://{transactor-host}:{port}/{db-name}[?password={password}]\n\n   Free transactor integrated storage:\n   datomic:free://{transactor-host}:{port}/{db-name}[?password={password}]\n\n   In-process Memory:\n   datomic:mem://{db-name}\n\n   Note that URIs must be percent encoded and db-name cannot contain the following characters: / " * : = ?\n\n   The dev and free protocols use additional ports to communicate with\n   storage.  By default, this ports is one higher than the specified\n   transactor port. You can override the default by specifying h2-port\n   in the query string, e.g.\n\n     datomic:dev://localhost:4334/mydb?h2-port=6000\n\n   The sql protocol also supports a map format instead of the URI\n   string. This is to enable specifying objects that can't be\n   embedded in URI strings, like DataSources. The format for the\n   SQL map is:\n\n     {:protocol :sql                  ;; keyword or string\n      :db-name "myDb"               ;; keyword or string\n\n      :data-source aDataSourceObject\n       ;; OR\n      :factory aCallableReturningConnection}\n\n   Note only one of data-source or factory should be supplied.\n\n   The cass protocol also supports a map format instead of the URI\n   string. This is to enable specifying objects that can't be embedded\n   in URI strings. The format for the Cassandra map is:\n\n     {:protocol :cass                 ;; keyword or string\n      :db-name "myDb"               ;; keyword or string\n      :table "myKeyspace.myTable"\n      :cluster aClusterObject}\n\n   Note that aClusterObject must be an instance of type\n   com.datastax.driver.core.Cluster.\n\n   The cass3 protocol also supports a map format instead of the URI\n   string. This is to enable specifying objects that can't be embedded\n   in URI strings. The format for the Cassandra map is:\n\n     {:protocol :cass                 ;; keyword or string\n      :db-name "myDb"               ;; keyword or string\n      :table "myKeyspace.myTable"\n      :session aSessionObject}\n\n   Note that aSessionObject must be an instance of type\n   com.datastax.oss.driver.api.core.cql.SyncCqlSession.\n\n   Datomic connections do not adhere to an acquire/use/release\n   pattern. They are thread-safe and long lived. Connections are\n   cached such that calling datomic.api/connect multiple times with\n   the same database value will return the same connection object.	datomic.api	1
+configuration	Could not resolve cassandra-cluster-callback 	datomic.cassandra	1
+configuration	Could not resolve cassandra-session-callback 	datomic.cassandra-v4	1
+configuration	Executes a query against inputs.\n\n   Inputs are data sources e.g. a database value retrieved from\n   Connection.db, a list of lists, and/or rules. If only one data\n   source is provided, no :in section is required, else the :in\n   section describes the inputs.\n\n   query can be a map, list, or string:\n\n   The query map form is {:find vars-and-aggregates\n                          :with vars-included-but-not-returned\n                          :in sources\n                          :where clauses}\n   where vars, sources and clauses are lists.\n\n  :with is optional, and names vars to be kept in the aggregation set but\n   not returned.\n\n   The query list form is [:find ?var1 ?var2 ...\n                           :with ?var3 ...\n                           :in $src1 $src2 ...\n                           :where clause1 clause2 ...]\n   The query list form is converted into the map form internally.\n\n   The query string form is a string which, when read, results\n   in a query list form or query map form.\n\n   Query parse results are cached.\n\n   Returns a data structure based on the find specification passed in.\n   See https://docs.datomic.com/query/query-data-reference.html#find-specs.	datomic.api	1
+configuration	Executes the query described by query-map\n\n   query-map form is {:query query\n                      :args args\n                      :timeout time-in-milliseconds\n                      :io-context qualified-keyword}\n\n   The query parameter is the same format as described in q.\n\n   The args parameter is the same format as inputs described in q.\n\n   The optional timeout is the number of milliseconds after which a\n   query may be stopped. Note: timeout is approximate, it is meant to\n   protect against long running queries, but is not guaranteed to stop\n   after precisely the duration specified.\n\n   You can get information about the I/O reads performed by a query\n   with io-stats. To request io-stats, add :io-context (a qualified\n   keyword) to the map you use to call query. Query will return a map\n   with\n\n   :ret                the result of the query\n   :io-stats           io-stats for the query\n\n   The io-stats map includes:\n\n   :io-context         the io-context passed in\n   :api                :tx-with\n   :api-ms             msec to perform the API call\n   :reads              breakout of reads by cache tier and index sort\n   :nested             breakout iff nested queries set :io-context\n\n   See https://docs.datomic.com/reference/io-stats.html.	datomic.api	1
+configuration	Functions to publish monitoring data to AWS.	datomic.aws-monitor	1
+configuration	Given a connection and a set of information (tx-data), submits\n         a transaction, blocking until a result is available. d/transact\n         updates the connection's shared reference to the value of the\n         database by swapping in the result of d/with.\n\n         Returns a completed future. See d/with for a description of\n         tx-data and the return map that will be placed in the future.\n\n         An exception indicates either that a transaction failed, or\n         that the result of the transaction is not known after a\n         communication failure. For detailed information on programmatic\n         error handling, see https://docs.datomic.com/api/error-handling.html.\n         Note that an exception may occur either when invoking the API\n         or when dereferencing the returned reference.\n\n         Optional args:\n          :hints opaque value, used to optimize transaction performance.\n          See d/with or https://docs.datomic.com/reference/hints.html.\n\n          :io-context a qualified keyword\n          When provided, the return map will have an additional :io-stats key describing\n          information about the I/O reads performed by the transaction, if the connection\n          supports io-stats.\n          See https://docs.datomic.com/reference/io-stats.html.	datomic.api	1
+configuration	Implementaion of datomic.core2.log backed by DynamoDB.	datomic.core2.log.ddb	1
+configuration	In-memory implementation of datomic.core2.log.	datomic.core2.log.mem	1
+configuration	Pacing with datomic.gcStoragePaceMsec =	datomic.garbage	1
+configuration	Returns a dynamic map of the entity's attributes for the given id, ident or lookup ref.\n   Entities implement\n     clojure.lang.Associative\n     clojure.lang.ILookup\n     clojure.lang.IPersistentCollection\n     clojure.lang.Seqable\n     datomic.Entity	datomic.api	1
+configuration	Returns hierarchical selections of attributes for eids. \n    See https://docs.datomic.com/query/query-pull.html for more information.\n\n    You can get information about the I/O reads performed by a\n    pull with io-stats. To request io-stats, pass :io-context\n    (a qualified keyword) as an option to pull-many. The return\n    value will be a map with\n\n    :ret                the result of the pull\n    :io-stats           io-stats for the pull\n\n    The io-stats map includes:\n\n    :io-context         the io-context passed in\n    :api                :tx-with\n    :api-ms             msec to peform the API call\n    :reads              breakout of reads by cache tier and index sort\n    :nested             breakout iff nested queries set :io-context\n\n    See https://docs.datomic.com/reference/io-stats.html.	datomic.api	1
+configuration	The cassandra-cluster-callback 	datomic.cassandra	1
+configuration	The cassandra-session-callback 	datomic.cassandra-v4	1
+configuration	Using cassandra-cluster-callback 	datomic.cassandra	1
+configuration	Using cassandra-session-callback 	datomic.cassandra-v4	1
+configuration	Warning: datomic.objectCacheBytes has been renamed to datomic.objectCacheMax, please change your configuration!	datomic.config	1
+configuration	d/with is a pure function that takes a database value and a\n         set of information (tx-data; held to be true at a point in time),\n         and returns a new database value that includes, via accretion,\n         that new information.\n\n         The tx-data argument is semantically an unordered set of information.\n         Syntactically it is a list that can include primitive assertions,\n         entity maps, and transaction functions.\n         See https://docs.datomic.com/transactions/transaction-data-reference.html.\n\n         If the tx-data is valid, returns a map containing the following keys:\n          :db-before  database value before the transaction\n          :db-after   database value after the transaction\n          :tx-data    collection of Datoms produced by the transaction\n          :tempids    argument to resolve-tempids\n\n         See d/datoms for a description of :tx-data.\n\n         Optional args:\n          :io-context a qualified keyword\n          When provided, the return map will have an additional :io-stats key describing\n          information about the I/O reads performed by the call to d/with.\n          For more detail, see https://docs.datomic.com/reference/io-stats.html.\n\n          :return-hints true\n          When provided, the return map may also include an additional key :hints,\n          an opaque value that can be passed as an option to d/transact or d/transact-async\n          to optimize performance.\n          For more detail, see https://docs.datomic.com/reference/hints.html.	datomic.api	1
+configuration	datomic.Database	datomic.janino	1
+configuration	datomic.Datom	datomic.janino	1
+configuration	datomic.allowLogOverlap	datomic.config	1
+configuration	datomic.allowLogOverlap	datomic.log	1
+configuration	datomic.artemis-client	datomic.artemis-client	5
+configuration	datomic.async	datomic.async	2
+configuration	datomic.backup	datomic.backup	12
+configuration	datomic.backupBranchConcurrency	datomic.backup	1
+configuration	datomic.backupBranchConcurrency	datomic.config	1
+configuration	datomic.backupPaceMsec	datomic.backup	1
+configuration	datomic.backupPaceMsec	datomic.config	1
+configuration	datomic.backupUseSegsetStorage	datomic.backup	1
+configuration	datomic.backupUseSegsetStorage	datomic.config	1
+configuration	datomic.buildRevision	datomic.config	1
+configuration	datomic.buildRevision	datomic.index	2
+configuration	datomic.cache.caffeine	datomic.cache	6
+configuration	datomic.cache.impl	datomic.cache	5
+configuration	datomic.callback	datomic.callback	4
+configuration	datomic.cassandra	datomic.cassandra	3
+configuration	datomic.cassandra-v4	datomic.cassandra-v4	3
+configuration	datomic.cassandra-values	datomic.cassandra-values	15
+configuration	datomic.cassandra-values-v4	datomic.cassandra-values-v4	15
+configuration	datomic.cassandraClusterCallback	datomic.config	1
+configuration	datomic.cast2slf4j	datomic.cast2slf4j	4
+configuration	datomic.cloudwatchAccessKeyId	datomic.aws-monitor	1
+configuration	datomic.cloudwatchAccessKeyId	datomic.config	1
+configuration	datomic.cloudwatchDimension	datomic.aws-monitor	1
+configuration	datomic.cloudwatchDimension	datomic.config	2
+configuration	datomic.cloudwatchName	datomic.aws-monitor	1
+configuration	datomic.cloudwatchName	datomic.config	2
+configuration	datomic.cloudwatchRegion	datomic.aws-monitor	1
+configuration	datomic.cloudwatchRegion	datomic.config	2
+configuration	datomic.cloudwatchSecretKey	datomic.aws-monitor	1
+configuration	datomic.cloudwatchSecretKey	datomic.config	1
+configuration	datomic.cluster	datomic.cluster	7
+configuration	datomic.clusterfs	datomic.clusterfs	7
+configuration	datomic.common	datomic.common	4
+configuration	datomic.connector	datomic.connector	15
+configuration	datomic.coordination	datomic.coordination	2
+configuration	datomic.dataDir	datomic.config	2
+configuration	datomic.db	datomic.db	4
+configuration	datomic.ddb	datomic.ddb	1
+configuration	datomic.ddb-s3-cluster	datomic.ddb-s3-cluster	1
+configuration	datomic.ddb-values	datomic.ddb-values	14
+configuration	datomic.ddbClientExecutionTimeout	datomic.config	2
+configuration	datomic.ddbConnectionTimeout	datomic.config	2
+configuration	datomic.ddbRequestTimeout	datomic.config	4
+configuration	datomic.ddbSocketTimeout	datomic.config	3
+configuration	datomic.defaultPartition	datomic.config	1
+configuration	datomic.defaultPartition	datomic.db	1
+configuration	datomic.deleteConcurrency	datomic.config	1
+configuration	datomic.deleteConcurrency	datomic.ddb-s3-cluster	2
+configuration	datomic.deleteConcurrency	datomic.kv-cluster	2
+configuration	datomic.disableAllExtensions	datomic.require	1
+configuration	datomic.domain	datomic.domain	2
+configuration	datomic.dynamicIndexParallelism	datomic.config	1
+configuration	datomic.efsDeletePool	datomic.config	1
+configuration	datomic.efsDeletePool	datomic.ddb-s3-cluster	1
+configuration	datomic.efsWritePool	datomic.config	1
+configuration	datomic.efsWritePool	datomic.ddb-s3-cluster	1
+configuration	datomic.exciseIOParallelism	datomic.config	1
+configuration	datomic.exciseIOParallelism	datomic.log	2
+configuration	datomic.externalSortPool	datomic.config	1
+configuration	datomic.externalSortPool	datomic.external-sort	1
+configuration	datomic.fileBackupConcurrency	datomic.backup	2
+configuration	datomic.fileBackupConcurrency	datomic.config	1
+configuration	datomic.fulltext	datomic.fulltext	14
+configuration	datomic.functions.*	datomic.janino	1
+configuration	datomic.functions.Fn	datomic.janino	1
+configuration	datomic.future	datomic.future	1
+configuration	datomic.garbage	datomic.garbage	9
+configuration	datomic.garbage.pod	datomic.garbage.pod	2
+configuration	datomic.gcStoragePaceMsec	datomic.config	1
+configuration	datomic.gcStoragePaceMsec	datomic.garbage	2
+configuration	datomic.h2	datomic.h2	1
+configuration	datomic.heartbeatIntervalMsec	datomic.config	1
+configuration	datomic.heartbeatIntervalMsec	datomic.kv-sql-ext	1
+configuration	datomic.impl.Exceptions$IllegalArgumentExceptionInfo	datomic.error	1
+configuration	datomic.impl.Exceptions$IllegalStateExceptionInfo	datomic.error	1
+configuration	datomic.index	datomic.index	46
+configuration	datomic.indexDirScale	datomic.config	1
+configuration	datomic.indexDirScale	datomic.index	1
+configuration	datomic.indexIOParallelism	datomic.config	1
+configuration	datomic.indexIOParallelism	datomic.index	2
+configuration	datomic.indexMetrics	datomic.config	1
+configuration	datomic.indexParallelism	datomic.config	1
+configuration	datomic.indexSegsPerSecond	datomic.config	1
+configuration	datomic.indexSegsPerSecond	datomic.index	1
+configuration	datomic.indexWorkDir	datomic.config	1
+configuration	datomic.indexWorkDir	datomic.index	1
+configuration	datomic.integrity	datomic.integrity	9
+configuration	datomic.kv-cluster	datomic.kv-cluster	22
+configuration	datomic.kv-sql	datomic.kv-sql	1
+configuration	datomic.kv-sql-ext	datomic.kv-sql-ext	2
+configuration	datomic.localMemcachedAutoDiscovery	datomic.config	2
+configuration	datomic.localMemcachedConfigTimeoutMsec	datomic.config	2
+configuration	datomic.localMemcachedPassword	datomic.config	2
+configuration	datomic.localMemcachedServers	datomic.config	3
+configuration	datomic.localMemcachedUsername	datomic.config	2
+configuration	datomic.log	datomic.log	13
+configuration	datomic.luceneLogFile	datomic.config	1
+configuration	datomic.memcached	datomic.memcached	4
+configuration	datomic.memcachedAutoDiscovery	datomic.config	2
+configuration	datomic.memcachedConfigTimeoutMsec	datomic.config	2
+configuration	datomic.memcachedExpirationDays	datomic.config	1
+configuration	datomic.memcachedExpirationDays	datomic.memcached	1
+configuration	datomic.memcachedGetTimeoutMsec	datomic.config	1
+configuration	datomic.memcachedLib	datomic.config	2
+configuration	datomic.memcachedPassword	datomic.config	2
+configuration	datomic.memcachedRepairFromSpyRatio	datomic.config	1
+configuration	datomic.memcachedServers	datomic.config	3
+configuration	datomic.memcachedUsername	datomic.config	2
+configuration	datomic.memoryIndexMax	datomic.config	4
+configuration	datomic.memoryIndexMax must be >= datomic.memoryIndexThreshold	datomic.config	1
+configuration	datomic.memoryIndexThreshold	datomic.config	2
+configuration	datomic.metricEventCallback	datomic.monitor	1
+configuration	datomic.metricsCallback	datomic.config	1
+configuration	datomic.metricsCallback	datomic.peer	1
+configuration	datomic.metricsCallback	datomic.process-monitor	2
+configuration	datomic.objectCacheBytes	datomic.config	1
+configuration	datomic.objectCacheMax	datomic.config	2
+configuration	datomic.objectCacheMax	datomic.domain	1
+configuration	datomic.peer	datomic.peer	25
+configuration	datomic.peerConnectionTTLMsec	datomic.config	1
+configuration	datomic.peerConnectionTTLMsec	datomic.connector	1
+configuration	datomic.pidFile	datomic.config	1
+configuration	datomic.pidFile	datomic.process	1
+configuration	datomic.pingConcurrency	datomic.config	1
+configuration	datomic.pingHost	datomic.config	1
+configuration	datomic.pingPort	datomic.config	1
+configuration	datomic.podGcDelayMsec	datomic.config	1
+configuration	datomic.podGcDelayMsec	datomic.garbage.pod	1
+configuration	datomic.prefetchConcurrency	datomic.config	1
+configuration	datomic.prefetchConcurrency	datomic.db	1
+configuration	datomic.prefetchProbes	datomic.config	2
+configuration	datomic.prefetchProbes	datomic.db	1
+configuration	datomic.printConnectionInfo	datomic.config	1
+configuration	datomic.process	datomic.process	4
+configuration	datomic.process-monitor	datomic.process-monitor	7
+configuration	datomic.query	datomic.datalog	1
+configuration	datomic.queryPool	datomic.config	1
+configuration	datomic.queryPool	datomic.datalog	1
+configuration	datomic.readAheadPool	datomic.cache	2
+configuration	datomic.readAheadPool	datomic.config	1
+configuration	datomic.readConcurrency	datomic.backup	1
+configuration	datomic.readConcurrency	datomic.config	1
+configuration	datomic.readConcurrency	datomic.kv-cluster	1
+configuration	datomic.reconnector2	datomic.reconnector2	3
+configuration	datomic.s3BackupConcurrency	datomic.backup	2
+configuration	datomic.s3BackupConcurrency	datomic.config	1
+configuration	datomic.s3ClientExecutionTimeout	datomic.config	2
+configuration	datomic.s3ConnectionTimeout	datomic.config	2
+configuration	datomic.s3MaxRetries	datomic.config	1
+configuration	datomic.s3MaxRetries	datomic.ddb-s3-cluster	1
+configuration	datomic.s3RequestTimeout	datomic.config	4
+configuration	datomic.s3RetryBaseDelay	datomic.config	1
+configuration	datomic.s3RetryBaseDelay	datomic.ddb-s3-cluster	1
+configuration	datomic.s3SocketTimeout	datomic.config	3
+configuration	datomic.slf4j	datomic.slf4j	4
+configuration	datomic.spy.memcached.ClientMode	datomic.memcached	3
+configuration	datomic.spy.memcached.ConnectionFactoryBuilder	datomic.memcached	2
+configuration	datomic.spy.memcached.compat.log.Log4JLogger	datomic.slf4j	1
+configuration	datomic.sqlValidationQuery	datomic.config	1
+configuration	datomic.sqlValidationQuery	datomic.kv-sql-ext	1
+configuration	datomic.temp-	datomic.db	1
+configuration	datomic.tools	datomic.tools	4
+configuration	datomic.transaction	datomic.transaction	2
+configuration	datomic.tx	datomic.db	2
+configuration	datomic.txTimeoutMsec	datomic.config	1
+configuration	datomic.txTimeoutMsec	datomic.peer	1
+configuration	datomic.useIndexArrayCaches	datomic.config	1
+configuration	datomic.useIndexArrayCaches	datomic.index	1
+configuration	datomic.val-cluster	datomic.val-cluster	6
+configuration	datomic.valcache	datomic.valcache	11
+configuration	datomic.valcache-direct	datomic.valcache-direct	3
+configuration	datomic.valcacheMaxGb	datomic.config	3
+configuration	datomic.valcachePath	datomic.config	3
+configuration	datomic.valcachePutsPool	datomic.config	1
+configuration	datomic.valcachePutsPool	datomic.valcache.puts-pool-impl	1
+configuration	datomic.version	datomic.config	1
+configuration	datomic.version	datomic.coordination	1
+configuration	datomic.versionUnique	datomic.backup	1
+configuration	datomic.versionUnique	datomic.config	2
+configuration	datomic.versionUnique	datomic.log	1
+configuration	datomic.writeConcurrency	datomic.backup	1
+configuration	datomic.writeConcurrency	datomic.cassandra-values	1
+configuration	datomic.writeConcurrency	datomic.cassandra-values-v4	1
+configuration	datomic.writeConcurrency	datomic.config	2
+configuration	datomic.writeConcurrency	datomic.ddb-values	1
+configuration	datomic.writeConcurrency	datomic.kv-cluster	2
+configuration	datomic/cassandra_values.clj	datomic.cassandra-values	1
+configuration	datomic/cassandra_values_v4.clj	datomic.cassandra-values-v4	1
+configuration	iam.amazonaws.com	datomic.aws	1
+configuration	infinispan.client.hotrod.connect_timeout	datomic.kv-hotrod	1
+configuration	infinispan.client.hotrod.key_size_estimate	datomic.kv-hotrod	1
+configuration	infinispan.client.hotrod.socket_timeout	datomic.kv-hotrod	1
+configuration	infinispan.client.hotrod.value_size_estimate	datomic.kv-hotrod	1
+configuration	static datomic.Database.*	datomic.janino	1
+configuration	static datomic.Peer.*	datomic.janino	1
+configuration	static datomic.Util.*	datomic.janino	1
+sql	Database log.\n\nLog comprises a tree, plus a tail pod that does three jobs:\n\n- points to the log tree, via the :d/r key in pod-meta\n- holds the tail of data not in the tree yet, in the pod "value"\n- coordinates who is allowed to write transactions\n\nThat sounds complected, and it is. The pod code is subtle and does not\nrepresent our ideas on best practice. It works the way it does for\ncompatibility with existing databases.\n\nAll pod writes increment the revision, which is a CAS guard that\nensures serialization of all activity on the pod. There are several\nkinds of calls to cluster/update-pod:\n\n- Claim the pod by passing a nil buf and the etag from the previous\n  value. This leaves the pod value and metadata unchanged, while\n  causing other writers to encounter a conflict on their next write.\n\n- Append transaction data by passing the previous etag and a buf which\n  gets appended to the buf already in the pod.\n\n- Adopt a new root by setting :d/r in the pod metadata, passing a\n  buf with whatever data is not yet in the root, and setting the\n  etag to nil to reset the pod value to the buf passed in.\n\n- Create a new database log by setting etag to nil, :d/r to point to a\n  new, empty tree, and setting the pod value to an empty list of\n  transactions.\n\nTransactions in the tail pod or in a leaf segment each are their own\ncaching context, and therefore must be preceded by a Fressian\nRESET_CACHES code.\n\nAn empty list of transactions in the pod buffer is the only place\nwhere Datomic uses Fressian's BEGIN_OPEN_LIST bytecode.	datomic.log	1
+sql	Deletes the database specified by uri. Returns true if the\n   delete occurred. See connect for a description of the URI\n   syntax.	datomic.api	1
+sql	Invalid select.	datomic.cassandra	1
+sql	Invalid select.	datomic.cassandra-v4	1
+sql	Property of an attribute. If value is :db.unique/value, then attribute value is unique to each entity. Attempts to insert a duplicate value for a temporary entity id will fail. If value is :db.unique/identity, then attribute value is unique, and upsert is enabled. Attempting to insert a duplicate value for a temporary entity id will cause all attributes associated with that temporary id to be merged with the entity already in the database. Defaults to nil.	datomic.db	1
+sql	SELECT 1	datomic.h2	1
+sql	create table if not exists datomic_kvs (id varchar primary key, rev integer, map varchar, val bytea)	datomic.h2	1
+sql	delete	datomic.kv-cluster	1
+sql	delete from 	datomic.cassandra	1
+sql	delete from 	datomic.cassandra-v4	1
+sql	delete from datomic_kvs where id = ?	datomic.sql	1
+sql	efs-delete	datomic.ddb-s3-cluster	1
+sql	insert into 	datomic.cassandra	1
+sql	insert into 	datomic.cassandra-v4	1
+sql	insert into datomic_kvs (	datomic.sql	1
+sql	insert into datomic_kvs (id, rev, map, val) values (?, ?, ?, ?)	datomic.sql	1
+sql	kv write failed in update-pod	datomic.kv-cluster	1
+sql	select 	datomic.cassandra	1
+sql	select 	datomic.cassandra-v4	1
+sql	select 1	datomic.kv-sql-ext	1
+sql	select 1 from dual	datomic.kv-sql-ext	1
+sql	select id, rev, map, val from datomic_kvs where id = ?	datomic.sql	1
+sql	update 	datomic.cassandra	1
+sql	update 	datomic.cassandra-v4	1
+sql	update datomic_kvs set 	datomic.sql	1
+sql	update datomic_kvs set rev=?, map=?, val=? where id=? and rev=?	datomic.sql	1
+sql	valcache implements a subset of the memcached binary protocol on top of the file system.\n per: https://github.com/memcached/memcached/wiki/BinaryProtocolRevamped\n\nNarrowing presumptions are:\n\nvalues never change\nare named by uuid-as-string keys\nare big enough to justify being stored in files (several kb +)\neviction is based on (required) threshold\nLRU, tracked with atime (use strictatime + lazytime flags when mounting)\nprovided/required dir is 'owned' by valcache, subdir structure is an impl detail\nlowish connection counts (< 1000)\n\nThe supported memcached commands are get/set/delete/noop/quit\ndata type, vbucket, cas, and expiry are not supported - non-zero values will be rejected.\n	datomic.valcache	1
+uri	datomic:	datomic.uri	1
+uri	datomic:cass2://	datomic.uri	1
+uri	datomic:cass3://	datomic.uri	1
+uri	datomic:cass://	datomic.uri	1
+uri	datomic:couchbase://	datomic.uri	1
+uri	datomic:ddb+s3://	datomic.uri	1
+uri	datomic:ddb-local://	datomic.uri	1
+uri	datomic:ddb://	datomic.uri	1
+uri	datomic:inf://	datomic.uri	1
+uri	datomic:mdev://	datomic.uri	1
+uri	datomic:mem://	datomic.uri	1
+uri	datomic:olddev://	datomic.uri	1
+uri	datomic:s3://	datomic.uri	1
+uri	datomic:sql://	datomic.uri	1
+uri	http://	datomic.aws	1
+uri	http://	datomic.cloudwatch	1
+uri	http://	datomic.ddb	1
+uri	http://	datomic.s3-api	1
+uri	http://169.254.169.254/latest/meta-data/local-ipv4	datomic.aws-detect	1
+uri	http://169.254.169.254/latest/meta-data/public-ipv4	datomic.aws-detect	1
+uri	jdbc:h2:	datomic.h2	2
+uri	jdbc:h2:tcp://	datomic.h2	1

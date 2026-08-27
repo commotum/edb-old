@@ -1,0 +1,59 @@
+/*
+ * Decompiled with CFR 0.152.
+ * 
+ * Could not load the following classes:
+ *  clojure.lang.AFunction
+ *  clojure.lang.IFn
+ *  clojure.lang.ISeq
+ *  clojure.lang.Keyword
+ *  clojure.lang.PersistentHashMap
+ *  clojure.lang.RT
+ *  clojure.lang.Var
+ */
+package datomic;
+
+import clojure.lang.AFunction;
+import clojure.lang.IFn;
+import clojure.lang.ISeq;
+import clojure.lang.Keyword;
+import clojure.lang.PersistentHashMap;
+import clojure.lang.RT;
+import clojure.lang.Var;
+
+public final class log$tail_empty_QMARK_
+extends AFunction {
+    public static final Var const__0 = RT.var((String)"clojure.core", (String)"seq?");
+    public static final Var const__1 = RT.var((String)"clojure.core", (String)"seq");
+    public static final Keyword const__3 = RT.keyword(null, (String)"txes");
+    public static final Var const__4 = RT.var((String)"clojure.core", (String)"empty?");
+
+    public static Object invokeStatic(Object p__16229) {
+        Object txes;
+        Object map__16230;
+        Object object;
+        Object object2 = p__16229;
+        p__16229 = null;
+        Object map__162302 = object2;
+        Object object3 = ((IFn)const__0.getRawRoot()).invoke(map__162302);
+        if (object3 != null && object3 != Boolean.FALSE) {
+            Object object4 = map__162302;
+            map__162302 = null;
+            object = PersistentHashMap.create((ISeq)((ISeq)((IFn)const__1.getRawRoot()).invoke(object4)));
+        } else {
+            object = map__162302;
+            map__162302 = null;
+        }
+        Object object5 = map__16230 = object;
+        map__16230 = null;
+        Object object6 = txes = RT.get((Object)object5, (Object)const__3);
+        txes = null;
+        return ((IFn)const__4.getRawRoot()).invoke(object6);
+    }
+
+    public Object invoke(Object object) {
+        Object object2 = object;
+        object = null;
+        return log$tail_empty_QMARK_.invokeStatic(object2);
+    }
+}
+

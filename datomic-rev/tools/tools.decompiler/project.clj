@@ -1,0 +1,10 @@
+(defproject bronsa/tools.decompiler "0.1.0-alpha1"
+  :description "Decompiler for Clojure AOT bytecode"
+  :url "https://github.com/Bronsa/tools.decompiler"
+  :license {:name "Eclipse Public License 1.0"
+            :url "https://www.eclipse.org/legal/epl-v10.html"}
+  :java-source-paths ["java"]
+  :manifest {"Premain-Class" "clojure.tools.decompiler.RetrieveClasses"}
+  :dependencies [[org.clojure/clojure "1.10.0"]
+                 [org.clojure/core.match "0.3.0-alpha5"]
+                 [org.apache.bcel/bcel "6.1"]])

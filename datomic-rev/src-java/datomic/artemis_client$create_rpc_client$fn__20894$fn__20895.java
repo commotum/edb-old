@@ -1,0 +1,42 @@
+/*
+ * Decompiled with CFR 0.152.
+ * 
+ * Could not load the following classes:
+ *  clojure.lang.AFunction
+ *  clojure.lang.IFn
+ *  clojure.lang.RT
+ *  clojure.lang.Var
+ *  org.apache.activemq.artemis.api.core.client.ClientConsumer
+ */
+package datomic;
+
+import clojure.lang.AFunction;
+import clojure.lang.IFn;
+import clojure.lang.RT;
+import clojure.lang.Var;
+import org.apache.activemq.artemis.api.core.client.ClientConsumer;
+
+public final class artemis_client$create_rpc_client$fn__20894$fn__20895
+extends AFunction {
+    Object consumer;
+    public static final Var const__0 = RT.var((String)"datomic.error", (String)"report");
+
+    public artemis_client$create_rpc_client$fn__20894$fn__20895(Object object) {
+        this.consumer = object;
+    }
+
+    public Object invoke() {
+        Object object;
+        try {
+            this.consumer = null;
+            ((ClientConsumer)this.consumer).close();
+            object = null;
+        }
+        catch (Throwable t__708__auto__2) {
+            Object t__708__auto__2 = null;
+            object = ((IFn)const__0.getRawRoot()).invoke((Object)t__708__auto__2);
+        }
+        return object;
+    }
+}
+

@@ -1,0 +1,34 @@
+ordinal	group_id	artifact_id	declared_version	scope	optional	type	classifier	exclusions	resolution	shipped_jars
+1	org.clojure	clojure	1.9.0	compile	false	jar			artifact-fallback	clojure-1.11.4.jar
+2	org.clojure	core.async	1.6.681	compile	false	jar			exact	core.async-1.6.681.jar
+3	org.clojure	tools.cli	1.0.219	compile	false	jar		org.clojure:clojure	exact	tools.cli-1.0.219.jar
+4	org.fressian	fressian	0.6.8	compile	false	jar			exact	fressian-0.6.8.jar
+5	commons-codec	commons-codec	1.15	compile	false	jar			exact	commons-codec-1.15.jar
+6	commons-io	commons-io	2.15.1	compile	false	jar			exact	commons-io-2.15.1.jar
+7	com.cognitect	anomalies	0.1.12	compile	false	jar			exact	anomalies-0.1.12.jar
+8	com.datomic	java-io	0.1.29	compile	false	jar			exact	java-io-0.1.29.jar
+9	org.slf4j	jul-to-slf4j	1.7.36	compile	false	jar			exact	jul-to-slf4j-1.7.36.jar
+10	org.slf4j	slf4j-api	1.7.36	compile	false	jar			artifact-fallback	slf4j-api-1.7.32.jar
+11	org.slf4j	log4j-over-slf4j	1.7.36	runtime	false	jar			exact	log4j-over-slf4j-1.7.36.jar
+12	org.slf4j	jcl-over-slf4j	1.7.36	compile	false	jar			exact	jcl-over-slf4j-1.7.36.jar
+13	org.apache.activemq	artemis-core-client	2.31.2	compile	false	jar		commons-logging:commons-logging,org.jgroups:jgroups	exact	artemis-core-client-2.31.2.jar
+14	com.cognitect	caster	1.0.45	compile	false	jar			exact	caster-1.0.45.jar
+15	com.datomic	query-support	0.8.28	compile	false	jar			exact	query-support-0.8.28.jar
+16	com.datomic	query-stats	1.0.13	compile	false	jar			exact	query-stats-1.0.13.jar
+17	com.datomic	io-stats	1.0.14	compile	false	jar			exact	io-stats-1.0.14.jar
+18	com.datastax.cassandra	cassandra-driver-core	3.7.1	provided	false	jar		io.netty:*	exact	cassandra-driver-core-3.7.1.jar
+19	com.datastax.oss	java-driver-core-shaded	4.17.0	provided	false	jar			exact	java-driver-core-shaded-4.17.0.jar
+20	software.aws.mcs	aws-sigv4-auth-cassandra-java-driver-plugin	4.0.9	provided	false	jar		com.datastax.oss:java-driver-core,com.datastax.oss:java-driver-core-shaded	exact	aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar
+21	org.infinispan	infinispan-client-hotrod	5.1.2.FINAL	provided	false	jar		org.rhq.helpers:rhq-pluginAnnotations	missing	
+22	com.h2database	h2	2.1.214	compile	false	jar			exact	h2-2.1.214.jar
+23	com.datomic	datomic-lucene-core	3.3.0	compile	false	jar			exact	datomic-lucene-core-3.3.0.jar
+24	com.github.ben-manes.caffeine	caffeine	3.1.5	compile	false	jar			exact	caffeine-3.1.5.jar
+25	com.datomic	memcache-asg-java-client	1.1.0.36	compile	false	jar			exact	memcache-asg-java-client-1.1.0.36.jar
+26	couchbase	couchbase-client	1.0.3	provided	false	jar		org.jboss.netty:netty,spy:spymemcached	missing	
+27	com.amazonaws	aws-java-sdk-cloudwatch	1.12.564	provided	false	jar		commons-logging:commons-logging,javax.mail:mail,org.apache.httpcomponents:httpclient	exact	aws-java-sdk-cloudwatch-1.12.564.jar
+28	com.amazonaws	aws-java-sdk-s3	1.12.564	provided	false	jar		commons-logging:commons-logging,org.apache.httpcomponents:httpclient	exact	aws-java-sdk-s3-1.12.564.jar
+29	com.amazonaws	aws-java-sdk-dynamodb	1.12.564	provided	false	jar		commons-logging:commons-logging,javax.mail:mail,org.apache.httpcomponents:httpclient	exact	aws-java-sdk-dynamodb-1.12.564.jar
+30	org.apache.httpcomponents	httpclient	4.5.13	compile	false	jar		commons-logging:commons-logging	exact	httpclient-4.5.13.jar
+31	org.apache.tomcat	tomcat-jdbc	7.0.109	compile	false	jar		commons-logging:commons-logging	exact	tomcat-jdbc-7.0.109.jar
+32	org.postgresql	postgresql	42.5.1	provided	false	jar			exact	postgresql-42.5.1.jar
+33	org.codehaus.janino	commons-compiler-jdk	3.0.12	compile	false	jar			exact	commons-compiler-jdk-3.0.12.jar

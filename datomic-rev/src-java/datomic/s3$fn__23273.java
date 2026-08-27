@@ -1,0 +1,40 @@
+/*
+ * Decompiled with CFR 0.152.
+ * 
+ * Could not load the following classes:
+ *  clojure.lang.AFunction
+ *  clojure.lang.ILookupThunk
+ *  clojure.lang.KeywordLookupSite
+ *  clojure.lang.RT
+ */
+package datomic;
+
+import clojure.lang.AFunction;
+import clojure.lang.ILookupThunk;
+import clojure.lang.KeywordLookupSite;
+import clojure.lang.RT;
+
+public final class s3$fn__23273
+extends AFunction {
+    static final KeywordLookupSite __site__0__ = new KeywordLookupSite(RT.keyword(null, (String)"name"));
+    static ILookupThunk __thunk__0__ = __site__0__;
+
+    public static Object invokeStatic(Object item) {
+        ILookupThunk iLookupThunk = __thunk__0__;
+        Object object = item;
+        item = null;
+        Object object2 = iLookupThunk.get(object);
+        if (iLookupThunk == object2) {
+            __thunk__0__ = __site__0__.fault(object);
+            object2 = __thunk__0__.get(object);
+        }
+        return object2;
+    }
+
+    public Object invoke(Object object) {
+        Object object2 = object;
+        object = null;
+        return s3$fn__23273.invokeStatic(object2);
+    }
+}
+
