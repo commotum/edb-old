@@ -150,6 +150,13 @@ recovered.
 
 The Peer reference, whole Transactor input, dependency and launch boundary,
 optional artifact map, and candidate/oracle separation are frozen. Stage 1 can
-now recover the whole corpus. Its first gate is deterministic decompilation and
-reader validation of all 247 namespace initializers, followed by the 46 Java
-source candidates and exact preservation/classification of all 11 resources.
+now recover the whole corpus.
+
+Stage 1 evidence supersedes the recovery method anticipated here without
+changing this frozen boundary. An exhaustive dependency-source scan proved
+that the canonical 247-namespace tree is 160 strict Datomic decompiles, two
+exact Datomic dependency sources, and 85 exact bundled sources, rather than
+247 decompiles. See `stage-1-clojure-recovery.md`. The 46-source Java slice is
+reported separately in `stage-1-java-recovery.md`. Resource classification is
+complete, while clean candidate-resource and dependency closure remains a
+Stage 1 gate.

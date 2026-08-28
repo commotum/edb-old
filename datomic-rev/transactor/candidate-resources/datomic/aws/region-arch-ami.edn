@@ -1,0 +1,3 @@
+;; Stage 1 non-production placeholder: AWS region/AMI discovery is deferred.
+;; Never use this empty map to generate or launch production infrastructure.
+{}

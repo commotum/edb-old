@@ -1,0 +1,3 @@
+rule_id	position	element	scope	nested_path	bytes	sha256	reason
+vendor-key	1	distribution:lib/nano-impl-0.1.325.jar	archive-entry	nano_impl/transactor-key.jks	1368	f3627f52580b84fe8f536423643fb46999fd2458498989307f2820d778eb73a1	vendor TLS identity payload
+vendor-trust	1	distribution:lib/nano-impl-0.1.325.jar	archive-entry	nano_impl/transactor-trust.jks	662	ca64f839d051d909974a624b4345d83cc739a0b90edbe54e7c3605a2fd8fc13b	vendor TLS trust payload

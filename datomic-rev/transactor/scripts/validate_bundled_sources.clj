@@ -22,7 +22,8 @@
 (defn normalized-ns [value]
   (str/replace (str value) "-" "_"))
 
-(let [[mapping-path distribution-root output-path] *command-line-args*
+(let [[mapping-path distribution-root output-path missing-policy] *command-line-args*
+      allow-missing? (= "allow-missing" missing-policy)
       lines (str/split-lines (slurp mapping-path))
       header (first lines)
       rows (rest lines)]
@@ -38,24 +39,34 @@
       (let [[expected-ns _ _ status match-count owner-jar _ source-entry
              expected-sha]
             (str/split line #"\t" -1)]
-        (assert (= "single-exact-path" status))
-        (assert (= "1" match-count))
-        (with-open [zip (ZipFile. (io/file distribution-root owner-jar))]
-          (let [entry (.getEntry zip source-entry)
-                bytes (with-open [input (.getInputStream zip entry)]
-                        (.readAllBytes input))
-                actual-sha (sha256 bytes)
-                form (first-form bytes)
-                declared (when (and (seq? form) (= 'ns (first form)))
-                           (second form))
-                ok? (and (= expected-sha actual-sha)
-                         (= expected-ns (normalized-ns declared)))]
-            (.write writer
-                    (str/join "\t"
-                              [expected-ns owner-jar source-entry
-                               expected-sha actual-sha declared
-                               (if ok? "pass" "fail")]))
-            (.write writer "\n"))))))
+        (cond
+          (and allow-missing? (= "missing" status) (= "0" match-count))
+          nil
+
+          (and (= "single-exact-path" status) (= "1" match-count))
+          (with-open [zip (ZipFile. (io/file distribution-root owner-jar))]
+            (let [entry (.getEntry zip source-entry)
+                  bytes (with-open [input (.getInputStream zip entry)]
+                          (.readAllBytes input))
+                  actual-sha (sha256 bytes)
+                  form (first-form bytes)
+                  declared (when (and (seq? form) (= 'ns (first form)))
+                             (second form))
+                  ok? (and (= expected-sha actual-sha)
+                           (= expected-ns (normalized-ns declared)))]
+              (.write writer
+                      (str/join "\t"
+                                [expected-ns owner-jar source-entry
+                                 expected-sha actual-sha declared
+                                 (if ok? "pass" "fail")]))
+              (.write writer "\n")))
+
+          :else
+          (throw (ex-info "unexpected dependency-source ownership status"
+                          {:namespace expected-ns
+                           :status status
+                           :match-count match-count
+                           :allow-missing allow-missing?}))))))
   (let [results (rest (str/split-lines (slurp output-path)))
         failures (count (filter #(str/ends-with? % "\tfail") results))]
     (println (str "validated=" (count results)))

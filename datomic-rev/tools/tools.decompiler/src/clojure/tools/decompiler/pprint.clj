@@ -53,7 +53,16 @@
                            (= 'quote (-> x second first)))
                   (let [ns-name (-> x second second)
                         ns-name (if (list? ns-name) (second ns-name) ns-name)]
-                    (swap! !aliases assoc (name ns-name) "")))
+                    ;; Only the most recent in-ns target is the current
+                    ;; namespace. Keeping older targets mapped to the empty
+                    ;; alias incorrectly removes qualification after a source
+                    ;; file switches namespaces more than once.
+                    (swap! !aliases
+                           (fn [aliases]
+                             (->> aliases
+                                  (remove (fn [[_ alias]] (= "" alias)))
+                                  (into {})
+                                  (#(assoc % (name ns-name) "")))))))
 
                 (when (or (= 'clojure.core/refer-clojure (first x))
                           (and (= 'clojure.core/refer (first x))

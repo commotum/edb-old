@@ -8,6 +8,7 @@ class_name=${1:?missing initializer class name}
 : "${DATOMIC_TRANSACTOR_DECOMPILER_CP:?missing decompiler classpath}"
 : "${DATOMIC_TRANSACTOR_NAMESPACE_TIMEOUT:=1200}"
 : "${DATOMIC_TRANSACTOR_JAVA_HEAP:=3g}"
+recovery_java_tmp_root=${DATOMIC_RECOVERY_JAVA_TMPDIR:-}
 
 [[ "$DATOMIC_TRANSACTOR_JAVA_HEAP" =~ ^[1-9][0-9]*[kKmMgG]$ ]] || {
   echo "DATOMIC_TRANSACTOR_JAVA_HEAP must be a positive JVM heap size: $DATOMIC_TRANSACTOR_JAVA_HEAP" >&2
@@ -21,6 +22,25 @@ status_file="$DATOMIC_TRANSACTOR_DECOMPILE_LOG_ROOT/$safe_name.status"
 stdout_file="$DATOMIC_TRANSACTOR_DECOMPILE_LOG_ROOT/$safe_name.out"
 stderr_file="$DATOMIC_TRANSACTOR_DECOMPILE_LOG_ROOT/$safe_name.err"
 
+java_tmp_option=()
+java_tmpdir=
+if [[ -n "$recovery_java_tmp_root" ]]; then
+  [[ "$recovery_java_tmp_root" == /* &&
+     -d "$recovery_java_tmp_root/namespaces" &&
+     ! -L "$recovery_java_tmp_root" &&
+     ! -L "$recovery_java_tmp_root/namespaces" ]] || {
+    echo "invalid DATOMIC_RECOVERY_JAVA_TMPDIR namespace root: $recovery_java_tmp_root" >&2
+    exit 2
+  }
+  java_tmpdir="$recovery_java_tmp_root/namespaces/$safe_name"
+  [[ ! -e "$java_tmpdir" && ! -L "$java_tmpdir" ]] || {
+    echo "namespace Java tmp path already exists: $java_tmpdir" >&2
+    exit 2
+  }
+  mkdir "$java_tmpdir"
+  java_tmp_option=("-Djava.io.tmpdir=$java_tmpdir")
+fi
+
 rm -f -- "$DATOMIC_TRANSACTOR_SOURCE_ROOT/$source_path" "$status_file"
 mkdir -p -- "$(dirname -- "$DATOMIC_TRANSACTOR_SOURCE_ROOT/$source_path")"
 
@@ -28,6 +48,7 @@ set +e
 timeout --signal=TERM --kill-after=10s \
   "$DATOMIC_TRANSACTOR_NAMESPACE_TIMEOUT" \
   java -XX:+PerfDisableSharedMem "-Xmx$DATOMIC_TRANSACTOR_JAVA_HEAP" \
+  "${java_tmp_option[@]}" \
   -cp "$DATOMIC_TRANSACTOR_DECOMPILER_CP" \
   clojure.main "$script_dir/decompile_one.clj" \
   "$DATOMIC_TRANSACTOR_CLASSES_ROOT" \
@@ -36,6 +57,16 @@ timeout --signal=TERM --kill-after=10s \
   >"$stdout_file" 2>"$stderr_file"
 exit_status=$?
 set -e
+
+if [[ -n "$java_tmpdir" ]]; then
+  if [[ -n $(find "$java_tmpdir" -mindepth 1 -print -quit) ]]; then
+    echo "namespace Java tmp directory is dirty: $java_tmpdir" \
+      >> "$stderr_file"
+    exit_status=94
+  else
+    rmdir "$java_tmpdir" || exit_status=94
+  fi
+fi
 
 if [[ "$exit_status" -eq 0 && -s "$DATOMIC_TRANSACTOR_SOURCE_ROOT/$source_path" ]]; then
   printf 'pass\t0\n' > "$status_file"

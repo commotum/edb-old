@@ -6,6 +6,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 project_dir=$(cd -- "$script_dir/.." && pwd)
 datomic_home=${1:-"$project_dir/../../datomic/datomic-pro-1.0.7277"}
 output_dir=${2:-"$project_dir/src-clj-regenerated"}
+recovery_java_tmp_root=${DATOMIC_RECOVERY_JAVA_TMPDIR:-}
 peer_jar="$datomic_home/peer-1.0.7277.jar"
 decompiler_src="$project_dir/tools/tools.decompiler/src"
 decompiler_jar="$project_dir/tools/tools.decompiler/target/tools.decompiler-0.1.0-alpha1-standalone.jar"
@@ -15,12 +16,55 @@ if [[ ! -f "$decompiler_jar" ]]; then
   decompiler_jar="$project_dir/tools/tools.decompiler-0.1.0-alpha1-standalone.jar"
 fi
 
-for command_name in java unzip sha256sum mktemp; do
+for command_name in java unzip sha256sum mktemp find rmdir; do
   command -v "$command_name" >/dev/null || {
     echo "missing required command: $command_name" >&2
     exit 1
   }
 done
+
+if [[ -n "$recovery_java_tmp_root" ]]; then
+  [[ "$recovery_java_tmp_root" == /* &&
+     -d "$recovery_java_tmp_root" &&
+     ! -L "$recovery_java_tmp_root" &&
+     -w "$recovery_java_tmp_root" ]] || {
+    echo "DATOMIC_RECOVERY_JAVA_TMPDIR must be an absolute, writable, non-symlink directory: $recovery_java_tmp_root" >&2
+    exit 1
+  }
+  [[ -z $(find "$recovery_java_tmp_root" -mindepth 1 -print -quit) ]] || {
+    echo "DATOMIC_RECOVERY_JAVA_TMPDIR must start empty: $recovery_java_tmp_root" >&2
+    exit 1
+  }
+  recovery_java_tmp_root=$(cd -- "$recovery_java_tmp_root" && pwd -P)
+fi
+
+run_recovery_java() {
+  local label=$1
+  shift
+  if [[ -z "$recovery_java_tmp_root" ]]; then
+    java -XX:+PerfDisableSharedMem "$@"
+    return
+  fi
+  local java_tmpdir="$recovery_java_tmp_root/$label"
+  [[ ! -e "$java_tmpdir" && ! -L "$java_tmpdir" ]] || {
+    echo "Peer recovery Java tmp path already exists: $java_tmpdir" >&2
+    return 70
+  }
+  mkdir "$java_tmpdir" || return 70
+  local java_status
+  if java -XX:+PerfDisableSharedMem \
+      "-Djava.io.tmpdir=$java_tmpdir" "$@"; then
+    java_status=0
+  else
+    java_status=$?
+  fi
+  if [[ -n $(find "$java_tmpdir" -mindepth 1 -print -quit) ]]; then
+    echo "Peer recovery Java tmp directory is dirty: $java_tmpdir" >&2
+    return 70
+  fi
+  rmdir "$java_tmpdir" || return 70
+  return "$java_status"
+}
 
 [[ -f "$peer_jar" ]] || {
   echo "peer JAR not found: $peer_jar" >&2
@@ -57,10 +101,12 @@ log_file="$output_dir/decompile.log"
 mkdir -p "$classes_dir"
 unzip -oq "$peer_jar" -d "$classes_dir"
 
-java -cp "$decompiler_src:$decompiler_jar" clojure.main \
+run_recovery_java validate-decompiler \
+  -cp "$decompiler_src:$decompiler_jar" clojure.main \
   "$script_dir/validate_decompiler.clj"
 
-java -Xmx4g -cp "$decompiler_src:$decompiler_jar" clojure.main \
+run_recovery_java decompile \
+  -Xmx4g -cp "$decompiler_src:$decompiler_jar" clojure.main \
   "$script_dir/decompile_clojure.clj" \
   "$classes_dir" "$output_dir" "$report_file" \
   >"$log_file" 2>&1
@@ -76,8 +122,15 @@ grep -q ':failure-count 0' "$report_file" || {
   exit 1
 }
 
-java -cp "$decompiler_src:$decompiler_jar" clojure.main \
+run_recovery_java validate-source \
+  -cp "$decompiler_src:$decompiler_jar" clojure.main \
   "$script_dir/validate_clojure.clj" "$output_dir"
+
+if [[ -n "$recovery_java_tmp_root" &&
+      -n $(find "$recovery_java_tmp_root" -mindepth 1 -print -quit) ]]; then
+  echo "Peer recovery Java tmp root is dirty after recovery: $recovery_java_tmp_root" >&2
+  exit 70
+fi
 
 echo "reconstructed $source_count namespaces in $output_dir"
 echo "details: $report_file"

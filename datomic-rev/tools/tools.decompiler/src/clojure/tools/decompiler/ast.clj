@@ -395,6 +395,36 @@
         (assoc :pc continuation-label))))
 
 ;; doesn't handle wrapping try/catch/finally
+(defn forward-goto-value-return-epilogue?
+  "Recognize the one stack-preserving control-flow shape in which a value at
+  an expression boundary jumps forward to a shared value-return epilogue.
+  The jump must have a real, strictly later target, and that target may only
+  contain the same inert return scaffolding accepted by will-ret? before an
+  explicit JVM value return.  In particular, a second goto is not followed."
+  [ctx {:insn/keys [label] :as goto-insn}]
+  (let [target-label (goto-label goto-insn)]
+    (and (< label target-label)
+         (some? (maybe-insn-at ctx {:label target-label}))
+         (loop [off 0]
+           (let [{:insn/keys [name] :as insn}
+                 (maybe-insn-at ctx {:label target-label :offset off})]
+             (cond
+               (not insn)
+               false
+
+               (isa? bc/insn-h (keyword name) ::bc/return-value)
+               true
+
+               (or (#{"invokestatic" "checkcast"} name)
+                   (isa? bc/insn-h (keyword name) ::bc/no-op)
+                   (isa? bc/insn-h
+                         (keyword name)
+                         ::bc/invoke-instance-method))
+               (recur (inc off))
+
+               :else
+               false))))))
+
 (defn will-ret? [ctx label]
   (loop [off 0]
     (let [{:insn/keys [name] :as insn} (maybe-insn-at ctx {:label label :offset off})]
@@ -408,12 +438,15 @@
             (isa? bc/insn-h (keyword name) ::bc/invoke-instance-method))
         (recur (inc off))
 
+        (= "goto" name)
+        (forward-goto-value-return-epilogue? ctx insn)
+
         :else
 
         false))))
 
 (defn process-impure-loop [{:keys [impure-loops pc] :as ctx}]
-  (let [end-label (impure-loops pc)
+  (let [loop-entry-label (impure-loops pc)
         enclosing-end-insn (when-let [label (:enclosing-end-label ctx)]
                              (maybe-insn-at ctx {:label label}))
         enclosing-end-is-backedge?
@@ -424,20 +457,23 @@
                           (restrict (:terminate? ctx) :recur?))
 
         {body-stack :stack body-stmnts :statements
-         body-recur? :recur? :keys [pc]} (process-insns (-> ctx
-                                                                                  (assoc :loop-args [])
-                                                                                  (update :impure-loops disj pc)
-                                                                                  (assoc :impure-loop-entry pc)
-                                                                                  (assoc :loop-end-label end-label)
-                                                                                  (assoc :terminate? body-terminate?)
-                                                                                  (assoc :statements [])))
-        statement? (not (will-ret? ctx end-label))
+         body-recur? :recur? body-pc :pc} (process-insns (-> ctx
+                                                              (assoc :loop-args [])
+                                                              (update :impure-loops disj pc)
+                                                              (assoc :impure-loop-entry pc)
+                                                              (assoc :loop-end-label loop-entry-label)
+                                                              (assoc :terminate? body-terminate?)
+                                                              (assoc :statements [])))
+        ;; impure-loops is a set, so its value is the loop entry.  Whether the
+        ;; loop supplies the enclosing expression's value is determined only
+        ;; by the continuation reached after processing its body.
+        statement? (not (will-ret? ctx body-pc))
         body (->do (conj body-stmnts (peek body-stack)))
         loop-expr {:op :loop
                    :local-variables []
                    :body body}]
     (-> ctx
-        (assoc :pc pc)
+        (assoc :pc body-pc)
         (update (if statement? :statements :stack) conj loop-expr))))
 
 (defn continue-within-enclosing-region
@@ -542,9 +578,19 @@
                                        :terminate? (restrict (:terminate? ctx) (pc= end-then))
                                        :statements []))
 
+        else-start-insn (when maybe-one-armed?
+                          (maybe-insn-at ctx {:label start-else}))
+        protected-value-else?
+        (and enclosing-end-label
+             (< start-else enclosing-end-label)
+             (isa? bc/insn-h
+                   (keyword (:insn/name else-start-insn))
+                   ::bc/load-insn))
+
         impure-loop-one-armed? (and (:impure-loop-entry ctx)
                                     (empty? (:loop-args ctx))
                                     maybe-one-armed?
+                                    (not protected-value-else?)
                                     (:recur? then-ctx))
 
         one-armed? (and maybe-one-armed?
@@ -569,7 +615,13 @@
         {else-stack :stack else-stmnts :statements else-recur? :recur?
          else-ast :ast} else-ctx
 
-        statement? (or one-armed? (= stack then-stack else-stack))
+        ;; A true one-armed recur must remain the value of the implicit loop.
+        ;; Emitting it as a statement makes the nil subsequently supplied by
+        ;; process-impure-loop follow the recur, which is both non-tail Clojure
+        ;; and a semantic truncation of the loop.
+        statement? (if impure-loop-one-armed?
+                     false
+                     (or one-armed? (= stack then-stack else-stack)))
 
         terminal-impure-if? (and (:impure-loop-entry ctx)
                                  maybe-one-armed?
@@ -599,7 +651,9 @@
                 conj {:op :if
                       :test test
                       :then (->do then)
-                      :else (if else (->do else) nil-expr)})
+                      :else (if one-armed?
+                              nil-expr
+                              (if else (->do else) nil-expr))})
         (cond-> (or (not statement?) impure-loop-one-armed?)
           (assoc :recur? (or then-recur? else-recur?))
           one-armed? (assoc :pc start-else)))))
@@ -806,6 +860,19 @@
   (let [{:insn/keys [length]} (curr-insn ctx)
         body-ctx (process-insns (-> ctx
                                     (update :pc + length)
+                                    ;; A lexical binding is a structured
+                                    ;; control-flow region just like a try
+                                    ;; body.  Preserve its nearest end while
+                                    ;; reconstructing nested branches: some
+                                    ;; Clojure compilers replace an unreachable
+                                    ;; branch-to-end GOTO with NOP/NOP/ATHROW,
+                                    ;; so the branch alone no longer exposes
+                                    ;; the lexical continuation.
+                                    (assoc :enclosing-end-label
+                                           (if-let [outer-end
+                                                    (:enclosing-end-label ctx)]
+                                             (min outer-end end-label)
+                                             end-label))
                                     (assoc :terminate? (restrict (:terminate? ctx) (pc= end-label)))
                                     (assoc :statements [])))
         {body-stack :stack body-stmnts :statements :keys [recur?]} body-ctx
@@ -1583,9 +1650,57 @@
       pretty-fname
       fname)))
 
+(def invocation-method-names
+  #{"invoke" "invokeStatic" "invokePrim" "doInvoke"})
+
+(defn class-field-instruction?
+  [class-name field-name instruction-name instruction]
+  (let [{:insn/keys [target-class target-name]}
+        (:insn/pool-element instruction)]
+    (and (= instruction-name (:insn/name instruction))
+         (= class-name target-class)
+         (= field-name target-name))))
+
+(defn derived-fn-name-is-used-capture?
+  "True only when a class-derived fn name is also a proved captured field:
+  the class declares the instance field, its constructor writes that exact
+  field, and an invocation body reads it. In that bytecode graph, emitting the
+  derived name would shadow the closed-over value rather than recover an
+  authored recursive fn name."
+  [{class-name :class/name
+    fields :class/fields
+    methods :class/methods}
+   derived-name]
+  (let [instance-field?
+        (some #(and (= derived-name (:field/name %))
+                    (not (contains? (:field/flags %) :static)))
+              fields)
+        constructor-write?
+        (some (fn [method]
+                (and (= "<init>" (:method/name method))
+                     (some #(class-field-instruction?
+                              class-name derived-name "putfield" %)
+                           (:method/bytecode method))))
+              methods)
+        invocation-read?
+        (some (fn [method]
+                (and (contains? invocation-method-names (:method/name method))
+                     (some #(class-field-instruction?
+                              class-name derived-name "getfield" %)
+                           (:method/bytecode method))))
+              methods)]
+    (boolean (and instance-field? constructor-write? invocation-read?))))
+
+(defn recover-fn-name [bc explicit-name]
+  (if explicit-name
+    explicit-name
+    (let [derived-name (extract-fn-name (:class/name bc))]
+      (when-not (derived-fn-name-is-used-capture? bc derived-name)
+        derived-name))))
+
 (defn decompile-fn [{class-name :class/name :as bc} {:keys [fn-name] :as ctx}]
   (-> ctx
-      (assoc :fn-name (or fn-name (extract-fn-name class-name)))
+      (assoc :fn-name (recover-fn-name bc fn-name))
       (assoc :class-name class-name)
       (process-static-init bc)
       (process-init bc)

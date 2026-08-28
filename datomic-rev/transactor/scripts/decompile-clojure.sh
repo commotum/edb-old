@@ -11,6 +11,7 @@ output_dir=${2:-/tmp/datomic-transactor-decompile}
 jobs=${JOBS:-4}
 namespace_timeout=${NAMESPACE_TIMEOUT:-1200}
 java_heap=${DATOMIC_TRANSACTOR_JAVA_HEAP:-3g}
+recovery_java_tmp_root=${DATOMIC_RECOVERY_JAVA_TMPDIR:-}
 transactor_jar="$datomic_home/datomic-transactor-pro-1.0.7277.jar"
 expected_sha=d90819b57e2138085ddc26c93314f953c2cd776d1d1aa8b43a6bec1e475d3692
 decompiler_src="$project_dir/tools/tools.decompiler/src"
@@ -21,7 +22,7 @@ if [[ ! -f "$decompiler_jar" ]]; then
 fi
 
 for command_name in java unzip sha256sum mktemp timeout xargs find sort awk \
-    cp rg sed wc; do
+    comm cp rg sed wc rmdir; do
   command -v "$command_name" >/dev/null || {
     echo "missing required command: $command_name" >&2
     exit 1
@@ -40,6 +41,20 @@ done
   echo "DATOMIC_TRANSACTOR_JAVA_HEAP must be a positive JVM heap size: $java_heap" >&2
   exit 1
 }
+if [[ -n "$recovery_java_tmp_root" ]]; then
+  [[ "$recovery_java_tmp_root" == /* &&
+     -d "$recovery_java_tmp_root" &&
+     ! -L "$recovery_java_tmp_root" &&
+     -w "$recovery_java_tmp_root" ]] || {
+    echo "DATOMIC_RECOVERY_JAVA_TMPDIR must be an absolute, writable, non-symlink directory: $recovery_java_tmp_root" >&2
+    exit 1
+  }
+  [[ -z $(find "$recovery_java_tmp_root" -mindepth 1 -print -quit) ]] || {
+    echo "DATOMIC_RECOVERY_JAVA_TMPDIR must start empty: $recovery_java_tmp_root" >&2
+    exit 1
+  }
+  recovery_java_tmp_root=$(cd -- "$recovery_java_tmp_root" && pwd -P)
+fi
 [[ -f "$transactor_jar" ]] || {
   echo "Transactor JAR not found: $transactor_jar" >&2
   exit 1
@@ -53,6 +68,34 @@ actual_sha=$(sha256sum "$transactor_jar" | awk '{print $1}')
 [[ "$actual_sha" == "$expected_sha" ]] || {
   echo "unexpected Transactor JAR SHA-256: $actual_sha" >&2
   exit 1
+}
+
+run_recovery_java() {
+  local label=$1
+  shift
+  if [[ -z "$recovery_java_tmp_root" ]]; then
+    java -XX:+PerfDisableSharedMem "$@"
+    return
+  fi
+  local java_tmpdir="$recovery_java_tmp_root/$label"
+  [[ ! -e "$java_tmpdir" && ! -L "$java_tmpdir" ]] || {
+    echo "recovery Java tmp path already exists: $java_tmpdir" >&2
+    return 70
+  }
+  mkdir "$java_tmpdir" || return 70
+  local java_status
+  if java -XX:+PerfDisableSharedMem \
+      "-Djava.io.tmpdir=$java_tmpdir" "$@"; then
+    java_status=0
+  else
+    java_status=$?
+  fi
+  if [[ -n $(find "$java_tmpdir" -mindepth 1 -print -quit) ]]; then
+    echo "recovery Java tmp directory is dirty: $java_tmpdir" >&2
+    return 70
+  fi
+  rmdir "$java_tmpdir" || return 70
+  return "$java_status"
 }
 
 if [[ -e "$output_dir" ]] && \
@@ -90,7 +133,38 @@ bundled_count=$((init_count - datomic_count))
   exit 1
 }
 
-java -cp "$decompiler_src:$decompiler_jar" clojure.main \
+# Two Datomic namespaces are also shipped as exact dependency source.  Audit
+# all 162 Datomic initializer-derived paths before deciding which ones truly
+# require decompilation; do not maintain a hand-written exception list.
+datomic_dependency_dir="$work_dir/datomic-dependency"
+"$script_dir/recover-bundled-sources.sh" \
+  "$datomic_home" "$datomic_dependency_dir" datomic \
+  > "$output_dir/datomic-dependency-recovery.log"
+
+awk -F '\t' '
+  NR > 1 && $4 == "single-exact-path" && $5 == "1" {
+    sub(/\.class$/, "", $2)
+    print $2
+  }
+' "$datomic_dependency_dir/ownership.tsv" \
+  | sort > "$output_dir/datomic-dependency-init-classes.txt"
+
+comm -23 "$output_dir/datomic-init-classes.txt" \
+  "$output_dir/datomic-dependency-init-classes.txt" \
+  > "$output_dir/datomic-decompile-init-classes.txt"
+
+datomic_dependency_count=$(wc -l \
+  < "$output_dir/datomic-dependency-init-classes.txt")
+datomic_decompile_count=$(wc -l \
+  < "$output_dir/datomic-decompile-init-classes.txt")
+[[ "$datomic_dependency_count" -eq 2 && \
+   "$datomic_decompile_count" -eq 160 ]] || {
+  echo "unexpected Datomic recovery split: decompile=$datomic_decompile_count exact_dependency=$datomic_dependency_count" >&2
+  exit 1
+}
+
+run_recovery_java validate-decompiler \
+  -cp "$decompiler_src:$decompiler_jar" clojure.main \
   "$project_dir/scripts/validate_decompiler.clj"
 
 export DATOMIC_TRANSACTOR_CLASSES_ROOT="$classes_dir"
@@ -99,21 +173,55 @@ export DATOMIC_TRANSACTOR_DECOMPILE_LOG_ROOT="$output_dir/logs"
 export DATOMIC_TRANSACTOR_DECOMPILER_CP="$decompiler_src:$decompiler_jar"
 export DATOMIC_TRANSACTOR_NAMESPACE_TIMEOUT="$namespace_timeout"
 export DATOMIC_TRANSACTOR_JAVA_HEAP="$java_heap"
+export DATOMIC_RECOVERY_JAVA_TMPDIR="$recovery_java_tmp_root"
+
+if [[ -n "$recovery_java_tmp_root" ]]; then
+  mkdir "$recovery_java_tmp_root/namespaces"
+fi
 
 set +e
 xargs -P "$jobs" -n 1 "$script_dir/decompile-one.sh" \
-  < "$output_dir/datomic-init-classes.txt" \
+  < "$output_dir/datomic-decompile-init-classes.txt" \
   > "$output_dir/decompile-results.log"
 xargs_status=$?
 set -e
+
+if [[ -n "$recovery_java_tmp_root" ]]; then
+  [[ -z $(find "$recovery_java_tmp_root/namespaces" \
+             -mindepth 1 -print -quit) ]] || {
+    echo "namespace recovery Java tmp root is dirty: $recovery_java_tmp_root/namespaces" >&2
+    exit 70
+  }
+  rmdir "$recovery_java_tmp_root/namespaces"
+fi
 
 bundled_dir="$work_dir/bundled"
 "$script_dir/recover-bundled-sources.sh" "$datomic_home" "$bundled_dir" \
   > "$output_dir/bundled-recovery.log"
 
-# The two recovery domains are intentionally disjoint.  Refuse an overwrite
-# instead of letting a bundled dependency source silently replace a recovered
-# datomic.* namespace.
+# All three recovery domains are intentionally disjoint.  Refuse an overwrite
+# instead of letting an exact dependency source silently replace a decompiled
+# namespace or another exact source.
+while IFS= read -r -d '' datomic_dependency_source; do
+  relative_source=${datomic_dependency_source#"$datomic_dependency_dir/source/"}
+  destination="$output_dir/source/$relative_source"
+  [[ ! -e "$destination" && ! -L "$destination" ]] || {
+    echo "Datomic dependency source collides with decompiled source: $relative_source" >&2
+    exit 1
+  }
+done < <(find "$datomic_dependency_dir/source" -type f -print0)
+
+cp -a "$datomic_dependency_dir/source/." "$output_dir/source/"
+(cd "$output_dir/source" && \
+  sha256sum -c "$datomic_dependency_dir/source-manifest.sha256") \
+  > "$output_dir/datomic-dependency-merge-validation.log"
+mkdir -p "$output_dir/datomic-dependency-evidence"
+for evidence_name in ownership.tsv ownership-report.md \
+    namespace-validation.tsv source-manifest.sha256 summary.tsv; do
+  cp "$datomic_dependency_dir/$evidence_name" \
+    "$output_dir/datomic-dependency-evidence/$evidence_name"
+done
+
 while IFS= read -r -d '' bundled_source; do
   relative_source=${bundled_source#"$bundled_dir/source/"}
   destination="$output_dir/source/$relative_source"
@@ -140,14 +248,28 @@ done
     safe_name=${class_name//[^A-Za-z0-9_.-]/_}
     if [[ "$class_name" == datomic/* ]]; then
       scope=datomic
-      recovery_method=decompiled
-      source_entry=${class_name%__init}.clj
-      if [[ -f "$output_dir/logs/$safe_name.status" ]]; then
-        IFS=$'\t' read -r status exit_status \
-          < "$output_dir/logs/$safe_name.status"
+      source_entry=$(awk -F '\t' -v entry="$class_name.class" \
+        'NR > 1 && $2 == entry && $4 == "single-exact-path" {print $8}' \
+        "$datomic_dependency_dir/ownership.tsv")
+      if [[ -n "$source_entry" ]]; then
+        recovery_method=shipped-dependency-source
+        if [[ -s "$output_dir/source/$source_entry" ]]; then
+          status=pass
+          exit_status=0
+        else
+          status=fail
+          exit_status=93
+        fi
       else
-        status=fail
-        exit_status=91
+        recovery_method=decompiled
+        source_entry=${class_name%__init}.clj
+        if [[ -f "$output_dir/logs/$safe_name.status" ]]; then
+          IFS=$'\t' read -r status exit_status \
+            < "$output_dir/logs/$safe_name.status"
+        else
+          status=fail
+          exit_status=91
+        fi
       fi
     else
       scope=bundled
@@ -172,9 +294,13 @@ result_row_count=$(awk 'NR > 1 {n++} END {print n+0}' \
   "$output_dir/results.tsv")
 unique_source_entry_count=$(awk -F '\t' 'NR > 1 && $6 != "" {print $6}' \
   "$output_dir/results.tsv" | sort -u | wc -l)
-datomic_pass_count=$(awk -F '\t' \
-  '$2 == "datomic" && $4 == "pass" && $5 == "0" {n++} END {print n+0}' \
+datomic_decompile_pass_count=$(awk -F '\t' \
+  '$2 == "datomic" && $3 == "decompiled" && $4 == "pass" && $5 == "0" {n++} END {print n+0}' \
   "$output_dir/results.tsv")
+datomic_dependency_pass_count=$(awk -F '\t' \
+  '$2 == "datomic" && $3 == "shipped-dependency-source" && $4 == "pass" && $5 == "0" {n++} END {print n+0}' \
+  "$output_dir/results.tsv")
+datomic_pass_count=$((datomic_decompile_pass_count + datomic_dependency_pass_count))
 bundled_pass_count=$(awk -F '\t' \
   '$2 == "bundled" && $4 == "pass" && $5 == "0" {n++} END {print n+0}' \
   "$output_dir/results.tsv")
@@ -207,7 +333,8 @@ fi
     | sort -z \
     | xargs -0 sha256sum > "$output_dir/source-manifest.sha256")
 
-java -cp "$decompiler_src:$decompiler_jar" clojure.main \
+run_recovery_java validate-recovered-source \
+  -cp "$decompiler_src:$decompiler_jar" clojure.main \
   "$project_dir/scripts/validate_clojure.clj" \
   "$output_dir/source/datomic" \
   > "$output_dir/read-validation.log"
@@ -221,7 +348,9 @@ java -cp "$decompiler_src:$decompiler_jar" clojure.main \
   printf 'results.rows\t%s\n' "$result_row_count"
   printf 'results.unique_source_entries\t%s\n' \
     "$unique_source_entry_count"
-  printf 'datomic.decompile.passed\t%s\n' "$datomic_pass_count"
+  printf 'datomic.decompile.passed\t%s\n' "$datomic_decompile_pass_count"
+  printf 'datomic.shipped_dependency_source.passed\t%s\n' \
+    "$datomic_dependency_pass_count"
   printf 'bundled.shipped_source.passed\t%s\n' "$bundled_pass_count"
   printf 'recovery.passed\t%s\n' "$pass_count"
   printf 'recovery.failed\t%s\n' "$failure_count"
@@ -236,7 +365,10 @@ echo "Transactor source result: pass=$pass_count fail=$failure_count source=$sou
 echo "details: $output_dir/results.tsv"
 
 if [[ "$failure_count" -ne 0 || "$pass_count" -ne 247 || \
-      "$datomic_pass_count" -ne 162 || "$bundled_pass_count" -ne 85 || \
+      "$datomic_pass_count" -ne 162 || \
+      "$datomic_decompile_pass_count" -ne 160 || \
+      "$datomic_dependency_pass_count" -ne 2 || \
+      "$bundled_pass_count" -ne 85 || \
       "$result_row_count" -ne 247 || \
       "$unique_source_entry_count" -ne 247 || \
       "$source_count" -ne 247 || "$clj_count" -ne 246 || \

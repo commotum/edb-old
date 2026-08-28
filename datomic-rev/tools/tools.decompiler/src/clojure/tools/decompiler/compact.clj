@@ -283,22 +283,943 @@
 
 (defn var-symbol [form]
   (when (and (seq? form)
-             (= "var" (call-name form))
+             (contains? #{'var 'clojure.core/var} (first form))
              (symbol? (second form)))
     (second form)))
 
 (defn dynamic-var-symbol [form]
-  (when (and (= ".setDynamic" (call-name form))
+  (when (and (seq? form)
+             (= '.setDynamic (first form))
              (= true (nth form 2 nil)))
     (var-symbol (second form))))
 
+(defn target-var-symbol [form]
+  (or (var-symbol form) (dynamic-var-symbol form)))
+
 (defn reset-meta-parts [form]
-  (when (= "reset-meta!" (call-name form))
+  (when (and (seq? form)
+             (contains? #{'reset-meta! 'clojure.core/reset-meta!}
+                        (first form)))
     [(second form) (nth form 2 nil)]))
 
 (defn bind-root-parts [form]
-  (when (= ".bindRoot" (call-name form))
+  (when (and (seq? form) (= '.bindRoot (first form)))
     [(second form) (nth form 2 nil)]))
+
+(defn set-meta-parts [form]
+  (when (and (seq? form) (= '.setMeta (first form)))
+    [(second form) (nth form 2 nil)]))
+
+(defn quoted-symbol [form]
+  (let [form (loop [form form]
+               (if (and (seq? form)
+                        (contains? #{'quote '.withMeta} (first form)))
+                 (recur (second form))
+                 form))]
+    (when (symbol? form) form)))
+
+(defn in-ns-symbol [form]
+  (when (and (seq? form)
+             (contains? #{'in-ns 'clojure.core/in-ns} (first form)))
+    (quoted-symbol (second form))))
+
+(defn canonical-var-symbol [current-ns var-name]
+  (when var-name
+    (if (namespace var-name)
+      var-name
+      (if current-ns
+        (symbol (str current-ns) (name var-name))
+        var-name))))
+
+(defn namespace-after [current-ns forms]
+  (reduce (fn [namespace form]
+            (or (in-ns-symbol form) namespace))
+          current-ns
+          forms))
+
+(defn literal-arglists [form]
+  (let [form (loop [form form]
+               (if (and (seq? form)
+                        (contains? #{'quote '.withMeta} (first form)))
+                 (recur (second form))
+                 form))]
+    (cond
+      (and (sequential? form) (every? vector? form))
+      (vec form)
+
+      (and (= 'clojure.core/list (first form))
+           (every? vector? (rest form)))
+      (vec (rest form))
+
+      :else
+      nil)))
+
+(defn parameter-arity-shape [parameters]
+  (when (vector? parameters)
+    (let [ampersands (keep-indexed
+                       (fn [index parameter]
+                         (when (= '& (protocol-arg-symbol parameter)) index))
+                       parameters)]
+      (cond
+        (empty? ampersands)
+        [:fixed (count parameters)]
+
+        (and (= 1 (count ampersands))
+             (= (first ampersands) (- (count parameters) 2)))
+        [:variadic (first ampersands)]
+
+        :else
+        nil))))
+
+(defn fn-parameter-vectors [body]
+  (cond
+    (vector? (first body))
+    [(first body)]
+
+    (and (seq body)
+         (every? #(and (seq? %) (vector? (first %))) body))
+    (mapv first body)
+
+    :else
+    nil))
+
+(defn function-form? [form]
+  (and (seq? form)
+       (contains? #{'fn 'fn* 'clojure.core/fn} (first form))))
+
+(declare normalize-argument-form)
+
+(defn normalize-argument-metadata [metadata]
+  (when (seq metadata)
+    (into {}
+          (map (fn [[k v]]
+                 [(normalize-argument-form k)
+                  (normalize-argument-form v)]))
+          metadata)))
+
+(defn normalize-argument-form
+  ([form]
+   (normalize-argument-form form (meta form)))
+  ([form explicit-metadata]
+   (cond
+     (and (seq? form) (= 'quote (first form)) (= 2 (count form)))
+     (normalize-argument-form (second form) explicit-metadata)
+
+     (and (seq? form)
+          (= '.withMeta (first form))
+          (= 3 (count form))
+          (map? (nth form 2)))
+     (normalize-argument-form (second form) (nth form 2))
+
+     (symbol? form)
+     [:symbol form (normalize-argument-metadata explicit-metadata)]
+
+     (vector? form)
+     [:vector (mapv normalize-argument-form form)
+      (normalize-argument-metadata explicit-metadata)]
+
+     (map? form)
+     [:map (into {}
+                 (map (fn [[k v]]
+                        [(normalize-argument-form k)
+                         (normalize-argument-form v)]))
+                 form)
+      (normalize-argument-metadata explicit-metadata)]
+
+     (set? form)
+     [:set (set (map normalize-argument-form form))
+      (normalize-argument-metadata explicit-metadata)]
+
+     (seq? form)
+     [:list (mapv normalize-argument-form form)
+      (normalize-argument-metadata explicit-metadata)]
+
+     :else
+     [:value form (normalize-argument-metadata explicit-metadata)])))
+
+(defn matching-function-arglists? [metadata fn-body]
+  (when (and (map? metadata) (contains? metadata :arglists))
+    (let [advertised (literal-arglists (:arglists metadata))
+          implemented (fn-parameter-vectors fn-body)
+          advertised-shapes (some->> advertised
+                                     (mapv parameter-arity-shape))
+          implemented-shapes (some->> implemented
+                                     (mapv parameter-arity-shape))]
+      (and (seq advertised)
+           (seq implemented)
+           (every? some? advertised-shapes)
+           (every? some? implemented-shapes)
+           (= advertised-shapes implemented-shapes)
+           (= (mapv normalize-argument-form advertised)
+              (mapv normalize-argument-form implemented))))))
+
+(declare pure-metadata-form?)
+
+(defn pure-metadata-call? [form]
+  (let [head (first form)]
+    (cond
+      (= 'quote head)
+      (= 2 (count form))
+
+      (= 'var head)
+      (and (= 2 (count form)) (symbol? (second form)))
+
+      (= '.withMeta head)
+      (and (= 3 (count form))
+           (pure-metadata-form? (second form))
+           (pure-metadata-form? (nth form 2)))
+
+      (contains? #{'clojure.core/list 'clojure.core/vector
+                   'clojure.core/hash-map 'clojure.core/array-map
+                   'clojure.core/set}
+                 head)
+      (every? pure-metadata-form? (rest form))
+
+      :else
+      false)))
+
+(defn pure-metadata-form? [form]
+  (cond
+    (symbol? form) false
+    (map? form) (every? (fn [[k v]]
+                          (and (pure-metadata-form? k)
+                               (pure-metadata-form? v)))
+                        form)
+    (vector? form) (every? pure-metadata-form? form)
+    (set? form) (every? pure-metadata-form? form)
+    (seq? form) (pure-metadata-call? form)
+    :else true))
+
+(defn pure-root-value? [form]
+  (cond
+    (symbol? form) false
+    (map? form) (every? (fn [[k v]]
+                          (and (pure-root-value? k)
+                               (pure-root-value? v)))
+                        form)
+    (vector? form) (every? pure-root-value? form)
+    (set? form) (every? pure-root-value? form)
+    (seq? form) (and (= 'quote (first form))
+                     (= 2 (count form)))
+    :else true))
+
+(defn local-definition-safe? [current-ns var-name]
+  (if-let [qualified-ns (some-> var-name namespace)]
+    (and current-ns (= qualified-ns (str current-ns)))
+    true))
+
+(def metadata-aware-bind-root-marker-tag (Object.))
+(def metadata-aware-dynamic-bind-root-marker-tag (Object.))
+(def metadata-order-dynamic-marker-tag (Object.))
+(def metadata-order-set-marker-tag (Object.))
+(def metadata-order-bind-marker-tag (Object.))
+
+(defn metadata-aware-bind-root-marker [target value metadata]
+  (list metadata-aware-bind-root-marker-tag target value metadata))
+
+(defn metadata-aware-dynamic-bind-root-marker [target value metadata]
+  (list metadata-aware-dynamic-bind-root-marker-tag target value metadata))
+
+(defn metadata-dynamic-marker [var-name]
+  (list metadata-order-dynamic-marker-tag var-name))
+
+(defn metadata-set-marker [var-name metadata dynamic-target?]
+  (list metadata-order-set-marker-tag var-name metadata dynamic-target?))
+
+(defn metadata-bind-marker [var-name value dynamic-target?]
+  (list metadata-order-bind-marker-tag var-name value dynamic-target?))
+
+(defn annotate-bind-root-metadata-body
+  ([forms]
+   (annotate-bind-root-metadata-body forms nil))
+  ([forms initial-ns]
+   (let [consumed-form (Object.)]
+     (loop [remaining forms
+            current-ns initial-ns
+            metadata-by-var {}
+            dynamic-by-var {}
+            annotated []]
+       (if (empty? remaining)
+         (vec (remove #(identical? consumed-form %) annotated))
+         (let [form (first remaining)
+               remaining (rest remaining)
+               raw-dynamic-var (dynamic-var-symbol form)
+               dynamic-key (canonical-var-symbol current-ns raw-dynamic-var)
+               [set-target original-metadata] (set-meta-parts form)
+               set-var (target-var-symbol set-target)
+               set-key (canonical-var-symbol current-ns set-var)
+               set-target-dynamic? (boolean (dynamic-var-symbol set-target))
+               [bind-target bind-value] (bind-root-parts form)
+               bind-var (target-var-symbol bind-target)
+               bind-key (canonical-var-symbol current-ns bind-var)
+               bind-target-dynamic?
+               (boolean (dynamic-var-symbol bind-target))
+               evidence (get metadata-by-var bind-key)
+               dynamic-evidence (get dynamic-by-var bind-key)
+               next-ns (or (in-ns-symbol form) current-ns)]
+           (cond
+             raw-dynamic-var
+             (recur remaining
+                    next-ns
+                    metadata-by-var
+                    (assoc dynamic-by-var dynamic-key
+                           {:output-index (count annotated)})
+                    (conj annotated (metadata-dynamic-marker dynamic-key)))
+
+             set-var
+             (recur remaining
+                    next-ns
+                    (assoc metadata-by-var set-key
+                           {:metadata original-metadata
+                            :dynamic-target? set-target-dynamic?
+                            :output-index (count annotated)})
+                    dynamic-by-var
+                    (conj annotated
+                          (metadata-set-marker
+                            set-key original-metadata
+                            set-target-dynamic?)))
+
+             (and bind-var (contains? metadata-by-var bind-key))
+             (let [set-index (:output-index evidence)
+                   intervening (subvec annotated (inc set-index))
+                   nonobserving-interstitial?
+                   (every? #(or (nil? %) (false? %)) intervening)
+                   dynamic-index (:output-index dynamic-evidence)
+                   dynamic-adjacent?
+                   (or (nil? dynamic-evidence)
+                       (= dynamic-index (dec set-index)))
+                   dynamic-pair?
+                   (or dynamic-evidence
+                       (:dynamic-target? evidence)
+                       bind-target-dynamic?)
+                   safe? (and nonobserving-interstitial?
+                              dynamic-adjacent?
+                              (local-definition-safe? current-ns bind-key)
+                              (or (function-form? bind-value)
+                                  (pure-root-value? bind-value))
+                              (map? (:metadata evidence))
+                              (pure-metadata-form? (:metadata evidence)))
+                   next-annotated
+                   (cond
+                     (and safe? dynamic-pair?)
+                     (-> annotated
+                         (cond-> dynamic-evidence
+                           (assoc dynamic-index consumed-form))
+                         (assoc set-index consumed-form)
+                         (conj (metadata-aware-dynamic-bind-root-marker
+                                 bind-target bind-value
+                                 (:metadata evidence))))
+
+                     safe?
+                     (-> annotated
+                         (assoc set-index consumed-form)
+                         (conj (metadata-aware-bind-root-marker
+                                 bind-target bind-value
+                                 (:metadata evidence))))
+
+                     :else
+                     (conj annotated
+                           (metadata-bind-marker
+                             bind-key bind-value
+                             bind-target-dynamic?)))]
+               (recur remaining
+                      next-ns
+                      (dissoc metadata-by-var bind-key)
+                      (dissoc dynamic-by-var bind-key)
+                      next-annotated))
+
+             bind-var
+             (recur remaining
+                    next-ns
+                    metadata-by-var
+                    (dissoc dynamic-by-var bind-key)
+                    (conj annotated
+                          (metadata-bind-marker
+                            bind-key bind-value
+                            bind-target-dynamic?)))
+
+             :else
+             (recur remaining next-ns metadata-by-var dynamic-by-var
+                    (conj annotated form)))))))))
+
+(declare annotate-bind-root-metadata-form)
+
+(defn annotate-bind-root-metadata-children [form current-ns]
+  (w/walk (fn [child]
+            (first (annotate-bind-root-metadata-form child current-ns)))
+          identity
+          form))
+
+(defn annotate-bind-root-metadata-form [form current-ns]
+  (if (= "do" (call-name form))
+    (let [[children final-ns]
+          (loop [remaining (rest form)
+                 namespace current-ns
+                 children []]
+            (if (empty? remaining)
+              [children namespace]
+              (let [[child child-final-ns]
+                    (annotate-bind-root-metadata-form
+                      (first remaining) namespace)]
+                (recur (rest remaining)
+                       child-final-ns
+                       (conj children child)))))]
+      [(list* (first form)
+              (annotate-bind-root-metadata-body children current-ns))
+       final-ns])
+    [(if (coll? form)
+       (annotate-bind-root-metadata-children form current-ns)
+       form)
+     (or (in-ns-symbol form) current-ns)]))
+
+(defn annotate-bind-root-metadata [source]
+  ;; Var.setMeta and Var.bindRoot are separate initializer statements. Carry
+  ;; the former as an internal marker until bindRoot compaction decides
+  ;; whether the original Var actually advertised function arglists.
+  (first (annotate-bind-root-metadata-form source nil)))
+
+(defn runtime-var-reference [var-name]
+  (if-let [namespace (namespace var-name)]
+    (list 'clojure.lang.RT/var namespace (name var-name))
+    (list 'var var-name)))
+
+(defn runtime-var-target [var-name dynamic-target?]
+  (let [reference (runtime-var-reference var-name)]
+    (if dynamic-target?
+      (list '.setDynamic reference true)
+      reference)))
+
+(defn late-bound-qualified-var-value [form]
+  ;; A value-side `(var qualified/name)` is stricter than the RT.var call in
+  ;; the initializer bytecode: the reader/compiler requires the target Var to
+  ;; exist already.  That breaks legitimate circular namespace initialization.
+  ;; Rewrite only this exact bind value shape; target Vars and arbitrary nested
+  ;; forms continue through the normal metadata/order repair unchanged.
+  (if (and (seq? form)
+           (= 2 (count form))
+           (contains? #{'var 'clojure.core/var} (first form))
+           (symbol? (second form))
+           (namespace (second form)))
+    (runtime-var-reference (second form))
+    form))
+
+(def semantic-metadata-form-key
+  ::semantic-metadata-form)
+
+(def semantic-metadata-marker-tag (Object.))
+(def protocol-scaffold-marker-tag (Object.))
+
+(def exact-source-location-keys
+  #{:file :line :column :end-line :end-column})
+
+(defn quoted-form? [form]
+  (and (seq? form)
+       (= "quote" (call-name form))
+       (= 2 (count form))))
+
+(defn semantic-metadata-marker [form registry]
+  (let [identifier (Object.)]
+    (swap! registry assoc identifier form)
+    (list semantic-metadata-marker-tag identifier)))
+
+(def erasable-list-location-keysets
+  #{#{:line} #{:column} #{:line :column}})
+
+(defn erasable-list-location-with-meta? [form]
+  (and (seq? form)
+       (= ".withMeta" (call-name form))
+       (= 3 (count form))
+       (let [value (second form)
+             metadata (nth form 2)]
+         (and (seq? value)
+              (= "list" (call-name value))
+              (map? metadata)
+              (contains? erasable-list-location-keysets
+                         (set (keys metadata)))))))
+
+(defn protect-metadata-aware-marker-tree [form registry]
+  ;; Metadata-aware bind markers must remain readable until their advertised
+  ;; arglists are compared with the recovered fn body.  Protect only the
+  ;; nested withMeta shape that the generic location-scaffolding rule would
+  ;; erase; hiding the whole metadata operand would make that comparison
+  ;; opaque and unnecessarily demote exact defn recoveries.
+  (cond
+    (erasable-list-location-with-meta? form)
+    (semantic-metadata-marker form registry)
+
+    (map? form)
+    (with-meta
+      (into (empty form)
+            (map (fn [[key value]]
+                   [(protect-metadata-aware-marker-tree key registry)
+                    (protect-metadata-aware-marker-tree value registry)]))
+            form)
+      (meta form))
+
+    (vector? form)
+    (with-meta
+      (mapv #(protect-metadata-aware-marker-tree % registry) form)
+      (meta form))
+
+    (set? form)
+    (with-meta
+      (set (map #(protect-metadata-aware-marker-tree % registry) form))
+      (meta form))
+
+    (seq? form)
+    (with-meta
+      (apply list
+             (map #(protect-metadata-aware-marker-tree % registry) form))
+      (meta form))
+
+    :else form))
+
+(defn protect-semantic-metadata-tree [form registry]
+  (cond
+    ;; Quoted values are runtime data, not executable forms to simplify.
+    (quoted-form? form)
+    (semantic-metadata-marker form registry)
+
+    ;; `.withMeta` is itself the exact runtime metadata construction.  Hide
+    ;; the whole call so neither it nor its quoted/list children are touched.
+    (and (seq? form)
+         (contains? #{".withMeta" "with-meta"} (call-name form)))
+    (semantic-metadata-marker form registry)
+
+    ;; Some source-stage forms carry IObj metadata directly instead of an
+    ;; explicit withMeta call.  Preserve those objects through clojure.walk,
+    ;; which otherwise reconstructs the sequence and loses its metadata.
+    (and (seq? form) (seq (meta form)))
+    (semantic-metadata-marker form registry)
+
+    (map? form)
+    (with-meta
+      (into (empty form)
+            (map (fn [[key value]]
+                   [(protect-semantic-metadata-tree key registry)
+                    (protect-semantic-metadata-tree value registry)]))
+            form)
+      (meta form))
+
+    (vector? form)
+    (with-meta
+      (mapv #(protect-semantic-metadata-tree % registry) form)
+      (meta form))
+
+    (set? form)
+    (with-meta
+      (set (map #(protect-semantic-metadata-tree % registry) form))
+      (meta form))
+
+    (seq? form)
+    (with-meta
+      (apply list (map #(protect-semantic-metadata-tree % registry) form))
+      (meta form))
+
+    :else form))
+
+(defn protect-semantic-metadata-forms [source]
+  ;; The generic compact rules intentionally erase reader/compiler line maps.
+  ;; A `.withMeta` nested in a Var metadata operand is different: it is part
+  ;; of the runtime Var metadata (not scaffolding) and must survive exactly.
+  ;; Traverse top-down so quoted data is protected before postwalk reaches it.
+  (let [registry (atom {})]
+    [(letfn [(protect [form]
+            (cond
+              (map? form)
+              (with-meta
+                (into (empty form)
+                      (map (fn [[key value]] [(protect key) (protect value)]))
+                      form)
+                (meta form))
+
+              (vector? form)
+              (with-meta (mapv protect form) (meta form))
+
+              (set? form)
+              (with-meta (set (map protect form)) (meta form))
+
+              (seq? form)
+              (let [head-form (first form)
+                    head (call-name form)
+                    items (vec form)
+                    marker-metadata-index
+                    (cond
+                      (and (= 4 (count items))
+                           (or (identical?
+                                 metadata-aware-bind-root-marker-tag
+                                 head-form)
+                               (identical?
+                                 metadata-aware-dynamic-bind-root-marker-tag
+                                 head-form))) 3
+                      (and (= 4 (count items))
+                           (identical? metadata-order-set-marker-tag
+                                       head-form)) 2
+                      :else nil)
+                    metadata-index
+                    (or marker-metadata-index
+                        (cond
+                          (contains? #{".setMeta" "reset-meta!"}
+                                     head) 2
+                          (contains? #{".withMeta" "with-meta"}
+                                     head) 2
+                          :else nil))]
+                (with-meta
+                  (apply list
+                         (map-indexed
+                           (fn [index item]
+                             (if (= index metadata-index)
+                               (if (= index marker-metadata-index)
+                                 (protect-metadata-aware-marker-tree
+                                   item registry)
+                                 (protect-semantic-metadata-tree item registry))
+                               (protect item)))
+                           items))
+                  (meta form)))
+
+              :else form))]
+       (protect source))
+     @registry]))
+
+(defn restore-semantic-metadata-markers [source registry]
+  (w/postwalk
+    (fn [form]
+      (if (and (seq? form)
+               (identical? semantic-metadata-marker-tag (first form))
+               (contains? registry (second form)))
+        (get registry (second form))
+        form))
+    source))
+
+(defn typed-metadata-tree [form]
+  (cond
+    (quoted-form? form)
+    form
+
+    (map? form)
+    (with-meta
+      (into (empty form)
+            (map (fn [[key value]]
+                   [(typed-metadata-tree key)
+                    (if (and (contains? exact-source-location-keys key)
+                             (instance? Integer value))
+                      (list 'int value)
+                      (typed-metadata-tree value))]))
+            form)
+      (when-let [metadata (meta form)]
+        (typed-metadata-tree metadata)))
+
+    (vector? form)
+    (with-meta (mapv typed-metadata-tree form)
+      (when-let [metadata (meta form)]
+        (typed-metadata-tree metadata)))
+
+    (set? form)
+    (with-meta (set (map typed-metadata-tree form))
+      (when-let [metadata (meta form)]
+        (typed-metadata-tree metadata)))
+
+    (seq? form)
+    (with-meta (apply list (map typed-metadata-tree form))
+      (when-let [metadata (meta form)]
+        (typed-metadata-tree metadata)))
+
+    :else form))
+
+(defn preserve-exact-metadata-number-types [source]
+  ;; Pprinting an in-memory Integer as `1` makes the next reader create a
+  ;; Long.  Emit `(int 1)` only beneath proven metadata operands.  Quoted
+  ;; domain data and ordinary maps containing `:column` remain untouched.
+  (w/postwalk
+    (fn [form]
+      (if (and (seq? form)
+               (contains? #{".setMeta" "reset-meta!" ".withMeta" "with-meta"}
+                          (call-name form))
+               (< 2 (count form)))
+        (with-meta
+          (apply list
+                 (assoc (vec form) 2
+                        (typed-metadata-tree (nth form 2))))
+          (meta form))
+        form))
+    source))
+
+(defn immediate-protocol-initializer [form]
+  (when (and (seq? form)
+             (= 1 (count form))
+             (function-form? (first form)))
+    (let [nodes (tree-seq coll? seq form)
+          sets (keep set-meta-parts nodes)
+          binds (keep bind-root-parts nodes)
+          set-vars (map (comp target-var-symbol first) sets)
+          bind-vars (map (comp target-var-symbol first) binds)
+          metadata (map second sets)]
+      (when (and (= 2 (count sets))
+                 (= 1 (count binds))
+                 (every? symbol? (concat set-vars bind-vars))
+                 (apply = (concat set-vars bind-vars))
+                 (apply = metadata)
+                 (= {} (second (first binds)))
+                 (some #(= ".hasRoot" (call-name %)) nodes))
+        {:protocol (first set-vars)
+         :metadata (first metadata)}))))
+
+(defn protocol-class-name [protocol]
+  (clojure.lang.Compiler/munge
+    (str (namespace protocol) "." (name protocol))))
+
+(defn protocol-class-load? [form protocol]
+  (and (= "classForName" (call-name form))
+       (= 2 (count form))
+       (= (protocol-class-name protocol) (second form))))
+
+(defn protocol-doc-value [form protocol]
+  (when (and (= "alter-meta!" (call-name form))
+             (= 5 (count form))
+             (= protocol (target-var-symbol (second form)))
+             (= "assoc" (call-name (list (nth form 2 nil))))
+             (= :doc (nth form 3 nil)))
+    {:doc (nth form 4)}))
+
+(defn protocol-assertion? [form protocol]
+  (and (seq? form)
+       (= 3 (count form))
+       (let [callee (first form)]
+         (and (seq? callee)
+              (= 'clojure.core/assert-same-protocol
+                 (target-var-symbol callee))))
+       (= protocol (target-var-symbol (second form)))))
+
+(defn protocol-root-evidence [form protocol]
+  (when (and (= "alter-var-root" (call-name form))
+             (= 4 (count form))
+             (= protocol (target-var-symbol (second form)))
+             (= "merge" (some-> (nth form 2 nil) name)))
+    (let [assoc-form (nth form 3 nil)
+          entries (when (and (= "assoc" (call-name assoc-form))
+                             (even? (count (drop 2 assoc-form))))
+                    (into {} (map vec (partition 2 (drop 2 assoc-form)))))]
+      (when (and (= #{:sigs :var :method-map :method-builders}
+                    (set (keys entries)))
+                 (= protocol (target-var-symbol (:var entries)))
+                 (map? (:sigs entries))
+                 (= (set (keys (:sigs entries)))
+                    (set (keys (:method-map entries)))))
+        {:sigs (:sigs entries)}))))
+
+(defn protocol-reset? [form protocol]
+  (and (= "-reset-methods" (call-name form))
+       (= 2 (count form))
+       (= protocol (second form))))
+
+(defn protocol-return? [form protocol]
+  (= (symbol (name protocol)) (quoted-symbol form)))
+
+(defn protocol-method-preintern-facts
+  [protocol sigs preinterned-vars-before-namespace-load]
+  (into {}
+        (map (fn [method]
+               [method
+                (contains? preinterned-vars-before-namespace-load
+                           (symbol (namespace protocol) (name method)))]))
+        (keys sigs)))
+
+(defn protocol-scaffold-evidence
+  ([forms]
+   (protocol-scaffold-evidence forms #{}))
+  ([forms preinterned-vars-before-namespace-load]
+   (when (= 7 (count forms))
+     (let [[initializer class-load doc-form assertion root-form reset-form
+            return-form] forms
+           init-evidence (immediate-protocol-initializer initializer)
+           protocol (:protocol init-evidence)
+           doc-evidence (when protocol
+                          (protocol-doc-value doc-form protocol))
+           root-evidence (when protocol
+                           (protocol-root-evidence root-form protocol))]
+       (when (and init-evidence
+                  (protocol-class-load? class-load protocol)
+                  doc-evidence
+                  (protocol-assertion? assertion protocol)
+                  root-evidence
+                  (protocol-reset? reset-form protocol)
+                  (protocol-return? return-form protocol))
+         (merge init-evidence doc-evidence root-evidence
+                {:method-var-preinterned-before-namespace-load?
+                 (protocol-method-preintern-facts
+                   protocol (:sigs root-evidence)
+                   preinterned-vars-before-namespace-load)}))))))
+
+(defn protect-protocol-scaffold-body
+  [forms registry preinterned-vars-before-namespace-load]
+  (loop [remaining (vec forms) protected []]
+    (if (empty? remaining)
+      protected
+      (if-let [evidence (and (<= 7 (count remaining))
+                             (protocol-scaffold-evidence
+                               (subvec remaining 0 7)
+                               preinterned-vars-before-namespace-load))]
+        (let [identifier (Object.)]
+          (swap! registry assoc identifier evidence)
+          (recur (subvec remaining 7)
+                 (conj protected
+                       (list protocol-scaffold-marker-tag identifier))))
+        (recur (subvec remaining 1)
+               (conj protected (first remaining)))))))
+
+(defn protect-protocol-scaffolds
+  ([source]
+   (protect-protocol-scaffolds source #{}))
+  ([source preinterned-vars-before-namespace-load]
+   (let [registry (atom {})]
+     [(w/postwalk
+        (fn [form]
+          (if (= "do" (call-name form))
+            (with-meta
+              (list* (first form)
+                     (protect-protocol-scaffold-body
+                       (rest form) registry
+                       preinterned-vars-before-namespace-load))
+              (meta form))
+            form))
+        source)
+      @registry])))
+
+(defn protocol-tag-value [tag]
+  (cond
+    (nil? tag) nil
+    (quoted-form? tag) (second tag)
+    (or (symbol? tag) (keyword? tag) (class? tag)) tag
+    :else
+    (throw (ex-info "unsupported defprotocol tag form" {:tag tag}))))
+
+(defn protocol-source-argument [form]
+  (loop [form form tag nil]
+    (cond
+      (and (seq? form) (= ".withMeta" (call-name form))
+           (= 3 (count form)) (map? (nth form 2)))
+      (recur (second form)
+             (or (protocol-tag-value (:tag (nth form 2))) tag))
+
+      (quoted-form? form)
+      (let [argument (second form)]
+        (when-not (symbol? argument)
+          (throw (ex-info "non-symbol defprotocol argument"
+                          {:argument form})))
+        (cond-> argument tag (with-meta {:tag tag})))
+
+      (symbol? form)
+      (cond-> form tag (with-meta {:tag tag}))
+
+      :else
+      (throw (ex-info "unsupported defprotocol argument form"
+                      {:argument form})))))
+
+(defn protocol-method-declaration [[method signature]]
+  (when-not (and (keyword? method) (map? signature))
+    (throw (ex-info "malformed defprotocol signature"
+                    {:method method :signature signature})))
+  (let [arglists (literal-arglists (:arglists signature))
+        tag (protocol-tag-value (:tag signature))
+        method-name (cond-> (symbol (name method))
+                      tag (with-meta {:tag tag}))
+        parameters (when arglists
+                     (mapv #(mapv protocol-source-argument %) arglists))
+        doc (:doc signature)]
+    (when-not (seq parameters)
+      (throw (ex-info "defprotocol signature has no literal arglists"
+                      {:method method :signature signature})))
+    (when-not (or (nil? doc) (string? doc))
+      (throw (ex-info "unsupported defprotocol method doc"
+                      {:method method :doc doc})))
+    (list* method-name (concat parameters (when doc [doc])))))
+
+(defn expand-protocol-scaffold
+  [{:keys [protocol metadata doc sigs
+           method-var-preinterned-before-namespace-load?]}]
+  (when-not (or (nil? doc) (string? doc))
+    (throw (ex-info "unsupported defprotocol doc" {:protocol protocol :doc doc})))
+  (let [protocol-name (symbol (name protocol))
+        metadata-binding (gensym "protocol_metadata__")
+        declarations (mapv protocol-method-declaration sigs)
+        protocol-definition
+        (list* 'defprotocol protocol-name
+               (concat (when doc [doc]) declarations))
+        protocol-reset
+        (list 'reset-meta!
+              (runtime-var-reference protocol)
+              (list 'assoc
+                    (list 'assoc metadata-binding :doc doc)
+                    :name (list 'quote protocol-name)
+                    :ns '*ns*))
+        method-resets
+        (mapv (fn [[method signature]]
+                (let [method-name (symbol (name method))
+                      preinterned?
+                      (true?
+                        (get method-var-preinterned-before-namespace-load?
+                             method))
+                      signature-binding (gensym "protocol_signature__")
+                      name-binding (gensym "protocol_method_name__")]
+                  (list
+                    'let
+                    [signature-binding
+                     (list 'assoc signature
+                           :protocol (runtime-var-reference protocol))
+                     name-binding
+                     (if preinterned?
+                       (list 'quote method-name)
+                       (list 'with-meta
+                             (list :name signature-binding)
+                             signature-binding))]
+                    (list 'reset-meta!
+                          (runtime-var-reference
+                            (symbol (namespace protocol) (name method)))
+                          (list 'assoc signature-binding
+                                :name name-binding
+                                :ns '*ns*)))))
+              sigs)]
+    (list* 'let
+           [metadata-binding (typed-metadata-tree metadata)]
+           protocol-definition
+           protocol-reset
+           method-resets)))
+
+(defn expand-protocol-scaffold-markers [source registry]
+  (w/postwalk
+    (fn [form]
+      (if (and (seq? form)
+               (identical? protocol-scaffold-marker-tag (first form))
+               (contains? registry (second form)))
+        (expand-protocol-scaffold (get registry (second form)))
+        form))
+    source))
+
+(defn restore-metadata-order [source]
+  (w/postwalk
+    (fn [form]
+      (cond
+        (and (seq? form)
+             (identical? metadata-order-dynamic-marker-tag (first form)))
+        (list '.setDynamic
+              (runtime-var-reference (second form))
+              true)
+
+        (and (seq? form)
+             (identical? metadata-order-set-marker-tag (first form)))
+        (list '.setMeta
+              (runtime-var-target (second form) (nth form 3 false))
+              (nth form 2 nil))
+
+        (and (seq? form)
+             (identical? metadata-order-bind-marker-tag (first form)))
+        (list '.bindRoot
+              (runtime-var-target (second form) (nth form 3 false))
+              (late-bound-qualified-var-value (nth form 2 nil)))
+
+        :else
+        form))
+    source))
 
 (defn definition-symbol [form]
   (when (and (contains? #{"def" "defn" "defonce" "defmulti" "defprotocol"
@@ -307,8 +1228,10 @@
              (symbol? (second form)))
     (second form)))
 
-(defn same-var? [left right]
-  (and left right (= (name left) (name right))))
+(defn same-var? [current-ns left right]
+  (and left right
+       (= (canonical-var-symbol current-ns left)
+          (canonical-var-symbol current-ns right))))
 
 (defn repaired-reset-meta [var-name metadata]
   (let [simple-name (symbol (name var-name))]
@@ -318,8 +1241,43 @@
                 :name (list 'quote simple-name)
                 :ns '*ns*))))
 
+(defn expand-metadata-aware-bind-root [form]
+  (let [target (second form)
+        value (nth form 2 nil)
+        original-metadata (nth form 3 nil)
+        var-name (target-var-symbol target)
+        simple-name (some-> var-name name symbol)
+        function? (function-form? value)
+        function-tail (when function? (rest value))
+        function-body (when function?
+                        (if (symbol? (first function-tail))
+                          (rest function-tail)
+                          function-tail))
+        definition
+        (if (and function?
+                 (map? original-metadata)
+                 (not (contains? original-metadata :doc))
+                 (matching-function-arglists?
+                   original-metadata function-body))
+          (list* 'defn simple-name function-body)
+          (list 'def simple-name value))]
+    (list 'do
+          definition
+          (repaired-reset-meta simple-name original-metadata))))
+
+(defn expand-metadata-aware-dynamic-bind-root [form]
+  (let [target (second form)
+        value (nth form 2 nil)
+        original-metadata (nth form 3 nil)
+        var-name (target-var-symbol target)
+        simple-name (some-> var-name name symbol)
+        dynamic-name (with-meta simple-name {:dynamic true})]
+    (list 'do
+          (list 'def dynamic-name value)
+          (repaired-reset-meta simple-name original-metadata))))
+
 (defn repair-definition-body [forms]
-  (loop [remaining forms repaired []]
+  (loop [remaining forms current-ns nil repaired []]
     (let [[a b c & tail] remaining
           dynamic-var (dynamic-var-symbol a)
           [reset-target metadata] (reset-meta-parts b)
@@ -333,29 +1291,30 @@
         (empty? remaining)
         repaired
 
-        (and (same-var? dynamic-var reset-dynamic-var)
-             (same-var? dynamic-var bind-dynamic-var))
+        (and (same-var? current-ns dynamic-var reset-dynamic-var)
+             (same-var? current-ns dynamic-var bind-dynamic-var))
         (let [simple-name (symbol (name dynamic-var))
               dynamic-name (with-meta simple-name {:dynamic true})]
-          (recur tail
+          (recur tail (namespace-after current-ns [a b c])
                  (conj repaired
                        (list 'def dynamic-name bind-value)
                        (repaired-reset-meta simple-name metadata))))
 
-        (same-var? dynamic-var reset-dynamic-var)
+        (same-var? current-ns dynamic-var reset-dynamic-var)
         (let [simple-name (symbol (name dynamic-var))
               dynamic-name (with-meta simple-name {:dynamic true})]
-          (recur (cons c tail)
+          (recur (cons c tail) (namespace-after current-ns [a b])
                  (conj repaired
                        (list 'def dynamic-name)
                        (repaired-reset-meta simple-name metadata))))
 
-        (same-var? plain-reset-var definition-var)
-        (recur (cons c tail)
+        (same-var? current-ns plain-reset-var definition-var)
+        (recur (cons c tail) (namespace-after current-ns [a b])
                (conj repaired b (repaired-reset-meta definition-var plain-metadata)))
 
         :else
-        (recur (rest remaining) (conj repaired a))))))
+        (recur (rest remaining) (namespace-after current-ns [a])
+               (conj repaired a))))))
 
 (defn repair-definition-order [source]
   (w/postwalk (fn [form]
@@ -508,8 +1467,24 @@
                           ~init))))))))
 
 (defn macrocompact-step [expr]
-  (if (captured-compiler-temp-binding? expr)
+  (cond
+    (and (seq? expr)
+         (true? (semantic-metadata-form-key (meta expr))))
     expr
+
+    (captured-compiler-temp-binding? expr)
+    expr
+
+    (and (seq? expr)
+         (identical? metadata-aware-bind-root-marker-tag (first expr)))
+    (expand-metadata-aware-bind-root expr)
+
+    (and (seq? expr)
+         (identical? metadata-aware-dynamic-bind-root-marker-tag
+                     (first expr)))
+    (expand-metadata-aware-dynamic-bind-root expr)
+
+    :else
     (compact expr
     [(do ?ret) :-> ?ret]
     [(`let [?a ?b] (`let ?binds ?&body)) :-> `(let [~?a ~?b ~@?binds] ~@?&body)]
@@ -558,8 +1533,7 @@
                            (= 'do (first expr))))
                     %)}
      :->
-     (list* 'do (->> (for [expr ?&body
-                           :when expr]
+     (list* 'do (->> (for [expr ?&body]
                        (if (and (seq? expr)
                                 (= 'do (first expr)))
                          (rest expr)
@@ -877,14 +1851,28 @@
 
 ;; WIP for, assert, ns, condp, with-redefs, definterface
 
-(defn macrocompact [source]
-  (-> (w/postwalk
-        (fn [node]
-          (if (seq? node)
-            (let [new-node (macrocompact-step node)]
-              (if (= node new-node)
-                node
-                (recur new-node)))
-            node))
-        source)
-      (repair-definition-order)))
+(defn macrocompact
+  ([source]
+   (macrocompact source #{}))
+  ([source preinterned-vars-before-namespace-load]
+   (let [[protocol-protected protocol-registry]
+         (protect-protocol-scaffolds
+           source preinterned-vars-before-namespace-load)
+         [metadata-protected metadata-registry]
+         (-> protocol-protected
+             annotate-bind-root-metadata
+             protect-semantic-metadata-forms)]
+     (-> (w/postwalk
+           (fn [node]
+             (if (seq? node)
+               (let [new-node (macrocompact-step node)]
+                 (if (= node new-node)
+                   node
+                   (recur new-node)))
+               node))
+           metadata-protected)
+         (repair-definition-order)
+         (restore-metadata-order)
+         (expand-protocol-scaffold-markers protocol-registry)
+         (restore-semantic-metadata-markers metadata-registry)
+         (preserve-exact-metadata-number-types)))))

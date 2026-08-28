@@ -18,8 +18,10 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Exhaustively maps non-Datomic Transactor namespace initializers to exact
- * Clojure source entries in the hash-bound shipped dependency JAR set.  The
+ * Exhaustively maps one Transactor namespace scope to exact Clojure source
+ * entries in the hash-bound shipped dependency JAR set.  The default scope is
+ * the 85 bundled-library namespaces; the optional "datomic" scope audits all
+ * 162 Datomic namespaces, including the ones with no shipped source.  The
  * scanner reads ZIPs directly and never loads classes from them.
  */
 public final class MapBundledSources {
@@ -56,7 +58,7 @@ public final class MapBundledSources {
         return out.toString();
     }
 
-    private static List<Namespace> readNamespaces(Path tsv)
+    private static List<Namespace> readNamespaces(Path tsv, String scope)
             throws IOException {
         List<Namespace> result = new ArrayList<>();
         try (BufferedReader reader = Files.newBufferedReader(
@@ -71,7 +73,7 @@ public final class MapBundledSources {
                 if (fields.length != 4) {
                     throw new IOException("bad namespace row: " + line);
                 }
-                if (!"bundled".equals(fields[2])) continue;
+                if (!scope.equals(fields[2])) continue;
                 if (!fields[1].endsWith("__init.class")) {
                     throw new IOException(
                             "unexpected init entry: " + fields[1]);
@@ -83,9 +85,16 @@ public final class MapBundledSources {
             }
         }
         result.sort(Comparator.comparing(Namespace::name));
-        if (result.size() != 85) {
+        int expected = switch (scope) {
+            case "bundled" -> 85;
+            case "datomic" -> 162;
+            default -> throw new IOException(
+                    "unsupported namespace scope: " + scope);
+        };
+        if (result.size() != expected) {
             throw new IOException(
-                    "expected 85 bundled namespaces, got " + result.size());
+                    "expected " + expected + " " + scope
+                    + " namespaces, got " + result.size());
         }
         return result;
     }
@@ -125,17 +134,18 @@ public final class MapBundledSources {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 5) {
+        if (args.length < 5 || args.length > 6) {
             throw new IllegalArgumentException(
                     "usage: MapBundledSources NAMESPACE_TSV JAR_TSV "
-                    + "DIST_ROOT OUTPUT_TSV REPORT_MD");
+                    + "DIST_ROOT OUTPUT_TSV REPORT_MD [bundled|datomic]");
         }
         Path namespaceTsv = Path.of(args[0]);
         Path jarTsv = Path.of(args[1]);
         Path distRoot = Path.of(args[2]);
         Path outputTsv = Path.of(args[3]);
         Path reportMd = Path.of(args[4]);
-        List<Namespace> namespaces = readNamespaces(namespaceTsv);
+        String scope = args.length == 6 ? args[5] : "bundled";
+        List<Namespace> namespaces = readNamespaces(namespaceTsv, scope);
         List<JarSpec> jars = readJars(jarTsv);
 
         Map<String, Namespace> wanted = new LinkedHashMap<>();
@@ -227,13 +237,24 @@ public final class MapBundledSources {
         Files.write(outputTsv, output, StandardCharsets.UTF_8);
 
         List<String> report = new ArrayList<>();
-        report.add("# Bundled Transactor namespace source ownership");
+        report.add(scope.equals("bundled")
+                ? "# Bundled Transactor namespace source ownership"
+                : "# Datomic Transactor dependency-source ownership");
         report.add("");
-        report.add("This read-only scan checked all **" + verifiedJars
-                + "** hash-bound shipped dependency JARs (" + scannedEntries
-                + " physical ZIP entries) for exact `.clj`/`.cljc` paths "
-                + "derived from the 85 non-`datomic.*` Transactor initializer "
-                + "class paths.");
+        if (scope.equals("bundled")) {
+            report.add("This read-only scan checked all **" + verifiedJars
+                    + "** hash-bound shipped dependency JARs ("
+                    + scannedEntries + " physical ZIP entries) for exact "
+                    + "`.clj`/`.cljc` paths derived from the 85 "
+                    + "non-`datomic.*` Transactor initializer class paths.");
+        } else {
+            report.add("This read-only scan checked all **" + verifiedJars
+                    + "** hash-bound shipped dependency JARs ("
+                    + scannedEntries + " physical ZIP entries) for exact "
+                    + "`.clj`/`.cljc` paths derived from all "
+                    + namespaces.size() + " Datomic Transactor initializer "
+                    + "class paths.");
+        }
         report.add("");
         report.add("## Result");
         report.add("");
@@ -275,7 +296,7 @@ public final class MapBundledSources {
                 + "Missing paths remain decompiler recovery inputs.");
         Files.write(reportMd, report, StandardCharsets.UTF_8);
 
-        System.out.println("bundled_namespaces=" + namespaces.size());
+        System.out.println(scope + "_namespaces=" + namespaces.size());
         System.out.println("verified_dependency_jars=" + verifiedJars);
         System.out.println("scanned_zip_entries=" + scannedEntries);
         statusCounts.forEach((status, count) ->
