@@ -101,6 +101,218 @@
                              ast/initial-local-ctx))))
   (println "decompiler terminal ATHROW method finalization passed"))
 
+(let [throw-expr {:op :throw :ex {:op :local :name "failure"}}
+      nonreturning {:ast {}
+                    :statements [throw-expr]
+                    :stack []
+                    :reachable #{0}
+                    :insns [{:insn/name "athrow" :insn/label 0}
+                            {:insn/name "athrow" :insn/label 1}]}
+      finalized (ast/finalize-nonreturning-method nonreturning)
+      returning (assoc nonreturning
+                       :reachable #{0}
+                       :insns [{:insn/name "areturn" :insn/label 0}])]
+  (assert (= {:op :do
+              :statements [throw-expr]
+              :ret ast/nil-expr}
+             (:ast finalized)))
+  (assert (= returning (ast/finalize-nonreturning-method returning)))
+  (assert (= {:ast {} :statements [] :stack []
+              :reachable #{0}
+              :insns [{:insn/name "athrow" :insn/label 0}]}
+             (ast/finalize-nonreturning-method
+               {:ast {} :statements [] :stack []
+                :reachable #{0}
+                :insns [{:insn/name "athrow" :insn/label 0}]})))
+  (println "decompiler non-returning method finalization passed"))
+
+(let [visited (atom [])
+      recur-expr {:op :recur :args []}
+      result-expr {:op :const :val :done}
+      branch-processor
+      (fn [branch]
+        (swap! visited conj (:pc branch))
+        (case (:pc branch)
+          10 (assoc branch
+                    :stack [recur-expr]
+                    :statements []
+                    :ast {}
+                    :recur? true)
+          30 (do
+               (assert ((:terminate? branch) {:pc 40}))
+               (assoc branch
+                      :stack [result-expr]
+                      :statements []
+                      :ast {}))))
+      result (with-redefs [ast/process-insns branch-processor]
+               (ast/process-if {:stack [] :statements []}
+                               {:op :local :name "test"}
+                               [10 20]
+                               [30 40 true]))]
+  (assert (= [10 30] @visited))
+  (assert (= 40 (:pc result)))
+  (assert (:recur? result))
+  (assert (= recur-expr (get-in result [:stack 0 :then :ret])))
+  (assert (= result-expr (get-in result [:stack 0 :else :ret])))
+  (println "decompiler implicit function-loop else boundary passed"))
+
+(let [visited (atom [])
+      recur-expr {:op :recur :args []}
+      result-expr {:op :const :val :done}
+      branch-processor
+      (fn [branch]
+        (swap! visited conj (:pc branch))
+        (case (:pc branch)
+          10 (assoc branch
+                    :stack [recur-expr]
+                    :statements []
+                    :ast {}
+                    :recur? true)
+          30 (assoc branch
+                    :stack [result-expr]
+                    :statements []
+                    :ast {})))
+      result (with-redefs [ast/process-insns branch-processor]
+               (ast/process-if {:stack []
+                                :statements []
+                                :impure-loop-entry 0
+                                :loop-args []}
+                               {:op :local :name "continue?"}
+                               [10 20]
+                               [30 40 true]))]
+  (assert (= [10] @visited))
+  (assert (= 30 (:pc result)))
+  (assert (:recur? result))
+  (assert (empty? (:stack result)))
+  (assert (= recur-expr (get-in result [:statements 0 :then :ret])))
+  (assert (= ast/nil-expr (get-in result [:statements 0 :else])))
+  (println "decompiler impure-loop one-armed recur recovery passed"))
+
+(let [visited (atom [])
+      recur-expr {:op :recur :args []}
+      result-expr {:op :const :val :done}
+      branch-processor
+      (fn [branch]
+        (swap! visited conj (:pc branch))
+        (case (:pc branch)
+          10 (assoc branch
+                    :stack [recur-expr]
+                    :statements []
+                    :ast {}
+                    :recur? true)
+          30 (assoc branch
+                    :stack [result-expr]
+                    :statements []
+                    :ast {})))
+      result (with-redefs [ast/process-insns branch-processor]
+               (ast/process-if {:stack []
+                                :statements []
+                                :impure-loop-entry 0
+                                :loop-args [{:name "nested"}]}
+                               {:op :local :name "continue?"}
+                               [10 20]
+                               [30 40 true]))]
+  (assert (= [10 30] @visited))
+  (assert (= 40 (:pc result)))
+  (assert (:recur? result))
+  (assert (= recur-expr (get-in result [:stack 0 :then :ret])))
+  (assert (= result-expr (get-in result [:stack 0 :else :ret])))
+  (println "decompiler nested-loop else preservation passed"))
+
+(let [loop-if {:op :if
+               :test {:op :local :name "continue?"}
+               :then {:op :do
+                      :statements []
+                      :ret {:op :recur :args []}}
+               :else ast/nil-expr}
+      body-processor (fn [body]
+                       (assert (= 0 (:impure-loop-entry body)))
+                       (assoc body
+                              :pc 30
+                              :stack []
+                              :statements [loop-if]
+                              :ast {}
+                              :recur? true))
+      result (with-redefs [ast/process-insns body-processor
+                           ast/will-ret? (constantly false)]
+               (ast/process-impure-loop
+                 {:pc 0
+                  :impure-loops #{0}
+                  :jump-table {0 0, 40 1}
+                  :stack []
+                  :statements []
+                  :ast {}}))]
+  (assert (= 30 (:pc result)))
+  (assert (empty? (:stack result)))
+  (assert (= {} (:ast result)))
+  (assert (= :loop (get-in result [:statements 0 :op])))
+  (assert (= loop-if (get-in result [:statements 0 :body :statements 0])))
+  (println "decompiler impure-loop continuation preservation passed"))
+
+(let [ctx {:pc 10 :enclosing-end-label 20}
+      crossed (ast/continue-within-enclosing-region ctx {:pc 30})
+      exact (ast/continue-within-enclosing-region ctx {:pc 20})
+      at-boundary (ast/continue-within-enclosing-region
+                    {:pc 20 :enclosing-end-label 20}
+                    {:pc 30})]
+  (assert (= 20 (:pc crossed)))
+  (assert (= 20 (:pc exact)))
+  (assert (= 30 (:pc at-boundary)))
+  (println "decompiler enclosing structured-region boundary passed"))
+
+(let [outer-a {:start-label 0 :end-label 68 :handler-label 273 :type "java.lang.Throwable"}
+      outer-b {:start-label 72 :end-label 268 :handler-label 273 :type "java.lang.Throwable"}
+      inner-a {:start-label 0 :end-label 68 :handler-label 156 :type "java.lang.Throwable"}
+      inner-b {:start-label 72 :end-label 152 :handler-label 156 :type "java.lang.Throwable"}
+      table #{outer-a outer-b inner-a inner-b}
+      outer (ast/coalesce-split-try-ranges 0 table)
+      inner (ast/coalesce-split-try-ranges
+              0
+              (apply disj table (:consumed outer)))]
+  (assert (= [{:start-label 0
+               :end-label 268
+               :handler-label 273
+               :type "java.lang.Throwable"}]
+             (:handlers outer)))
+  (assert (= #{outer-a outer-b} (set (:consumed outer))))
+  (assert (= 152 (get-in inner [:handlers 0 :end-label])))
+  (assert (= #{inner-a inner-b} (set (:consumed inner))))
+  (println "decompiler nested split-try coalescing passed"))
+
+(let [terminal (with-redefs [ast/insn-at (fn [_ _] {:insn/name "athrow"})
+                             ast/get-reachable (fn [& _] #{})]
+                 (ast/try-return-label
+                   {:pc 0
+                    :insns [{:insn/label 10 :insn/length 1}]
+                    :jump-table {10 0}}
+                   [{:handler-label 9}]))
+      outer-target (with-redefs [ast/insn-at (fn [_ _] {:insn/name "athrow"})
+                                 ast/get-reachable (fn [& _] #{220})]
+                     (ast/try-return-label
+                       {:pc 139
+                        :insns [{:insn/label 0 :insn/jump-offset 220}
+                                {:insn/label 222 :insn/length 1}]
+                        :jump-table {0 0, 220 1, 222 2}}
+                       [{:handler-label 196}]))]
+  (assert (= 11 terminal))
+  (assert (= 220 outer-target))
+  (println "decompiler terminal/pre-try continuation recovery passed"))
+
+(let [insns [{:insn/label 196
+              :insn/name "astore"
+              :insn/local-variable-element {:insn/target-index 4}}
+             {:insn/label 198 :insn/name "getstatic"}
+             {:insn/label 213
+              :insn/name "aload"
+              :insn/local-variable-element {:insn/target-index 4}}
+             {:insn/label 215 :insn/name "athrow"}]
+      recovered (ast/exceptional-finally-range
+                  {:insns insns
+                   :jump-table {196 0, 198 1, 213 2, 215 3}}
+                  {:handler-label 196})]
+  (assert (= {:start-label 198 :end-label 213} recovered))
+  (println "decompiler exceptional-only finally recovery passed"))
+
 (let [keyword-ast (fn [namespace name]
                     {:op :invoke-static
                      :target "clojure.lang.RT"

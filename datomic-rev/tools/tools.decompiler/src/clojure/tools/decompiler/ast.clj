@@ -157,23 +157,32 @@
   Present them as one range so a return-through-finally slot is not mistaken
   for a lexical binding."
   [pc exception-table]
-  (let [initial (->> (start-try-block-info pc exception-table)
-                     (sort-by (comp - :end-label))
-                     (partition-by :end-label)
-                     first)
-        handler-key (juxt :handler-label :type)
-        initial-keys (set (map handler-key initial))
-        first-handler-label (reduce min (map :handler-label initial))
-        continuation-groups (->> exception-table
-                                 (filter #(and (< pc (:start-label %))
-                                               (< (:start-label %) first-handler-label)))
-                                 (group-by (juxt :start-label :end-label))
-                                 vals
-                                 (filter #(= initial-keys
-                                             (set (map handler-key %)))))
-        consumed (vec (concat initial (mapcat identity continuation-groups)))
-        end-label (reduce max (map :end-label consumed))]
-    {:handlers (mapv #(assoc % :start-label pc :end-label end-label) initial)
+  (let [handler-key (juxt :handler-label :type)
+        initial (vec (start-try-block-info pc exception-table))
+        logical-ranges
+        (mapv (fn [entry]
+                (let [key (handler-key entry)
+                      continuations
+                      (filter #(and (= key (handler-key %))
+                                    (< pc (:start-label %))
+                                    (< (:start-label %) (:handler-label entry)))
+                              exception-table)
+                      consumed (vec (cons entry continuations))]
+                  {:entry entry
+                   :consumed consumed
+                   :end-label (reduce max (map :end-label consumed))}))
+              initial)
+        ;; When nested try regions start at the same bytecode label, recover
+        ;; the widest (outer) region first. Its body retains the narrower
+        ;; entries, allowing process-insns to reconstruct them recursively.
+        outer-end (reduce max (map :end-label logical-ranges))
+        selected (filter #(= outer-end (:end-label %)) logical-ranges)
+        handlers (mapv #(assoc (:entry %)
+                               :start-label pc
+                               :end-label outer-end)
+                       selected)
+        consumed (vec (mapcat :consumed selected))]
+    {:handlers handlers
      :consumed consumed}))
 
 (defn compiler-return-spill?
@@ -200,19 +209,95 @@
 
 (declare process-insns)
 
-(defn process-try-block [{:keys [pc exception-table] :as ctx}]
+(defn try-return-label
+  "Find the continuation after a reconstructed try. Older Clojure AOT puts a
+  positive GOTO immediately before the first handler. Newer AOT can remove an
+  unreachable normal path and leave ATHROW/NOP padding there. In that case a
+  later handler may still have the return-spill GOTO; otherwise an outer branch
+  target reachable from method entry is the continuation. A terminal try has
+  no continuation and is sent to the method-end sentinel."
+  [{:keys [insns jump-table pc] :as ctx} handlers]
+  (let [return-goto
+        (some (fn [{:keys [handler-label]}]
+                (let [{:insn/keys [name jump-offset] :as prior}
+                      (insn-at ctx {:label handler-label :offset -1})]
+                  (when (and (= "goto" name) (pos? jump-offset)) prior)))
+              (sort-by :handler-label handlers))
+        entry-reachable (get-reachable 0 #{} ctx)
+        max-handler-label (reduce max (map :handler-label handlers))
+        pre-try-targets
+        (->> insns
+             (take-while #(< (:insn/label %) pc))
+             (mapcat
+               (fn [{:insn/keys [label jump-offset jump-targets]}]
+                 (cond
+                   jump-offset
+                   [(+ label jump-offset)]
+
+                   jump-targets
+                   (mapv (partial + label)
+                         (conj (:insn/jump-offsets jump-targets)
+                               (:insn/default-offset jump-targets)))
+
+                   :else
+                   [])))
+             set)
+        outer-continuation
+        (->> pre-try-targets
+             (filter #(and (contains? jump-table %)
+                           (> % max-handler-label)
+                           (contains? entry-reachable %)))
+             sort
+             first)]
+    (cond
+      return-goto
+      (:insn/label
+        (insn-at ctx {:label (goto-label return-goto) :offset 1}))
+
+      outer-continuation
+      outer-continuation
+
+      :else
+      (if-let [{:insn/keys [label length]} (peek insns)]
+        (+ label length)
+        0))))
+
+(defn exceptional-finally-range
+  "Return the executable body of a catch-all finally handler, excluding its
+  synthetic exception spill and terminal reload/ATHROW. This is needed when a
+  newer compiler has removed the unreachable normal-path copy of a finally."
+  [{:keys [insns jump-table] :as ctx} {:keys [handler-label]}]
+  (let [{:insn/keys [name local-variable-element]}
+        (insn-at ctx {:label handler-label})
+        exception-index (:insn/target-index local-variable-element)
+        start-insn (insn-at ctx {:label handler-label :offset 1})
+        tail-load
+        (when (isa? bc/insn-h (keyword name) ::bc/store-insn)
+          (some (fn [idx]
+                  (let [{load-name :insn/name
+                         load-local :insn/local-variable-element
+                         :as load-insn} (nth insns idx)
+                        next-insn (nth insns (inc idx) nil)]
+                    (when (and (isa? bc/insn-h (keyword load-name)
+                                    ::bc/load-insn)
+                               (= exception-index
+                                  (:insn/target-index load-local))
+                               (= "athrow" (:insn/name next-insn)))
+                      load-insn)))
+                (range (inc (get jump-table handler-label))
+                       (dec (count insns)))))]
+    (when (and start-insn tail-load)
+      {:start-label (:insn/label start-insn)
+       :end-label (:insn/label tail-load)})))
+
+(defn process-try-block [{:keys [pc exception-table enclosing-end-label] :as ctx}]
   (let [{:keys [handlers consumed]} (coalesce-split-try-ranges pc exception-table)
 
         first-handler (->> handlers (sort-by :handler-label) first)
 
         body-end-label (:end-label first-handler)
 
-        ret-label (-> (insn-at ctx {:label (:handler-label first-handler)
-                                    :offset -1})
-
-                      (goto-label)
-                      (as-> %
-                          (:insn/label (insn-at ctx {:label % :offset 1}))))
+        ret-label (try-return-label ctx handlers)
 
         expr-ctx (-> ctx
                      (update :exception-table #(apply disj % consumed)))
@@ -220,26 +305,55 @@
         ;; WIP: need to backup lvt?
         body-ctx (-> expr-ctx
                      (assoc :statements [])
+                     (assoc :enclosing-end-label body-end-label)
                      (assoc :terminate? (restrict (:terminate? expr-ctx) (pc= body-end-label)))
                      (process-insns))
 
         body-statements (-> body-ctx :statements)
         body-stack (-> body-ctx :stack)
-        body-exprs (if (and (empty? body-stack)
-                            (= :loop (:op (peek body-statements)))
-                            (compiler-return-spill? ctx body-end-label))
+        body-end-insn (curr-insn (assoc body-ctx :pc body-end-label))
+        body-terminal-throw? (and (= "athrow" (:insn/name body-end-insn))
+                                  (seq body-stack)
+                                  (contains? (:reachable body-ctx)
+                                             body-end-label))
+        body-exprs (cond
+                     body-terminal-throw?
+                     (conj body-statements
+                           {:op :throw :ex (peek body-stack)})
+
+                     (and (empty? body-stack)
+                          (= :loop (:op (peek body-statements)))
+                          (compiler-return-spill? ctx body-end-label))
                      body-statements
+
+                     :else
                      (conj body-statements (peek body-stack)))
         body (->do body-exprs)
 
         next-insn (insn-at body-ctx {:offset 1})
 
-        ?finally (when (seq (remove :type handlers))
-                   (let [start-label (:insn/label next-insn)
-                         end-label (:insn/label (insn-at ctx {:label (:handler-label first-handler) :offset -1}))
+        ?finally (when-let [finally-handler (->> handlers
+                                                 (remove :type)
+                                                 (sort-by :handler-label)
+                                                 first)]
+                   (let [inline-range
+                         (when (and (< (:insn/label next-insn)
+                                       (:handler-label first-handler))
+                                    (not (#{"athrow" "nop"}
+                                           (:insn/name next-insn))))
+                           {:start-label (:insn/label next-insn)
+                            :end-label
+                            (:insn/label
+                              (insn-at ctx
+                                       {:label (:handler-label first-handler)
+                                        :offset -1}))})
+                         {:keys [start-label end-label]}
+                         (or inline-range
+                             (exceptional-finally-range ctx finally-handler))
                          finally-ctx (process-insns (-> expr-ctx
                                                         (assoc :pc start-label)
                                                         (assoc :statements [])
+                                                        (assoc :enclosing-end-label end-label)
                                                         (assoc :terminate? (restrict (:terminate? expr-ctx ) (pc= end-label)))))]
                      (->do (-> finally-ctx :statements))))
 
@@ -253,6 +367,7 @@
                                                          (assoc :exception-table #{})
                                                          (update :stack conj local)
                                                          (assoc :statements [])
+                                                         (assoc :enclosing-end-label end-label)
                                                          (assoc :terminate? (restrict (:terminate? expr-ctx) (pc= end-label)))))]
                         {:op :catch
                          :local {:name name
@@ -267,12 +382,17 @@
                 :catches ?catches
                 :finally ?finally
                 :body body}
-               body)]
+               body)
+
+        continuation-label (if (and enclosing-end-label
+                                    (< pc enclosing-end-label ret-label))
+                             enclosing-end-label
+                             ret-label)]
 
     (-> ctx
         (update :stack conj expr)
         (assoc :recur? (:recur? body-ctx))
-        (assoc :pc ret-label))))
+        (assoc :pc continuation-label))))
 
 ;; doesn't handle wrapping try/catch/finally
 (defn will-ret? [ctx label]
@@ -294,21 +414,44 @@
 
 (defn process-impure-loop [{:keys [impure-loops pc] :as ctx}]
   (let [end-label (impure-loops pc)
+        enclosing-end-insn (when-let [label (:enclosing-end-label ctx)]
+                             (maybe-insn-at ctx {:label label}))
+        enclosing-end-is-backedge?
+        (and (= "goto" (:insn/name enclosing-end-insn))
+             (= pc (goto-label enclosing-end-insn)))
+        body-terminate? (if enclosing-end-is-backedge?
+                          :recur?
+                          (restrict (:terminate? ctx) :recur?))
 
-        {body-stack :stack body-stmnts :statements :keys [pc]} (process-insns (-> ctx
+        {body-stack :stack body-stmnts :statements
+         body-recur? :recur? :keys [pc]} (process-insns (-> ctx
                                                                                   (assoc :loop-args [])
                                                                                   (update :impure-loops disj pc)
+                                                                                  (assoc :impure-loop-entry pc)
                                                                                   (assoc :loop-end-label end-label)
-                                                                                  (assoc :terminate? (restrict (:terminate? ctx) :recur?))
+                                                                                  (assoc :terminate? body-terminate?)
                                                                                   (assoc :statements [])))
         statement? (not (will-ret? ctx end-label))
-        body (->do (conj body-stmnts (peek body-stack)))]
+        body (->do (conj body-stmnts (peek body-stack)))
+        loop-expr {:op :loop
+                   :local-variables []
+                   :body body}]
     (-> ctx
         (assoc :pc pc)
-        (update (if statement? :statements :stack)
-                conj {:op :loop
-                      :local-variables []
-                      :body body}))))
+        (update (if statement? :statements :stack) conj loop-expr))))
+
+(defn continue-within-enclosing-region
+  "Structured bytecode recovery can advance directly to a lexical or try
+  continuation beyond the protected region currently being parsed. Stop at
+  that enclosing boundary so its caller can reconstruct the surrounding
+  catch/finally before resuming the continuation."
+  [{start-label :pc end-label :enclosing-end-label} next-ctx]
+  (let [continuation-label (:pc next-ctx)]
+    (if (and end-label
+             continuation-label
+             (< start-label end-label continuation-label))
+      (assoc next-ctx :pc end-label)
+      next-ctx)))
 
 (defn process-insns [{:keys [pc jump-table exception-table terminate? impure-loops]
                       :as ctx}]
@@ -318,14 +461,14 @@
     ctx
 
     (start-try-block-info pc exception-table)
-    (recur (process-try-block ctx))
+    (recur (continue-within-enclosing-region ctx (process-try-block ctx)))
 
     (contains? impure-loops pc)
-    (recur (process-impure-loop ctx))
+    (recur (continue-within-enclosing-region ctx (process-impure-loop ctx)))
 
     :else
     (let [insn (curr-insn ctx)]
-      (recur (>process-insn ctx insn)))))
+      (recur (continue-within-enclosing-region ctx (>process-insn ctx insn))))))
 
 (defmethod process-insn ::bc/no-op [ctx _]
   ctx)
@@ -392,17 +535,27 @@
         (assoc :stack [] :statements []
                :ast (->do (conj statements ret))))))
 
-(defn process-if [{:keys [stack] :as ctx} test [start-then end-then]
+(defn process-if [{:keys [pc stack enclosing-end-label] :as ctx} test [start-then end-then]
                   [start-else end-else maybe-one-armed?]]
   (let [then-ctx (process-insns (assoc ctx
                                        :pc start-then
                                        :terminate? (restrict (:terminate? ctx) (pc= end-then))
                                        :statements []))
 
-        one-armed? (and (not (:recur? then-ctx)) maybe-one-armed?)
+        impure-loop-one-armed? (and (:impure-loop-entry ctx)
+                                    (empty? (:loop-args ctx))
+                                    maybe-one-armed?
+                                    (:recur? then-ctx))
+
+        one-armed? (and maybe-one-armed?
+                          (or impure-loop-one-armed?
+                              (not (:recur? then-ctx))))
 
         end-else (if (and maybe-one-armed? (not one-armed?))
-                     (:loop-end-label ctx)
+                     ;; A recur branch inside an implicit function loop has no
+                     ;; enclosing :loop-end-label.  Keep the bytecode-derived
+                     ;; else end instead of terminating processing at nil.
+                     (or (:loop-end-label ctx) end-else)
                      end-else)
 
         else-ctx (when-not one-armed?
@@ -411,23 +564,43 @@
                                          :terminate? (restrict (:terminate? ctx) (pc= end-else))
                                          :statements [])))
 
-        {then-stack :stack then-stmnts :statements then-recur? :recur?} then-ctx
-        {else-stack :stack else-stmnts :statements else-recur? :recur?} else-ctx
+        {then-stack :stack then-stmnts :statements then-recur? :recur?
+         then-ast :ast} then-ctx
+        {else-stack :stack else-stmnts :statements else-recur? :recur?
+         else-ast :ast} else-ctx
 
         statement? (or one-armed? (= stack then-stack else-stack))
 
-        [then else] (if statement?
-                      [then-stmnts else-stmnts]
-                      [(conj then-stmnts (peek then-stack))
-                       (conj else-stmnts (peek else-stack))])]
+        terminal-impure-if? (and (:impure-loop-entry ctx)
+                                 maybe-one-armed?
+                                 then-recur?
+                                 (seq else-ast)
+                                 (= end-else (:impure-loop-entry ctx)))
+
+        branch-exprs (fn [branch-ast branch-stmnts branch-stack]
+                       (if (and terminal-impure-if? (seq branch-ast))
+                         [branch-ast]
+                         (if statement?
+                           branch-stmnts
+                           (conj branch-stmnts (peek branch-stack)))))
+        then (if impure-loop-one-armed?
+               (conj then-stmnts (peek then-stack))
+               (branch-exprs then-ast then-stmnts then-stack))
+        else (branch-exprs else-ast else-stmnts else-stack)
+
+        continuation-label (if (and enclosing-end-label
+                                    end-else
+                                    (< pc enclosing-end-label end-else))
+                             enclosing-end-label
+                             end-else)]
     (-> ctx
-        (assoc :pc end-else)
+        (assoc :pc continuation-label)
         (update (if statement? :statements :stack)
                 conj {:op :if
                       :test test
                       :then (->do then)
                       :else (if else (->do else) nil-expr)})
-        (cond-> (not statement?)
+        (cond-> (or (not statement?) impure-loop-one-armed?)
           (assoc :recur? (or then-recur? else-recur?))
           one-armed? (assoc :pc start-else)))))
 
@@ -1301,6 +1474,26 @@
         (recur insns data))
       (assoc ctx :impure-loops data))))
 
+(defn reachable-return?
+  [{:keys [insns reachable]}]
+  (boolean
+    (some (fn [{:insn/keys [name label]}]
+            (and (contains? reachable label)
+                 (or (= "return" name)
+                     (isa? bc/insn-h (keyword name) ::bc/return-value))))
+          insns)))
+
+(defn finalize-nonreturning-method
+  [{:keys [ast statements stack] :as ctx}]
+  ;; Newer Clojure AOT output can end a method with ATHROW (or a loop) and put
+  ;; only another unreachable ATHROW after it.  Such a method never visits a
+  ;; JVM return handler, so preserve the body accumulated by process-insns.
+  (if (and (empty? ast)
+           (not (reachable-return? ctx))
+           (or (seq statements) (seq stack)))
+    (assoc ctx :ast (expr+statements ctx))
+    ctx))
+
 (defn process-method-insns [{:keys [fn-name] :as ctx} {:method/keys [bytecode jump-table local-variable-table flags exception-table]}]
   (-> ctx
       (merge initial-local-ctx {:jump-table jump-table})
@@ -1321,7 +1514,8 @@
       (assoc :insns bytecode)
       (collect-impure-loops-data)
       (collect-reachable)
-      (process-insns)))
+      (process-insns)
+      (finalize-nonreturning-method)))
 
 (defn process-static-init [{:keys [bc-for] :as ctx} {:class/keys [methods]}]
   (let [method (u/find-method methods {:method/name "<clinit>"})]

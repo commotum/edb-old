@@ -1,0 +1,11 @@
+metric	value
+classes.expected	52
+classes.candidate	52
+fields.candidate	122
+fields.original	122
+methods.candidate	303
+methods.original	303
+abi.matches	52
+abi.differences	0
+code.matches	52
+code.differences	0
