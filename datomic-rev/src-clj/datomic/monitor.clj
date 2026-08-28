@@ -56,53 +56,54 @@
     (addObservation
       [this k v]
       (do
-        (.accumulate
-          (or
-            (.get ^java.util.concurrent.ConcurrentHashMap lo k)
-            (.computeIfAbsent
-              ^java.util.concurrent.ConcurrentHashMap lo
-              k
-              (reify
-                java.util.function.Function
-                (apply
-                  [this metric]
-                  (java.util.concurrent.atomic.LongAccumulator.
-                    min*
-                    (long java.lang.Long/MAX_VALUE))))))
-          (long ^java.lang.Number v))
-        (.accumulate
-          (or
-            (.get ^java.util.concurrent.ConcurrentHashMap hi k)
-            (.computeIfAbsent
-              ^java.util.concurrent.ConcurrentHashMap hi
-              k
-              (reify
-                java.util.function.Function
-                (apply
-                  [this metric]
-                  (java.util.concurrent.atomic.LongAccumulator.
-                    max*
-                    (long java.lang.Long/MIN_VALUE))))))
-          (long ^java.lang.Number v))
-        (.add
-          (or
-            (.get ^java.util.concurrent.ConcurrentHashMap sum k)
-            (.computeIfAbsent
-              ^java.util.concurrent.ConcurrentHashMap sum
-              k
-              (reify
-                java.util.function.Function
-                (apply [this metric] (java.util.concurrent.atomic.LongAdder.)))))
-          (long ^java.lang.Number v))
-        (.increment
-          (or
-            (.get ^java.util.concurrent.ConcurrentHashMap count k)
-            (.computeIfAbsent
-              ^java.util.concurrent.ConcurrentHashMap count
-              k
-              (reify
-                java.util.function.Function
-                (apply [this metric] (java.util.concurrent.atomic.LongAdder.))))))
+        (let [^java.util.concurrent.atomic.LongAccumulator accumulator
+              (or
+                (.get ^java.util.concurrent.ConcurrentHashMap lo k)
+                (.computeIfAbsent
+                  ^java.util.concurrent.ConcurrentHashMap lo
+                  k
+                  (reify
+                    java.util.function.Function
+                    (apply
+                      [this metric]
+                      (java.util.concurrent.atomic.LongAccumulator.
+                        min*
+                        (long java.lang.Long/MAX_VALUE))))))]
+          (.accumulate accumulator (long ^java.lang.Number v)))
+        (let [^java.util.concurrent.atomic.LongAccumulator accumulator
+              (or
+                (.get ^java.util.concurrent.ConcurrentHashMap hi k)
+                (.computeIfAbsent
+                  ^java.util.concurrent.ConcurrentHashMap hi
+                  k
+                  (reify
+                    java.util.function.Function
+                    (apply
+                      [this metric]
+                      (java.util.concurrent.atomic.LongAccumulator.
+                        max*
+                        (long java.lang.Long/MIN_VALUE))))))]
+          (.accumulate accumulator (long ^java.lang.Number v)))
+        (let [^java.util.concurrent.atomic.LongAdder adder
+              (or
+                (.get ^java.util.concurrent.ConcurrentHashMap sum k)
+                (.computeIfAbsent
+                  ^java.util.concurrent.ConcurrentHashMap sum
+                  k
+                  (reify
+                    java.util.function.Function
+                    (apply [this metric] (java.util.concurrent.atomic.LongAdder.)))))]
+          (.add adder (long ^java.lang.Number v)))
+        (let [^java.util.concurrent.atomic.LongAdder adder
+              (or
+                (.get ^java.util.concurrent.ConcurrentHashMap count k)
+                (.computeIfAbsent
+                  ^java.util.concurrent.ConcurrentHashMap count
+                  k
+                  (reify
+                    java.util.function.Function
+                    (apply [this metric] (java.util.concurrent.atomic.LongAdder.)))))]
+          (.increment adder))
         nil)))
   (clojure.core/import 'datomic.monitor.Statistics)
   (defn ->Statistics ([lo hi sum count] (datomic.monitor.Statistics. lo hi sum count)))
@@ -187,6 +188,6 @@
       (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " val "\n" (pr-str 'k)))))
       (let [temp__5457__auto__ metric-event-callback]
         (when temp__5457__auto__ (let [cb temp__5457__auto__] (^clojure.lang.IFn cb k val))))
-      (.addObservation (deref statistics) k val)))
+      (.addObservation ^datomic.monitor.Statistics (deref statistics) k val)))
   (defn ns->ms (^double [^long nanos] (/ (quot nanos 10000) 100.0)))
   (defn alarm ([k] (add-stat :Alarm 1) (add-stat (keyword (str "Alarm" (name k))) 1))))

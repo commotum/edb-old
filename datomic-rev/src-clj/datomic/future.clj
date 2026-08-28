@@ -34,7 +34,7 @@
   (defn filling-promise
     ([f]
       (let [ch (a/promise-chan)
-            f (fn f
+            f (fn
                 ([]
                   (try
                     (let [v (^clojure.lang.IFn f)]

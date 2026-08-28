@@ -92,7 +92,7 @@ The analyzer reports 2,906 definitions: 2,631 public and 275 private. It emits
 3,533 call-edge rows, 2,798 reference-edge rows, 1,722 distinct keywords, and
 273 heuristic configuration/SQL/URI strings. Its normalized corpus record is
 `reports/source-index/corpus.edn` (SHA-256
-`0c427dc3bce814f69fc7f342d5872929a3214c4f0bd02c13fbd1a1d107bb9f9c`).
+`88ac1c629a205cba92e00b1ec7b25327575ef24a89d57e83912a6d14cd366bcb`).
 Analyzer gap count is zero under its explicit failed-marker contract.
 
 ## 4. Source-only compile/load closure
@@ -115,10 +115,17 @@ The sweep includes direct passes for `datomic.query.support`, `datomic.query`,
 `datomic.peer`, and `datomic.kv-hotrod`. Exact inputs, hashes, warnings, and the
 142-line proof are in `reports/compile-audit/`.
 
-The final sweep produced 318 unique compiler-warning texts: 306 reflection, 10
-primitive-local recur, and two auto-boxing texts. Across the isolated processes
-these repeated 6,898 times. They did not prevent compilation/loading but remain
-relevant to performance and source fidelity.
+The checked-in pre-hardening compile audit produced 318 unique compiler-warning
+texts: 306 reflection, 10 primitive-local recur, and two auto-boxing texts.
+Across those isolated processes they repeated 6,898 times; that historical
+evidence remains in `reports/compile-audit/`. The final post-Stage-4 packaged
+sweep instead records an exact 157-line unresolved inventory: 150 reflection,
+six primitive-local recur, and one auto-boxing warning, with SHA-256
+`9c8f20b030205f749edc952255da131bfa6d45c1537bbf0655bd6fe772ce33ad`.
+Across its isolated namespace processes those warnings repeated 1,873 times in
+85 nonempty stderr logs. They did not prevent compilation/loading, but remain
+relevant to performance and source fidelity; `stage-4-validation.md` records
+the evidence boundary for every repair.
 
 ## 5. Exact JVM and runtime surfaces
 

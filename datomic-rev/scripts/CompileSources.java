@@ -68,6 +68,7 @@ public final class CompileSources {
                 files,
                 null,
                 Arrays.asList("-source", "11", "-target", "11",
+                              "-encoding", "UTF-8", "-proc:none",
                               "-classpath", expandClasspath(args[2]), "-d", args[1]),
                 null,
                 files.getJavaFileObjectsFromFiles(sources)

@@ -53,7 +53,9 @@
                 2
                 (let [first_string? (=
                                       java.lang.String
-                                      (first (.getParameterTypes (first setters))))]
+                                      (first
+                                        (.getParameterTypes
+                                          ^java.lang.reflect.Method (first setters))))]
                   (conj result ((if first_string? second first) setters)))))))
         []
         (group-by

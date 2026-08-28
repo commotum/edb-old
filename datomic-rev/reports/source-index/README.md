@@ -21,7 +21,7 @@ Final summary: 142 namespaces; 2,906 definitions (2,631 public, 275 private);
 strings; zero explicit gaps.
 
 `corpus.edn` SHA-256:
-`0c427dc3bce814f69fc7f342d5872929a3214c4f0bd02c13fbd1a1d107bb9f9c`.
+`88ac1c629a205cba92e00b1ec7b25327575ef24a89d57e83912a6d14cd366bcb`.
 
 Call/reference resolution is intentionally conservative: it indexes Vars that
 can be resolved from recovered definitions, namespace aliases, and explicit

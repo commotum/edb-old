@@ -19,7 +19,8 @@ syntax, and names erased by AOT compilation cannot be recovered.
 | Clojure AOT classes mapped | 5,470 / 5,470 |
 | Reconstructed namespaces | 142 / 142 |
 | Deterministic final regenerations | 2 / 2 byte-identical (`latest35`, `latest36`) |
-| Recovered-source manifest | `ec43cd7e963514d855b0b6080c485caa638858dced0a3e40d4fca0b6866531be` |
+| Deterministic decompiler baseline manifest | `ec43cd7e963514d855b0b6080c485caa638858dced0a3e40d4fca0b6866531be` |
+| Current packaged Clojure input manifest | `186b247033a461b4e5f391a302c43b9a727cf4fde0db2b10487a6c001b9da2e1` |
 | Handwritten Java classes/sources | 47 / 43 |
 | Reader-valid Clojure files | 142 / 142 |
 | Fresh-JVM source-only namespace loads | 142 / 142 |
@@ -31,6 +32,11 @@ syntax, and names erased by AOT compilation cannot be recovered.
 | Decompilation gap markers | 0 |
 | Bytecode parse warnings | 0 |
 | In-memory Datomic API parity | exact canonical result (`228b03dac4a437465937c53dbc7c4917294de408b2311b41a662e5f39eca37be`) |
+| Reproducible source artifact | 2 clean builds byte-identical (`bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`) |
+| Exact unresolved compiler-warning inventory | 157 (`150` reflection, `6` primitive recur, `1` auto-boxing) |
+| PostgreSQL backup/recovery matrix | PASS (full, incremental, corruption, interruption, retry) |
+| Bounded concurrency/transport matrix | PASS (cancellation, lifecycle, 8×8 CAS, verified `SIGSTOP`/`SIGCONT`) |
+| Conservative source-navigation pass | 142 namespaces / 2,906 definitions indexed |
 
 The source-only validation uses recovered Clojure, compiled recovered Java,
 resources, and distribution dependencies. It deliberately excludes both
@@ -39,6 +45,16 @@ classpath. `datomic.kv-hotrod` is checked against either Datomic's declared
 provided Infinispan 5.1.2 dependency or the included compile-only API stubs.
 
 See `reports/recovery-validation.md` for the exact claims and caveats.
+See `reports/stage-1-validation.md` for the canonical packaged-artifact
+boundary and its complete validation gate.
+See `reports/stage-2-validation.md` for the disposable PostgreSQL lifecycle,
+backup, corruption, restore, and recovery matrix.
+See `reports/stage-3-validation.md` for the fresh-JVM concurrency,
+cancellation, connection-lifecycle, CAS-contention, and transport-fault matrix.
+See `reports/stage-4-validation.md` for the bytecode-proven warning repairs and
+the exact inventory deliberately left unresolved.
+See `reports/source-guide.md` and `reports/stage-5-readability.md` for the
+subsystem map, generated-source cautions, and conservative navigation pass.
 
 ## Repository map
 
@@ -50,6 +66,8 @@ See `reports/recovery-validation.md` for the exact claims and caveats.
   including the TLS key/trust stores and AWS/core2 metadata.
 - `reports/source-index/` — deterministic namespace, Var, dependency, call,
   reference, keyword, string, and class-closure indexes.
+- `reports/source-guide.md` — subsystem entry points, execution flows,
+  provenance boundaries, generated-source traps, and validation ladder.
 - `tools/tools.decompiler/` — the repaired AOT Clojure decompiler source.
 - `tools/bytecode-inventory/` — a deterministic, non-class-loading ASM scanner
   and a compact checked-in baseline.
@@ -57,8 +75,9 @@ See `reports/recovery-validation.md` for the exact claims and caveats.
   for the missing provided Hot Rod API. They are not runtime implementations.
 - `scripts/` — regeneration, reader validation, Java compilation, corpus
   analysis, strict source-only namespace validation, runtime-surface comparison,
-  focused recovered-behavior regressions, and original-versus-recovered API
-  parity validation.
+  focused recovered-behavior regressions, original-versus-recovered API parity,
+  disposable PostgreSQL backup/recovery validation, and bounded concurrency and
+  transport-fault validation.
 
 ## Reproduce the Clojure recovery
 
@@ -77,6 +96,21 @@ the classpath. A successful run reports 142 successes, zero failures, and then
 performs a non-evaluating reader pass with `*read-eval*` disabled.
 
 ## Reproduce the build checks
+
+Build the canonical thin recovered-source artifact twice and run every Stage 1
+artifact gate:
+
+```bash
+JOBS=4 scripts/validate-stage-1.sh \
+  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
+  /tmp/datomic-stage-1
+```
+
+The artifact contains the 142 recovered Clojure sources, 47 classes freshly
+compiled from the 43 handwritten Java sources, the ten exact Peer resources,
+and six provenance records. It contains no Clojure AOT classes. Its build and
+candidate runtime classpaths exclude the original Peer and duplicate core2 AOT
+JARs; licensed Peer use is confined to explicit oracle subprocesses.
 
 Compile the handwritten Java surface:
 
@@ -178,6 +212,23 @@ in `datomic.core2.thread`.
 Two CFR casts were repaired in the handwritten Lucene directory sources. Those
 were the only errors in the 43-source handwritten Java compilation surface.
 
+Three later storage-driven repairs were also fixed from original
+bytecode: the future wrapper now invokes its captured outer callable instead of
+recursing through a decompiler-created self-name; object-array memory sizing
+returns its completed long result; and `datomic.common/pfuture` submits the
+captured function through the original `Callable` overload. Focused regressions
+cover both success and failure paths. Historically, the `Callable` repair
+reduced the reflection inventory from 306 to 305; no warning was suppressed.
+
+Stage 4 subsequently repaired another 159 source warning sites across 11
+namespaces, exclusively where instruction-level oracle evidence established
+the correct source form. This removed 160 warning records and reduced the full
+inventory from 317 (`305` reflection, `10` primitive recur, `2` auto-boxing) to
+157 (`150`, `6`, and `1`, respectively). It also repaired
+`datomic.common/compare-byte-arrays`, whose equal-length branch discarded its
+computed result. The remaining 157 warnings are retained in an exact checked
+inventory; see `reports/stage-4-validation.md`.
+
 The prior recovery's direct proxy constructor and generated reify-class hint
 were also replaced with source forms that can be recompiled. The recovered
 `datomic.query.support/counted-seq` proxy matches the original AOT behavior on
@@ -193,12 +244,18 @@ reconstruction, reader validity, Java compilation, exact checked JVM surfaces,
 source-only compile/load closure, and exact parity for the documented in-memory
 API workload for this peer JAR. It does not mean literal recovery of Datomic's
 unpublished source or proof that every operation is behaviorally equivalent
-under every backend and schedule. Reflection warnings remain where AOT erased
-source-level hints; they are recorded compiler warnings, not load errors.
-Subtle storage, security, distributed-failure, and concurrency behavior should
-still be checked against bytecode and a disposable licensed Datomic
-environment.
+under every backend and schedule. The PostgreSQL lifecycle and selected backup,
+corruption, restore, and interruption paths are covered by the Stage 2 gate.
+Stage 3 additionally covers bounded promise/IOC/pool cancellation paths,
+connection-release races, eight rounds of eight-way SQL CAS contention, and a
+watchdog-protected transactor pause/recovery. Other storage backends, wider
+concurrency schedules, security behavior, multi-transactor failover, and
+broader distributed failures remain outside the demonstrated boundary. The 157
+unresolved compiler warnings remain where this bounded audit did not establish
+a unique source correction; they are exact recorded evidence, not load errors
+or suppressed diagnostics.
 
+The fuller subsystem and execution-flow map is `reports/source-guide.md`.
 Useful starting points:
 
 - Public API: `src-java/datomic/{Peer,Connection,Database,Datom,Entity,Log}.java`

@@ -60,59 +60,68 @@
     (^long [a b]
       (let [a a b b len (alength ^bytes a) lencomp (- len (alength ^bytes b))]
         (if (= lencomp 0)
-          (do
-            (loop [pos 0]
-              (if (= pos len)
-                0
-                (let [c (-
-                          (unchecked-long
-                            (java.lang.Byte/valueOf (byte (aget ^bytes a (int pos)))))
-                          (unchecked-long
-                            (java.lang.Byte/valueOf (byte (aget ^bytes b (int pos))))))]
-                  (if (= c 0) (recur (inc pos)) c))))
-            nil)
+          (loop [pos 0]
+            (if (= pos len)
+              0
+              (let [c (-
+                        (unchecked-long
+                          (java.lang.Byte/valueOf (byte (aget ^bytes a (int pos)))))
+                        (unchecked-long
+                          (java.lang.Byte/valueOf (byte (aget ^bytes b (int pos))))))]
+                (if (= c 0) (recur (inc pos)) c))))
           lencomp))))
   (def BYTES (java.lang.Class/forName "[B"))
   (declare coll-compare)
   (defn compare-ex
     (^long [a b]
-      (.longValue
-        (cond
-          (.equals a b) 0
-          (or
-            (instance? java.util.List a)
-            (and (instance? java.util.Map a) (not (instance? clojure.lang.IRecord a)))
-            (instance? java.util.Set a)) (long (coll-compare a b))
-          (identical? (.getClass a) (.getClass b)) (if (instance? BYTES a)
-                                                     (long (compare-byte-arrays a b))
-                                                     (java.lang.Integer/valueOf
-                                                       (int
-                                                         (.compareTo ^java.lang.Comparable a b))))
-          (or (instance? java.util.Collection b) (instance? java.util.Map b)) 1
-          :else (do
-                  (java.lang.Integer/valueOf
-                    (int (.compareTo (.getName (.getClass a)) (.getName (.getClass b))))))))))
+      (let [^java.lang.Number result
+            (cond
+              (.equals ^java.lang.Object a b) 0
+              (or
+                (instance? java.util.List a)
+                (and (instance? java.util.Map a) (not (instance? clojure.lang.IRecord a)))
+                (instance? java.util.Set a)) (long (coll-compare a b))
+              (identical?
+                (.getClass ^java.lang.Object a)
+                (.getClass ^java.lang.Object b)) (if (instance? BYTES a)
+                                                   (long (compare-byte-arrays a b))
+                                                   (java.lang.Integer/valueOf
+                                                     (int
+                                                       (.compareTo
+                                                         ^java.lang.Comparable a
+                                                         b))))
+              (or (instance? java.util.Collection b) (instance? java.util.Map b)) 1
+              :else (do
+                      (java.lang.Integer/valueOf
+                        (int
+                          (.compareTo
+                            (.getName (.getClass ^java.lang.Object a))
+                            (.getName (.getClass ^java.lang.Object b)))))))]
+        (.longValue result))))
   (defn compare
     (^long [a b]
-      (.longValue
-        (cond
-          (identical? a b) 0
-          (nil? a) (if (nil? b) 0 -1)
-          (nil? b) 1
-          (instance? java.lang.Number a) (if (instance? java.lang.Number b)
-                                           (java.lang.Integer/valueOf
-                                             (int
-                                               (clojure.lang.Numbers/compare
-                                                 ^java.lang.Number a
-                                                 ^java.lang.Number b)))
-                                           -1)
-          (and (instance? java.lang.String a) (instance? java.lang.String b)) (java.lang.Integer/valueOf
-                                                                                (int
-                                                                                  (.compareTo
-                                                                                    ^java.lang.Comparable a
-                                                                                    b)))
-          (instance? java.lang.Number b) 1
-          :else (do (long (compare-ex a b)))))))
+      (let [^java.lang.Number result
+            (cond
+              (identical? a b) 0
+              (nil? a) (if (nil? b) 0 -1)
+              (nil? b) 1
+              (instance? java.lang.Number a) (if (instance? java.lang.Number b)
+                                               (java.lang.Integer/valueOf
+                                                 (int
+                                                   (clojure.lang.Numbers/compare
+                                                     ^java.lang.Number a
+                                                     ^java.lang.Number b)))
+                                               -1)
+              (and
+                (instance? java.lang.String a)
+                (instance? java.lang.String b)) (java.lang.Integer/valueOf
+                                                  (int
+                                                    (.compareTo
+                                                      ^java.lang.Comparable a
+                                                      b)))
+              (instance? java.lang.Number b) 1
+              :else (do (long (compare-ex a b))))]
+        (.longValue result))))
   (defn equals-with-strict-scale
     ([a b]
       (and
@@ -122,24 +131,27 @@
           true))))
   (defn cl
     (^long [a b]
-      (.longValue
-        (loop [as (.iterator ^java.util.List a) bs (.iterator ^java.util.List b)]
-          (let [ha (.hasNext ^java.util.Iterator as) hb (.hasNext ^java.util.Iterator bs)]
-            (cond
-              (and ha hb) (let [c (compare
-                                    (.next ^java.util.Iterator as)
-                                    (.next ^java.util.Iterator bs))]
-                            (if (= c 0) (recur as bs) (long c)))
-              ha 1
-              hb -1
-              :else (do 0)))))))
+      (let [^java.lang.Number result
+            (loop [as (.iterator ^java.util.List a) bs (.iterator ^java.util.List b)]
+              (let [ha (.hasNext ^java.util.Iterator as) hb (.hasNext ^java.util.Iterator bs)]
+                (cond
+                  (and ha hb) (let [c (compare
+                                        (.next ^java.util.Iterator as)
+                                        (.next ^java.util.Iterator bs))]
+                                (if (= c 0) (recur as bs) (long c)))
+                  ha 1
+                  hb -1
+                  :else (do 0))))]
+        (.longValue result))))
   (reset-meta!
     #'cl
     (assoc
       {:private true,
        :arglists
        (clojure.core/list
-         (.withMeta [(.withMeta 'a {:tag 'List}) (.withMeta 'b {:tag 'List})] {:tag 'long})),
+         (let [^clojure.lang.IObj args
+               [(.withMeta 'a {:tag 'List}) (.withMeta 'b {:tag 'List})]]
+           (.withMeta args {:tag 'long}))),
        :column 1}
       :name
       'cl
@@ -167,38 +179,54 @@
   (reset-meta!
     #'cx
     (assoc
-      {:private true, :arglists (clojure.core/list (.withMeta ['a 'b] {:tag 'long})), :column 1}
+      {:private true,
+       :arglists
+       (clojure.core/list
+         (let [^clojure.lang.IObj args ['a 'b]]
+           (.withMeta args {:tag 'long}))),
+       :column 1}
       :name
       'cx
       :ns
       *ns*))
   (defn cc
     (^long [a b]
-      (.longValue
-        (let [ca (count a) cb (count b)]
-          (cond
-            (< ca cb) -1
-            (> ca cb) 1
-            :else (do
-                    (let [ha (.hashCode a) hb (.hashCode b)]
-                      (if (= ha hb) (long (cx a b)) (long (- ha hb))))))))))
+      (let [^java.lang.Number result
+            (let [ca (count a) cb (count b)]
+              (cond
+                (< ca cb) -1
+                (> ca cb) 1
+                :else (do
+                        (let [ha (.hashCode ^java.lang.Object a)
+                              hb (.hashCode ^java.lang.Object b)]
+                          (if (= ha hb) (long (cx a b)) (long (- ha hb)))))))]
+        (.longValue result))))
   (reset-meta!
     #'cc
     (assoc
-      {:private true, :arglists (clojure.core/list (.withMeta ['a 'b] {:tag 'long})), :column 1}
+      {:private true,
+       :arglists
+       (clojure.core/list
+         (let [^clojure.lang.IObj args ['a 'b]]
+           (.withMeta args {:tag 'long}))),
+       :column 1}
       :name
       'cc
       :ns
       *ns*))
   (defn coll-compare
     (^long [a b]
-      (.longValue
-        (cond
-          (instance? java.util.List a) (if (instance? java.util.List b) (long (cl a b)) -1)
-          (instance? java.util.List b) 1
-          (instance? java.util.Map a) (if (instance? java.util.Map b) (long (cc a b)) -1)
-          (instance? java.util.Map b) 1
-          (instance? java.util.Set a) (do (if (instance? java.util.Set b) (long (cc a b)) -1))))))
+      (let [^java.lang.Number result
+            (cond
+              (instance? java.util.List a) (if (instance? java.util.List b) (long (cl a b)) -1)
+              (instance? java.util.List b) 1
+              (instance? java.util.Map a) (if (instance? java.util.Map b) (long (cc a b)) -1)
+              (instance? java.util.Map b) 1
+              (instance? java.util.Set a) (do
+                                             (if (instance? java.util.Set b)
+                                               (long (cc a b))
+                                               -1)))]
+        (.longValue result))))
   (defn <' ([a b] (neg? (compare a b))))
   (defn >' ([a b] (not (<' a b))))
   (defn split-filter ([pred coll] [(filter pred coll) (remove pred coll)]))
@@ -485,7 +513,9 @@
         java.util.Comparator
         (^int compare
           [this o1 o2]
-          (.compareTo (^clojure.lang.IFn key_fn o1) (^clojure.lang.IFn key_fn o2))))))
+          (.compareTo
+            ^java.lang.Comparable (^clojure.lang.IFn key_fn o1)
+            (^clojure.lang.IFn key_fn o2))))))
   (defn fire
     ([&form &env & body]
       (seq
@@ -543,7 +573,7 @@
                            (when (.isWarnEnabled ^org.slf4j.Logger logger)
                              (.warn
                                ^org.slf4j.Logger logger
-                               (logger/process "Scheduled task failed")
+                               ^java.lang.String (logger/process "Scheduled task failed")
                                ^java.lang.Throwable ex)
                              (logger/caused-by logger ex))
                            nil)
@@ -576,7 +606,7 @@
         (if (instance? java.lang.Throwable result)
           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common") ex result]
             (when (.isInfoEnabled ^org.slf4j.Logger logger)
-              (.info ^org.slf4j.Logger logger (logger/process m) ex)
+              (.info ^org.slf4j.Logger logger ^java.lang.String (logger/process m) ex)
               (logger/caused-by logger ex))
             nil)
           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common")]
@@ -795,6 +825,7 @@
     ([exec f]
       (let [fut (.submit
                   ^java.util.concurrent.ExecutorService exec
+                  ^java.util.concurrent.Callable
                   ((deref #'clojure.core/binding-conveyor-fn) f))]
         (reify
           clojure.lang.IPending
@@ -830,9 +861,9 @@
         (mapv
           (fn fn__9238
             ([p1__9237#]
-              (.submit
-                ^java.util.concurrent.ExecutorService exec
-                (bound-fn [] (^clojure.lang.IFn f p1__9237#)))))
+              (let [^java.util.concurrent.Callable task
+                    (bound-fn [] (^clojure.lang.IFn f p1__9237#))]
+                (.submit ^java.util.concurrent.ExecutorService exec task))))
           coll))))
   (defn distinct-by
     ([f coll]

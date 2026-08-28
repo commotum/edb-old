@@ -232,20 +232,20 @@
   (defn use-array-cache? ([] (deref datomic.index/array-cache-ref)))
   (defn get-dir-node
     ([root ridx lookup cache?]
-      (let [k (aget (.-dirids ^datomic.index.RootNode root) (unchecked-int ridx))
+      (let [k (aget ^"[Ljava.lang.Object;" (.-dirids ^datomic.index.RootNode root) (unchecked-int ridx))
             ac (datomic.index/use-array-cache?)]
         (io-stats/inc! :dir)
         (io-trace/note! k :dir)
         (or
-          (when ac (aget (.-dirs ^datomic.index.RootNode root) (unchecked-int ridx)))
+          (when ac (aget ^"[Ljava.lang.Object;" (.-dirs ^datomic.index.RootNode root) (unchecked-int ridx)))
           (let [dir (common/getx
                       lookup
-                      (aget (.-dirids ^datomic.index.RootNode root) (unchecked-int ridx)))]
+                      (aget ^"[Ljava.lang.Object;" (.-dirids ^datomic.index.RootNode root) (unchecked-int ridx)))]
             (let [and__5236__auto__ ac]
               (when and__5236__auto__
                 (let [and__5236__auto__ cache?]
                   (when and__5236__auto__
-                    (aset (.-dirs ^datomic.index.RootNode root) (unchecked-int ridx) dir)))))
+                    (aset ^"[Ljava.lang.Object;" (.-dirs ^datomic.index.RootNode root) (unchecked-int ridx) dir)))))
             dir)))))
   (defonce ITreeIter {})
   (defprotocol ITreeIter (seg+item-seq [iter]) (seg-seq [iter]) (dir-seq [iter]))
@@ -278,7 +278,7 @@
                               seg
                               (common/getx
                                 lookup
-                                (aget (.-segids ^datomic.index.DirNode dir) (int didx))))
+                                (aget ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode dir) (int didx))))
                             (set!
                               sidx
                               (int
@@ -302,7 +302,7 @@
                               seg
                               (common/getx
                                 lookup
-                                (aget (.-segids ^datomic.index.DirNode dir) (int didx))))
+                                (aget ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode dir) (int didx))))
                             (set!
                               sidx
                               (int
@@ -343,7 +343,7 @@
                                                                                      ^datomic.index.DirNode dir))))
                                                                              (let 
                                                                                [k
-                                                                                (aget
+                                                                                (aget ^"[Ljava.lang.Object;"
                                                                                   (.-segids
                                                                                     ^datomic.index.DirNode dir)
                                                                                   (int didx))]
@@ -358,7 +358,7 @@
                                                                          seg
                                                                          (common/getx
                                                                            lookup
-                                                                           (aget
+                                                                           (aget ^"[Ljava.lang.Object;"
                                                                              (.-segids
                                                                                ^datomic.index.DirNode dir)
                                                                              (int didx))))
@@ -388,7 +388,7 @@
                                                                            seg
                                                                            (common/getx
                                                                              lookup
-                                                                             (aget
+                                                                             (aget ^"[Ljava.lang.Object;"
                                                                                (.-segids
                                                                                  ^datomic.index.DirNode dir)
                                                                                (int didx))))
@@ -481,7 +481,7 @@
                                                                                                          (unchecked-int
                                                                                                            ^java.lang.Number di)),
                                                                                                        :seg
-                                                                                                       (aget
+                                                                                                       (aget ^"[Ljava.lang.Object;"
                                                                                                          (.-segids
                                                                                                            ^datomic.index.DirNode d)
                                                                                                          (unchecked-int
@@ -489,7 +489,7 @@
                                                                                                        :count
                                                                                                        (java.lang.Integer/valueOf
                                                                                                          (int
-                                                                                                           (aget
+                                                                                                           (aget ^ints
                                                                                                              (.-counts
                                                                                                                ^datomic.index.DirNode d)
                                                                                                              (unchecked-int
@@ -537,7 +537,7 @@
                                                                                                (unchecked-int
                                                                                                  ^java.lang.Number di)),
                                                                                              :seg
-                                                                                             (aget
+                                                                                             (aget ^"[Ljava.lang.Object;"
                                                                                                (.-segids
                                                                                                  ^datomic.index.DirNode d)
                                                                                                (unchecked-int
@@ -545,8 +545,8 @@
                                                                                              :count
                                                                                              (java.lang.Integer/valueOf
                                                                                                (int
-                                                                                                 (aget
-                                                                                                   (.-counts
+                                                                                                (aget ^ints
+                                                                                                  (.-counts
                                                                                                      ^datomic.index.DirNode d)
                                                                                                    (unchecked-int
                                                                                                      di)))),
@@ -900,10 +900,10 @@
      datomic.index.IBinarySearch
      (^long compare
        [this ^datomic.db.Datum x ^datomic.index.TransposedData ys ^long i]
-       (.longValue
-         (let [eai (bit-shift-left i 1)
-               a (aget (.-eas ^datomic.index.TransposedData ys) (inc eai))
-               e (aget (.-eas ^datomic.index.TransposedData ys) eai)]
+       (let [^java.lang.Number ret
+             (let [eai (bit-shift-left i 1)
+               a (aget ^longs (.-eas ^datomic.index.TransposedData ys) (inc eai))
+               e (aget ^longs (.-eas ^datomic.index.TransposedData ys) eai)]
            (cond
              (< (.getE ^datomic.db.Datum x) e) -1
              (> (.getE ^datomic.db.Datum x) e) 1
@@ -925,7 +925,8 @@
                            (.isAssertion ^datomic.db.Datum x)
                            (.isAssertion ^datomic.index.TransposedData ys (unchecked-int i))) 0
                          (.isAssertion ^datomic.db.Datum x) -1
-                         :else (do 1))))))))
+                         :else (do 1))))))]
+         (.longValue ret)))
      (^long search
        [this ^datomic.index.TransposedData tdata k]
        (loop [low 0 high (dec (.size ^datomic.index.TransposedData tdata))]
@@ -944,10 +945,10 @@
      datomic.index.IBinarySearch
      (^long compare
        [this ^datomic.db.Datum x ^datomic.index.TransposedData ys ^long i]
-       (.longValue
-         (let [eai (bit-shift-left i 1)
-               a (aget (.-eas ^datomic.index.TransposedData ys) (inc eai))
-               e (aget (.-eas ^datomic.index.TransposedData ys) eai)]
+       (let [^java.lang.Number ret
+             (let [eai (bit-shift-left i 1)
+               a (aget ^longs (.-eas ^datomic.index.TransposedData ys) (inc eai))
+               e (aget ^longs (.-eas ^datomic.index.TransposedData ys) eai)]
            (cond
              (< (.getA ^datomic.db.Datum x) a) -1
              (> (.getA ^datomic.db.Datum x) a) 1
@@ -969,7 +970,8 @@
                            (.isAssertion ^datomic.db.Datum x)
                            (.isAssertion ^datomic.index.TransposedData ys (unchecked-int i))) 0
                          (.isAssertion ^datomic.db.Datum x) -1
-                         :else (do 1))))))))
+                         :else (do 1))))))]
+         (.longValue ret)))
      (^long search
        [this ^datomic.index.TransposedData tdata k]
        (loop [low 0 high (dec (.size ^datomic.index.TransposedData tdata))]
@@ -988,10 +990,10 @@
      datomic.index.IBinarySearch
      (^long compare
        [this ^datomic.db.Datum x ^datomic.index.TransposedData ys ^long i]
-       (.longValue
-         (let [eai (bit-shift-left i 1)
-               a (aget (.-eas ^datomic.index.TransposedData ys) (inc eai))
-               e (aget (.-eas ^datomic.index.TransposedData ys) eai)]
+       (let [^java.lang.Number ret
+             (let [eai (bit-shift-left i 1)
+               a (aget ^longs (.-eas ^datomic.index.TransposedData ys) (inc eai))
+               e (aget ^longs (.-eas ^datomic.index.TransposedData ys) eai)]
            (cond
              (< (.getA ^datomic.db.Datum x) a) -1
              (> (.getA ^datomic.db.Datum x) a) 1
@@ -1013,7 +1015,8 @@
                            (.isAssertion ^datomic.db.Datum x)
                            (.isAssertion ^datomic.index.TransposedData ys (unchecked-int i))) 0
                          (.isAssertion ^datomic.db.Datum x) -1
-                         :else (do 1))))))))
+                         :else (do 1))))))]
+         (.longValue ret)))
      (^long search
        [this ^datomic.index.TransposedData tdata k]
        (loop [low 0 high (dec (.size ^datomic.index.TransposedData tdata))]
@@ -1032,13 +1035,13 @@
      datomic.index.IBinarySearch
      (^long compare
        [this ^datomic.db.Datum x ^datomic.index.TransposedData ys ^long i]
-       (.longValue
-         (let [c (common/compare
+       (let [^java.lang.Number ret
+             (let [c (common/compare
                    (.getV ^datomic.db.Datum x)
                    (.getV ^datomic.index.TransposedData ys (unchecked-int i)))
                eai (bit-shift-left i 1)
-               a (aget (.-eas ^datomic.index.TransposedData ys) (inc eai))
-               e (aget (.-eas ^datomic.index.TransposedData ys) eai)]
+               a (aget ^longs (.-eas ^datomic.index.TransposedData ys) (inc eai))
+               e (aget ^longs (.-eas ^datomic.index.TransposedData ys) eai)]
            (cond
              (not (zero? c)) (long c)
              (< (.getA ^datomic.db.Datum x) a) -1
@@ -1055,7 +1058,8 @@
                (.isAssertion ^datomic.db.Datum x)
                (.isAssertion ^datomic.index.TransposedData ys (unchecked-int i))) 0
              (.isAssertion ^datomic.db.Datum x) -1
-             :else (do 1)))))
+             :else (do 1)))]
+         (.longValue ret)))
      (^long search
        [this ^datomic.index.TransposedData tdata k]
        (loop [low 0 high (dec (.size ^datomic.index.TransposedData tdata))]
@@ -1101,8 +1105,8 @@
       *ns*))
   (defn indexed-binary-search
     (^long [tdata k cmpi]
-      (.longValue
-        (loop [low 0 high (dec (.size ^datomic.index.TransposedData tdata))]
+      (let [^java.lang.Number ret
+            (loop [low 0 high (dec (.size ^datomic.index.TransposedData tdata))]
           (if (<= low high)
             (let [mid (quot (+ low high) 2)
                   c (.compare
@@ -1114,7 +1118,8 @@
                 (> c 0) (recur (inc mid) high)
                 (< c 0) (recur low (dec mid))
                 :else (do (long mid))))
-            (long (- (inc low))))))))
+            (long (- (inc low)))))]
+        (.longValue ret))))
   (defn ibtree-search
     (^long [coll k cmp]
       (let [idx (.search ^datomic.index.IBinarySearch cmp ^datomic.index.TransposedData coll k)]
@@ -1125,7 +1130,8 @@
       {:private true,
        :arglists
        (clojure.core/list
-         (.withMeta ['coll 'k (.withMeta 'cmp {:tag 'IBinarySearch})] {:tag 'long})),
+         (let [^clojure.lang.IObj arglist ['coll 'k (.withMeta 'cmp {:tag 'IBinarySearch})]]
+           (.withMeta arglist {:tag 'long}))),
        :column 1}
       :name
       'ibtree-search
@@ -1160,20 +1166,20 @@
       [this k]
       (do
         (io-stats/using-index! order)
-        (when (> (alength (.-dirids ^datomic.index.RootNode root)) 0)
+        (when (> (alength ^"[Ljava.lang.Object;" (.-dirids ^datomic.index.RootNode root)) 0)
           (let [ridx (datomic.index/ibtree-search (.-keydata ^datomic.index.RootNode root) k cmpi)
                 dir (datomic.index/get-dir-node root (long ridx) lookup true)]
-            (when (> (alength (.-segids ^datomic.index.DirNode dir)) 0)
+            (when (> (alength ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode dir)) 0)
               (let [didx (datomic.index/ibtree-search
                            (.-keydata ^datomic.index.DirNode dir)
                            k
                            cmpi)
-                    segk (aget (.-segids ^datomic.index.DirNode dir) (int didx))
+                    segk (aget ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode dir) (int didx))
                     _ (io-trace/note! segk order)
                     ac (datomic.index/use-array-cache?)
                     seg (or
                           (when ac
-                            (let [seg (aget (.-segs ^datomic.index.DirNode dir) (int didx))
+                            (let [seg (aget ^"[Ljava.lang.Object;" (.-segs ^datomic.index.DirNode dir) (int didx))
                                   temp__5457__auto__ (and seg (.get ^java.lang.ref.Reference seg))]
                               (when temp__5457__auto__
                                 (let [ret temp__5457__auto__]
@@ -1181,15 +1187,15 @@
                                   ret))))
                           (let [seg (common/getx
                                       lookup
-                                      (aget (.-segids ^datomic.index.DirNode dir) (int didx)))]
+                                      (aget ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode dir) (int didx)))]
                             (when ac
-                              (aset
+                              (aset ^"[Ljava.lang.Object;"
                                 (.-segs ^datomic.index.DirNode dir)
                                 (int didx)
                                 (java.lang.ref.WeakReference. seg)))
                             seg))
-                    doff (aget (.-offsets ^datomic.index.DirNode dir) didx)
-                    dcount (aget (.-counts ^datomic.index.DirNode dir) didx)
+                    doff (aget ^ints (.-offsets ^datomic.index.DirNode dir) didx)
+                    dcount (aget ^ints (.-counts ^datomic.index.DirNode dir) didx)
                     sidx (datomic.index/ibinary-search seg k cmpi)]
                 (if sidx
                   (datomic.index.TreeIter.
@@ -1213,7 +1219,7 @@
       [this]
       (do
         (io-stats/using-index! order)
-        (when (> (alength (.-dirids ^datomic.index.RootNode root)) 0)
+        (when (> (alength ^"[Ljava.lang.Object;" (.-dirids ^datomic.index.RootNode root)) 0)
           (let [dir (datomic.index/get-dir-node root 0 lookup false)]
             (when (> (count (.-segids ^datomic.index.DirNode dir)) 0)
               (datomic.index.TreeIter.
@@ -1250,15 +1256,17 @@
                     (unchecked-int ^java.lang.Number segidx)))))))))
     (^long longCount
       [this]
-      (.longValue (or (deref cached_count) (reset! cached_count (reduce + (map :count this))))))
+      (let [^java.lang.Number ret
+            (or (deref cached_count) (reset! cached_count (reduce + (map :count this))))]
+        (.longValue ret)))
     (seek-seg
       [this k]
-      (when (> (alength (.-dirids ^datomic.index.RootNode root)) 0)
+      (when (> (alength ^"[Ljava.lang.Object;" (.-dirids ^datomic.index.RootNode root)) 0)
         (let [ridx (datomic.index/ibtree-search (.-keydata ^datomic.index.RootNode root) k cmpi)
               dir (datomic.index/get-dir-node root (long ridx) lookup true)]
-          (when (> (alength (.-segids ^datomic.index.DirNode dir)) 0)
+          (when (> (alength ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode dir)) 0)
             (let [didx (datomic.index/ibtree-search (.-keydata ^datomic.index.DirNode dir) k cmpi)]
-              (aget (.-segids ^datomic.index.DirNode dir) (int didx)))))))
+              (aget ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode dir) (int didx)))))))
     (^clojure.lang.ISeq seq
       [this]
       (seq
@@ -1326,7 +1334,7 @@
                                                                                                      (unchecked-int
                                                                                                        ^java.lang.Number di)),
                                                                                                    :seg
-                                                                                                   (aget
+                                                                                                   (aget ^"[Ljava.lang.Object;"
                                                                                                      (.-segids
                                                                                                        ^datomic.index.DirNode d)
                                                                                                      (unchecked-int
@@ -1334,8 +1342,8 @@
                                                                                                    :count
                                                                                                    (java.lang.Integer/valueOf
                                                                                                      (int
-                                                                                                       (aget
-                                                                                                         (.-counts
+                                                                                                      (aget ^ints
+                                                                                                        (.-counts
                                                                                                            ^datomic.index.DirNode d)
                                                                                                          (unchecked-int
                                                                                                            di))))})
@@ -1365,7 +1373,7 @@
                                                                                              (unchecked-int
                                                                                                ^java.lang.Number di)),
                                                                                            :seg
-                                                                                           (aget
+                                                                                           (aget ^"[Ljava.lang.Object;"
                                                                                              (.-segids
                                                                                                ^datomic.index.DirNode d)
                                                                                              (unchecked-int
@@ -1373,7 +1381,7 @@
                                                                                            :count
                                                                                            (java.lang.Integer/valueOf
                                                                                              (int
-                                                                                               (aget
+                                                                                               (aget ^ints
                                                                                                  (.-counts
                                                                                                    ^datomic.index.DirNode d)
                                                                                                  (unchecked-int
@@ -1784,13 +1792,14 @@
         (when temp__5457__auto__ (let [k temp__5457__auto__] (cluster/val-key->uuid k))))))
   (defn valid-version
     (^long [root_map]
-      (.longValue
-        (let [version (or (:version root_map) 1)]
+      (let [^java.lang.Number ret
+            (let [version (or (:version root_map) 1)]
           (when-not (contains? #{1 2} version)
             (error/state
               :db.error/index-version
               (str "This version of Datomic cannot read index version " version)))
-          version))))
+              version)]
+        (.longValue ret))))
   (defn version-root-key
     ([^long version k]
       (when-not (contains? #{:eavt-main :aevt-main :raet-main :avet-main} k)
@@ -2222,7 +2231,7 @@
     ([db data]
       (when data
         (let [d (first data)
-              nohist (.-noHistory
+              nohist (.-noHistory ^datomic.db.Attribute
                        (db/attribute
                          db
                          (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))))]
@@ -2252,7 +2261,7 @@
             (let [nd (next data)]
               (lazy-seq (cons d (datomic.index/separating-retractions db retref nd))))
             (let [n (fnext data)
-                  nohist (.-noHistory
+                  nohist (.-noHistory ^datomic.db.Attribute
                            (db/attribute
                              db
                              (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))))]
@@ -2905,7 +2914,7 @@
                         (reduce
                           (fn fn__15465
                             ([ret i]
-                              (let [segid (aget
+                              (let [segid (aget ^"[Ljava.lang.Object;"
                                             (.-segids ^datomic.index.DirNode dir)
                                             (unchecked-int i))]
                                 (cond
@@ -2940,20 +2949,20 @@
                                           (conj
                                             ret
                                             {:key
-                                             (.get
+                                             (.get ^java.util.List
                                                (.-keydata ^datomic.index.DirNode dir)
                                                (unchecked-int ^java.lang.Number i)),
                                              :segid segid,
                                              :offset
                                              (java.lang.Integer/valueOf
                                                (int
-                                                 (aget
+                                                 (aget ^ints
                                                    (.-offsets ^datomic.index.DirNode dir)
                                                    (unchecked-int i)))),
                                              :count
                                              (java.lang.Integer/valueOf
                                                (int
-                                                 (aget
+                                                 (aget ^ints
                                                    (.-counts ^datomic.index.DirNode dir)
                                                    (unchecked-int i))))}))))))
                           []
@@ -3366,7 +3375,7 @@
               (when (.isWarnEnabled ^org.slf4j.Logger logger)
                 (.warn
                   ^org.slf4j.Logger logger
-                  (logger/process "merge-one-index failed")
+                  ^java.lang.String (logger/process "merge-one-index failed")
                   ^java.lang.Throwable ex)
                 (logger/caused-by logger ex))
               nil)
@@ -3495,9 +3504,9 @@
                        ([attrid]
                          (let [main_aevt_datoms (datomic.index/attr-datoms
                                                   db
-                                                  (.-aevt (.-index ^datomic.db.Db db))
+                                                  (.-aevt ^datomic.db.IndexSet (.-index ^datomic.db.Db db))
                                                   attrid)
-                               mid_aevt_datoms (let [temp__5457__auto__ (.-aevt
+                               mid_aevt_datoms (let [temp__5457__auto__ (.-aevt ^datomic.db.IndexSet
                                                                           (.-mid-index
                                                                             ^datomic.db.Db db))]
                                                  (when temp__5457__auto__
@@ -3512,7 +3521,7 @@
                                                main_aevt_datoms
                                                mid_aevt_datoms)
                                              main_aevt_datoms)
-                               hist_aevt_datoms (let [temp__5457__auto__ (.-aevt
+                               hist_aevt_datoms (let [temp__5457__auto__ (.-aevt ^datomic.db.IndexSet
                                                                            (.-history
                                                                              ^datomic.db.Db db))]
                                                   (when temp__5457__auto__
@@ -3644,7 +3653,7 @@
                      (reduce
                        (fn fn__15589
                          ([aids d]
-                           (if (.-needsAVET
+                           (if (.-needsAVET ^datomic.db.Attribute
                                  (db/attribute db (long (.getE ^datomic.impl.db.IDatum d))))
                              aids
                              (conj! aids (long (.getE ^datomic.impl.db.IDatum d))))))
@@ -3925,11 +3934,11 @@
       (or
         (when index
           (let [root (.-root ^datomic.index.Index index)
-                n_dirs (alength (.-dirids ^datomic.index.RootNode root))]
+                n_dirs (alength ^"[Ljava.lang.Object;" (.-dirids ^datomic.index.RootNode root))]
             (when-not (= n_dirs 0)
               (let [last_idx (dec n_dirs)
                     last_dir (datomic.index/get-dir-node root (long last_idx) olookup true)
-                    last_dir_n_segs (alength (.-segids ^datomic.index.DirNode last_dir))]
+                    last_dir_n_segs (alength ^"[Ljava.lang.Object;" (.-segids ^datomic.index.DirNode last_dir))]
                 (+ (* part_size last_idx) last_dir_n_segs)))))
         0)))
   (defn stg-index-size
@@ -4057,7 +4066,7 @@
       (let [temp__5457__auto__ (some-> db (^clojure.lang.IFn tier) (^clojure.lang.IFn sort))]
         (when temp__5457__auto__
           (let [idx temp__5457__auto__
-                G__15692 (some-> idx (.seek) (datomic.index/seg+item-seq))
+                G__15692 (some-> ^datomic.btset.IDataSet idx (.seek) (datomic.index/seg+item-seq))
                 vec__15693 G__15692
                 seq__15694 (seq vec__15693)
                 first__15695 (first seq__15694)
@@ -4758,7 +4767,7 @@
                                                                     olookup
                                                                     (map
                                                                       :key
-                                                                      (.dir-seq
+                                                                      (.dir-seq ^datomic.index.TreeIter
                                                                         (.seek
                                                                           ^datomic.index.Index mid_idx)))
                                                                     main_idx
@@ -4818,7 +4827,7 @@
                                                                 (long n_segs)
                                                                 (map
                                                                   :seg
-                                                                  (.dir-seq
+                                                                  (.dir-seq ^datomic.index.TreeIter
                                                                     (.seek
                                                                       ^datomic.index.Index mid_idx
                                                                       start_key))))
@@ -5082,9 +5091,9 @@
                          :eavt-hist
                          (constantly 42)
                          (datomic.index/dir-partition-size :eavt)
-                         (.-eavt (.-indexing ^datomic.db.Db db))
-                         (.-eavt (.-mid-index ^datomic.db.Db db))
-                         (.-eavt (.-index ^datomic.db.Db db))
+                         (.-eavt ^datomic.db.IndexSet (.-indexing ^datomic.db.Db db))
+                         (.-eavt ^datomic.db.IndexSet (.-mid-index ^datomic.db.Db db))
+                         (.-eavt ^datomic.db.IndexSet (.-index ^datomic.db.Db db))
                          db/eavt-cmp
                          datomic.index/eavt-cmpi
                          datomic.index/common-write-handlers
@@ -5107,9 +5116,9 @@
                              (java.lang.Integer/valueOf
                                (int (.getA ^datomic.impl.db.IDatum p1__15737#)))))
                          (datomic.index/dir-partition-size :avet)
-                         (.-avet (.-indexing ^datomic.db.Db db))
-                         (.-avet (.-mid-index ^datomic.db.Db db))
-                         (.-avet (.-index ^datomic.db.Db db))
+                         (.-avet ^datomic.db.IndexSet (.-indexing ^datomic.db.Db db))
+                         (.-avet ^datomic.db.IndexSet (.-mid-index ^datomic.db.Db db))
+                         (.-avet ^datomic.db.IndexSet (.-index ^datomic.db.Db db))
                          db/avet-cmp
                          datomic.index/avet-cmpi
                          datomic.index/common-write-handlers
@@ -5132,9 +5141,9 @@
                              (java.lang.Integer/valueOf
                                (int (.getA ^datomic.impl.db.IDatum p1__15738#)))))
                          (datomic.index/dir-partition-size :aevt)
-                         (.-aevt (.-indexing ^datomic.db.Db db))
-                         (.-aevt (.-mid-index ^datomic.db.Db db))
-                         (.-aevt (.-index ^datomic.db.Db db))
+                         (.-aevt ^datomic.db.IndexSet (.-indexing ^datomic.db.Db db))
+                         (.-aevt ^datomic.db.IndexSet (.-mid-index ^datomic.db.Db db))
+                         (.-aevt ^datomic.db.IndexSet (.-index ^datomic.db.Db db))
                          db/aevt-cmp
                          datomic.index/aevt-cmpi
                          datomic.index/common-write-handlers
@@ -5162,7 +5171,7 @@
                                          cstore
                                          olookup
                                          db
-                                         (.-aevt (.-indexing ^datomic.db.Db db))
+                                         (.-aevt ^datomic.db.IndexSet (.-indexing ^datomic.db.Db db))
                                          (map
                                            (fn fn__15858
                                              ([p1__15740#] (db/resolve-id db p1__15740#)))
@@ -5189,9 +5198,9 @@
                          :raet-hist
                          (constantly 42)
                          (datomic.index/dir-partition-size :raet)
-                         (.-raet (.-indexing ^datomic.db.Db db))
-                         (.-raet (.-mid-index ^datomic.db.Db db))
-                         (.-raet (.-index ^datomic.db.Db db))
+                         (.-raet ^datomic.db.IndexSet (.-indexing ^datomic.db.Db db))
+                         (.-raet ^datomic.db.IndexSet (.-mid-index ^datomic.db.Db db))
+                         (.-raet ^datomic.db.IndexSet (.-index ^datomic.db.Db db))
                          db/raet-cmp
                          datomic.index/raet-cmpi
                          datomic.index/common-write-handlers
@@ -5425,7 +5434,7 @@
               (when (.isWarnEnabled ^org.slf4j.Logger logger)
                 (.warn
                   ^org.slf4j.Logger logger
-                  (logger/process "merge-db failed")
+                  ^java.lang.String (logger/process "merge-db failed")
                   ^java.lang.Throwable ex)
                 (logger/caused-by logger ex))
               nil)

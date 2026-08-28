@@ -311,12 +311,13 @@
   (defn get-eidx (^long [datum] (datomic.db/eid->eidx (.getE ^datomic.impl.db.IDatum datum))))
   (defn implicit-part
     (^long [^long id]
-      (.longValue
-        (if (and (< id 524288) (>= id 0))
+      (let [^java.lang.Number ret
+            (if (and (< id 524288) (>= id 0))
           (long (datomic.db/make-eid (bit-or id 524288) 0))
           (error/arg
             :db.error/implicit-part-out-of-range
-            (str (long id) " out of implicit part range"))))))
+            (str (long id) " out of implicit part range")))]
+        (.longValue ret))))
   (defn implicit-part-id
     ([^long part]
       (let [partbits (datomic.db/eid->part part)]
@@ -330,7 +331,8 @@
       {:private true,
        :arglists
        (clojure.core/list
-         (.withMeta [(.withMeta 'part {:tag 'long}) (.withMeta 'id {:tag 'long})] {:tag 'long})),
+         (let [^clojure.lang.IObj arglist [(.withMeta 'part {:tag 'long}) (.withMeta 'id {:tag 'long})]]
+           (.withMeta arglist {:tag 'long}))),
        :column 1}
       :name
       'make-tempid
@@ -639,8 +641,8 @@
      java.util.Comparator
      (^int compare
        [this x y]
-       (.intValue
-         (let [x x y y]
+       (let [^java.lang.Number ret
+             (let [x x y y]
            (cond
              (< (.getE ^datomic.impl.db.IDatum x) (.getE ^datomic.impl.db.IDatum y)) -1
              (> (.getE ^datomic.impl.db.IDatum x) (.getE ^datomic.impl.db.IDatum y)) 1
@@ -654,14 +656,15 @@
                          (not (zero? c)) (long c)
                          (> (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) -1
                          (< (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) 1
-                         :else (do (datomic.db/assertion-policy-compare x y)))))))))))
+                         :else (do (datomic.db/assertion-policy-compare x y)))))))]
+         (.intValue ret)))))
   (def avet-cmp
    (reify
      java.util.Comparator
      (^int compare
        [this x y]
-       (.intValue
-         (let [x x y y]
+       (let [^java.lang.Number ret
+             (let [x x y y]
            (cond
              (< (.getA ^datomic.impl.db.IDatum x) (.getA ^datomic.impl.db.IDatum y)) -1
              (> (.getA ^datomic.impl.db.IDatum x) (.getA ^datomic.impl.db.IDatum y)) 1
@@ -675,14 +678,15 @@
                          (> (.getE ^datomic.impl.db.IDatum x) (.getE ^datomic.impl.db.IDatum y)) 1
                          (> (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) -1
                          (< (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) 1
-                         :else (do (datomic.db/assertion-policy-compare x y)))))))))))
+                         :else (do (datomic.db/assertion-policy-compare x y)))))))]
+         (.intValue ret)))))
   (def aevt-cmp
    (reify
      java.util.Comparator
      (^int compare
        [this x y]
-       (.intValue
-         (let [x x y y]
+       (let [^java.lang.Number ret
+             (let [x x y y]
            (cond
              (< (.getA ^datomic.impl.db.IDatum x) (.getA ^datomic.impl.db.IDatum y)) -1
              (> (.getA ^datomic.impl.db.IDatum x) (.getA ^datomic.impl.db.IDatum y)) 1
@@ -696,14 +700,15 @@
                          (not (zero? c)) (long c)
                          (> (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) -1
                          (< (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) 1
-                         :else (do (datomic.db/assertion-policy-compare x y)))))))))))
+                         :else (do (datomic.db/assertion-policy-compare x y)))))))]
+         (.intValue ret)))))
   (def raet-cmp
    (reify
      java.util.Comparator
      (^int compare
        [this x y]
-       (.intValue
-         (let [x x
+       (let [^java.lang.Number ret
+             (let [x x
                y y
                c (common/compare
                    (.getV ^datomic.impl.db.IDatum x)
@@ -716,7 +721,8 @@
              (> (.getE ^datomic.impl.db.IDatum x) (.getE ^datomic.impl.db.IDatum y)) 1
              (> (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) -1
              (< (.getT ^datomic.impl.db.IDatum x) (.getT ^datomic.impl.db.IDatum y)) 1
-             :else (do (datomic.db/assertion-policy-compare x y))))))))
+             :else (do (datomic.db/assertion-policy-compare x y))))]
+         (.intValue ret)))))
   (defn asserting-datum
     ([^long e ^long a v ^long t]
       (datomic.db.Datum. (long e) (unchecked-int a) v (long (bit-or (bit-shift-left t 1) 1)))))
@@ -865,10 +871,11 @@
             (datomic.db/datom-error-desc db (drop 1 procargs)))
           {:entity x, :datom (datomic.db/datom-error-desc db (drop 1 procargs))})))
     (^long [db x]
-      (.longValue
-        (or
-          (datomic.db/resolve-id db x)
-          (error/arg :db.error/not-an-entity (str "Unable to resolve entity: " x) {:entity x})))))
+      (let [^java.lang.Number ret
+            (or
+              (datomic.db/resolve-id db x)
+              (error/arg :db.error/not-an-entity (str "Unable to resolve entity: " x) {:entity x}))]
+        (.longValue ret))))
   (defn require-tuple-ids
     ([db attr tup]
       (if (or (nil? attr) (nil? tup))
@@ -933,7 +940,7 @@
     {:local-id
      (fn fn__12629
        ([this db procargs local_tempids]
-         (if (.startsWith this ":")
+         (if (.startsWith ^java.lang.String this ":")
            (datomic.db/local-id (datomic.db/to-kw this) db procargs local_tempids)
            (let [temp__5455__auto__ (get local_tempids this)]
              (if temp__5455__auto__
@@ -1069,12 +1076,12 @@
     [attr vtype_kw]
     clojure.lang.ILookup
     datomic.Attribute
-    (^boolean hasFulltext [this] (.booleanValue (:fulltext this)))
-    (^boolean hasNoHistory [this] (.booleanValue (:no-history this)))
-    (^boolean hasAVET [this] (.booleanValue (:has-avet this)))
-    (^boolean isIndexed [this] (.booleanValue (:indexed this)))
+    (^boolean hasFulltext [this] (.booleanValue ^java.lang.Boolean (:fulltext this)))
+    (^boolean hasNoHistory [this] (.booleanValue ^java.lang.Boolean (:no-history this)))
+    (^boolean hasAVET [this] (.booleanValue ^java.lang.Boolean (:has-avet this)))
+    (^boolean isIndexed [this] (.booleanValue ^java.lang.Boolean (:indexed this)))
     (unique [this] (:unique this))
-    (^boolean isComponent [this] (.booleanValue (:is-component this)))
+    (^boolean isComponent [this] (.booleanValue ^java.lang.Boolean (:is-component this)))
     (cardinality [this] (:cardinality this))
     (valueType [this] (:value-type this))
     (ident [this] (:ident this))
@@ -1348,7 +1355,8 @@
       {:private true,
        :arglists
        (clojure.core/list
-         (.withMeta [(.withMeta 'cmp {:tag 'Comparator})] {:tag 'java.util.Comparator})),
+         (let [^clojure.lang.IObj arglist [(.withMeta 'cmp {:tag 'Comparator})]]
+           (.withMeta arglist {:tag 'java.util.Comparator}))),
        :column 1}
       :name
       'reverse-comparator
@@ -2020,7 +2028,7 @@
     ([db attr_id]
       (let [attr (let [G__13055 (datomic.db/resolve-id db attr_id)]
                    (when-not (nil? G__13055) (datomic.db/attribute db G__13055)))
-            type (let [G__13056 attr G__13056 (some-> G__13056 (.-vtypeid))]
+            type (let [G__13056 attr G__13056 (some-> ^datomic.db.Attribute G__13056 (.-vtypeid))]
                    (when-not (nil? G__13056) (.ident ^datomic.Database db G__13056)))]
         (when (and
                 (contains? datomic.db/tuple-value-types type)
@@ -2282,7 +2290,7 @@
                                                ([idx item]
                                                  (when (=
                                                          20
-                                                         (.-vtypeid
+                                                         (.-vtypeid ^datomic.db.Attribute
                                                            (datomic.db/require-attr db item)))
                                                    idx)))
                                              tupleAttrs)))]
@@ -2529,7 +2537,7 @@
       *ns*))
   (defn drop-avet
     ([db aid _ _]
-      (let [unique? (.-unique (datomic.db/attribute db aid))]
+      (let [unique? (.-unique ^datomic.db.Attribute (datomic.db/attribute db aid))]
         [(if unique?
            (datomic.db/set-element-fields db aid :index false)
            (datomic.db/set-element-fields db aid :index false :needsAVET false))])))
@@ -2543,7 +2551,7 @@
       *ns*))
   (defn drop-unique
     ([db aid _ _]
-      (let [indexed? (.-index (datomic.db/attribute db aid))]
+      (let [indexed? (.-index ^datomic.db.Attribute (datomic.db/attribute db aid))]
         [(if indexed?
            (datomic.db/set-element-fields db aid :unique nil)
            (datomic.db/set-element-fields db aid :unique nil :index false :needsAVET false))])))
@@ -2675,7 +2683,7 @@
   (defn attribute-seq ([db] (filter (partial instance? datomic.db.Attribute) (:elements db))))
   (defn add-avet
     ([db aid _ _]
-      (if (.-unique (datomic.db/attribute db aid))
+      (if (.-unique ^datomic.db.Attribute (datomic.db/attribute db aid))
         [(datomic.db/set-element-fields db aid :index true)]
         (let [avet (into
                      (:avet (:memidx db))
@@ -3083,7 +3091,7 @@
                                 (datomic.db/system-schema-datom? db existing)
                                 (or
                                   (=
-                                    (.-cardinality
+                                    (.-cardinality ^datomic.db.Attribute
                                       (datomic.db/attribute
                                         db
                                         (java.lang.Integer/valueOf (int a))))
@@ -3174,7 +3182,7 @@
       (let [eaomap (java.util.HashMap.)]
         (fn fn__13305
           ([d]
-            (if (= 35 (.-cardinality (datomic.db/attribute db (.a ^datomic.Datom d))))
+            (if (= 35 (.-cardinality ^datomic.db.Attribute (datomic.db/attribute db (.a ^datomic.Datom d))))
               (let [v (.put ^java.util.HashMap eaomap (datomic.db.EAOpof. d) d)]
                 (or (nil? v) (datomic.db/datoms-conflict db v d)))
               true))))))
@@ -3193,7 +3201,7 @@
           ([d]
             (if (and
                   (.added ^datomic.Datom d)
-                  (.-unique (datomic.db/attribute db (.a ^datomic.Datom d))))
+                  (.-unique ^datomic.db.Attribute (datomic.db/attribute db (.a ^datomic.Datom d))))
               (let [v (.put ^java.util.HashMap avmap (datomic.db.AVof. d) d)]
                 (or (nil? v) (datomic.db/datoms-conflict db v d)))
               true))))))
@@ -3360,7 +3368,7 @@
                                0
                                hook_attr
                                aid
-                               (.getT (first result)))))))
+                               (.getT ^datomic.impl.db.IDatum (first result)))))))
                      result
                      (sort (datomic.db/attrs-missing-hooks db result)))]
         (when check_installs?
@@ -4067,11 +4075,15 @@
               datomic.db/assertion?
               (iter/merge-iters
                 datomic.db/aevt-cmp
-                (.seek (.-aevt ^datomic.db.IndexSet index) (datomic.db/datum db :a 10))
-                (when (and (:mid-index db) (.-aevt (:mid-index db)))
-                  (.seek (.-aevt (:mid-index db)) (datomic.db/datum db :a 10)))
-                (when (and (:history db) (.-aevt (:history db)))
-                  (.seek (.-aevt (:history db)) (datomic.db/datum db :a 10))))))))))
+                (.seek ^datomic.btset.IDataSet (.-aevt ^datomic.db.IndexSet index) (datomic.db/datum db :a 10))
+                (when (and (:mid-index db) (.-aevt ^datomic.db.IndexSet (:mid-index db)))
+                  (.seek ^datomic.btset.IDataSet
+                    (.-aevt ^datomic.db.IndexSet (:mid-index db))
+                    (datomic.db/datum db :a 10)))
+                (when (and (:history db) (.-aevt ^datomic.db.IndexSet (:history db)))
+                  (.seek ^datomic.btset.IDataSet
+                    (.-aevt ^datomic.db.IndexSet (:history db))
+                    (datomic.db/datum db :a 10))))))))))
   (reset-meta!
     #'ident-setting-datoms
     (assoc
@@ -4101,12 +4113,14 @@
                                       datomic.db/assertion?
                                       (iter/merge-iters
                                         datomic.db/aevt-cmp
-                                        (.seek
+                                        (.seek ^datomic.btset.IDataSet
                                           (.-aevt ^datomic.db.IndexSet index)
                                           (datomic.db/datum db :a attrid))
-                                        (when (and (:mid-index db) (.-aevt (:mid-index db)))
-                                          (.seek
-                                            (.-aevt (:mid-index db))
+                                        (when (and
+                                                (:mid-index db)
+                                                (.-aevt ^datomic.db.IndexSet (:mid-index db)))
+                                          (.seek ^datomic.btset.IDataSet
+                                            (.-aevt ^datomic.db.IndexSet (:mid-index db))
                                             (datomic.db/datum db :a attrid)))))]
                           (if (and iter (= attrid (long (.getA (datomic.db/dget iter)))))
                             (recur
@@ -4157,11 +4171,11 @@
       {:private true,
        :arglists
        (clojure.core/list
-         (.withMeta
-           [(.withMeta 'nextT {:tag 'long})
-            (.withMeta 'index {:tag 'IndexSet})
-            (.withMeta 'mid-index {:tag 'IndexSet})]
-           {:tag 'long})),
+         (let [^clojure.lang.IObj arglist
+               [(.withMeta 'nextT {:tag 'long})
+                (.withMeta 'index {:tag 'IndexSet})
+                (.withMeta 'mid-index {:tag 'IndexSet})]]
+           (.withMeta arglist {:tag 'long}))),
        :column 1}
       :name
       'find-last-tx
@@ -4204,9 +4218,9 @@
                         (when-not (nil? G__13621) (.elementAt ^datomic.db.IDbImpl db G__13621)))
                     db
                     (:db-after
-                      (.with
+                      (.with ^datomic.Database
                         (assoc db :basisT -1 :nextT 0)
-                        (cons
+                        ^java.util.List (cons
                           #:db{:id (DbId/create {:idx -1000001, :part :db.part/tx}),
                                :txInstant epoch}
                           data)))))))
@@ -4564,7 +4578,7 @@
       (and
         (instance? java.util.Map v)
         (not (instance? datomic.db.DbId v))
-        (= 20 (.-vtypeid (datomic.db/attribute db attrid))))))
+        (= 20 (.-vtypeid ^datomic.db.Attribute (datomic.db/attribute db attrid))))))
   (defn normalize-map ([m] (if (associative? m) m (into {} m))))
   (reset-meta!
     #'normalize-map
@@ -4578,7 +4592,7 @@
   (defn has-unique-id?
     ([db emap]
       (let [unique_id? (fn unique_id_QMARK_
-                         ([p1__13692#] (= 38 (.-unique (datomic.db/require-attr db p1__13692#)))))]
+                         ([p1__13692#] (= 38 (.-unique ^datomic.db.Attribute (datomic.db/require-attr db p1__13692#)))))]
         (some
           (fn fn__13696 ([p1__13693#] (^clojure.lang.IFn unique_id? p1__13693#)))
           (keys emap)))))
@@ -4669,7 +4683,7 @@
                       db
                       nil
                       local_tempids)]
-        (when (.-isComponent (datomic.db/attribute db attrid))
+        (when (.-isComponent ^datomic.db.Attribute (datomic.db/attribute db attrid))
           (.matchPart ^datomic.db.AssignPartitions part_reqs childid parentid))
         (cons
           [:db/add parentid attrid childid]

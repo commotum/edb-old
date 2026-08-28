@@ -66,7 +66,9 @@
   (.setMacro #'pthread)
   (defn pfuture
     ([f exec]
-      (let [fut (.submit ^java.util.concurrent.ExecutorService exec (binding-conveyor-fn f))]
+      (let [fut (.submit
+                  ^java.util.concurrent.ExecutorService exec
+                  ^java.util.concurrent.Callable (binding-conveyor-fn f))]
         (reify
           clojure.lang.IBlockingDeref
           clojure.lang.IDeref
@@ -316,5 +318,5 @@
                      60
                      TimeUnit/SECONDS
                      (java.util.concurrent.SynchronousQueue.)
-                     (daemon-factory name))]
+                     ^java.util.concurrent.ThreadFactory (daemon-factory name))]
           (if metrics? (observable-thread-pool pool name) pool))))))

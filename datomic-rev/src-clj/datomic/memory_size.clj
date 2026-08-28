@@ -101,23 +101,21 @@
     java.lang.Object
     MemorySize
     {:memory-size
-     (fn fn__424
+       (fn fn__424
        ([o]
-         (let [cls (.getClass o)]
+         (let [cls (.getClass ^java.lang.Object o)]
            (if (.isArray ^java.lang.Class cls)
-             (do
-               (let [a o
-                     a__6200__auto__ a
-                     l__6201__auto__ (alength ^"[Ljava.lang.Object;" a__6200__auto__)]
-                 (loop [idx 0 ret 16]
-                   (if (< idx l__6201__auto__)
-                     (recur
-                       (inc (int idx))
-                       (+
-                         ret
-                         (max 8 (long (memory-size (aget ^"[Ljava.lang.Object;" a (int idx)))))))
-                     (long ret))))
-               nil)
+             (let [a o
+                   a__6200__auto__ a
+                   l__6201__auto__ (alength ^"[Ljava.lang.Object;" a__6200__auto__)]
+               (loop [idx 0 ret 16]
+                 (if (< idx l__6201__auto__)
+                   (recur
+                     (inc (int idx))
+                     (+
+                       ret
+                       (max 8 (long (memory-size (aget ^"[Ljava.lang.Object;" a (int idx)))))))
+                   (long ret))))
              (if (not (identical? cls java.lang.Object))
                (do (throw (java.lang.Error. (str "No size estimator for " cls))) nil)
                16)))))})

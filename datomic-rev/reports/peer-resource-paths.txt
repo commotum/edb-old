@@ -1,0 +1,10 @@
+META-INF/MANIFEST.MF
+META-INF/maven/com.datomic/peer/pom.xml
+com/datomic/core2/manifest.edn
+copyright
+data_readers.clj
+datomic/VERSION
+datomic/aws/instance-arch.edn
+datomic/aws/region-arch-ami.edn
+datomic/transactor-key.jks
+datomic/transactor-trust.jks

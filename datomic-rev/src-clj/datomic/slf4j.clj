@@ -386,7 +386,7 @@
       ([e]
         (let [logger (LoggerFactory/getLogger "datomic.slf4j") ex e]
           (when (.isWarnEnabled ^org.slf4j.Logger logger)
-            (.warn ^org.slf4j.Logger logger (process "Caught exception") ex)
+            (.warn ^org.slf4j.Logger logger ^java.lang.String (process "Caught exception") ex)
             (caused-by logger ex))
           nil))))
   (defn log-uncaught-exceptions
@@ -401,7 +401,7 @@
                 (when (.isWarnEnabled ^org.slf4j.Logger logger)
                   (.warn
                     ^org.slf4j.Logger logger
-                    (process "Uncaught exception")
+                    ^java.lang.String (process "Uncaught exception")
                     ^java.lang.Throwable ex)
                   (caused-by logger ex))
                 nil)

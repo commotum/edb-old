@@ -98,7 +98,7 @@
         (.array ^java.nio.ByteBuffer buff)
         (slurp-bytes buff))))
   (defn string->bbuf ([s] (ByteBuffer/wrap (.getBytes ^java.lang.String s "UTF-8"))))
-  (defn bbuf->string ([bb] (java.lang.String. (alias-buf-bytes bb) "UTF-8")))
+  (defn bbuf->string ([bb] (java.lang.String. ^bytes (alias-buf-bytes bb) "UTF-8")))
   (defn expand-byte-array
     ([buf valid_bytes new_length]
       (if (<= new_length (count buf))
@@ -435,7 +435,9 @@
       (<= 0 limit (java.lang.Integer/valueOf (int (.capacity ^java.nio.Buffer bbuf))))))
   (defn encode-base128 ([raw] (JavaByteUtil/to7Bit ^bytes raw)))
   (defn decode-base128 ([coded] (JavaByteUtil/to8Bit ^bytes coded)))
-  (defn bbuf->base128 ([bbuf] (java.lang.String. (encode-base128 (alias-buf-bytes bbuf)) "UTF-8")))
+  (defn bbuf->base128
+    ([bbuf]
+      (java.lang.String. ^bytes (encode-base128 (alias-buf-bytes bbuf)) "UTF-8")))
   (defn base128->bbuf
     ([s]
       (let [bytes (decode-base128 (.getBytes ^java.lang.String s "UTF-8"))]
@@ -503,7 +505,7 @@
       (long
         (.getValue
           (let [G__9369 (java.util.zip.CRC32.)]
-            (.update ^java.util.zip.Checksum G__9369 (alias-buf-bytes bbuf))
+            (.update ^java.util.zip.Checksum G__9369 ^bytes (alias-buf-bytes bbuf))
             G__9369)))))
   (defn describe-bbuf
     ([bbuf]

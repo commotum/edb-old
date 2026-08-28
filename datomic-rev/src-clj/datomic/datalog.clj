@@ -164,9 +164,10 @@
                 (recur
                   (inc i)
                   (if b
-                    (clojure.lang.Util/hashCombine
-                      (unchecked-int h)
-                      (int (clojure.lang.Util/hash (nth x (unchecked-int i)))))
+                    (long
+                      (clojure.lang.Util/hashCombine
+                        (unchecked-int h)
+                        (int (clojure.lang.Util/hash (nth x (unchecked-int i))))))
                     h)))
               (long h)))))))
   (defn hashyf
@@ -179,9 +180,12 @@
                 (recur
                   (inc i)
                   (if b
-                    (clojure.lang.Util/hashCombine
-                      (unchecked-int h)
-                      (int (clojure.lang.Util/hash (nth y (unchecked-int ^java.lang.Number b)))))
+                    (long
+                      (clojure.lang.Util/hashCombine
+                        (unchecked-int h)
+                        (int
+                          (clojure.lang.Util/hash
+                            (nth y (unchecked-int ^java.lang.Number b))))))
                     h)))
               (long h)))))))
   (defn partv
@@ -367,7 +371,7 @@
            :else (do
                    (error/arg
                      :db.error/invalid-data-source
-                     (str (.getClass xs) " is not a valid data source type.")
+                     (str (.getClass ^java.lang.Object xs) " is not a valid data source type.")
                      {:input xs}))))),
      :join-project-with
      (fn fn__18162
@@ -390,7 +394,7 @@
            :else (do
                    (error/arg
                      :db.error/invalid-data-source
-                     (str (.getClass xs) " is not a valid data source type.")
+                     (str (.getClass ^java.lang.Object xs) " is not a valid data source type.")
                      {:input xs})))))})
   (deftype DbRel [db isref iskey consts starts whiles])
   (clojure.core/import 'datomic.datalog.DbRel)
@@ -464,7 +468,7 @@
            (extrel-coll src consts)
            (error/arg
              :db.error/invalid-data-source
-             (str (.getClass src) " is not a valid data source type.")
+             (str (.getClass ^java.lang.Object src) " is not a valid data source type.")
              {:input src}))))})
   (extend
     datomic.db.Db
@@ -991,13 +995,14 @@
                                (recur
                                  (inc i)
                                  (if b
-                                   (clojure.lang.Util/hashCombine
-                                     (unchecked-int h)
-                                     (int
-                                       (clojure.lang.Util/hash
-                                         (^clojure.lang.IFn ident
-                                           (long i)
-                                           (nth x (unchecked-int i))))))
+                                   (long
+                                     (clojure.lang.Util/hashCombine
+                                       (unchecked-int h)
+                                       (int
+                                         (clojure.lang.Util/hash
+                                           (^clojure.lang.IFn ident
+                                             (long i)
+                                             (nth x (unchecked-int i)))))))
                                    h)))
                              (long h)))))
                hashy (fn hashy
@@ -1008,13 +1013,14 @@
                                (recur
                                  (inc i)
                                  (if b
-                                   (clojure.lang.Util/hashCombine
-                                     (unchecked-int h)
-                                     (int
-                                       (clojure.lang.Util/hash
-                                         (^clojure.lang.IFn ident
-                                           (long i)
-                                           (nth y (unchecked-int i))))))
+                                   (long
+                                     (clojure.lang.Util/hashCombine
+                                       (unchecked-int h)
+                                       (int
+                                         (clojure.lang.Util/hash
+                                           (^clojure.lang.IFn ident
+                                             (long i)
+                                             (nth y (unchecked-int i)))))))
                                    h)))
                              (long h)))))
                vec__18237 (let [ht (java.util.HashMap.)

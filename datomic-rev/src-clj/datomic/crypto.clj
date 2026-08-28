@@ -203,7 +203,7 @@
         (.limit
           ^java.nio.ByteBuffer result
           (int (+ (.limit ^java.nio.Buffer result) (hmac-length alg))))
-        (.put ^java.nio.ByteBuffer result (calc-hmac bbuf alg k))
+        (.put ^java.nio.ByteBuffer result ^bytes (calc-hmac bbuf alg k))
         (.flip ^java.nio.ByteBuffer result))))
   (defn validate-hmac
     ([bbuf alg k]
@@ -218,7 +218,7 @@
             buf_hmac (byte-array (hmac-length alg))
             input (.position (.duplicate ^java.nio.ByteBuffer bbuf) (int hmac_offset))]
         (.get ^java.nio.ByteBuffer input ^bytes buf_hmac)
-        (if (Arrays/equals ^bytes buf_hmac (calc-hmac result alg k))
+        (if (Arrays/equals ^bytes buf_hmac ^bytes (calc-hmac result alg k))
           result
           (do
             (throw
