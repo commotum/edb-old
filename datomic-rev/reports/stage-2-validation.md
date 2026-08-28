@@ -10,10 +10,11 @@ root publication, missing and unreadable segments, restore rejection,
 interrupted restore, incremental retry, exact logical recovery, and
 post-recovery writes.
 
-The complete retained post-Stage-4 run is
-`/tmp/datomic-stage2-stage4-final-v1`. Its summary
-records `stage.complete=true`, `fault-injection.included=true`, and
-`services.stopped=true`.
+The latest complete hardened adversarial final run is
+`/tmp/datomic-stage2-adversarial-final-v2`. Its summary records
+`stage.complete=true` and `fault-injection.included=true`; its run-status record
+has `services.stopped=true`. The directory is local, ephemeral run evidence,
+not durable repository content.
 
 ## Candidate and fixture boundary
 
@@ -38,9 +39,10 @@ entered the candidate classpath. It supplied the external transaction service
 required by the SQL peer protocol; this is evidence about the recovered peer,
 not evidence of a recovered transactor.
 
-The run copied and hash-recorded all origin-gate inputs and all nine executed
-harness files. Before touching a database it reran the artifact-origin gate and
-the test-storage self-test. The candidate origin, dependency set, Java runtime,
+The run copied and hash-recorded all origin-gate inputs and an exhaustive
+manifest of all 45 regular files under the shared scripts classpath root.
+Before touching a database it reran the artifact-origin gate and the
+test-storage self-test. The candidate origin, dependency set, Java runtime,
 PostgreSQL binaries, transactor fixture, ports, catalog names, and mutable paths
 are recorded in `config.properties` and `candidate-classpath.tsv`.
 
@@ -48,6 +50,15 @@ are recorded in `config.properties` and `candidate-classpath.tsv`.
 
 Five PostgreSQL catalogs began with zero `datomic_kvs` rows. The source and
 restore workloads then produced these results:
+
+The run-scoped source database identity was
+`stage2-source-2eb7e27d-833a-4f09-a3db-61e370f70985`. The t1, t2, and t3 source
+snapshots each gated on that exact unchanged identity, their exact basis
+(`1001`, `1066`, and `1099`), and `as-of-t=nil`. Full, incremental, and recovery
+backup roots carried the same database identity. Before each restored database
+was allowed to write, the candidate asserted the exact
+`[database-id basis-t as-of-t]` tuple for t1, t2, or t3; the three recorded
+restore tuples all have `as-of-t=nil`.
 
 | Case | Evidence |
 |---|---|
@@ -94,7 +105,7 @@ A normal incremental retry then copied 43, skipped 9, published exactly root
 ### Missing and unreadable leaves
 
 The harness deterministically selected the topology-independent leaf
-`values/00/6a90c08b-4392-46f8-a963-5dbceb33ed00`. Two complete disposable
+`values/01/6a90ed48-7c19-48e9-ab05-a823bb10ab01`. Two complete disposable
 backup copies were made. The selected leaf was moved out of one and replaced
 with an empty file in the other.
 
@@ -109,13 +120,14 @@ with an empty file in the other.
 
 ### Interrupted restore and recovery
 
-The interruption probe selected a different topology-independent leaf and
-withheld it only after observing copied progress. The first full restore copied
-48 values, injected the miss exactly once after copied count 5, and failed with
+The interruption probe selected the different topology-independent leaf
+`values/f9/6a90ed48-dbb7-4163-b9e7-8b5d58d140f9` and withheld it only after
+observing copied progress. The first full restore copied 48 values, injected
+the miss exactly once after copied count 4, and failed with
 `:restore/read-failed`. It did not return success.
 
 After worker progress quiesced, a clean incremental retry copied 4 values,
-reused 28, and returned `:succeeded`. A separate transactor was then started on
+skipped 9, and returned `:succeeded`. A separate transactor was then started on
 that recovered catalog. The candidate observed the exact t3 database identity,
 logical, datom, history, row count, and hashes before writing one sentinel. The
 write advanced basis `1099 -> 1132` and rows `128 -> 129` without altering the
@@ -165,15 +177,28 @@ not Datomic's proprietary `file:` adapter or public backup CLI.
 Run the complete gate in a new work directory with unused loopback ports:
 
 ```bash
+DATOMIC_HOME=${DATOMIC_HOME:-../../datomic/datomic-pro-1.0.7277}
+ARTIFACT=/tmp/datomic-stage-1/build-a/datomic-rev-peer-1.0.7277-source.jar
+POSTGRES_ROOT=${POSTGRES_ROOT:?set this to a PostgreSQL 16 installation root}
+STAGE2_PG_PORT=${STAGE2_PG_PORT:-55436}
+STAGE2_TRANSACTOR_PORT=${STAGE2_TRANSACTOR_PORT:-54340}
+
 scripts/stage2/validate-postgresql.sh \
-  --datomic-home /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
-  --artifact /tmp/datomic-stage1-stage4-final-v1/build-a/datomic-rev-peer-1.0.7277-source.jar \
-  --postgres-root /tmp/datomic-postgres-16-root \
-  --pg-port 55436 \
-  --transactor-port 54340 \
-  --work-root /tmp/datomic-stage2-stage4-final-v1 \
+  --datomic-home "$DATOMIC_HOME" \
+  --artifact "$ARTIFACT" \
+  --postgres-root "$POSTGRES_ROOT" \
+  --pg-port "$STAGE2_PG_PORT" \
+  --transactor-port "$STAGE2_TRANSACTOR_PORT" \
   --confirm-disposable DATOMIC_STAGE2_DISPOSABLE
 ```
+
+The gate requires Linux process-identity semantics with readable `/proc` and
+the GNU command behavior used by `find`, `readlink`, `sort`, and `timeout`.
+`POSTGRES_ROOT` is a user-supplied prerequisite, not a repository or stable
+`/tmp` asset; the explicit `--pg-bin-dir`, `--pg-lib-dir`, and
+`--pg-share-dir` options support other PostgreSQL layouts. Confirm that the two
+example ports are unused before running. Omitting `--work-root` selects a fresh
+`mktemp` directory and prints its path.
 
 The script refuses non-loopback PostgreSQL, occupied ports, unsafe or nonempty
 work roots, non-disposable catalog names, reused mutable paths, mismatched
@@ -181,23 +206,29 @@ runtime/tool hashes, wildcard classpaths, and any original peer/core2/transactor
 implementation on a candidate classpath. An exit trap stops the exact verified
 transactor process and exact new PostgreSQL data directory on every path.
 
-Key retained evidence hashes are:
+Key hashes in the local hardened adversarial final run are:
 
 | File | SHA-256 |
 |---|---|
-| `config.properties` | `1500e1a6e4b42d33a9e5114bbe1c3d67d4c5d8279f0f9345b29c27dd9272aabe` |
-| `candidate-classpath.tsv` | `b375395d6fd6d0bb896e55c5e4eeab294cb154f84477fa77a8286bafb74853b8` |
-| `stage-2-summary.properties` | `5e50f0be223d508711e3058b820ae62275a34c716312132f4ebd16d86a71ff31` |
+| `config.properties` | `6d1b4a0d834cf76cf79a019adfd107ad22a1f2859a5d52f096f4763a3c6d1929` |
+| `candidate-classpath.tsv` | `180961e49ab2ecb038056675dce297beb780abc23ff3ffa38d1868f04028e750` |
+| `inputs/stage2-harness.tsv` (45 files) | `9d7a01374465990c17cc83c214395591a653cf572439220b66e4d1e6384e17b1` |
+| `stage-2-summary.properties` | `5c93bd80755dfb7bdc82f648eecbef8e14434cb971813a8ad05e146d4733947a` |
 | `run-status.properties` | `4d4a1c7ca0fdcc5ce75513c355a015bea61547b8358f50fdbf3424041dd49c71` |
-| `evidence.sha256` | `78ba14d01454f90d650174c7f92f9fa1bf80244686d95faa6029770ba831dca5` |
+| `evidence.sha256` | `25e5f821a84bbde27cb85a985a2728cffbe73509dfd2f7b70c115ed6ca2cf721` |
 
-`evidence.sha256` accounts for 118 retained input, log, result, configuration,
-classpath, status, and summary files. The final result summary separately
-records a SHA-256 for every normalized lifecycle and fault result marker.
+`evidence.sha256` accounts for 118 local input, log, result, configuration,
+classpath, status, and summary files and currently verifies in full. The final
+result summary separately records a SHA-256 for every normalized lifecycle and
+fault result marker. These raw files remain ephemeral while they live under
+`/tmp`; the report does not describe them as a durable archive.
 
 ## Remaining boundary
 
 Stage 2 does not prove every storage backend, proprietary filesystem adapter,
 security configuration, distributed failure, or concurrency schedule. Those
 claims remain outside the demonstrated result. The separate completed Stage 3
-matrix records bounded concurrency and resource-race coverage.
+matrix records bounded concurrency and resource-race coverage. This is Peer
+interoperability evidence using the licensed Transactor as an external fixture;
+it neither recovers that Transactor nor completes the separate educational
+Transactor target.

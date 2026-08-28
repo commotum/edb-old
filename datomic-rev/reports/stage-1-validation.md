@@ -4,6 +4,10 @@ Date: `2026-08-27` (`America/Los_Angeles`).
 
 Status: **PASS**.
 
+The latest adversarial final run is
+`/tmp/datomic-stage1-adversarial-final-v1`. This is local, ephemeral run
+evidence rather than checked-in repository content.
+
 The canonical recovered implementation is a thin, source-bearing JAR built
 from the recovered Clojure namespaces, the peer/core2-free compilation of the
 handwritten Java sources, and the ten exact Peer resources. It is not an AOT
@@ -51,8 +55,10 @@ The canonical builder:
 - rejects Peer and core2 by filename and by their exact SHA-256 values;
 - compiles the 43 handwritten Java sources against only those 532 dependencies;
 - verifies that compilation produces exactly the 47-class handwritten manifest;
-- packages sorted file-only stored ZIP entries with the fixed local timestamp
-  `1980-01-01T00:00:00`.
+- packages physically sorted, file-only, `STORED` ZIP entries with the fixed
+  local timestamp `1980-01-01T00:00:00`; and
+- verifies every entry's physical order, method, sizes, timestamp, comment, and
+  extra field, as well as the absence of an archive comment.
 
 The host Java image exposes the compiler API but lacks the Java 11 `ct.sym`
 data and a `javac` executable, so `--release 11` is unavailable. The pinned
@@ -87,7 +93,7 @@ classes was visible.
 | Artifact inspection/input verification | PASS |
 | Original-resource byte oracle | 10 / 10 PASS |
 | Fresh-JVM packaged namespace loads | 142 PASS, 0 FAIL |
-| Focused recovered behavior regressions | PASS |
+| Focused recovered behavior regressions | PASS, including expanded lower-risk Stage 4 behavior coverage |
 | Handwritten Java surface | 47 classes, 108 fields, 279 methods exact |
 | Runtime Var/authored-class surfaces | 142 / 142 exact |
 | Unique reflection warnings | 150 |
@@ -102,6 +108,14 @@ The licensed Peer SHA-256
 was used only in explicitly separated resource, bytecode-surface, namespace-
 surface, and behavior-oracle lanes. It never entered the candidate build or
 candidate runtime classpath.
+
+The expanded direct behavior gate now also covers overloaded-setter selection;
+statistics accumulation and callback delivery; heap/direct UTF-8, base128, and
+CRC paths; HMAC validation and tamper rejection; logging/retry/scheduled-failure
+paths; heterogeneous comparison, key comparators, and pooled-map behavior; and
+selected Datalog hash, join, and invalid-source paths. Stage 4 records the
+remaining site-specific evidence boundary rather than treating this broader
+regression set as exhaustive query equivalence.
 
 ## Bytecode-proven hardening included in the artifact
 
@@ -136,19 +150,39 @@ of the 157 warnings deliberately left unchanged are documented in
 After all of these repairs, the complete Stage 1 gate—not merely focused
 probes—was rerun from two clean builds and produced the canonical hash above.
 
+## Final-run evidence
+
+The adversarial rerun hashes the validation harness itself and accounts for all
+files beneath both builds, packaged-artifact validation, and the recorded
+inputs:
+
+| Record | SHA-256 |
+|---|---|
+| `stage-1-summary.properties` | `0ecd7443db30698b19e46c538694ecef14a705bab33b8823959d26620b31b0bb` |
+| `artifact-validation/validation-summary.properties` | `2cd299ff624ac21e020fc35a7283eeb7d255d86ba2008988f485dc34b8892d76` |
+| `inputs/stage1-validation-harness.tsv` | `8c04b2dd38cf403fe29a981b5f025b1f5bb86863ddeb651f5b4d3f3c7f2dd404` |
+| `evidence.sha256` | `531b2f2e9ce15e10bbe87ffcbfb5d8b884e7aacd6b20bcb4601b9f59bb5a960a` |
+
+`evidence.sha256` contains 1,230 file records and verifies in full in the local
+run directory. The manifest binds that local evidence while it exists; `/tmp`
+is not a durable evidence store.
+
 ## Reproduce
 
 Run the complete Stage 1 gate in a new empty directory:
 
 ```bash
-JOBS=4 scripts/validate-stage-1.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
-  /tmp/datomic-stage-1
+DATOMIC_HOME=${DATOMIC_HOME:-../../datomic/datomic-pro-1.0.7277}
+STAGE1_ROOT=/tmp/datomic-stage-1
+JOBS=4 scripts/validate-stage-1.sh "$DATOMIC_HOME" "$STAGE1_ROOT"
+ARTIFACT="$STAGE1_ROOT/build-a/datomic-rev-peer-1.0.7277-source.jar"
 ```
 
-The run writes both clean builds, full candidate/oracle diagnostics, the exact
-candidate classpath record, and `stage-1-summary.properties` beneath the given
-directory.
+`STAGE1_ROOT` must be absent or empty. The run writes both clean builds, full
+candidate/oracle diagnostics, the exact candidate classpath record, the
+validation-harness manifest, `stage-1-summary.properties`, and
+`evidence.sha256` beneath it. The `ARTIFACT` assignment is the composable input
+used by the Stage 2 and Stage 3 commands.
 
 This completes the reproducible-artifact stage. PostgreSQL lifecycle,
 backup/restore, fault recovery, bounded concurrency, and transport-pause

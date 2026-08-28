@@ -84,8 +84,8 @@ the time this report was drafted is:
 | Gate | Post-Stage-4 status |
 |---|---|
 | [Stage 1](stage-1-validation.md) | **PASS** — two clean builds and the complete packaged-artifact gate produced canonical artifact SHA-256 `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`. |
-| [Stage 2](stage-2-validation.md) | **PASS** — `/tmp/datomic-stage2-stage4-final-v1`; final artifact SHA `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`; 118-file evidence-manifest SHA `78ba14d01454f90d650174c7f92f9fa1bf80244686d95faa6029770ba831dca5`; services stopped. |
-| [Stage 3](stage-3-validation.md) | **PASS** — `/tmp/datomic-stage3-stage4-final-v1`; final artifact SHA `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`; 64-file evidence-manifest SHA `f3033d28744e604e621dcbe9d0596a73f46c6ab8860d4db9ff84a878d9736bc8`; services stopped. |
+| [Stage 2](stage-2-validation.md) | **PASS** — local ephemeral run `/tmp/datomic-stage2-adversarial-final-v2`; final artifact SHA `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`; 118-file evidence-manifest SHA `25e5f821a84bbde27cb85a985a2728cffbe73509dfd2f7b70c115ed6ca2cf721`; services stopped. |
+| [Stage 3](stage-3-validation.md) | **PASS** — local ephemeral run `/tmp/datomic-stage3-adversarial-final-v2`; final artifact SHA `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`; 88-file evidence-manifest SHA `8f69d3fac2ab0d7d59f449db2c2e3489b292d24a123522a023754a94b01984f6`; services stopped; the manifest includes the retained post-preflight Hot Rod stub recheck. |
 
 The Stage 2 and Stage 3 reports remain the authorities for their bounded
 PostgreSQL, recovery, concurrency, and transport claims. Their final reruns

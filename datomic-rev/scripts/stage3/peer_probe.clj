@@ -83,9 +83,12 @@
   (when executor
     (.shutdownNow executor)
     (try
-      (.awaitTermination executor 2 TimeUnit/SECONDS)
+      (ensure! (.awaitTermination executor 2 TimeUnit/SECONDS)
+               "Owned executor did not terminate"
+               {})
       (catch InterruptedException _
-        (.interrupt (Thread/currentThread)))))
+        (.interrupt (Thread/currentThread))
+        (fail! "Interrupted while awaiting owned executor termination" {}))))
   nil)
 
 (defn- submit-call!
@@ -136,12 +139,10 @@
   [connection tx-data deadline label]
   (get-before! ^Future (d/transact-async connection tx-data) deadline label))
 
-(defn- release-quietly!
+(defn- release!
   [connection]
   (when connection
-    (try
-      (bounded-call! connect-deadline-ms :release #(d/release connection))
-      (catch Throwable _ nil)))
+    (bounded-call! connect-deadline-ms :release #(d/release connection)))
   nil)
 
 (defn- cause-chain
@@ -174,6 +175,23 @@
     (sorted-map :returned (f))
     (catch Throwable throwable
       (sorted-map :thrown throwable))))
+
+(defn- cleanup-all!
+  [& actions]
+  (let [failures
+        (->> actions
+             (map-indexed
+               (fn [index action]
+                 (when-let [throwable (:thrown (capture action))]
+                   (sorted-map
+                     :cleanup-index index
+                     :error (error-profile throwable)))))
+             (remove nil?)
+             vec)]
+    (ensure! (empty? failures)
+             "One or more owned resources failed cleanup"
+             {:cleanup-failures failures}))
+  nil)
 
 (defn- bounded-capture
   [milliseconds label f]
@@ -475,7 +493,7 @@
           :created? created?
           :state (state-summary db)))
       (finally
-        (release-quietly! @connection)))))
+        (release! @connection)))))
 
 (defn- query-controls!
   [uri]
@@ -564,7 +582,7 @@
                             :message "Query canceled: timeout elapsed"
                             :outer-deadline-ms query-deadline-ms))))
       (finally
-        (release-quietly! connection)))))
+        (release! connection)))))
 
 (defn- lifecycle-holder
   [connection ready released deadline]
@@ -597,7 +615,8 @@
         executor (fixed-executor 9 "stage3-lifecycle")
         deadline (deadline-after-ms lifecycle-deadline-ms)
         ready (CountDownLatch. 8)
-        released (CountDownLatch. 1)]
+        released (CountDownLatch. 1)
+        connection-released? (atom false)]
     (try
       (let [before-db (ensure-stage! (d/db @connection) :lifecycle-ready)
             holder-tasks
@@ -626,6 +645,7 @@
                     (get-before! release-task deadline :lifecycle-release))
                  "Connection release did not complete"
                  {})
+        (reset! connection-released? true)
         (ensure! (= (vec (repeat 4 :snapshot-survived))
                     (mapv #(get-before! % deadline :lifecycle-holder)
                           holder-tasks))
@@ -669,9 +689,11 @@
               :release-completed? true
               :state (state-summary after-db)))))
       (finally
-        (shutdown-executor! executor)
-        (release-quietly! @reconnected)
-        (release-quietly! @connection)))))
+        (cleanup-all!
+          #(shutdown-executor! executor)
+          #(release! @reconnected)
+          #(when-not @connection-released?
+             (release! @connection)))))))
 
 (defn- contention-tx
   [round]
@@ -788,8 +810,9 @@
           :success-count contention-rounds
           :worker-count contention-workers))
       (finally
-        (shutdown-executor! executor)
-        (release-quietly! connection)))))
+        (cleanup-all!
+          #(shutdown-executor! executor)
+          #(release! connection))))))
 
 (defn- audit!
   [uri]
@@ -810,7 +833,7 @@
           :counter-history-sha256 (sha256 history)
           :state (state-summary db)))
       (finally
-        (release-quietly! connection)))))
+        (release! connection)))))
 
 (defn- parse-exact-boolean
   [value]

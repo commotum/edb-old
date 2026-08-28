@@ -195,9 +195,21 @@ while (($#)); do
   esac
 done
 
-for command_name in awk cmp cp date find grep java kill mkdir mkfifo mktemp \
-  readlink sed sha256sum sleep sort tail timeout tr unzip uniq wc; do
+for command_name in awk chmod cmp cp date dirname find grep java kill mkdir \
+  mkfifo mktemp readlink sed sha256sum sleep sort tail timeout tr uname unzip \
+  uniq wc; do
   need_command "$command_name"
+done
+
+[[ "$(uname -s)" == Linux ]] ||
+  die "Stage 3 process ownership and transport faults require Linux"
+[[ -r /proc/self/cmdline && -r /proc/self/status ]] ||
+  die "Stage 3 requires readable Linux /proc process metadata"
+kill -l STOP >/dev/null 2>&1 && kill -l CONT >/dev/null 2>&1 ||
+  die "Stage 3 requires STOP and CONT process signals"
+for gnu_command in find readlink timeout; do
+  [[ "$($gnu_command --version 2>/dev/null | sed -n '1p')" == *GNU* ]] ||
+    die "Stage 3 requires GNU $gnu_command"
 done
 
 [[ -x "$stage2_runner" ]] || die "missing executable Stage 2 preflight: $stage2_runner"
@@ -366,6 +378,54 @@ grep -Fqx 'Stage 2 PostgreSQL dry-run validation passed' "$preflight_stdout" ||
 grep -Fqx 'candidate.boundary.validated=true' "$preflight_root/run-status.properties" ||
   die "Stage 2 preflight did not validate the candidate boundary"
 
+preflight_evidence_manifest="$preflight_root/evidence.sha256"
+[[ -f "$preflight_evidence_manifest" && ! -L "$preflight_evidence_manifest" ]] ||
+  die "Stage 2 preflight omitted its evidence manifest"
+(cd -- "$preflight_root" && sha256sum -c evidence.sha256) \
+  >"$logs_dir/00-stage2-evidence-check.out" ||
+  die "Stage 2 preflight evidence verification failed"
+
+preflight_copy="$inputs_dir/stage2-preflight"
+mkdir -p -- "$preflight_copy"
+cp -- "$preflight_evidence_manifest" "$preflight_copy/evidence.sha256"
+preflight_evidence_count=0
+while IFS=' ' read -r expected_sha evidence_path extra; do
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ && -n "$evidence_path" && -z "${extra:-}" ]] ||
+    die "malformed Stage 2 preflight evidence row"
+  case "$evidence_path" in
+    /*|..|../*|*/..|*/../*)
+      die "unsafe Stage 2 preflight evidence path: $evidence_path"
+      ;;
+  esac
+  preflight_source="$preflight_root/$evidence_path"
+  [[ -f "$preflight_source" && ! -L "$preflight_source" ]] ||
+    die "Stage 2 preflight evidence is missing or symbolic: $evidence_path"
+  [[ "$(sha256_file "$preflight_source")" == "$expected_sha" ]] ||
+    die "Stage 2 preflight evidence changed while copying: $evidence_path"
+  mkdir -p -- "$preflight_copy/$(dirname -- "$evidence_path")"
+  cp -- "$preflight_source" "$preflight_copy/$evidence_path"
+  ((preflight_evidence_count += 1))
+done <"$preflight_evidence_manifest"
+((preflight_evidence_count > 0)) || die "Stage 2 preflight evidence manifest is empty"
+(cd -- "$preflight_copy" && sha256sum -c evidence.sha256) \
+  >"$logs_dir/00-stage2-evidence-copy-check.out" ||
+  die "copied Stage 2 preflight evidence verification failed"
+
+preflight_harness_manifest="$preflight_root/inputs/stage2-harness.tsv"
+[[ -f "$preflight_harness_manifest" && ! -L "$preflight_harness_manifest" ]] ||
+  die "Stage 2 preflight omitted its harness manifest"
+[[ -z "$(find "$scripts_dir" -type l -print -quit)" ]] ||
+  die "shared scripts classpath root may not contain symbolic links"
+harness_recheck="$inputs_dir/stage2-harness-recheck.tsv"
+printf 'sha256\tpath\n' >"$harness_recheck"
+while IFS= read -r harness_path; do
+  harness_name=${harness_path#"$scripts_dir/"}
+  printf '%s\t%s\n' "$(sha256_file "$harness_path")" "$harness_name" \
+    >>"$harness_recheck"
+done < <(find "$scripts_dir" -type f -print | sort)
+cmp -s "$preflight_harness_manifest" "$harness_recheck" ||
+  die "shared scripts classpath changed after the Stage 2 preflight"
+
 preflight_classpath="$preflight_root/candidate-classpath.tsv"
 [[ -f "$preflight_classpath" ]] || die "Stage 2 preflight omitted candidate-classpath.tsv"
 [[ "$(sed -n '1p' "$preflight_classpath")" == $'position\trole\tsha256\tpath' ]] ||
@@ -391,6 +451,27 @@ while IFS=$'\t' read -r recorded_position role expected_sha entry extra; do
   if [[ "$position" -eq 2 ]]; then
     [[ "$role" == stage2-test-harness && "$entry" == "$scripts_dir" ]] ||
       die "candidate harness root differs from the shared scripts directory"
+    [[ "$expected_sha" == "$(sha256_file "$preflight_harness_manifest")" ]] ||
+      die "candidate harness hash differs from the exhaustive preflight manifest"
+  fi
+  if [[ "$position" -eq 3 ]]; then
+    [[ "$role" == compile-only-hotrod-stubs && -d "$entry" ]] ||
+      die "candidate Hot Rod stub tree differs from the Stage 2 preflight"
+    preflight_stub_manifest="$preflight_root/inputs/infinispan-stubs.tsv"
+    [[ -f "$preflight_stub_manifest" && ! -L "$preflight_stub_manifest" ]] ||
+      die "Stage 2 preflight omitted its Hot Rod stub manifest"
+    [[ "$expected_sha" == "$(sha256_file "$preflight_stub_manifest")" ]] ||
+      die "candidate Hot Rod stub manifest hash differs from the classpath record"
+    [[ -z "$(find "$entry" -type l -print -quit)" ]] ||
+      die "candidate Hot Rod stub tree contains a symbolic link"
+    stub_recheck="$inputs_dir/infinispan-stubs-recheck.tsv"
+    printf 'sha256\tpath\n' >"$stub_recheck"
+    while IFS= read -r stub_path; do
+      printf '%s\t%s\n' "$(sha256_file "$entry/$stub_path")" "$stub_path" \
+        >>"$stub_recheck"
+    done < <(find "$entry" -type f -printf '%P\n' | sort)
+    cmp -s "$preflight_stub_manifest" "$stub_recheck" ||
+      die "candidate Hot Rod stub tree changed after the Stage 2 preflight"
   fi
   if ((position >= 4)); then
     case "$entry" in
@@ -493,7 +574,9 @@ config_record="$work_root/config.properties"
   printf 'artifact.path=%s\n' "$artifact_jar"
   printf 'artifact.sha256=%s\n' "$(sha256_file "$artifact_jar")"
   printf 'stage2.preflight.runner.sha256=%s\n' "$(sha256_file "$stage2_runner")"
-  printf 'stage2.preflight.evidence.sha256=%s\n' "$(sha256_file "$results_dir/00-artifact-origins.result")"
+  printf 'stage2.preflight.origin-result.sha256=%s\n' "$(sha256_file "$results_dir/00-artifact-origins.result")"
+  printf 'stage2.preflight.evidence.manifest.sha256=%s\n' "$(sha256_file "$preflight_copy/evidence.sha256")"
+  printf 'stage2.preflight.evidence.file.count=%s\n' "$preflight_evidence_count"
   printf 'stage3.harness.manifest.sha256=%s\n' "$(sha256_file "$harness_manifest")"
   printf 'candidate.classpath.entry.count=%s\n' "${#candidate_entries[@]}"
   printf 'candidate.original.peer=false\n'

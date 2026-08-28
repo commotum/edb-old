@@ -227,9 +227,16 @@ while (($#)); do
   esac
 done
 
-for command_name in awk cmp cp find grep java mkdir mktemp mv readlink sed sha256sum sort tail timeout tr unzip uniq wc; do
+for command_name in \
+  awk cat chmod cmp cp dirname find grep java kill mkdir mktemp mv readlink sed \
+  sha256sum sleep sort tail timeout tr uname unzip uniq wc; do
   need_command "$command_name"
 done
+
+[[ "$(uname -s)" == Linux ]] ||
+  die "Stage 2 requires Linux process identity semantics"
+[[ -r "/proc/$$/cmdline" && -n "$(tr '\0' ' ' <"/proc/$$/cmdline")" ]] ||
+  die "Stage 2 requires a readable Linux /proc process table"
 
 [[ "$pg_major" =~ ^[0-9]+$ ]] || die "pg-major is not numeric: $pg_major"
 [[ "$startup_timeout" =~ ^[0-9]+$ ]] && ((startup_timeout > 0)) ||
@@ -474,19 +481,27 @@ actual_stub_manifest_sha=$(sha256_file "$stub_manifest")
 
 harness_manifest="$inputs_dir/stage2-harness.tsv"
 printf 'sha256\tpath\n' >"$harness_manifest"
-for harness_file in \
-  verify_artifact_origins.clj \
-  stage2/backup_probe.clj \
-  stage2/fault_probe.clj \
-  stage2/logback-stage2.xml \
-  stage2/peer_workload.clj \
-  stage2/restore_probe.clj \
-  stage2/storage.clj \
-  stage2/storage_self_test.clj \
-  stage2/validate-postgresql.sh; do
-  [[ -f "$scripts_dir/$harness_file" ]] || die "missing Stage 2 harness file: $harness_file"
+if ! harness_symlink=$(find "$scripts_dir" -type l -print -quit); then
+  die "could not inspect shared scripts classpath root for symbolic links"
+fi
+[[ -z "$harness_symlink" ]] ||
+  die "shared scripts classpath root may not contain symbolic links"
+harness_inventory="$runtime_dir/stage2-harness-paths.nul"
+if ! find "$scripts_dir" -type f -printf '%P\0' | sort -z >"$harness_inventory"; then
+  die "could not inventory shared scripts classpath root"
+fi
+harness_file_count=0
+while IFS= read -r -d '' harness_file; do
+  require_safe_path_text harness-path "$harness_file"
+  [[ -n "$harness_file" && "$harness_file" != /* ]] ||
+    die "invalid relative Stage 2 harness path: $harness_file"
+  [[ -f "$scripts_dir/$harness_file" && ! -L "$scripts_dir/$harness_file" ]] ||
+    die "Stage 2 harness entry is not a regular file: $harness_file"
   printf '%s\t%s\n' "$(sha256_file "$scripts_dir/$harness_file")" "$harness_file" >>"$harness_manifest"
-done
+  ((harness_file_count += 1))
+done <"$harness_inventory"
+((harness_file_count > 0)) ||
+  die "shared scripts classpath root contains no regular files"
 [[ ! -e "$scripts_dir/datomic" ]] ||
   die "Stage 2 harness classpath root may not contain a loose datomic namespace"
 
@@ -626,6 +641,7 @@ config_record="$work_root/config.properties"
   printf 'artifact.sha256=%s\n' "$(sha256_file "$artifact_jar")"
   printf 'dependency.manifest.sha256=%s\n' "$(sha256_file "$dependency_manifest")"
   printf 'stage2.harness.manifest.sha256=%s\n' "$(sha256_file "$harness_manifest")"
+  printf 'stage2.harness.file.count=%s\n' "$harness_file_count"
   printf 'dependency.count=%s\n' "$dependency_count"
   printf 'candidate.classpath.entry.count=%s\n' "${#candidate_entries[@]}"
   printf 'candidate.original.peer=false\n'
@@ -989,6 +1005,27 @@ extract_single_string() {
   printf '%s' "$values"
 }
 
+require_single_literal() {
+  local file=$1
+  local keyword=$2
+  local literal=$3
+  local occurrence_count
+  occurrence_count=$(
+    awk -v needle=":$keyword $literal" '
+      {
+        text = $0
+        while ((position = index(text, needle)) != 0) {
+          count += 1
+          text = substr(text, position + length(needle))
+        }
+      }
+      END {print count + 0}
+    ' "$file"
+  )
+  [[ "$occurrence_count" -eq 1 ]] ||
+    die "expected exactly one :$keyword $literal in $file, found $occurrence_count"
+}
+
 sql_uri() {
   local logical_name=$1
   local catalog=$2
@@ -1005,6 +1042,8 @@ run_captured 10-seed 'STAGE2-PEER-RESULT ' \
 seed_result=$last_result_file
 t1=$(extract_single_number "$seed_result" basis-t)
 t1_logical_sha=$(extract_single_hash "$seed_result" logical-sha256)
+source_database_id=$(extract_single_string "$seed_result" database-id)
+require_single_literal "$seed_result" as-of-t nil
 
 [[ ! -e "$backup_root" ]] ||
   die "full backup requires a new backup root: $backup_root"
@@ -1012,8 +1051,11 @@ run_captured 20-full-backup 'STAGE2-BACKUP-RESULT ' \
   "${candidate_java[@]}" -m stage2.backup-probe full "$source_uri" "$backup_root"
 full_backup_result=$last_result_file
 full_backup_t=$(extract_single_number "$full_backup_result" latest-t)
+full_backup_database_id=$(extract_single_string "$full_backup_result" db-id)
 [[ "$full_backup_t" == "$t1" ]] ||
   die "full backup restore point $full_backup_t differs from seeded basis $t1"
+[[ "$full_backup_database_id" == "$source_database_id" ]] ||
+  die "full backup database identity differs from the source database"
 grep -Fq ":ts [$t1]" "$full_backup_result" ||
   die "full backup did not publish exactly the seeded restore point"
 full_copied=$(extract_single_number "$full_backup_result" copied)
@@ -1033,14 +1075,21 @@ run_captured 30-augment 'STAGE2-PEER-RESULT ' \
 augment_result=$last_result_file
 t2=$(extract_single_number "$augment_result" basis-t)
 t2_logical_sha=$(extract_single_hash "$augment_result" logical-sha256)
+augment_database_id=$(extract_single_string "$augment_result" database-id)
+require_single_literal "$augment_result" as-of-t nil
+[[ "$augment_database_id" == "$source_database_id" ]] ||
+  die "source database identity changed during phase two"
 ((t2 > t1)) || die "augmented basis $t2 did not advance beyond $t1"
 
 run_captured 40-incremental-backup 'STAGE2-BACKUP-RESULT ' \
   "${candidate_java[@]}" -m stage2.backup-probe incremental "$source_uri" "$backup_root"
 incremental_backup_result=$last_result_file
 incremental_backup_t=$(extract_single_number "$incremental_backup_result" latest-t)
+incremental_backup_database_id=$(extract_single_string "$incremental_backup_result" db-id)
 [[ "$incremental_backup_t" == "$t2" ]] ||
   die "incremental backup restore point $incremental_backup_t differs from augmented basis $t2"
+[[ "$incremental_backup_database_id" == "$source_database_id" ]] ||
+  die "incremental backup database identity differs from the source database"
 incremental_skipped=$(extract_single_number "$incremental_backup_result" skipped)
 ((incremental_skipped > 0)) ||
   die "incremental backup did not reuse any previously stored segments"
@@ -1063,6 +1112,10 @@ run_captured 43-phase-three 'STAGE2-PEER-RESULT ' \
 phase_three_result=$last_result_file
 t3=$(extract_single_number "$phase_three_result" basis-t)
 t3_logical_sha=$(extract_single_hash "$phase_three_result" logical-sha256)
+phase_three_database_id=$(extract_single_string "$phase_three_result" database-id)
+require_single_literal "$phase_three_result" as-of-t nil
+[[ "$phase_three_database_id" == "$source_database_id" ]] ||
+  die "source database identity changed during phase three"
 ((t3 > t2)) || die "phase-three basis $t3 did not advance beyond $t2"
 
 run_captured 44-root-store-failure 'STAGE2-FAULT-RESULT ' \
@@ -1080,8 +1133,11 @@ run_captured 45-recovery-backup 'STAGE2-BACKUP-RESULT ' \
   "${candidate_java[@]}" -m stage2.backup-probe incremental "$source_uri" "$backup_root"
 recovery_backup_result=$last_result_file
 recovery_backup_t=$(extract_single_number "$recovery_backup_result" latest-t)
+recovery_backup_database_id=$(extract_single_string "$recovery_backup_result" db-id)
 [[ "$recovery_backup_t" == "$t3" ]] ||
   die "recovery backup restore point $recovery_backup_t differs from phase-three basis $t3"
+[[ "$recovery_backup_database_id" == "$source_database_id" ]] ||
+  die "recovery backup database identity differs from the source database"
 recovery_skipped=$(extract_single_number "$recovery_backup_result" skipped)
 ((recovery_skipped > 0)) ||
   die "recovery backup did not reuse immutable values copied before failed root publication"
@@ -1118,7 +1174,11 @@ current_step=restore-full-transactor-start
 start_transactor restore-full "$restore_full_catalog"
 run_captured 60-restore-t1-writable 'STAGE2-PEER-RESULT ' \
   "${candidate_java[@]}" -m stage2.peer-workload post-restore \
-  "$restore_full_uri" "$t1_logical_sha"
+  "$restore_full_uri" "$t1_logical_sha" "$source_database_id" "$t1"
+restore_t1_writable_result=$last_result_file
+grep -Fq ':restore-identity {' "$restore_t1_writable_result" ||
+  die "t1 restore omitted exact database identity evidence"
+require_single_literal "$restore_t1_writable_result" exact? true
 current_step=restore-full-transactor-stop
 stop_transactor || die "could not stop full-restore transactor safely"
 
@@ -1146,7 +1206,11 @@ current_step=restore-incremental-transactor-start
 start_transactor restore-incremental "$restore_incr_catalog"
 run_captured 90-restore-t2-writable 'STAGE2-PEER-RESULT ' \
   "${candidate_java[@]}" -m stage2.peer-workload post-restore \
-  "$restore_incr_uri" "$t2_logical_sha"
+  "$restore_incr_uri" "$t2_logical_sha" "$source_database_id" "$t2"
+restore_t2_writable_result=$last_result_file
+grep -Fq ':restore-identity {' "$restore_t2_writable_result" ||
+  die "t2 restore omitted exact database identity evidence"
+require_single_literal "$restore_t2_writable_result" exact? true
 current_step=restore-incremental-transactor-stop
 stop_transactor || die "could not stop incremental-restore transactor safely"
 
@@ -1245,8 +1309,11 @@ current_step=recovery-transactor-start
 start_transactor recovery "$recovery_catalog"
 run_captured 99-recovery-writable 'STAGE2-PEER-RESULT ' \
   "${candidate_java[@]}" -m stage2.peer-workload post-restore \
-  "$recovery_uri" "$t3_logical_sha"
+  "$recovery_uri" "$t3_logical_sha" "$source_database_id" "$t3"
 recovery_writable_result=$last_result_file
+grep -Fq ':restore-identity {' "$recovery_writable_result" ||
+  die "t3 recovery omitted exact database identity evidence"
+require_single_literal "$recovery_writable_result" exact? true
 current_step=recovery-transactor-stop
 stop_transactor || die "could not stop recovery transactor safely"
 
@@ -1266,6 +1333,8 @@ summary_file="$work_root/stage-2-summary.properties"
   printf 'candidate.original.peer=false\n'
   printf 'candidate.original.core2=false\n'
   printf 'candidate.original.transactor=false\n'
+  printf 'source.database.id=%s\n' "$source_database_id"
+  printf 'source.current.as-of-t=nil\n'
   printf 'source.t1=%s\n' "$t1"
   printf 'source.t1.logical.sha256=%s\n' "$t1_logical_sha"
   printf 'source.t2=%s\n' "$t2"
@@ -1274,6 +1343,7 @@ summary_file="$work_root/stage-2-summary.properties"
   printf 'source.t3.logical.sha256=%s\n' "$t3_logical_sha"
   printf 'backup.full.verified=true\n'
   printf 'backup.incremental.verified=true\n'
+  printf 'backup.database-id.exact=true\n'
   printf 'backup.failed-root.unpublished=true\n'
   printf 'backup.failed-root.retry.verified=true\n'
   printf 'backup.missing-segment.exact=true\n'
@@ -1284,6 +1354,9 @@ summary_file="$work_root/stage-2-summary.properties"
   printf 'restore.unreadable.rejected-before-write=true\n'
   printf 'restore.interruption.incremental-retry=true\n'
   printf 'restore.t3.recovery.writable=true\n'
+  printf 'restore.database-id.exact=true\n'
+  printf 'restore.basis-t.exact=true\n'
+  printf 'restore.current.as-of-t=nil\n'
   printf 'result.seed.sha256=%s\n' "$(sha256_file "$seed_result")"
   printf 'result.full-backup.sha256=%s\n' "$(sha256_file "$full_backup_result")"
   printf 'result.augment.sha256=%s\n' "$(sha256_file "$augment_result")"
@@ -1292,10 +1365,10 @@ summary_file="$work_root/stage-2-summary.properties"
   printf 'result.root-store-failure.sha256=%s\n' "$(sha256_file "$root_store_failure_result")"
   printf 'result.recovery-backup.sha256=%s\n' "$(sha256_file "$recovery_backup_result")"
   printf 'result.restore-t1-full.sha256=%s\n' "$(sha256_file "$restore_t1_result")"
-  printf 'result.restore-t1-writable.sha256=%s\n' "$(sha256_file "$results_dir/60-restore-t1-writable.result")"
+  printf 'result.restore-t1-writable.sha256=%s\n' "$(sha256_file "$restore_t1_writable_result")"
   printf 'result.restore-t2-base.sha256=%s\n' "$(sha256_file "$restore_t2_base_result")"
   printf 'result.restore-t2-incremental.sha256=%s\n' "$(sha256_file "$restore_t2_incremental_result")"
-  printf 'result.restore-t2-writable.sha256=%s\n' "$(sha256_file "$results_dir/90-restore-t2-writable.result")"
+  printf 'result.restore-t2-writable.sha256=%s\n' "$(sha256_file "$restore_t2_writable_result")"
   printf 'result.leaf-faults.sha256=%s\n' "$(sha256_file "$leaf_faults_result")"
   printf 'result.clean-verify.sha256=%s\n' "$(sha256_file "$clean_verify_result")"
   printf 'result.missing-verify.sha256=%s\n' "$(sha256_file "$missing_verify_result")"

@@ -7,10 +7,12 @@ Status: **PASS**.
 Stage 4 reduced the exact recovered-source warning inventory only where the
 licensed original bytecode fixed the correction at instruction level. It did
 not suppress diagnostics or infer types merely from plausible source intent.
-The baseline contained 317 unique warning lines: 305 reflection warnings, 10
-primitive-local `recur` warnings, and two auto-boxing warnings. The final
-inventory contains 157: 150 reflection, six primitive-local `recur`, and one
-auto-boxing warning.
+The checked-in [pre-hardening baseline](stage-4-pre-hardening-warnings.txt)
+contains 317 unique warning lines: 305 reflection warnings, 10 primitive-local
+`recur` warnings, and two auto-boxing warnings. Its SHA-256 is
+`5105303385e2ce6d749e46d1566e39a816588f119b1b13a2d4e7dee1663bb6e1`.
+The final inventory contains 157: 150 reflection, six primitive-local `recur`,
+and one auto-boxing warning.
 
 ## Repair accounting
 
@@ -71,6 +73,17 @@ The changes preserve the recovered evaluation structure. No unresolved site
 was edited simply to reduce the count, and no compiler-warning option was
 disabled.
 
+The final Stage 1 behavior gate directly exercises a broader portion of the
+lower-risk repairs: overloaded-setter selection; statistics accumulation and
+callbacks; UTF-8, base128, CRC, HMAC, and tamper-rejection paths; logging,
+retry, scheduling, heterogeneous comparison, key-comparator, and pooled-map
+behavior; and selected Datalog hash, join, and invalid-source paths. `DL006`
+and `DL007` are compiler-generated hash closures inside the database/query
+path, not stable top-level Vars exposed for an isolated direct probe. Their
+claim therefore remains bounded by their exact bytecode evidence and surface
+parity together with the accumulated database/query gates; the report does not
+mislabel them as independently unit-tested functions.
+
 ## Separate semantic repair
 
 `datomic.common/compare-byte-arrays` had a non-warning decompiler defect: its
@@ -110,17 +123,20 @@ surface hashes were:
 | `datomic.monitor` | `b615c03ed543bcc978e9ea7e3fb290e725c0e06ceb630a7d2747d381bde0647b` |
 | `datomic.slf4j` | `cb3aff233f339823048d55d81c8455db6a62eefc263ff69fd6f4adab85f53248` |
 
-The complete source-only gate at `/tmp/datomic-stage4-full-source-v1` then
-loaded all 142 namespaces without original Peer/core2 AOT fallback and passed
-the recovered behavior regressions. Its combined namespace diagnostics
+The local source-only gate at `/tmp/datomic-stage4-full-source-v1` then loaded
+all 142 namespaces without original Peer/core2 AOT fallback and passed the
+then-current recovered behavior regressions. Its combined namespace diagnostics
 contained exactly the final 150/6/1 inventory. The successful behavior result
 has SHA-256
 `07bf6be73cd2fee64bcbd0aff6f4d0ce9e0cbfa8ba9123f8c9d8286ead110ac5`.
+That `/tmp` directory is ephemeral; the later Stage 1 adversarial rerun below
+contains the expanded direct behavior gate.
 
 ## Final Stage 1 rerun
 
 The complete Stage 1 gate passed at
-`/tmp/datomic-stage1-stage4-final-v1`, after two independent clean builds. It
+`/tmp/datomic-stage1-adversarial-final-v1`, after two independent clean builds.
+It
 produced byte-identical 205-entry artifacts with SHA-256
 `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`.
 The candidate classpath contained the recovered artifact, compile/load-only Hot
@@ -133,9 +149,13 @@ recovered-behavior regressions, exact warning-inventory enforcement, and the
 unchanged in-memory parity result SHA-256
 `228b03dac4a437465937c53dbc7c4917294de408b2311b41a662e5f39eca37be`.
 The final `stage-1-summary.properties` has SHA-256
-`1b14f9fcb2e2a77a5205fbceb05bd1a4b0f2dc9b64724eab3f702a7dc52da579`;
+`0ecd7443db30698b19e46c538694ecef14a705bab33b8823959d26620b31b0bb`;
 the packaged `validation-summary.properties` has SHA-256
-`2cd299ff624ac21e020fc35a7283eeb7d255d86ba2008988f485dc34b8892d76`.
+`2cd299ff624ac21e020fc35a7283eeb7d255d86ba2008988f485dc34b8892d76`;
+and the 1,230-file evidence manifest has SHA-256
+`531b2f2e9ce15e10bbe87ffcbfb5d8b884e7aacd6b20bcb4601b9f59bb5a960a`.
+The validation-harness manifest has SHA-256
+`8c04b2dd38cf403fe29a981b5f025b1f5bb86863ddeb651f5b4d3f3c7f2dd404`.
 
 ## Exact unresolved boundary
 
@@ -156,7 +176,8 @@ intrinsically unrepairable. The exact inventory is the authoritative list.
 
 | Record | SHA-256 |
 |---|---|
-| `stage-4-index-db-bytecode-evidence.tsv` | `7183b407fc4d9edabaad8f8d29d463eea6fe692043e22dc0951db388ea8dc9bf` |
+| `stage-4-pre-hardening-warnings.txt` | `5105303385e2ce6d749e46d1566e39a816588f119b1b13a2d4e7dee1663bb6e1` |
+| `stage-4-index-db-bytecode-evidence.tsv` | `18cca469a923aba52344f903f67214c2231ba4aabcdfaf73e3b8b15e8f6e0c45` |
 | `stage-4-lowrisk-bytecode-evidence.tsv` | `e320e50bf67cff4198020cbf767db3fe6aca03c2c852889ce749811a5764bb22` |
 | `stage-4-unresolved-warnings.txt` | `9c8f20b030205f749edc952255da131bfa6d45c1537bbf0655bd6fe772ce33ad` |
 | Final recovered artifact | `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe` |
@@ -166,19 +187,21 @@ intrinsically unrepairable. The exact inventory is the authoritative list.
 Both complete PostgreSQL gates were rerun against the exact final artifact,
 after the Stage 1 result above:
 
-| Gate | Retained run and result |
+| Gate | Local final run and result |
 |---|---|
-| Stage 2 lifecycle/recovery | `/tmp/datomic-stage2-stage4-final-v1`; all lifecycle, full/incremental backup/restore, missing/corrupt segment rejection, interrupted restore/retry, exact t3 recovery, and post-recovery write checks passed. The 118-file evidence manifest has SHA-256 `78ba14d01454f90d650174c7f92f9fa1bf80244686d95faa6029770ba831dca5`; the summary has SHA-256 `5e50f0be223d508711e3058b820ae62275a34c716312132f4ebd16d86a71ff31`. |
-| Stage 3 concurrency/transport | `/tmp/datomic-stage3-stage4-final-v1`; all local cancellation/rejection cases, SQL query controls, lifecycle race, eight-round 8-way CAS contention, canonical audits, and verified transactor pause/recovery passed. The 64-file evidence manifest has SHA-256 `f3033d28744e604e621dcbe9d0596a73f46c6ab8860d4db9ff84a878d9736bc8`; the summary has SHA-256 `462dee72fdf018ebd9e44355009c0a8004903f04b503419e6faefdb48ce82733`. |
+| Stage 2 lifecycle/recovery | `/tmp/datomic-stage2-adversarial-final-v2`; all lifecycle, full/incremental backup/restore, exact database-ID/basis/current-view gates, missing/corrupt segment rejection, interrupted restore/retry, exact t3 recovery, and post-recovery write checks passed. The 118-file evidence manifest has SHA-256 `25e5f821a84bbde27cb85a985a2728cffbe73509dfd2f7b70c115ed6ca2cf721`; the summary has SHA-256 `5c93bd80755dfb7bdc82f648eecbef8e14434cb971813a8ad05e146d4733947a`. |
+| Stage 3 concurrency/transport | `/tmp/datomic-stage3-adversarial-final-v2`; all local cancellation/rejection cases, SQL query controls, lifecycle race, eight-round 8-way CAS contention, canonical audits, and verified transactor pause/recovery passed. The 88-file evidence manifest has SHA-256 `8f69d3fac2ab0d7d59f449db2c2e3489b292d24a123522a023754a94b01984f6`; the summary has SHA-256 `1d41a632788e515bea16d71c663140eb9d97defcc411a1436ee8b97092a35c06`. The manifest includes the retained post-preflight Hot Rod stub recheck. |
 
 Both summaries record `stage.complete=true`; both run-status records say
-`services.stopped=true` and `evidence.complete=true`. Stage 2 retained the
+`services.stopped=true` and `evidence.complete=true`. Stage 2 records the
 exact t3 logical SHA-256
 `de1debf98a63e10fa775591c7a57d557d559e7af1c42a4d676f10882cb0ca684`.
-Stage 3 retained canonical peer-state SHA-256
+Stage 3 records canonical peer-state SHA-256
 `abe3a8e000587079b64965cb99d468ef355d14ef11bd0855aeefab4eba394510`,
 with byte-identical pre/post-transport audit files. The licensed transactor was
 an isolated external fixture in both runs and all database fixtures stopped.
+All three adversarial run roots named in this report are local `/tmp` evidence,
+not durable repository archives.
 
 ## Claim boundary
 
@@ -188,4 +211,6 @@ tested source, surface, in-memory, PostgreSQL, recovery, and bounded concurrency
 behavior. It does not claim that the 157 remaining diagnostics are harmless
 under every execution path, nor that the recovered source text is identical to
 unpublished original source. External storage and concurrency claims remain
-bounded by the Stage 2 and Stage 3 matrices.
+bounded by the Stage 2 and Stage 3 matrices. Those matrices validate the Peer
+against a licensed external Transactor; Stage 4 makes no Transactor-recovery or
+educational-Transactor completion claim.

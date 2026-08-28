@@ -1,5 +1,11 @@
 # Source-only namespace validation
 
+> **Historical pre-Stage-4 evidence.** This manifest records the deterministic
+> decompiler baseline before the promoted hardening overlay. Its 318-warning
+> inventory is not the current state. The authoritative final inventory is
+> [`../stage-4-unresolved-warnings.txt`](../stage-4-unresolved-warnings.txt),
+> containing 157 unique warnings.
+
 - Timestamp: `2026-08-27` (`America/Los_Angeles`)
 - Host: `Linux 6.17.0-35-generic x86_64`
 - Java: `OpenJDK 21.0.12+8-1-24.04-Ubuntu`

@@ -22,6 +22,7 @@ resource_list="$project_dir/reports/peer-resource-paths.txt"
 expected_warning_inventory="$project_dir/reports/stage-4-unresolved-warnings.txt"
 expected_peer_sha=cb55c9d01e155f9965e3332cd8ef70be42cdefacb50c072076e9ecf22b9a23ba
 expected_parity_sha=228b03dac4a437465937c53dbc7c4917294de408b2311b41a662e5f39eca37be
+expected_stub_manifest_sha=5bb9a3440c4fe00f3b299a7e48fbf2aa6ef5f3ef2208fe389af13304eb267e02
 jobs=${JOBS:-4}
 
 [[ -f "$artifact_jar" && -f "$peer_jar" && -f "$expected_warning_inventory" ]] || {
@@ -94,6 +95,27 @@ while IFS= read -r stub_class; do
     "$(sha256sum "$stub_dir/$stub_class" | awk '{print $1}')" \
     "$stub_class" >>"$stub_manifest"
 done < <(find "$stub_dir" -type f -name '*.class' -printf '%P\n' | sort)
+
+expected_stub_paths=$'org/infinispan/client/hotrod/Flag.class\norg/infinispan/client/hotrod/RemoteCache.class\norg/infinispan/client/hotrod/RemoteCacheManager.class\norg/infinispan/client/hotrod/VersionedValue.class'
+actual_stub_paths=$(awk -F '\t' 'NR > 1 {print $2}' "$stub_manifest")
+[[ "$actual_stub_paths" == "$expected_stub_paths" ]] || {
+  echo "stub directory must contain exactly the four compile-only Hot Rod classes" >&2
+  exit 1
+}
+all_stub_paths=$(find "$stub_dir" -type f -printf '%P\n' | sort)
+[[ "$all_stub_paths" == "$expected_stub_paths" ]] || {
+  echo "stub directory contains non-stub files" >&2
+  exit 1
+}
+[[ -z "$(find "$stub_dir" -type l -print -quit)" ]] || {
+  echo "stub directory may not contain symbolic links" >&2
+  exit 1
+}
+actual_stub_manifest_sha=$(sha256sum "$stub_manifest" | awk '{print $1}')
+[[ "$actual_stub_manifest_sha" == "$expected_stub_manifest_sha" ]] || {
+  echo "compile-only Hot Rod stubs differ from the canonical deterministic bytes" >&2
+  exit 1
+}
 
 candidate_classpath="$artifact_jar:$stub_dir:$dependency_classpath"
 candidate_classpath_record="$work_root/candidate-classpath.tsv"

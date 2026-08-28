@@ -356,27 +356,32 @@
 
 (defn- shutdown!
   []
+  (d/shutdown false)
+  (shutdown-agents)
+  :completed)
+
+(defn- capture
+  [f]
   (try
-    (d/shutdown false)
-    (catch Throwable _ nil)
-    (finally
-      (try
-        (shutdown-agents)
-        (catch Throwable _ nil)))))
+    {:returned (f)}
+    (catch Throwable throwable
+      {:thrown throwable})))
 
 (defn -main
   [& args]
-  (let [exit-code
-        (try
-          (let [uri (parse-uri! args)
-                result (run-probe! uri)]
-            (emit! result-prefix result)
-            0)
-          (catch Throwable throwable
-            (binding [*out* *err*]
-              (emit! error-prefix (sanitized-throwable throwable)))
-            1)
-          (finally
-            (shutdown!)))]
-    (when-not (zero? exit-code)
-      (System/exit exit-code))))
+  (let [operation
+        (capture
+          #(let [uri (parse-uri! args)]
+             (run-probe! uri)))
+        cleanup (capture shutdown!)
+        successful? (and (contains? operation :returned)
+                         (contains? cleanup :returned))]
+    (if successful?
+      (emit! result-prefix (:returned operation))
+      (binding [*out* *err*]
+        (emit!
+          error-prefix
+          (sorted-map
+            :cleanup-error (some-> cleanup :thrown sanitized-throwable)
+            :operation-error (some-> operation :thrown sanitized-throwable)))))
+    (System/exit (if successful? 0 1))))

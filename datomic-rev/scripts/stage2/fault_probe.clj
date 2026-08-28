@@ -613,32 +613,47 @@
               [:leaf-faults :restore-interruption
                :root-store-failure :verify]}))))
 
+(defn- capture
+  [f]
+  (try
+    {:returned (f)}
+    (catch Throwable throwable
+      {:thrown throwable})))
+
 (defn- shutdown!
   []
   (try
     (d/shutdown true)
-    (catch Throwable _ nil))
-  (shutdown-agents))
+    (finally
+      (shutdown-agents)))
+  :completed)
+
+(defn- main-error
+  [mode operation cleanup]
+  (sorted-map
+    :cleanup-error (when-let [throwable (:thrown cleanup)]
+                     (sanitized-throwable throwable))
+    :mode mode
+    :operation-error (when-let [throwable (:thrown operation)]
+                       (sanitized-throwable throwable))))
 
 (defn -main
   [& args]
   (let [mode (first args)
-        exit-code
-        (try
-          (println (str result-prefix (pr-str (parse-and-run! args))))
-          (flush)
-          0
-          (catch Throwable throwable
-            (binding [*out* *err*]
-              (println
-                (str error-prefix
-                     (pr-str
-                       (sorted-map
-                         :error (sanitized-throwable throwable)
-                         :mode mode))))
-              (flush))
-            1)
-          (finally
-            (shutdown!)))]
+        operation (capture #(parse-and-run! args))
+        cleanup (capture shutdown!)
+        operation-succeeded? (contains? operation :returned)
+        cleanup-succeeded? (contains? cleanup :returned)
+        exit-code (cond
+                    (and operation-succeeded? cleanup-succeeded?) 0
+                    (not cleanup-succeeded?) 2
+                    :else 1)]
+    (if (zero? exit-code)
+      (do
+        (println (str result-prefix (pr-str (:returned operation))))
+        (flush))
+      (binding [*out* *err*]
+        (println (str error-prefix (pr-str (main-error mode operation cleanup))))
+        (flush)))
     (when-not (zero? exit-code)
       (System/exit exit-code))))

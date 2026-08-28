@@ -133,29 +133,44 @@
    :db-error (some #(some-> % ex-data :db/error) (cause-chain throwable))
    :probe-error (some #(some-> % ex-data ::error) (cause-chain throwable))})
 
+(defn- capture
+  [f]
+  (try
+    {:returned (f)}
+    (catch Throwable throwable
+      {:thrown throwable})))
+
 (defn- shutdown!
   []
   (try
     (d/shutdown false)
-    (catch Throwable _ nil)
     (finally
-      (try
-        (shutdown-agents)
-        (catch Throwable _ nil)))))
+      (shutdown-agents)))
+  :completed)
+
+(defn- main-error
+  [operation cleanup]
+  {:operation-error (when-let [throwable (:thrown operation)]
+                      (sanitized-error throwable))
+   :cleanup-error (when-let [throwable (:thrown cleanup)]
+                    (sanitized-error throwable))})
 
 (defn -main
   [& args]
-  (let [exit-code
-        (try
-          (println (str result-prefix (pr-str (run-restore! (parse-args args)))))
-          (flush)
-          0
-          (catch Throwable throwable
-            (binding [*out* *err*]
-              (println (str error-prefix (pr-str (sanitized-error throwable))))
-              (flush))
-            1)
-          (finally
-            (shutdown!)))]
+  (let [operation (capture #(run-restore! (parse-args args)))
+        cleanup (capture shutdown!)
+        operation-succeeded? (contains? operation :returned)
+        cleanup-succeeded? (contains? cleanup :returned)
+        exit-code (cond
+                    (and operation-succeeded? cleanup-succeeded?) 0
+                    (not cleanup-succeeded?) 2
+                    :else 1)]
+    (if (zero? exit-code)
+      (do
+        (println (str result-prefix (pr-str (:returned operation))))
+        (flush))
+      (binding [*out* *err*]
+        (println (str error-prefix (pr-str (main-error operation cleanup))))
+        (flush)))
     (when-not (zero? exit-code)
       (System/exit exit-code))))

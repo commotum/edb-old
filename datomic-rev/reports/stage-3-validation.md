@@ -10,17 +10,23 @@ against disposable PostgreSQL 16.15.  Every candidate JVM used the exact
 source artifact was the only Peer/core2 implementation; the licensed
 transactor was a separately fingerprinted external fixture.
 
-The retained post-Stage-4 successful run is
-`/tmp/datomic-stage3-stage4-final-v1`. Its summary records
+The latest hardened adversarial final successful run is
+`/tmp/datomic-stage3-adversarial-final-v2`. Its summary records
 `stage.complete=true`, `services.stopped=true`, and canonical peer-state
 SHA-256
 `abe3a8e000587079b64965cb99d468ef355d14ef11bd0855aeefab4eba394510`.
+The directory is local, ephemeral run evidence rather than durable repository
+content.
 
 ## Candidate and fixture boundary
 
-The aggregate runner first invokes the complete Stage 2 `--dry-run` gate.  It
-then copies and hashes that gate's candidate classpath and origin result before
-loading any Stage 3 probe.  The successful run recorded:
+The aggregate runner first invokes the complete Stage 2 `--dry-run` gate. It
+verifies that gate's 19-file evidence manifest, copies every manifested file,
+reverifies the copy, and confirms that the exhaustive 45-file Stage 2 harness
+manifest still matches the shared scripts classpath before loading any Stage 3
+probe. It also rehashes the exact four-class Hot Rod stub tree after that
+preflight and retains the independent recheck as
+`inputs/infinispan-stubs-recheck.tsv`. The successful run recorded:
 
 - recovered artifact SHA-256
   `bc7836b124896706a9bde9cdd0e6af84279dc06dbb0bee41ea448382f818cdfe`;
@@ -73,7 +79,7 @@ The successful trace recorded:
 
 - exact `:cognitect.anomalies/unavailable` during the pause;
 - normal orchestrator resume before the watchdog fired;
-- recovery on attempt 52 after 51 bounded unavailable retries;
+- recovery on attempt 47 after 46 bounded unavailable retries;
 - basis T 1053 before the fault and after the recovery sync;
 - one sentinel entity, one read result, and one transaction sentinel datom;
 - sentinel basis advancement from 1053 to 1055;
@@ -94,56 +100,82 @@ a 30-second cleanup timeout emit `STAGE3-ERROR` and cannot pass.  This boundary
 does not hide per-case executor leaks: every executor created by a probe is
 separately shut down and awaited before the result is returned.
 
-Two other retained attempts are diagnostic rather than product failures:
+Two earlier development attempts are diagnostic rather than product failures:
 
-- v2 reached PostgreSQL start but the filesystem/network sandbox denied local
+- the first reached PostgreSQL start but the filesystem/network sandbox denied local
   socket creation; cleanup completed and no transactor was started;
-- v3 demonstrated the successful query assertions followed by the
+- the next demonstrated the successful query assertions followed by the
   process-global-thread hang described above, then the aggregate timeout trap
   stopped both fixtures.
 
 ## Evidence hashes
 
-The successful directory contains 64 hashed evidence files. Top-level hashes
-for the final post-Stage-4 run are:
+The successful directory contains 88 hashed evidence files. The additional
+file relative to the preceding run is the retained Hot Rod stub recheck named
+above. Top-level hashes for the hardened adversarial final run are:
 
 | Record | SHA-256 |
 |---|---|
-| `config.properties` | `eff2d4d4e9768bdb55abbec61c863539229b9181ac3f9feca05119f3d2e20db5` |
-| `stage-3-summary.properties` | `462dee72fdf018ebd9e44355009c0a8004903f04b503419e6faefdb48ce82733` |
+| `config.properties` | `f6d19ef47c1027dd2835257ee8e4f867f23084bbe0664c2285020ac8cea55ab0` |
+| `candidate-classpath.tsv` | `ebd63377a1f3ebe799e0f8a1ff405351c58e5dab4aa482bc3d9a3ec07c6ee5ac` |
+| `stage-3-summary.properties` | `1d41a632788e515bea16d71c663140eb9d97defcc411a1436ee8b97092a35c06` |
 | `run-status.properties` | `8afd73fa0018d4ecbe106aedaef90ea5032fe216f27077282822d751f0b8cbff` |
-| `evidence.sha256` | `f3033d28744e604e621dcbe9d0596a73f46c6ab8860d4db9ff84a878d9736bc8` |
-| Stage 3 harness manifest | `b6ba343b0d0c2c9a610de0b359aeb3fba358a1fa9b468ff2cec030a97a6168d4` |
+| `evidence.sha256` | `8f69d3fac2ab0d7d59f449db2c2e3489b292d24a123522a023754a94b01984f6` |
+| Stage 3 harness manifest | `814c71bbc321fd19beca87bc33c2025f3805702097c4392e7f3103b138a748e6` |
+| Copied Stage 2 preflight `evidence.sha256` (19 files) | `dc20a8ea052444170ddd7792c1cafef6bbf473917cd9e1c8a725fcaa83b12bcb` |
+| Stage 2 harness recheck (45 files) | `9d7a01374465990c17cc83c214395591a653cf572439220b66e4d1e6384e17b1` |
+| Hot Rod stub recheck (4 classes) | `5bb9a3440c4fe00f3b299a7e48fbf2aa6ef5f3ef2208fe389af13304eb267e02` |
 
 The pre- and post-transport audit result files are byte-identical, both with
 SHA-256
 `8c434b3f37258153bf701c39adb26ae6405f509fb0c10c130298241649d01d1a`.
+The 88-file manifest currently verifies in full, but the raw `/tmp` directory
+is a local ephemeral record, not a durable evidence archive.
 
 ## Reproduce
 
-First run the non-SQL cases against a Stage 2-audited candidate classpath:
+First create a hash-verifiable Stage 2 dry-run root, then pass that root and a
+new empty work root to the non-SQL runner:
 
 ```bash
-scripts/stage3/validate-local.sh "$CANDIDATE_CLASSPATH" \
-  /tmp/datomic-stage3-local
+DATOMIC_HOME=${DATOMIC_HOME:-../../datomic/datomic-pro-1.0.7277}
+ARTIFACT=/tmp/datomic-stage-1/build-a/datomic-rev-peer-1.0.7277-source.jar
+POSTGRES_ROOT=${POSTGRES_ROOT:?set this to a PostgreSQL 16 installation root}
+STAGE2_DRY_RUN_ROOT=/tmp/datomic-stage2-dry-run
+STAGE3_LOCAL_ROOT=/tmp/datomic-stage3-local
+
+scripts/stage2/validate-postgresql.sh \
+  --datomic-home "$DATOMIC_HOME" \
+  --artifact "$ARTIFACT" \
+  --postgres-root "$POSTGRES_ROOT" \
+  --work-root "$STAGE2_DRY_RUN_ROOT" \
+  --dry-run
+
+scripts/stage3/validate-local.sh \
+  "$STAGE2_DRY_RUN_ROOT" "$STAGE3_LOCAL_ROOT"
 ```
 
 Run the complete disposable PostgreSQL gate:
 
 ```bash
+STAGE3_PG_PORT=${STAGE3_PG_PORT:-55437}
+STAGE3_TRANSACTOR_PORT=${STAGE3_TRANSACTOR_PORT:-54341}
+
 scripts/stage3/validate-postgresql.sh \
-  --datomic-home /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
-  --artifact /tmp/datomic-stage1-stage4-final-v1/build-a/datomic-rev-peer-1.0.7277-source.jar \
-  --postgres-root /tmp/datomic-postgres-16-root \
-  --work-root /tmp/datomic-stage3-stage4-final-v1 \
-  --pg-port 55437 \
-  --transactor-port 54341 \
+  --datomic-home "$DATOMIC_HOME" \
+  --artifact "$ARTIFACT" \
+  --postgres-root "$POSTGRES_ROOT" \
+  --pg-port "$STAGE3_PG_PORT" \
+  --transactor-port "$STAGE3_TRANSACTOR_PORT" \
   --confirm-disposable DATOMIC_STAGE3_DISPOSABLE
 ```
 
-The work root must be absent or empty and its basename must start with
-`datomic-stage3-`.  Use unused loopback ports and no production catalog or
-service.
+All explicit work roots above must be absent or empty and use the required
+`datomic-stage2-` or `datomic-stage3-` basename. Omitting the aggregate
+`--work-root` creates a fresh `mktemp` directory. The gate requires Linux,
+readable `/proc`, GNU `find`, `readlink`, and `timeout`, plus `SIGSTOP` and
+`SIGCONT`. `POSTGRES_ROOT` is user supplied. Confirm that both aggregate ports
+are unused, and use no production catalog or service.
 
 ## Claim boundary
 
@@ -152,4 +184,6 @@ backends, or distributed failures.  The contention schedule is deliberately
 small and repeatable.  The transport test pauses one co-located external
 transactor and does not model packet reordering, multi-transactor failover,
 security faults, or a long-duration partition.  Those cases remain outside the
-demonstrated boundary.
+demonstrated boundary. The paused licensed Transactor is an external fixture;
+this matrix neither recovers it nor completes the separate educational
+Transactor target.

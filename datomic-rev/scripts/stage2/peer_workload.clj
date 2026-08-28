@@ -242,6 +242,36 @@
       :row-count (count rows)
       :rows-sha256 (sha256 rows))))
 
+(defn- ensure-current-snapshot!
+  [value phase]
+  (ensure! (nil? (:as-of-t value))
+           "Current database snapshot unexpectedly has an as-of basis"
+           {:phase phase :snapshot value})
+  (ensure! (and (string? (:database-id value))
+                (not (str/blank? (:database-id value))))
+           "Current database snapshot has no database identity"
+           {:phase phase :snapshot value})
+  (ensure! (and (integer? (:basis-t value))
+                (not (neg? (:basis-t value))))
+           "Current database snapshot has an invalid basis"
+           {:phase phase :snapshot value})
+  value)
+
+(defn- ensure-restored-identity!
+  [value expected-database-id expected-basis-t phase]
+  (ensure-current-snapshot! value phase)
+  (ensure! (= expected-database-id (:database-id value))
+           "Restored database identity differs from the source database"
+           {:phase phase
+            :expected-database-id expected-database-id
+            :actual-database-id (:database-id value)})
+  (ensure! (= expected-basis-t (:basis-t value))
+           "Restored database basis differs from the requested restore point"
+           {:phase phase
+            :expected-basis-t expected-basis-t
+            :actual-basis-t (:basis-t value)})
+  value)
+
 (defn- seed!
   [uri expected-created]
   (let [created? (d/create-database uri)]
@@ -256,7 +286,7 @@
               after-db (:db-after tx-result)
               _ (ensure-t-advance! before-db after-db :phase-one)
               _ (ensure-phase! after-db :phase-one (expected-phase-one-rows))
-              result (snapshot after-db)]
+              result (ensure-current-snapshot! (snapshot after-db) :phase-one)]
           (ensure! (= 64 (:row-count result))
                    "Phase-one row count differs"
                    result)
@@ -274,7 +304,7 @@
             after-db (:db-after tx-result)
             _ (ensure-t-advance! before-db after-db :phase-two)
             _ (ensure-phase! after-db :phase-two (expected-phase-two-rows))
-            result (snapshot after-db)]
+            result (ensure-current-snapshot! (snapshot after-db) :phase-two)]
         (ensure! (= 96 (:row-count result))
                  "Phase-two row count differs"
                  result)
@@ -292,7 +322,7 @@
             after-db (:db-after tx-result)
             _ (ensure-t-advance! before-db after-db :phase-three)
             _ (ensure-phase! after-db :phase-three (expected-phase-three-rows))
-            result (snapshot after-db)]
+            result (ensure-current-snapshot! (snapshot after-db) :phase-three)]
         (ensure! (= 128 (:row-count result))
                  "Phase-three row count differs"
                  result)
@@ -311,12 +341,16 @@
         (d/release conn)))))
 
 (defn- post-restore!
-  [uri expected-logical-sha]
+  [uri expected-logical-sha expected-database-id expected-basis-t]
   (let [conn (d/connect uri)]
     (try
       (let [before-db (d/db conn)
             before-rows (semantic-rows before-db)
-            before (snapshot before-db)]
+            before (ensure-restored-identity!
+                     (snapshot before-db)
+                     expected-database-id
+                     expected-basis-t
+                     :post-restore-before-write)]
         (ensure! (= expected-logical-sha (:logical-sha256 before))
                  "Restored logical snapshot differs"
                  {:expected expected-logical-sha :actual before})
@@ -336,7 +370,9 @@
                                  [:stage2/all :stage2/post-restore]]
               without-sentinel (vec (remove #(= "post-restore-sentinel" (first %))
                                             after-rows))
-              after (snapshot after-db)]
+              after (ensure-current-snapshot!
+                     (snapshot after-db)
+                     :post-restore-after-write)]
           (ensure-t-advance! before-db after-db :post-restore)
           (ensure! (= (inc (count before-rows)) (count after-rows))
                    "Post-restore write did not add exactly one row"
@@ -357,6 +393,10 @@
                    "Post-restore write did not change the logical snapshot"
                    {})
           {:before before
+           :restore-identity {:as-of-t nil
+                              :basis-t expected-basis-t
+                              :database-id expected-database-id
+                              :exact? true}
            :after after}))
       (finally
         (d/release conn)))))
@@ -364,6 +404,14 @@
 (defn- parse-t
   [value]
   (when value (Long/parseLong value)))
+
+(defn- parse-basis-t
+  [value]
+  (let [basis-t (parse-t value)]
+    (ensure! (and (some? basis-t) (not (neg? basis-t)))
+             "EXPECTED_BASIS_T must be a non-negative integer"
+             {:expected-basis-t value})
+    basis-t))
 
 (defn- parse-exact-boolean
   [value label]
@@ -411,14 +459,25 @@
         {:mode mode :uri uri :arg (parse-t arg)})
 
       "post-restore"
-      (do
-        (ensure! (= 3 argument-count)
-                 "post-restore requires exactly MODE URI EXPECTED_LOGICAL_SHA256"
+      (let [[_ _ expected-logical-sha expected-database-id expected-basis-t]
+            args]
+        (ensure! (= 5 argument-count)
+                 (str "post-restore requires exactly MODE URI "
+                      "EXPECTED_LOGICAL_SHA256 EXPECTED_DATABASE_ID "
+                      "EXPECTED_BASIS_T")
                  {:argument-count argument-count})
-        (ensure! (boolean (re-matches #"[0-9a-f]{64}" arg))
+        (ensure! (boolean (re-matches #"[0-9a-f]{64}" expected-logical-sha))
                  "EXPECTED_LOGICAL_SHA256 must be a lowercase SHA-256 digest"
                  {})
-        {:mode mode :uri uri :arg arg})
+        (ensure! (and (string? expected-database-id)
+                      (not (str/blank? expected-database-id)))
+                 "EXPECTED_DATABASE_ID must not be blank"
+                 {})
+        {:mode mode
+         :uri uri
+         :arg {:expected-basis-t (parse-basis-t expected-basis-t)
+               :expected-database-id expected-database-id
+               :expected-logical-sha expected-logical-sha}})
 
       (fail! "Unknown Stage 2 peer workload mode" {:mode mode}))))
 
@@ -430,7 +489,10 @@
     "phase-three" (phase-three! uri)
     "fault-seed" (phase-three! uri)
     "snapshot" (read-snapshot uri arg)
-    "post-restore" (post-restore! uri arg)))
+    "post-restore" (post-restore! uri
+                                  (:expected-logical-sha arg)
+                                  (:expected-database-id arg)
+                                  (:expected-basis-t arg))))
 
 (defn- cause-chain
   [^Throwable throwable]
@@ -444,6 +506,13 @@
    :db-error (some #(some-> % ex-data :db/error) (cause-chain throwable))
    :workload-error (some #(some-> % ex-data ::error) (cause-chain throwable))})
 
+(defn- capture
+  [f]
+  (try
+    {:returned (f)}
+    (catch Throwable throwable
+      {:thrown throwable})))
+
 (defn- shutdown!
   []
   (try
@@ -452,32 +521,41 @@
       (.interrupt (Thread/currentThread))))
   (try
     (d/shutdown false)
-    (catch Throwable _ nil)
     (finally
-      (try
-        (shutdown-agents)
-        (catch Throwable _ nil)))))
+      (shutdown-agents)))
+  :completed)
+
+(defn- main-error
+  [mode operation cleanup]
+  {:mode mode
+   :operation-error (when-let [throwable (:thrown operation)]
+                      (sanitized-error mode throwable))
+   :cleanup-error (when-let [throwable (:thrown cleanup)]
+                    (sanitized-error mode throwable))})
 
 (defn -main
   [& args]
   (let [mode (first args)
-        exit-code
-        (try
-          (let [command (parse-command args)
-                result (run-command command)]
-            (println (str result-prefix
-                          (pr-str {:mode (:mode command) :result result})))
-            (flush)
-            0)
-          (catch Throwable throwable
-            (binding [*out* *err*]
-              (println (str error-prefix
-                            (pr-str (sanitized-error mode throwable))))
-              (flush))
-            1)
-          (finally
-            ;; Allow release cleanup to finish before shutting down
-            ;; process-global peer services.
-            (shutdown!)))]
+        operation (capture
+                   #(let [command (parse-command args)]
+                      {:command command :result (run-command command)}))
+        ;; Allow release cleanup to finish before shutting down process-global
+        ;; peer services. The result marker is deliberately delayed until this
+        ;; cleanup succeeds.
+        cleanup (capture shutdown!)
+        operation-succeeded? (contains? operation :returned)
+        cleanup-succeeded? (contains? cleanup :returned)
+        exit-code (cond
+                    (and operation-succeeded? cleanup-succeeded?) 0
+                    (not cleanup-succeeded?) 2
+                    :else 1)]
+    (if (zero? exit-code)
+      (let [{:keys [command result]} (:returned operation)]
+        (println (str result-prefix
+                      (pr-str {:mode (:mode command) :result result})))
+        (flush))
+      (binding [*out* *err*]
+        (println (str error-prefix (pr-str (main-error mode operation cleanup))))
+        (flush)))
     (when-not (zero? exit-code)
       (System/exit exit-code))))

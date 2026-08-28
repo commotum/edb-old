@@ -69,6 +69,13 @@ if ! cmp -s "$expected_entries" "$work_root/sorted-actual-entries.txt"; then
   diff -u "$expected_entries" "$work_root/sorted-actual-entries.txt" >&2 || true
   exit 1
 fi
+if ! cmp -s "$expected_entries" "$actual_entries"; then
+  echo "artifact entries are not in canonical sorted order" >&2
+  diff -u "$expected_entries" "$actual_entries" >&2 || true
+  exit 1
+fi
+
+java "$script_dir/InspectJarMetadata.java" "$artifact_jar" "$expected_entries"
 
 actual_entry_count=$(wc -l <"$actual_entries")
 [[ "$actual_entry_count" -eq 205 ]] || {
@@ -168,7 +175,9 @@ for required_property in \
   'dependency.classpath.order=inputs/dependencies.tsv' \
   'original.peer.aot.on.build.classpath=false' \
   'original.core2.aot.on.build.classpath=false' \
-  'clojure.aot.classes.packaged=false'; do
+  'clojure.aot.classes.packaged=false' \
+  'archive.entries=stored' \
+  'archive.entry.timestamp=1980-01-01T00:00:00'; do
   grep -Fqx "$required_property" "$build_properties" || {
     echo "artifact provenance is missing: $required_property" >&2
     exit 1

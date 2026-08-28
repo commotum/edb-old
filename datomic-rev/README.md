@@ -10,6 +10,24 @@ It is a research artifact, not a clean-room implementation or a redistributable
 replacement for Datomic. Comments, original formatting, some macro surface
 syntax, and names erased by AOT compilation cannot be recovered.
 
+## Architectural boundary
+
+This repository recovers the **Peer**, not the complete Datomic system. The
+Peer is the application-linked query/client runtime. The separately launched
+**Transactor** owns the serialized write path and coordinates Datomic's log and
+indexes. **PostgreSQL** is the durable storage service beneath that Transactor;
+it does not replace it. Stage 2 and Stage 3 use the licensed original
+Transactor only as an isolated external interoperability oracle, never as a
+candidate classpath dependency.
+
+For studying Datomic's construction, this Peer recovery is therefore a
+foundation rather than the finish line. Transaction validation, tempid/upsert
+resolution, write serialization, log publication, index production, storage
+coordination, and HA behavior remain Transactor-side subjects for a separate
+educational recovery target. Nothing in this repository claims that the
+licensed Transactor has been recovered or that the educational target is
+complete.
+
 ## Closure status
 
 | Check | Result |
@@ -18,11 +36,11 @@ syntax, and names erased by AOT compilation cannot be recovered.
 | Peer classes inventoried | 5,517 / 5,517 |
 | Clojure AOT classes mapped | 5,470 / 5,470 |
 | Reconstructed namespaces | 142 / 142 |
-| Deterministic final regenerations | 2 / 2 byte-identical (`latest35`, `latest36`) |
+| Deterministic decompiler baseline regenerations | 2 / 2 byte-identical (`latest35`, `latest36`) |
 | Deterministic decompiler baseline manifest | `ec43cd7e963514d855b0b6080c485caa638858dced0a3e40d4fca0b6866531be` |
 | Current packaged Clojure input manifest | `186b247033a461b4e5f391a302c43b9a727cf4fde0db2b10487a6c001b9da2e1` |
 | Handwritten Java classes/sources | 47 / 43 |
-| Reader-valid Clojure files | 142 / 142 |
+| Reader-valid project Clojure files | 143 / 143 (142 namespaces plus `data_readers.clj`) |
 | Fresh-JVM source-only namespace loads | 142 / 142 |
 | Runtime Var/authored-class surfaces | 142 / 142 |
 | Record basis names/order/metadata | 25 records / 85 fields exact |
@@ -37,6 +55,17 @@ syntax, and names erased by AOT compilation cannot be recovered.
 | PostgreSQL backup/recovery matrix | PASS (full, incremental, corruption, interruption, retry) |
 | Bounded concurrency/transport matrix | PASS (cancellation, lifecycle, 8×8 CAS, verified `SIGSTOP`/`SIGCONT`) |
 | Conservative source-navigation pass | 142 namespaces / 2,906 definitions indexed |
+
+The latest hardened adversarial final reruns used the unchanged artifact above.
+Stage 1 recorded 1,230 hashed evidence files with manifest SHA-256
+`531b2f2e9ce15e10bbe87ffcbfb5d8b884e7aacd6b20bcb4601b9f59bb5a960a`;
+Stage 2 recorded 118 with
+`25e5f821a84bbde27cb85a985a2728cffbe73509dfd2f7b70c115ed6ca2cf721`;
+and Stage 3 recorded 88 with
+`8f69d3fac2ab0d7d59f449db2c2e3489b292d24a123522a023754a94b01984f6`.
+Those raw run directories are local evidence under `/tmp`, not durable
+repository contents. The stage reports record their exact boundaries and
+top-level hashes.
 
 The source-only validation uses recovered Clojure, compiled recovered Java,
 resources, and distribution dependencies. It deliberately excludes both
@@ -62,8 +91,10 @@ subsystem map, generated-source cautions, and conservative navigation pass.
 - `src-java/` — CFR evidence for all class files. The 43 handwritten sources
   are listed in `reports/handwritten-java-sources.txt`; the remaining files are
   low-level views of Clojure AOT output.
-- `resources/` — all 10 non-class peer entries at their exact classpath paths,
-  including the TLS key/trust stores and AWS/core2 metadata.
+- `resources/` — all 10 canonical non-class Peer entries at their exact
+  classpath paths, plus four noncanonical root aliases excluded from the
+  artifact; the canonical entries include TLS key/trust stores and AWS/core2
+  metadata.
 - `reports/source-index/` — deterministic namespace, Var, dependency, call,
   reference, keyword, string, and class-closure indexes.
 - `reports/source-guide.md` — subsystem entry points, execution flows,
@@ -79,21 +110,26 @@ subsystem map, generated-source cautions, and conservative navigation pass.
   disposable PostgreSQL backup/recovery validation, and bounded concurrency and
   transport-fault validation.
 
-## Reproduce the Clojure recovery
+## Reproduce the final Clojure recovery
 
 The default distribution location from this nested repository is
-`../../datomic/datomic-pro-1.0.7277`. The regeneration script verifies the peer
-hash and refuses to overwrite a non-empty output directory.
+`../../datomic/datomic-pro-1.0.7277`. The final-reproduction script verifies the
+Peer hash, produces the deterministic 142-namespace decompiler baseline,
+applies the checked-in hardening overlay for the 12 subsequently repaired
+namespaces, and verifies the exact packaged-source manifest
+`186b247033a461b4e5f391a302c43b9a727cf4fde0db2b10487a6c001b9da2e1`.
+It refuses to overwrite a non-empty output directory.
 
 ```bash
-scripts/decompile-clojure.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
-  /tmp/datomic-clj-regenerated
+DATOMIC_HOME=${DATOMIC_HOME:-../../datomic/datomic-pro-1.0.7277}
+scripts/reproduce-final-clojure.sh "$DATOMIC_HOME" \
+  /tmp/datomic-final-clojure
 ```
 
-The patched source directory is placed before the historical standalone JAR on
-the classpath. A successful run reports 142 successes, zero failures, and then
-performs a non-evaluating reader pass with `*read-eval*` disabled.
+The raw baseline remains under `decompiler-baseline/`; the exact final tree is
+under `src-clj/`, with `hardening-overlay.tsv` recording both sides of every
+overlay. `scripts/decompile-clojure.sh` remains available when only the
+historical deterministic decompiler baseline is wanted.
 
 ## Reproduce the build checks
 
@@ -101,9 +137,10 @@ Build the canonical thin recovered-source artifact twice and run every Stage 1
 artifact gate:
 
 ```bash
-JOBS=4 scripts/validate-stage-1.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
-  /tmp/datomic-stage-1
+DATOMIC_HOME=${DATOMIC_HOME:-../../datomic/datomic-pro-1.0.7277}
+STAGE1_ROOT=/tmp/datomic-stage-1
+JOBS=4 scripts/validate-stage-1.sh "$DATOMIC_HOME" "$STAGE1_ROOT"
+ARTIFACT="$STAGE1_ROOT/build-a/datomic-rev-peer-1.0.7277-source.jar"
 ```
 
 The artifact contains the 142 recovered Clojure sources, 47 classes freshly
@@ -115,8 +152,7 @@ JARs; licensed Peer use is confined to explicit oracle subprocesses.
 Compile the handwritten Java surface:
 
 ```bash
-scripts/compile-handwritten-java.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
+scripts/compile-handwritten-java.sh "$DATOMIC_HOME" \
   /tmp/datomic-handwritten-classes
 ```
 
@@ -124,8 +160,7 @@ Compare its complete class/field/method API surface with the original Peer
 classfiles:
 
 ```bash
-scripts/compare-handwritten-java-surfaces.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
+scripts/compare-handwritten-java-surfaces.sh "$DATOMIC_HOME" \
   /tmp/datomic-java-surface-validation
 ```
 
@@ -133,8 +168,7 @@ Load every recovered namespace in a separate JVM without proprietary AOT
 classes:
 
 ```bash
-JOBS=4 scripts/validate-all-namespaces.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
+JOBS=4 scripts/validate-all-namespaces.sh "$DATOMIC_HOME" \
   /tmp/datomic-source-validation
 ```
 
@@ -150,8 +184,7 @@ Compare runtime Var and authored class surfaces against the original AOT
 artifact in isolated JVMs:
 
 ```bash
-JOBS=4 scripts/compare-namespace-surfaces.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
+JOBS=4 scripts/compare-namespace-surfaces.sh "$DATOMIC_HOME" \
   /tmp/datomic-surface-validation
 ```
 
@@ -159,8 +192,7 @@ Run the original Peer and recovered source through the same deterministic
 in-memory database workload in independent JVMs:
 
 ```bash
-scripts/validate-end-to-end-parity.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
+scripts/validate-end-to-end-parity.sh "$DATOMIC_HOME" \
   /tmp/datomic-end-to-end-parity
 ```
 
@@ -172,10 +204,10 @@ EAVT/AVET/range/seek indexes, history/as-of/since, and `d/with`.
 Regenerate the semantic source index:
 
 ```bash
-java -cp '/home/jake/Developer/datomic/datomic-pro-1.0.7277/lib/*' \
+java -cp "$DATOMIC_HOME/lib/*" \
   clojure.main scripts/analyze_corpus.clj \
   src-clj \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277/peer-1.0.7277.jar \
+  "$DATOMIC_HOME/peer-1.0.7277.jar" \
   /tmp/datomic-source-analysis
 ```
 
@@ -183,10 +215,53 @@ Regenerate the bytecode inventory:
 
 ```bash
 tools/bytecode-inventory/run-datomic.sh \
-  /home/jake/Developer/datomic/datomic-pro-1.0.7277 \
+  "$DATOMIC_HOME" \
   "$PWD" \
   /tmp/datomic-bytecode-inventory
 ```
+
+## Reproduce the PostgreSQL gates
+
+The PostgreSQL gates require Linux with readable `/proc`, the GNU `find`,
+`readlink`, `sort`, and `timeout` behavior used by the scripts, and a
+user-supplied PostgreSQL 16 installation. Stage 3 additionally requires
+`SIGSTOP` and `SIGCONT`. `POSTGRES_ROOT` must name an extracted root from which
+the scripts can infer `bin`, `lib`, and `share`; use the explicit
+`--pg-bin-dir`, `--pg-lib-dir`, and `--pg-share-dir` options instead when that
+layout is unavailable.
+
+After the Stage 1 command above, choose four currently unused loopback ports and
+run the complete gates. Omitting `--work-root` makes each runner create a fresh
+temporary work root and print its location:
+
+```bash
+POSTGRES_ROOT=${POSTGRES_ROOT:?set this to a PostgreSQL 16 installation root}
+STAGE2_PG_PORT=${STAGE2_PG_PORT:-55436}
+STAGE2_TRANSACTOR_PORT=${STAGE2_TRANSACTOR_PORT:-54340}
+STAGE3_PG_PORT=${STAGE3_PG_PORT:-55437}
+STAGE3_TRANSACTOR_PORT=${STAGE3_TRANSACTOR_PORT:-54341}
+
+scripts/stage2/validate-postgresql.sh \
+  --datomic-home "$DATOMIC_HOME" \
+  --artifact "$ARTIFACT" \
+  --postgres-root "$POSTGRES_ROOT" \
+  --pg-port "$STAGE2_PG_PORT" \
+  --transactor-port "$STAGE2_TRANSACTOR_PORT" \
+  --confirm-disposable DATOMIC_STAGE2_DISPOSABLE
+
+scripts/stage3/validate-postgresql.sh \
+  --datomic-home "$DATOMIC_HOME" \
+  --artifact "$ARTIFACT" \
+  --postgres-root "$POSTGRES_ROOT" \
+  --pg-port "$STAGE3_PG_PORT" \
+  --transactor-port "$STAGE3_TRANSACTOR_PORT" \
+  --confirm-disposable DATOMIC_STAGE3_DISPOSABLE
+```
+
+The example port values are not reservations; replace any occupied value.
+These gates launch the licensed Transactor only as an isolated external
+fixture. They validate the recovered Peer against PostgreSQL-backed behavior;
+they do not produce or validate a recovered Transactor.
 
 ## What was repaired
 

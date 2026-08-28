@@ -3,12 +3,12 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: validate-local.sh CANDIDATE_CLASSPATH WORK_ROOT
+usage: validate-local.sh STAGE2_DRY_RUN_ROOT EMPTY_WORK_ROOT
 
 Runs each candidate-only Stage 3 local probe in a fresh, externally bounded
-JVM. CANDIDATE_CLASSPATH must be the exact colon-delimited recovered runtime
-classpath and must include the datomic-rev/scripts directory. WORK_ROOT stores
-one stdout/stderr log per case plus local-summary.properties.
+JVM. STAGE2_DRY_RUN_ROOT must be a completed, hash-verifiable Stage 2 dry run;
+the candidate classpath is reconstructed and re-audited from its exact record.
+EMPTY_WORK_ROOT stores the origin gate, one log pair per case, and the summary.
 USAGE
   exit 2
 }
@@ -19,54 +19,158 @@ die() {
 }
 
 [[ $# -eq 2 ]] || usage
-candidate_classpath=$1
+stage2_root=$1
 work_root=$2
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 scripts_root=$(cd -- "$script_dir/.." && pwd -P)
 
-[[ -n "$candidate_classpath" ]] || die "candidate classpath is empty"
-[[ "$candidate_classpath" != *$'\n'* && "$candidate_classpath" != *$'\r'* ]] ||
-  die "candidate classpath contains a newline"
-[[ "$candidate_classpath" != *'*'* && "$candidate_classpath" != *'?'* ]] ||
-  die "candidate classpath may not contain wildcards"
+for command_name in awk cmp cp find grep java mkdir mktemp readlink rm sed \
+  sha256sum sort tail timeout unzip wc; do
+  command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
+done
+
+harness_recheck=
+stub_recheck=
+artifact_entries=
+cleanup_temp_files() {
+  local temp_files=()
+  [[ -z "$harness_recheck" ]] || temp_files+=("$harness_recheck")
+  [[ -z "$stub_recheck" ]] || temp_files+=("$stub_recheck")
+  [[ -z "$artifact_entries" ]] || temp_files+=("$artifact_entries")
+  ((${#temp_files[@]} == 0)) || rm -f -- "${temp_files[@]}"
+}
+trap cleanup_temp_files EXIT
+
+[[ -d "$stage2_root" && ! -L "$stage2_root" ]] ||
+  die "Stage 2 dry-run root is missing or symbolic: $stage2_root"
+stage2_root=$(readlink -f -- "$stage2_root")
 [[ "$work_root" == /* ]] || die "work root must be absolute"
+[[ ! -L "$work_root" ]] || die "work root may not be a symbolic link"
+[[ ! -e "$work_root" || -d "$work_root" ]] || die "work root is not a directory"
+if [[ -d "$work_root" && -n "$(find "$work_root" -mindepth 1 -print -quit)" ]]; then
+  die "refusing non-empty work root: $work_root"
+fi
+
+evidence_manifest="$stage2_root/evidence.sha256"
+classpath_record="$stage2_root/candidate-classpath.tsv"
+[[ -f "$evidence_manifest" && -f "$classpath_record" ]] ||
+  die "Stage 2 root lacks evidence.sha256 or candidate-classpath.tsv"
+(cd -- "$stage2_root" && sha256sum -c evidence.sha256 >/dev/null) ||
+  die "Stage 2 dry-run evidence verification failed"
+grep -Fqx 'candidate.boundary.validated=true' "$stage2_root/run-status.properties" ||
+  die "Stage 2 run did not complete its candidate-boundary gate"
+
+[[ "$(sed -n '1p' "$classpath_record")" == $'position\trole\tsha256\tpath' ]] ||
+  die "candidate classpath record has the wrong header"
+[[ "$(wc -l <"$classpath_record")" -eq 536 ]] ||
+  die "candidate classpath record must contain exactly 535 entries"
+
+classpath_entries=()
+position=0
+while IFS=$'\t' read -r recorded_position role expected_sha entry extra; do
+  [[ "$recorded_position" == position ]] && continue
+  ((position += 1))
+  [[ "$recorded_position" -eq "$position" && -n "$role" &&
+     "$expected_sha" =~ ^[0-9a-f]{64}$ && -n "$entry" && -z "${extra:-}" ]] ||
+    die "malformed candidate classpath row at position $position"
+  [[ "$entry" == /* && "$entry" != *$'\n'* && "$entry" != *$'\r'* &&
+     "$entry" != *'*'* && "$entry" != *'?'* ]] ||
+    die "unsafe candidate classpath entry: $entry"
+  [[ -e "$entry" ]] || die "candidate classpath entry disappeared: $entry"
+  case "$position:$role" in
+    1:recovered-artifact)
+      [[ -f "$entry" && "$(sha256sum "$entry" | awk '{print $1}')" == "$expected_sha" ]] ||
+        die "recovered artifact differs from its classpath record"
+      artifact=$entry
+      ;;
+    2:stage2-test-harness)
+      [[ "$entry" == "$scripts_root" && -d "$entry" ]] ||
+        die "candidate harness is not the current scripts root"
+      harness_manifest="$stage2_root/inputs/stage2-harness.tsv"
+      [[ -f "$harness_manifest" &&
+         "$(sha256sum "$harness_manifest" | awk '{print $1}')" == "$expected_sha" ]] ||
+        die "Stage 2 harness manifest differs from its classpath record"
+      [[ -z "$(find "$scripts_root" -type l -print -quit)" ]] ||
+        die "scripts classpath root contains a symbolic link"
+      harness_recheck=$(mktemp)
+      printf 'sha256\tpath\n' >"$harness_recheck"
+      while IFS= read -r harness_path; do
+        printf '%s\t%s\n' \
+          "$(sha256sum "$harness_path" | awk '{print $1}')" \
+          "${harness_path#"$scripts_root/"}" >>"$harness_recheck"
+      done < <(find "$scripts_root" -type f -print | sort)
+      cmp -s "$harness_manifest" "$harness_recheck" ||
+        die "scripts classpath root differs from the exhaustive Stage 2 manifest"
+      rm -f -- "$harness_recheck"
+      ;;
+    3:compile-only-hotrod-stubs)
+      [[ -d "$entry" && -z "$(find "$entry" -type l -print -quit)" ]] ||
+        die "compile-only stub tree is missing or symbolic"
+      stub_manifest="$stage2_root/inputs/infinispan-stubs.tsv"
+      [[ -f "$stub_manifest" &&
+         "$(sha256sum "$stub_manifest" | awk '{print $1}')" == "$expected_sha" ]] ||
+        die "stub manifest differs from its classpath record"
+      stub_recheck=$(mktemp)
+      printf 'sha256\tpath\n' >"$stub_recheck"
+      while IFS= read -r stub_path; do
+        printf '%s\t%s\n' \
+          "$(sha256sum "$entry/$stub_path" | awk '{print $1}')" \
+          "$stub_path" >>"$stub_recheck"
+      done < <(find "$entry" -type f -printf '%P\n' | sort)
+      cmp -s "$stub_manifest" "$stub_recheck" ||
+        die "compile-only stub tree differs from its Stage 2 manifest"
+      rm -f -- "$stub_recheck"
+      ;;
+    *:dependency)
+      [[ "$position" -ge 4 && -f "$entry" &&
+         "$(sha256sum "$entry" | awk '{print $1}')" == "$expected_sha" ]] ||
+        die "candidate dependency differs at position $position"
+      case "${entry##*/}" in
+        peer-*.jar|core2-*.jar|datomic-transactor*.jar|*transactor-pro*.jar)
+          die "forbidden original implementation entered candidate classpath: $entry"
+          ;;
+      esac
+      ;;
+    *) die "unexpected candidate role at position $position: $role" ;;
+  esac
+  classpath_entries+=("$entry")
+done <"$classpath_record"
+[[ "$position" -eq 535 ]] || die "candidate classpath cardinality changed"
+candidate_classpath=$(IFS=:; echo "${classpath_entries[*]}")
 
 timeout_seconds=${STAGE3_LOCAL_TIMEOUT_SECONDS:-60}
 [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "timeout must be an integer"
 ((timeout_seconds >= 10 && timeout_seconds <= 300)) ||
   die "timeout must be between 10 and 300 seconds"
 
-IFS=: read -r -a classpath_entries <<<"$candidate_classpath"
-((${#classpath_entries[@]} > 0)) || die "candidate classpath has no entries"
-scripts_present=false
-for entry in "${classpath_entries[@]}"; do
-  [[ -n "$entry" ]] || die "candidate classpath contains an empty entry"
-  [[ "$entry" == /* ]] || die "candidate classpath entry is not absolute: $entry"
-  [[ -e "$entry" ]] || die "candidate classpath entry does not exist: $entry"
-  case "${entry##*/}" in
-    peer-*.jar|core2-*.jar|datomic-transactor*.jar|*transactor-pro*.jar)
-      die "forbidden original implementation entered candidate classpath: $entry"
-      ;;
-  esac
-  [[ "$entry" == "$scripts_root" ]] && scripts_present=true
-done
-[[ "$scripts_present" == true ]] ||
-  die "candidate classpath does not contain scripts root: $scripts_root"
-
-artifact=${classpath_entries[0]}
 [[ -f "$artifact" ]] || die "first classpath entry is not the recovered artifact"
 unzip -p -- "$artifact" META-INF/datomic-rev/build.properties 2>/dev/null |
   grep -Fqx 'artifact.kind=clojure-source-plus-handwritten-java-classes' ||
   die "first classpath entry lacks recovered-artifact provenance"
 
 artifact_entries=$(mktemp)
-trap 'rm -f -- "$artifact_entries"' EXIT
 unzip -Z1 -- "$artifact" | LC_ALL=C sort >"$artifact_entries"
 if grep -Eq '__init[.]class$' "$artifact_entries"; then
   die "recovered artifact contains packaged Clojure AOT initializers"
 fi
 
 mkdir -p -- "$work_root"
+cp -- "$classpath_record" "$work_root/candidate-classpath.tsv"
+origin_stdout="$work_root/artifact-origins.out"
+origin_stderr="$work_root/artifact-origins.err"
+if ! timeout --foreground --signal=TERM --kill-after=10s \
+     "${timeout_seconds}s" java -XX:-UsePerfData -cp "$candidate_classpath" \
+     clojure.main "$scripts_root/verify_artifact_origins.clj" \
+     "$artifact" \
+     "$stage2_root/inputs/origin-gate/namespaces.tsv" \
+     "$stage2_root/inputs/origin-gate/peer-resource-paths.txt" \
+     "$stage2_root/inputs/origin-gate/unmapped-classes.tsv" \
+     >"$origin_stdout" 2>"$origin_stderr"; then
+  tail -n 120 "$origin_stderr" >&2 || true
+  die "candidate origin gate failed"
+fi
+grep -Fqx 'artifact origin and candidate classpath isolation passed' "$origin_stdout" ||
+  die "candidate origin gate omitted its exact success marker"
 
 cases=(promise-cleanup core2-async pool-rejection query-timeout)
 namespaces=(stage3.promise-probe stage3.core2-async-probe
@@ -98,6 +202,11 @@ done
   printf 'case.count=%s\n' "${#cases[@]}"
   printf 'fresh.jvm.per.case=true\n'
   printf 'timeout.seconds=%s\n' "$timeout_seconds"
+  printf 'stage2.evidence.manifest.sha256=%s\n' \
+    "$(sha256sum "$evidence_manifest" | awk '{print $1}')"
+  printf 'candidate.classpath.record.sha256=%s\n' \
+    "$(sha256sum "$classpath_record" | awk '{print $1}')"
+  printf 'artifact.origin.gate=true\n'
   printf 'original.peer.aot=false\n'
   printf 'original.core2.aot=false\n'
 } >"$work_root/local-summary.properties"

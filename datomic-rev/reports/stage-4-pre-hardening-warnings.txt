@@ -1,0 +1,317 @@
+Auto-boxing loop arg: h
+Auto-boxing loop arg: ret
+Reflection warning, datomic/artemis_client.clj:139:23 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/artemis_client.clj:195:11 - call to static method createServerLocatorWithoutHA on org.apache.activemq.artemis.api.core.client.ActiveMQClient can't be resolved (argument types: unknown).
+Reflection warning, datomic/artemis_client.clj:197:11 - call to method setConnectionTTL can't be resolved (target class is unknown).
+Reflection warning, datomic/artemis_client.clj:198:11 - call to method setProducerWindowSize can't be resolved (target class is unknown).
+Reflection warning, datomic/artemis_client.clj:199:11 - call to method setClientFailureCheckPeriod can't be resolved (target class is unknown).
+Reflection warning, datomic/artemis_client.clj:279:44 - reference to field close can't be resolved.
+Reflection warning, datomic/artemis_client.clj:283:44 - reference to field close can't be resolved.
+Reflection warning, datomic/artemis_client.clj:287:44 - reference to field close can't be resolved.
+Reflection warning, datomic/artemis_client.clj:291:44 - reference to field close can't be resolved.
+Reflection warning, datomic/artemis_client.clj:295:44 - reference to field close can't be resolved.
+Reflection warning, datomic/artemis_client.clj:368:35 - reference to field receive can't be resolved.
+Reflection warning, datomic/artemis_client.clj:488:21 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/artemis_client.clj:514:23 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/artemis_client.clj:690:23 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/artemis_client.clj:812:58 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/artemis_client.clj:890:11 - call to method send on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/backup.clj:1025:25 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/backup.clj:1036:20 - reference to field getScheme can't be resolved.
+Reflection warning, datomic/backup.clj:876:25 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/btset.clj:118:26 - call to method childAt on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/btset.clj:140:7 - call to method rseek on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/btset.clj:152:13 - call to method seek on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/btset.clj:159:7 - call to method seek on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/btset.clj:169:38 - call to method conjoin on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/btset.clj:30:10 - call to method withMeta on clojure.lang.IPersistentVector can't be resolved (no such method).
+Reflection warning, datomic/btset.clj:88:26 - call to method childAt on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/builtins.clj:122:19 - reference to field cardinality can't be resolved.
+Reflection warning, datomic/cache.clj:70:19 - call to method submit can't be resolved (target class is unknown).
+Reflection warning, datomic/cache/caffeine.clj:142:38 - reference to field intValue can't be resolved.
+Reflection warning, datomic/cache/caffeine.clj:60:39 - call to method getIfPresent can't be resolved (target class is unknown).
+Reflection warning, datomic/cache/caffeine.clj:64:39 - call to method get can't be resolved (target class is unknown).
+Reflection warning, datomic/cassandra.clj:129:18 - call to method prepare on com.datastax.driver.core.Session can't be resolved (argument types: unknown).
+Reflection warning, datomic/cassandra_v4.clj:144:20 - call to com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder ctor can't be resolved.
+Reflection warning, datomic/cassandra_values.clj:121:70 - reference to field remaining on java.lang.Object can't be resolved.
+Reflection warning, datomic/cassandra_values.clj:63:43 - reference to field remaining on java.lang.Object can't be resolved.
+Reflection warning, datomic/cassandra_values_v4.clj:122:70 - reference to field remaining on java.lang.Object can't be resolved.
+Reflection warning, datomic/cassandra_values_v4.clj:63:43 - reference to field remaining on java.lang.Object can't be resolved.
+Reflection warning, datomic/cloudwatch.clj:62:24 - call to com.amazonaws.services.cloudwatch.AmazonCloudWatchClient ctor can't be resolved.
+Reflection warning, datomic/cloudwatch.clj:65:24 - call to com.amazonaws.services.cloudwatch.AmazonCloudWatchClient ctor can't be resolved.
+Reflection warning, datomic/cloudwatch.clj:93:11 - call to com.amazonaws.services.cloudwatch.AmazonCloudWatchClient ctor can't be resolved.
+Reflection warning, datomic/cloudwatch.clj:94:11 - call to com.amazonaws.services.cloudwatch.AmazonCloudWatchClient ctor can't be resolved.
+Reflection warning, datomic/clusterfs.clj:74:50 - reference to field longValue can't be resolved.
+Reflection warning, datomic/common.clj:125:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/common.clj:142:10 - call to method withMeta on clojure.lang.IPersistentVector can't be resolved (no such method).
+Reflection warning, datomic/common.clj:170:52 - call to method withMeta on clojure.lang.APersistentVector can't be resolved (no such method).
+Reflection warning, datomic/common.clj:177:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/common.clj:183:30 - reference to field hashCode can't be resolved.
+Reflection warning, datomic/common.clj:183:47 - reference to field hashCode can't be resolved.
+Reflection warning, datomic/common.clj:188:52 - call to method withMeta on clojure.lang.APersistentVector can't be resolved (no such method).
+Reflection warning, datomic/common.clj:195:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/common.clj:488:11 - call to method compareTo can't be resolved (target class is unknown).
+Reflection warning, datomic/common.clj:544:30 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/common.clj:579:15 - call to method info on org.slf4j.Logger can't be resolved (argument types: unknown, unknown).
+Reflection warning, datomic/common.clj:79:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/common.clj:81:11 - call to method equals can't be resolved (target class is unknown).
+Reflection warning, datomic/common.clj:834:15 - call to method submit on java.util.concurrent.ExecutorService can't be resolved (argument types: unknown).
+Reflection warning, datomic/common.clj:86:23 - reference to field getClass can't be resolved.
+Reflection warning, datomic/common.clj:86:37 - reference to field getClass can't be resolved.
+Reflection warning, datomic/common.clj:94:26 - call to method compareTo can't be resolved (target class is unknown).
+Reflection warning, datomic/common.clj:94:38 - reference to field getName can't be resolved.
+Reflection warning, datomic/common.clj:94:48 - reference to field getClass can't be resolved.
+Reflection warning, datomic/common.clj:94:63 - reference to field getName can't be resolved.
+Reflection warning, datomic/common.clj:94:73 - reference to field getClass can't be resolved.
+Reflection warning, datomic/common.clj:97:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/connector.clj:264:23 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/connector.clj:443:39 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/connector.clj:620:33 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/core2/aws/s3/aws_api.clj:296:90 - reference to field close can't be resolved.
+Reflection warning, datomic/core2/thread.clj:313:20 - call to java.util.concurrent.ThreadPoolExecutor ctor can't be resolved.
+Reflection warning, datomic/core2/thread.clj:69:17 - call to method submit on java.util.concurrent.ExecutorService can't be resolved (argument types: unknown).
+Reflection warning, datomic/core2/val_store/fs.clj:142:24 - reference to field toPath can't be resolved.
+Reflection warning, datomic/core2/val_store/s3/sdkv1.clj:83:60 - reference to field remaining can't be resolved.
+Reflection warning, datomic/core2/val_store/spi.clj:24:31 - reference to field hasRemaining can't be resolved.
+Reflection warning, datomic/crypto.clj:206:9 - call to method put on java.nio.ByteBuffer can't be resolved (argument types: unknown).
+Reflection warning, datomic/crypto.clj:221:13 - call to static method equals on java.util.Arrays can't be resolved (argument types: [B, unknown).
+Reflection warning, datomic/datafy.clj:56:46 - reference to field getParameterTypes can't be resolved.
+Reflection warning, datomic/datalog.clj:370:27 - reference to field getClass can't be resolved.
+Reflection warning, datomic/datalog.clj:393:27 - reference to field getClass can't be resolved.
+Reflection warning, datomic/datalog.clj:467:19 - reference to field getClass can't be resolved.
+Reflection warning, datomic/db.clj:1072:34 - reference to field booleanValue can't be resolved.
+Reflection warning, datomic/db.clj:1073:35 - reference to field booleanValue can't be resolved.
+Reflection warning, datomic/db.clj:1074:30 - reference to field booleanValue can't be resolved.
+Reflection warning, datomic/db.clj:1075:32 - reference to field booleanValue can't be resolved.
+Reflection warning, datomic/db.clj:1077:34 - reference to field booleanValue can't be resolved.
+Reflection warning, datomic/db.clj:1351:10 - call to method withMeta on clojure.lang.IPersistentVector can't be resolved (no such method).
+Reflection warning, datomic/db.clj:2023:64 - reference to field vtypeid can't be resolved.
+Reflection warning, datomic/db.clj:2285:58 - reference to field vtypeid can't be resolved.
+Reflection warning, datomic/db.clj:2532:21 - reference to field unique can't be resolved.
+Reflection warning, datomic/db.clj:2546:22 - reference to field index can't be resolved.
+Reflection warning, datomic/db.clj:2678:11 - reference to field unique can't be resolved.
+Reflection warning, datomic/db.clj:3086:37 - reference to field cardinality can't be resolved.
+Reflection warning, datomic/db.clj:314:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/db.clj:3177:23 - reference to field cardinality can't be resolved.
+Reflection warning, datomic/db.clj:3196:19 - reference to field unique can't be resolved.
+Reflection warning, datomic/db.clj:333:10 - call to method withMeta on clojure.lang.IPersistentVector can't be resolved (no such method).
+Reflection warning, datomic/db.clj:3363:32 - reference to field getT can't be resolved.
+Reflection warning, datomic/db.clj:4070:17 - call to method seek on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/db.clj:4071:44 - reference to field aevt can't be resolved.
+Reflection warning, datomic/db.clj:4072:19 - call to method seek can't be resolved (target class is unknown).
+Reflection warning, datomic/db.clj:4072:26 - reference to field aevt can't be resolved.
+Reflection warning, datomic/db.clj:4073:42 - reference to field aevt can't be resolved.
+Reflection warning, datomic/db.clj:4074:19 - call to method seek can't be resolved (target class is unknown).
+Reflection warning, datomic/db.clj:4074:26 - reference to field aevt can't be resolved.
+Reflection warning, datomic/db.clj:4104:41 - call to method seek on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/db.clj:4107:68 - reference to field aevt can't be resolved.
+Reflection warning, datomic/db.clj:4108:43 - call to method seek can't be resolved (target class is unknown).
+Reflection warning, datomic/db.clj:4109:45 - reference to field aevt can't be resolved.
+Reflection warning, datomic/db.clj:4160:10 - call to method withMeta on clojure.lang.IPersistentVector can't be resolved (no such method).
+Reflection warning, datomic/db.clj:4207:23 - call to method with can't be resolved (target class is unknown).
+Reflection warning, datomic/db.clj:4567:15 - reference to field vtypeid can't be resolved.
+Reflection warning, datomic/db.clj:4581:46 - reference to field unique can't be resolved.
+Reflection warning, datomic/db.clj:4672:15 - reference to field isComponent can't be resolved.
+Reflection warning, datomic/db.clj:642:8 - reference to field intValue can't be resolved.
+Reflection warning, datomic/db.clj:663:8 - reference to field intValue can't be resolved.
+Reflection warning, datomic/db.clj:684:8 - reference to field intValue can't be resolved.
+Reflection warning, datomic/db.clj:705:8 - reference to field intValue can't be resolved.
+Reflection warning, datomic/db.clj:868:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/db.clj:936:14 - call to method startsWith can't be resolved (target class is unknown).
+Reflection warning, datomic/ddb.clj:121:11 - call to com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient ctor can't be resolved.
+Reflection warning, datomic/ddb.clj:122:11 - call to com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient ctor can't be resolved.
+Reflection warning, datomic/ddb.clj:2224:9 - call to method listTables on com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient can't be resolved (argument types: unknown).
+Reflection warning, datomic/ddb.clj:2278:9 - call to method deleteTable on com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient can't be resolved (argument types: unknown).
+Reflection warning, datomic/ddb.clj:2296:9 - call to method describeTable on com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient can't be resolved (argument types: unknown).
+Reflection warning, datomic/ddb.clj:2375:17 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/ddb.clj:90:24 - call to com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient ctor can't be resolved.
+Reflection warning, datomic/ddb.clj:93:24 - call to com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient ctor can't be resolved.
+Reflection warning, datomic/excise.clj:116:50 - reference to field vtypeid can't be resolved.
+Reflection warning, datomic/excise.clj:231:9 - reference to field vtypeid can't be resolved.
+Reflection warning, datomic/excise.clj:37:33 - reference to field isComponent on java.lang.Object can't be resolved.
+Reflection warning, datomic/extensions.clj:172:29 - reference to field v on java.lang.Object can't be resolved.
+Reflection warning, datomic/fulltext.clj:199:20 - reference to field score can't be resolved.
+Reflection warning, datomic/fulltext.clj:555:29 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/garbage.clj:226:53 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/garbage.clj:491:23 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/garbage/pod.clj:36:11 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, unknown).
+Reflection warning, datomic/index.clj:1035:8 - reference to field longValue can't be resolved.
+Reflection warning, datomic/index.clj:1040:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1041:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1104:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/index.clj:1128:10 - call to method withMeta on clojure.lang.IPersistentVector can't be resolved (no such method).
+Reflection warning, datomic/index.clj:1163:18 - call to static method alength on clojure.lang.RT can't be resolved (argument types: java.lang.Object).
+Reflection warning, datomic/index.clj:1166:22 - call to static method alength on clojure.lang.RT can't be resolved (argument types: java.lang.Object).
+Reflection warning, datomic/index.clj:1171:26 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1176:39 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1184:39 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1186:31 - call to static method aset on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int, java.lang.ref.WeakReference).
+Reflection warning, datomic/index.clj:1191:26 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1192:28 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1216:18 - call to static method alength on clojure.lang.RT can't be resolved (argument types: java.lang.Object).
+Reflection warning, datomic/index.clj:1253:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/index.clj:1256:16 - call to static method alength on clojure.lang.RT can't be resolved (argument types: java.lang.Object).
+Reflection warning, datomic/index.clj:1259:20 - call to static method alength on clojure.lang.RT can't be resolved (argument types: java.lang.Object).
+Reflection warning, datomic/index.clj:1261:15 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1329:100 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1337:104 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1368:92 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1376:96 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:1787:7 - reference to field longValue can't be resolved.
+Reflection warning, datomic/index.clj:2225:22 - reference to field noHistory can't be resolved.
+Reflection warning, datomic/index.clj:2255:26 - reference to field noHistory can't be resolved.
+Reflection warning, datomic/index.clj:235:15 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:240:20 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:243:23 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:248:21 - call to static method aset on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int, unknown).
+Reflection warning, datomic/index.clj:281:33 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:2908:43 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:2943:46 - call to method get on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/index.clj:2950:50 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:2956:50 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:305:33 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:3367:17 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/index.clj:346:81 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:3498:51 - reference to field aevt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:3500:73 - reference to field aevt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:3515:74 - reference to field aevt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:361:76 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:3647:32 - reference to field needsAVET can't be resolved.
+Reflection warning, datomic/index.clj:391:78 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:3928:24 - call to static method alength on clojure.lang.RT can't be resolved (argument types: java.lang.Object).
+Reflection warning, datomic/index.clj:3932:37 - call to static method alength on clojure.lang.RT can't be resolved (argument types: java.lang.Object).
+Reflection warning, datomic/index.clj:4060:38 - reference to field seek can't be resolved.
+Reflection warning, datomic/index.clj:4761:71 - reference to field dir_seq on datomic.iter.Iter can't be resolved.
+Reflection warning, datomic/index.clj:4821:67 - reference to field dir_seq on datomic.iter.Iter can't be resolved.
+Reflection warning, datomic/index.clj:484:104 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:492:108 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:5085:26 - reference to field eavt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5086:26 - reference to field eavt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5087:26 - reference to field eavt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5110:26 - reference to field avet on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5111:26 - reference to field avet on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5112:26 - reference to field avet on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5135:26 - reference to field aevt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5136:26 - reference to field aevt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5137:26 - reference to field aevt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5165:42 - reference to field aevt on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5192:26 - reference to field raet on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5193:26 - reference to field raet on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:5194:26 - reference to field raet on java.lang.Object can't be resolved.
+Reflection warning, datomic/index.clj:540:94 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:5426:17 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/index.clj:548:98 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:903:8 - reference to field longValue can't be resolved.
+Reflection warning, datomic/index.clj:905:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:906:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:947:8 - reference to field longValue can't be resolved.
+Reflection warning, datomic/index.clj:949:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:950:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:991:8 - reference to field longValue can't be resolved.
+Reflection warning, datomic/index.clj:993:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/index.clj:994:18 - call to static method aget on clojure.lang.RT can't be resolved (argument types: java.lang.Object, int).
+Reflection warning, datomic/integrity.clj:1936:38 - call to method compare can't be resolved (target class is unknown).
+Reflection warning, datomic/integrity.clj:1996:38 - call to method compare can't be resolved (target class is unknown).
+Reflection warning, datomic/integrity.clj:2055:38 - call to method compare can't be resolved (target class is unknown).
+Reflection warning, datomic/integrity.clj:221:24 - reference to field get can't be resolved.
+Reflection warning, datomic/integrity.clj:239:72 - reference to field seek can't be resolved.
+Reflection warning, datomic/io.clj:101:28 - call to java.lang.String ctor can't be resolved.
+Reflection warning, datomic/io.clj:438:31 - call to java.lang.String ctor can't be resolved.
+Reflection warning, datomic/io.clj:506:13 - call to method update on java.util.zip.Checksum can't be resolved (argument types: unknown).
+Reflection warning, datomic/iter.clj:162:16 - reference to field get on java.lang.Object can't be resolved.
+Reflection warning, datomic/iter.clj:163:16 - reference to field get on java.lang.Object can't be resolved.
+Reflection warning, datomic/iter.clj:171:10 - call to method withMeta on clojure.lang.IPersistentVector can't be resolved (no such method).
+Reflection warning, datomic/iter.clj:185:17 - reference to field next on java.lang.Object can't be resolved.
+Reflection warning, datomic/iter.clj:192:17 - reference to field get on java.lang.Object can't be resolved.
+Reflection warning, datomic/janino.clj:23:18 - call to method createFastEvaluator on org.codehaus.commons.compiler.jdk.ScriptEvaluator can't be resolved (argument types: java.lang.String, java.lang.Class, unknown).
+Reflection warning, datomic/kv_sql_ext.clj:74:19 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/log.clj:1095:67 - reference to field getT can't be resolved.
+Reflection warning, datomic/log.clj:1185:53 - reference to field getT can't be resolved.
+Reflection warning, datomic/log.clj:1243:72 - reference to field txes can't be resolved.
+Reflection warning, datomic/log.clj:1244:47 - reference to field txes can't be resolved.
+Reflection warning, datomic/log.clj:1272:19 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:1276:23 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:1283:38 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:1287:42 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:133:63 - reference to field length can't be resolved.
+Reflection warning, datomic/log.clj:510:27 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:512:43 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:518:45 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:520:45 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:537:56 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:588:99 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:614:91 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:781:19 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:785:23 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:792:38 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/log.clj:796:42 - reference to field uuid on java.lang.Object can't be resolved.
+Reflection warning, datomic/lucene.clj:335:28 - call to static method open on com.datomic.lucene.index.IndexReader can't be resolved (argument types: unknown, boolean).
+Reflection warning, datomic/lucene.clj:445:7 - reference to field term on com.datomic.lucene.util.Attribute can't be resolved.
+Reflection warning, datomic/memcached.clj:222:30 - reference to field intValue can't be resolved.
+Reflection warning, datomic/memcached.clj:299:9 - call to datomic.spy.memcached.MemcachedClient ctor can't be resolved.
+Reflection warning, datomic/memcached.clj:344:22 - call to method set can't be resolved (target class is unknown).
+Reflection warning, datomic/memcached.clj:356:18 - reference to field isAlive can't be resolved.
+Reflection warning, datomic/memcached.clj:356:28 - reference to field getConnection can't be resolved.
+Reflection warning, datomic/memcached.clj:377:9 - call to method get can't be resolved (target class is unknown).
+Reflection warning, datomic/memcached.clj:385:60 - reference to field shutdown can't be resolved.
+Reflection warning, datomic/memory_size.clj:106:20 - reference to field getClass can't be resolved.
+Reflection warning, datomic/monitor.clj:190:7 - call to method addObservation can't be resolved (target class is unknown).
+Reflection warning, datomic/monitor.clj:59:9 - call to method accumulate on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/monitor.clj:73:9 - call to method accumulate on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/monitor.clj:87:9 - call to method add on java.lang.Object can't be resolved (no such method).
+Reflection warning, datomic/monitor.clj:97:9 - reference to field increment on java.lang.Object can't be resolved.
+Reflection warning, datomic/peer.clj:116:23 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/peer.clj:384:23 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/peer.clj:673:71 - call to method info on org.slf4j.Logger can't be resolved (argument types: unknown, unknown).
+Reflection warning, datomic/peer.clj:983:25 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/process.clj:127:43 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/process.clj:37:21 - call to method error on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Object).
+Reflection warning, datomic/process.clj:40:17 - call to method println can't be resolved (target class is unknown).
+Reflection warning, datomic/process.clj:56:17 - call to method println can't be resolved (target class is unknown).
+Reflection warning, datomic/process.clj:93:35 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/promise.clj:122:35 - reference to field booleanValue can't be resolved.
+Reflection warning, datomic/promise.clj:125:13 - reference to field booleanValue can't be resolved.
+Reflection warning, datomic/query.clj:1176:21 - reference to field intValue can't be resolved.
+Reflection warning, datomic/query.clj:141:45 - reference to field getV on java.lang.Object can't be resolved.
+Reflection warning, datomic/query.clj:314:47 - reference to field getRawId on datomic.Database can't be resolved.
+Reflection warning, datomic/query.clj:97:28 - reference to field getE on java.lang.Object can't be resolved.
+Reflection warning, datomic/s3_api.clj:1211:9 - call to method listObjects on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown).
+Reflection warning, datomic/s3_api.clj:1228:9 - call to method listNextBatchOfObjects on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown).
+Reflection warning, datomic/s3_api.clj:1245:9 - call to method listObjects on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown).
+Reflection warning, datomic/s3_api.clj:1262:9 - call to method createBucket on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown).
+Reflection warning, datomic/s3_api.clj:1279:9 - call to method createBucket on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown, unknown).
+Reflection warning, datomic/s3_api.clj:1297:7 - call to method deleteBucket on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown).
+Reflection warning, datomic/s3_api.clj:1315:9 - call to method putObject on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown, unknown, unknown).
+Reflection warning, datomic/s3_api.clj:1373:9 - call to method getObject on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown, unknown).
+Reflection warning, datomic/s3_api.clj:1430:9 - call to method getBucketPolicy on com.amazonaws.services.s3.AmazonS3Client can't be resolved (argument types: unknown).
+Reflection warning, datomic/s3_api.clj:55:24 - call to com.amazonaws.services.s3.AmazonS3Client ctor can't be resolved.
+Reflection warning, datomic/s3_api.clj:58:24 - call to com.amazonaws.services.s3.AmazonS3Client ctor can't be resolved.
+Reflection warning, datomic/s3_api.clj:86:11 - call to com.amazonaws.services.s3.AmazonS3Client ctor can't be resolved.
+Reflection warning, datomic/s3_api.clj:87:11 - call to com.amazonaws.services.s3.AmazonS3Client ctor can't be resolved.
+Reflection warning, datomic/slf4j.clj:389:13 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, unknown).
+Reflection warning, datomic/slf4j.clj:402:19 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/stats.clj:106:13 - call to method ident can't be resolved (target class is unknown).
+Reflection warning, datomic/stats.clj:120:19 - call to method ident can't be resolved (target class is unknown).
+Reflection warning, datomic/stats.clj:130:19 - call to method ident can't be resolved (target class is unknown).
+Reflection warning, datomic/stats.clj:93:13 - call to method ident can't be resolved (target class is unknown).
+Reflection warning, datomic/tools.clj:315:33 - reference to field remaining can't be resolved.
+Reflection warning, datomic/tools.clj:339:34 - reference to field getName can't be resolved.
+Reflection warning, datomic/tools.clj:339:44 - reference to field getClass can't be resolved.
+Reflection warning, datomic/tools.clj:344:11 - call to method info on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/tools.clj:425:33 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/tools/index_checks.clj:82:22 - reference to field vtypeid can't be resolved.
+Reflection warning, datomic/valcache.clj:1088:21 - call to method info on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/valcache.clj:332:37 - call to method withMeta on clojure.lang.APersistentVector can't be resolved (no such method).
+Reflection warning, datomic/valcache.clj:713:66 - call to method warn on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/valcache.clj:916:39 - call to method info on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+Reflection warning, datomic/valcache_direct.clj:134:68 - call to method info on org.slf4j.Logger can't be resolved (argument types: unknown, java.lang.Throwable).
+btset.clj:665 recur arg for primitive local: ret is not matching primitive, had: Object, needed: long
+btset.clj:675 recur arg for primitive local: ret is not matching primitive, had: Object, needed: long
+btset.clj:686 recur arg for primitive local: ret is not matching primitive, had: Object, needed: long
+btset.clj:696 recur arg for primitive local: ret is not matching primitive, had: Object, needed: long
+btset.clj:708 recur arg for primitive local: ret is not matching primitive, had: Object, needed: long
+btset.clj:720 recur arg for primitive local: ret is not matching primitive, had: Object, needed: long
+datalog.clj:1008 recur arg for primitive local: h is not matching primitive, had: Object, needed: long
+datalog.clj:164 recur arg for primitive local: h is not matching primitive, had: Object, needed: long
+datalog.clj:179 recur arg for primitive local: h is not matching primitive, had: Object, needed: long
+datalog.clj:991 recur arg for primitive local: h is not matching primitive, had: Object, needed: long
