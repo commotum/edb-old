@@ -19,6 +19,9 @@ stage2_runner="$scripts_dir/stage2/validate-postgresql.sh"
 stage2_logback="$scripts_dir/stage2/logback-stage2.xml"
 
 confirmation_token=DATOMIC_STAGE3_DISPOSABLE
+original_nano_sha=fbde8184da356bd3a9995a9f05f01493efe4baa87c4d48377cda3e53331807cd
+expected_sanitized_nano_sha=08f9699d6e35b9e052ec85ee15e0896b3a685c74e6e226d8cd89d9c61dbf8d5f
+expected_sanitized_nano_bytes=81218
 
 usage() {
   cat <<EOF
@@ -36,6 +39,9 @@ Candidate inputs:
   --dependency-manifest TSV  Optional manifest; Stage 2 verifies it against
                               the artifact's embedded copy.
   --stub-dir DIR              Optional prebuilt four-class Hot Rod stub tree.
+  --sanitized-nano JAR        Required canonical sanitized nano-impl JAR. It
+                              replaces the licensed original on the candidate
+                              classpath.
 
 PostgreSQL inputs:
   --postgres-root DIR        Extracted PostgreSQL root.
@@ -135,6 +141,7 @@ marker_count() {
 artifact_input=${DATOMIC_REV_ARTIFACT:-}
 dependency_manifest_input=
 stub_dir_input=
+sanitized_nano_input=
 datomic_home=${DATOMIC_HOME:-}
 postgres_root=${STAGE3_POSTGRES_ROOT:-}
 pg_bin_dir=
@@ -167,6 +174,7 @@ while (($#)); do
     --artifact) artifact_input=${2:?missing value for --artifact}; shift 2 ;;
     --dependency-manifest) dependency_manifest_input=${2:?missing value for --dependency-manifest}; shift 2 ;;
     --stub-dir) stub_dir_input=${2:?missing value for --stub-dir}; shift 2 ;;
+    --sanitized-nano) sanitized_nano_input=${2:?missing value for --sanitized-nano}; shift 2 ;;
     --postgres-root) postgres_root=${2:?missing value for --postgres-root}; shift 2 ;;
     --pg-bin-dir) pg_bin_dir=${2:?missing value for --pg-bin-dir}; shift 2 ;;
     --pg-lib-dir) pg_lib_dir=${2:?missing value for --pg-lib-dir}; shift 2 ;;
@@ -253,6 +261,21 @@ require_safe_path_text datomic-home "$datomic_home"
   die "missing external transactor launcher: $datomic_home/bin/transactor"
 transactor_jar="$datomic_home/datomic-transactor-pro-1.0.7277.jar"
 [[ -f "$transactor_jar" ]] || die "missing licensed transactor fixture: $transactor_jar"
+
+[[ -n "$sanitized_nano_input" ]] ||
+  die "provide --sanitized-nano pointing at the canonical sanitized nano-impl JAR"
+[[ ! -L "$sanitized_nano_input" ]] ||
+  die "sanitized Nano input may not be a symbolic link: $sanitized_nano_input"
+[[ -f "$sanitized_nano_input" ]] ||
+  die "missing sanitized Nano input: $sanitized_nano_input"
+sanitized_nano=$(readlink -f -- "$sanitized_nano_input")
+require_safe_path_text sanitized-nano "$sanitized_nano"
+[[ ! -L "$sanitized_nano" && -f "$sanitized_nano" ]] ||
+  die "sanitized Nano input must resolve to a regular non-symbolic file: $sanitized_nano"
+[[ "$(sha256_file "$sanitized_nano")" == "$expected_sanitized_nano_sha" ]] ||
+  die "sanitized Nano SHA-256 differs from the canonical candidate"
+[[ "$(wc -c <"$sanitized_nano")" -eq "$expected_sanitized_nano_bytes" ]] ||
+  die "sanitized Nano size differs from the canonical candidate"
 
 if [[ -n "$artifact_input" ]]; then
   [[ -f "$artifact_input" ]] || die "missing recovered artifact: $artifact_input"
@@ -358,6 +381,7 @@ preflight_args=(
   --pg-major "$pg_major"
   --pg-bin-dir "$pg_bin_dir"
   --probe-timeout "$probe_timeout"
+  --sanitized-nano "$sanitized_nano"
 )
 [[ -z "$artifact_input" ]] || preflight_args+=(--artifact "$artifact_input")
 [[ -z "$dependency_manifest_input" ]] ||
@@ -440,6 +464,7 @@ awk -F '\t' 'NR > 1 {
 
 candidate_entries=()
 position=0
+sanitized_nano_role_count=0
 while IFS=$'\t' read -r recorded_position role expected_sha entry extra; do
   [[ "$recorded_position" == position ]] && continue
   [[ -n "$recorded_position" && -n "$role" && -n "$expected_sha" && -n "$entry" && -z "${extra:-}" ]] ||
@@ -474,14 +499,39 @@ while IFS=$'\t' read -r recorded_position role expected_sha entry extra; do
       die "candidate Hot Rod stub tree changed after the Stage 2 preflight"
   fi
   if ((position >= 4)); then
-    case "$entry" in
-      "$datomic_home"/lib/*) ;;
-      *) die "candidate dependency escaped the licensed lib directory: $entry" ;;
-    esac
-    case "${entry##*/}" in
-      peer-*.jar|core2-*.jar|datomic-transactor*.jar|*transactor-pro*.jar)
-        die "forbidden original implementation entered candidate classpath: $entry"
+    # Stage 2's record contract keeps the manifest order and cardinality: one
+    # licensed nano-impl row is replaced in place by this explicit external
+    # role. Every ordinary dependency must still come from datomic-home/lib.
+    case "$role" in
+      dependency)
+        [[ "$expected_sha" != "$original_nano_sha" ]] ||
+          die "original Nano implementation hash entered candidate classpath: $entry"
+        case "$entry" in
+          "$datomic_home"/lib/*) ;;
+          *) die "candidate dependency escaped the licensed lib directory: $entry" ;;
+        esac
+        [[ ! -L "$entry" ]] ||
+          die "candidate dependency may not be a symbolic link: $entry"
+        case "${entry##*/}" in
+          peer-*.jar|core2-*.jar|datomic-transactor*.jar|*transactor-pro*.jar|nano-impl-*.jar)
+            die "forbidden original implementation entered candidate classpath: $entry"
+            ;;
+        esac
         ;;
+      sanitized-nano-dependency)
+        ((sanitized_nano_role_count += 1))
+        [[ "$sanitized_nano_role_count" -eq 1 ]] ||
+          die "candidate classpath contains more than one sanitized Nano role"
+        [[ "$entry" == "$sanitized_nano" ]] ||
+          die "Stage 2 recorded a different sanitized Nano path: $entry"
+        [[ "$expected_sha" == "$expected_sanitized_nano_sha" ]] ||
+          die "Stage 2 recorded a noncanonical sanitized Nano SHA-256"
+        [[ -f "$entry" && ! -L "$entry" ]] ||
+          die "recorded sanitized Nano is missing or symbolic: $entry"
+        [[ "$(wc -c <"$entry")" -eq "$expected_sanitized_nano_bytes" ]] ||
+          die "recorded sanitized Nano size is noncanonical"
+        ;;
+      *) die "unexpected candidate dependency role at position $position: $role" ;;
     esac
   fi
   [[ -f "$entry" || -d "$entry" ]] || die "candidate classpath entry disappeared: $entry"
@@ -493,6 +543,8 @@ while IFS=$'\t' read -r recorded_position role expected_sha entry extra; do
 done <"$preflight_classpath"
 [[ "$position" -eq 535 && "${#candidate_entries[@]}" -eq 535 ]] ||
   die "candidate classpath cardinality changed after preflight"
+[[ "$sanitized_nano_role_count" -eq 1 ]] ||
+  die "candidate classpath must contain exactly one sanitized Nano role"
 
 artifact_jar=${candidate_entries[0]}
 [[ -f "$artifact_jar" ]] || die "preflight artifact path is not a file"
@@ -582,6 +634,12 @@ config_record="$work_root/config.properties"
   printf 'candidate.original.peer=false\n'
   printf 'candidate.original.core2=false\n'
   printf 'candidate.original.transactor=false\n'
+  printf 'candidate.nano.original=false\n'
+  printf 'candidate.nano.sanitized=true\n'
+  printf 'candidate.nano.sanitized.role.count=%s\n' "$sanitized_nano_role_count"
+  printf 'candidate.nano.sanitized.path=%s\n' "$sanitized_nano"
+  printf 'candidate.nano.sanitized.sha256=%s\n' "$expected_sanitized_nano_sha"
+  printf 'candidate.nano.sanitized.bytes=%s\n' "$expected_sanitized_nano_bytes"
   printf 'candidate.peer-connection-ttl-msec=10000\n'
   printf 'candidate.tx-timeout-msec=10000\n'
   printf 'candidate.query-pool=2\n'
@@ -1156,6 +1214,11 @@ summary_file="$work_root/stage-3-summary.properties"
   printf 'candidate.original.peer=false\n'
   printf 'candidate.original.core2=false\n'
   printf 'candidate.original.transactor=false\n'
+  printf 'candidate.nano.original=false\n'
+  printf 'candidate.nano.sanitized=true\n'
+  printf 'candidate.nano.sanitized.role.count=%s\n' "$sanitized_nano_role_count"
+  printf 'candidate.nano.sanitized.sha256=%s\n' "$expected_sanitized_nano_sha"
+  printf 'candidate.nano.sanitized.bytes=%s\n' "$expected_sanitized_nano_bytes"
   printf 'local.promise=true\n'
   printf 'local.core2-async=true\n'
   printf 'local.pool-rejection=true\n'

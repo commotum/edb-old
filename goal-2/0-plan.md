@@ -1046,7 +1046,7 @@ without original implementation fallback.
 
 ### Stage 2 — Reconcile the shared semantic kernel
 
-**Status:** Pending
+**Status:** In progress
 
 **Outcome:** Correct Transactor-specific versions of the namespaces shared in
 name with the Peer, with reuse and divergence justified by evidence.
@@ -1064,7 +1064,7 @@ differences.
 
 ### Stage 3 — Establish a recovered Transactor process
 
-**Status:** Pending
+**Status:** In progress
 
 **Outcome:** A bounded recovered process that owns its launch, configuration,
 lifecycle, and shutdown without yet claiming transaction correctness.
@@ -1080,7 +1080,7 @@ Transactor implementation.
 
 ### Stage 4 — Make PostgreSQL the proven durable substrate
 
-**Status:** Pending
+**Status:** In progress
 
 **Outcome:** A recovered Transactor foundation that can safely create, locate,
 read, and update Datomic storage state through disposable PostgreSQL.
@@ -1096,7 +1096,7 @@ auditable and cleanup-complete.
 
 ### Stage 5 — Recover transactions and the durable log
 
-**Status:** Pending
+**Status:** In progress
 
 **Outcome:** An authoritative single-writer path whose transaction semantics,
 total order, durable commit, and acknowledgement boundary are understood and
@@ -1114,7 +1114,7 @@ never acknowledged before the exact durable commit boundary.
 
 ### Stage 6 — Produce indexes and complete the Peer round trip
 
-**Status:** Pending
+**Status:** In progress
 
 **Outcome:** Committed transactions become persistent indexes and flow through
 the real Peer–Transactor protocol into correct immutable Peer database values.
@@ -1182,14 +1182,144 @@ green; and no known gap is mislabeled as a recovered component.
 
 ## Current continuation
 
-**Current stage:** Stage 1 — recover the whole Transactor corpus.
+**Active workstream:** The repository-owned PostgreSQL main path is green from
+the corrected current sources. Close the exhaustive Stage 1 exact-source and
+surface boundary, then classify all 117 Stage 2 overlaps before advancing the
+concrete failure, transport, and HA gates. Do not reopen an unconstrained
+residual-by-residual loop.
 
-**Anti-ceremony checkpoint (2026-08-28):** The recovery work has produced a
-real candidate corpus, but the most recent residual-by-residual source quotient
-and acceptance-scanner refinements ceased to be the shortest route to the
-goal's educational finish line. In particular, no recovered Transactor process
-or recovered-Transactor PostgreSQL write has yet been demonstrated; the prior
-PostgreSQL lifecycle used the licensed Transactor only as an external fixture.
+**PostgreSQL vertical-slice checkpoint (2026-08-28):** The recovered
+Transactor and recovered Peer now complete the main path through provisioned
+PostgreSQL storage: process boot, Datomic catalog/database initialization,
+Peer transaction submission, durable SQL/log publication, notification and
+query, process restart, and Peer log/index adoption. The strict `vslice8` run
+used a resolved Peer classpath with the licensed Peer, Transactor, core2, and
+original Nano implementations absent and exactly one sanitized Nano
+derivative present. Its seed produced basis `1001`, 64 logical rows, 41
+PostgreSQL KV rows, 15,250 stored value bytes, a log-tail row, and a published
+index-root reference. A fresh recovered Transactor restart loaded
+the same database, advanced log catchup from `index-t 66` to `index-t 1001`,
+and the recovered Peer snapshot reproduced every seed hash exactly. From that
+strict restart state, a second recovered-Peer transaction advanced basis to
+`1066` and produced 96 logical rows. PostgreSQL then held 42 KV rows and
+18,992 stored value bytes. A third fresh recovered Transactor replayed 64,032
+bytes from `tail-t 1066, index-t 66`, and the final recovered-Peer snapshot
+reproduced the second commit's database id, basis, row count, and every hash
+exactly. The earlier `vslice7` seed/restart/augment result is retained only as
+a diagnostic: its Peer dependency list still contained the original Nano JAR,
+so it is not promotion evidence. Full evidence, hashes, repairs, and remaining limits are
+recorded in
+`datomic-rev/transactor/reports/postgresql-vertical-slice.md`.
+
+The historical `vslice8` inputs were subsequently found unsuitable as a
+reproducible gate: its Transactor discovery record pointed at live repository
+sources, its Peer artifact was stale against 11 current Peer files, and the
+canonical Peer artifact still packaged two licensed JKS resources. Those facts
+are no longer papered over. The new repository runner
+`datomic-rev/transactor/scripts/validate-postgresql-vertical-slice.sh`, SHA-256
+`3544bdb504ab7926359cbfe366c3bcbc8c85ad14292f68d1e4827cc228e88639`,
+rebuilds and byte-compares the current Peer, stages a JKS-free runtime
+derivative, snapshots current Transactor roots, rebuilds resources, proves all
+142 Peer and 272 Transactor/core2 origins, and recursively seals both
+classpaths. Its no-service preflight passed at
+`/tmp/datomic-recovered-pair-gate-dry-v7`, including the sealed focused
+runtime-regression probe; its evidence-manifest SHA-256 is
+`94cc29daebbedec4123d712f31f127bacad449df6d5e620014dbab79095eed0c`.
+
+The current executing repository-gate run passed at
+`/tmp/datomic-recovered-pair-live-v3`. Seed basis `1001`/64 rows survived a
+fresh Transactor and fresh data-directory restart with exact database id,
+basis, row count, and four semantic hashes; catchup replayed 37,372 bytes from
+`tail-t 1001, index-t 66`. The augment advanced to basis `1066`/96 rows and
+survived a third fresh process/data directory with the same exact checks;
+catchup replayed 64,032 bytes from `tail-t 1066, index-t 66`. PostgreSQL state
+was exactly 41 rows/15,254 value bytes after seed and 42/18,996 after augment,
+unchanged across each restart. All three Transactors stopped by bounded
+`SIGINT` with no TERM/KILL, both service ports closed, and `pg_controldata`
+reported `shut down`. The self-verifying evidence-manifest SHA-256 is
+`100245c7dbb8639ea4bbc8ad46594818bfb9909e6aae75a3b79c1b26263d24bf`;
+the candidate-runtime seal SHA-256 is
+`b821ed9c68a20f3f21baeb7f22b727f6caa176ef9dfadecd2ebab40647db7403`;
+the runtime-membership SHA-256 is
+`ab1c42d424061a8ed309e550f5092ffb5cc03711c9c80b4a000d09418c244236`.
+The resolved Peer and Transactor classpath ledgers have SHA-256 values
+`0cb5a2b425b0a979a0baf37272393184eee22b25e369a541b4185fbc2ee67935`
+and `5d009a86b73ec4c926fb2f420598479986becf3e3d5cb172770869ddc47fdbc8`.
+The database id is
+`recovered-pair-dad95659-f007-463c-8dd5-f1a7d9b4d63f`; seed/restart
+fingerprints match at
+`071b6799a2fbf4e70d25787d1cc0a5819eba73850bd086dc74a37bad34d00b0e`
+and augment/restart fingerprints match at
+`a5186eb24ddc24d34c0f2615953daa05c5bb65acc3e6618fe9ad453bb8f0171f`.
+The v1 and v2 runs remain historical main-path evidence. v1 predates the
+checked-in `compare-byte-arrays` correction; v2 used the corrected source but
+did not integrate the focused runtime validator into the gate itself.
+
+Before that run, the six earlier deliberate runtime repairs in `datomic.common`,
+`datomic.db`, `datomic.future`, `datomic.kv-cluster`,
+`datomic.memory-size`, and `datomic.update` passed their AOT/decompiler and
+focused behavior checks. Together with the `compare-byte-arrays` correction
+described below, they were honestly repinned. The current 247-row source
+manifest SHA-256 is
+`6f27a4259ea02bb3eba6214d44b7c155d0d3dda1128a8d0be5301c2d00257786`.
+A fresh structural root at
+`/tmp/datomic-transactor-recovered-pair-current-v2` then passed 272/272 namespace
+loads (271 cold, one documented order-dependent) with evidence-manifest
+SHA-256
+`5490edf69d9ae86a1d78edf9644e1196ebf644bbea649c022e83b141f58b5bc8`.
+Its candidate classpath is
+`/tmp/datomic-transactor-recovered-pair-current-v2/evidence/candidate-classpath.tsv`,
+SHA-256
+`ba0f0c6d56fa59e0060b6f662dc8be95cba766a4519839cff2fc232f1b85e4b1`.
+Structural surfaces remain deferred; they were not silently counted as run.
+
+The confirmed `datomic.common/compare-byte-arrays` defect is now repaired and
+revalidated rather than carried as an open runtime item. Exact AOT class
+`datomic/common$compare_byte_arrays.class`, SHA-256
+`23e34d076e57e17dce2947ffa8a20b000cfe888d55cc512ee7059f95bab9f4fe`,
+proves that the loop body continuation at bytecode offset 114 follows one
+forward `goto` to the sole `LRETURN` at 120; it does not produce the stale
+synthetic trailing `nil` that remained in the checked-in source. The generic
+continuation-aware loop recovery, exact-label decompiler regression, focused
+signed-byte/equal/prefix behavior matrix, 247-row source-manifest check, fresh
+272-namespace structural load, and the complete v3 PostgreSQL gate all pass.
+The v3 runner copies, seals, and executes the focused runtime validator at
+SHA-256
+`9e661bd3211dd3c483675d08138421d4255f97ae0cb1311f5d7adbe731c66a42`
+before it starts PostgreSQL, so `recovery.common.compare-byte-arrays=PASS` is
+an executed probe rather than a report-only marker.
+
+The corpus analyzer also now handles ordinary multi-form `ns` sources without
+accepting namespace declarations nested in `comment`; its focused fixture
+passes and a regenerated 142-namespace Peer index is byte-identical to the
+checked-in machine outputs. A legacy third-party `#=` reader form still blocks
+using that analyzer over the entire bundled Transactor dependency corpus with
+`*read-eval*` disabled. That safe-reader limitation is explicit and is not a
+runtime-gate blocker.
+
+The empty-schema startup probe also exposed a real recovery defect rather
+than a storage feature gap: both recovered `root-cause` functions discarded
+their recursive branch result, so retry reporting crashed with a secondary
+NPE. Exact Transactor AOT and the preserved Peer source prove the recursive
+deepest-cause form. The existing generic dead-`ATHROW` lexical-boundary repair
+now freshly recovers both functions, and one exact AOT-shaped decompiler
+regression plus one focused runtime regression pass. With that defect fixed,
+the same probe correctly reports PostgreSQL's missing `datomic_kvs` relation;
+external table provisioning is therefore an explicit harness precondition.
+
+This checkpoint advances Stages 2--6 but does not close them. Stage 2 still
+needs final classification of all 117 overlaps. Stage 3 now proves graceful
+success-path shutdown but still needs injected startup-failure cleanup. Stage
+4 still needs the exact CAS/root rejection and failure matrix. Stage 5 still
+needs rejection,
+concurrency, and fault-injected acknowledgement-boundary tests. Stage 6 still
+needs persistent-index scheduling/publication and transport-interruption
+coverage. Stage 7 HA remains pending.
+
+**Superseded anti-ceremony checkpoint (2026-08-28):** Before the runtime result
+above, the recovery work had produced a real candidate corpus, but the most
+recent residual-by-residual source quotient and acceptance-scanner refinements
+had ceased to be the shortest route to the goal's educational finish line.
 The 189 exact-source residuals, the report-only `defonce` analysis, and the
 remaining scanner/wrapper gaps stay recorded as open evidence obligations, but
 further refinement is deferred until direct execution exposes a defect that
@@ -1225,7 +1355,7 @@ literal-`nil`/`false` tail retention, typed location values, and generic protoco
 reconstruction and produced the verified v22 tree. The current decompiler adds
 the bytecode-proved captured-field/function-name discrimination, bounded
 impure-loop return repair, and persistent pre-namespace-load protocol-method
-Var discrimination described below. Its source-first validator passes 51/51
+Var discrimination described below. Its source-first validator passes 52/52
 tagged groups; v22 predates these final repairs and is still only diagnostic.
 The fresh whole-tree failures below, rather than these superseded snapshots,
 now define the promotion boundary.
@@ -1805,23 +1935,19 @@ acceptance failure even when later diagnostic gates continue. A post-preflight
 EXIT evidence path, bounded TERM-to-KILL cleanup, per-gate candidate/input
 seals, and explicit PASS/FAIL/NOT_RUN rows are required before this wrapper can
 be promoted.
-After source promotion, the full merged 247 Transactor plus 25
-Peer-core2 structural discovery/load/surface gate must also rerun from a new
-root with the sanitized Nano and generated resources proved at the runtime
-boundary. No recovered Transactor process and no PostgreSQL write, log, index,
-transport, or HA result is claimed yet; Stage 2 and later remain pending.
+The full merged 247 Transactor plus 25 Peer-core2 structural discovery/load
+gate has now rerun from a fresh root with the sanitized Nano and generated
+resources proved at the runtime boundary: 272/272 loads pass. The exhaustive
+surface half and normalized exact-source AOT promotion boundary remain open;
+they are distinct from the now-proven PostgreSQL main-path runtime slice.
 
-**Next direct action:** Assemble the already recovered 247 Transactor sources,
-25 recovered Peer-core2 support sources, 52 recovered Java classes, four
-candidate resources, sanitized Nano, and 532-element dependency closure into
-an original-free candidate runtime. Launch `datomic.launcher` against a
-disposable PostgreSQL catalog and capture the first concrete startup result.
-If it starts, run one transaction from the recovered Peer and verify the
-transaction, log, index, and durable SQL effects; if it fails, repair the
-earliest material runtime defect and repeat. Record the exact candidate
-classpath and prove that licensed Peer, Transactor, core2, and original Nano
-implementations are absent. Resume the deferred exact-source/scanner work only
-where a concrete runtime failure or final promotion gate makes it necessary.
+**Next direct action:** Close the deferred Stage 1 exact-source/surface boundary
+and classify all 117 Stage 2 overlaps. Then exercise the first still-open
+concrete Stage 3--7 boundary: injected-startup-failure cleanup, exact SQL
+CAS/root rejection, transport interruption, or active/standby takeover. The
+existing Stage 2/3 Peer harnesses remain licensed-Transactor oracle fixtures and
+must not be relabeled as the recovered-pair gate. Do not resume an
+unconstrained 189-residual loop.
 
 ## Goal completion
 

@@ -225,14 +225,26 @@ transactor/scripts/validate-structural-load.sh \
   /tmp/datomic-transactor-structural-load
 ```
 
-Stage 1 remains incomplete until the exact-source normalized AOT relation and
-the full bounded load/surface/runtime-resource gate close without original
-Peer, Transactor, core2, or unsanitized nano fallback. No recovered Transactor
-process or PostgreSQL transaction path is claimed by these structural tools.
-The latest sealed diagnostic proved 271 cold namespace loads plus the one
-bytecode-supported production-order load, but it is not promotable: its raw
-surface-output protocol obscured 36 results and the recovered `datomic.rest`
-surface genuinely differed. A dedicated EDN channel now separates canonical
-surface data from preserved third-party stdout; the fresh full run waits for
-the corrected repair's focused checks, full Peer regression, twin regeneration,
-and source-manifest promotion.
+The current fresh structural run is
+`/tmp/datomic-transactor-recovered-pair-current-v2`. Its candidate classpath
+ledger has SHA-256
+`ba0f0c6d56fa59e0060b6f662dc8be95cba766a4519839cff2fc232f1b85e4b1`,
+its evidence manifest has SHA-256
+`5490edf69d9ae86a1d78edf9644e1196ebf644bbea649c022e83b141f58b5bc8`,
+and its current 247-source manifest has SHA-256
+`6f27a4259ea02bb3eba6214d44b7c155d0d3dda1128a8d0be5301c2d00257786`.
+All 272 Transactor/core2 namespaces load (271 cold plus one
+bytecode-supported production-order load) with the original Peer, Transactor,
+core2, and unsanitized Nano implementations absent. Surfaces were explicitly
+not executed in this run.
+
+Stage 1 therefore remains incomplete at the exact-source normalized AOT and
+full bounded surface boundaries, not at structural namespace load. Separately,
+the repository-owned gate at
+`/tmp/datomic-recovered-pair-live-v3` now proves the recovered Transactor and
+recovered Peer through PostgreSQL boot, seed, durable commit, two fresh-process
+restart/adoption checks, and a post-restart augment transaction. It also runs
+the sealed focused recovery regressions. This runtime result does not close
+persistent-index publication, injected-failure cleanup, transport interruption,
+or HA/fencing. See `reports/postgresql-vertical-slice.md` for its exact evidence
+and limits.

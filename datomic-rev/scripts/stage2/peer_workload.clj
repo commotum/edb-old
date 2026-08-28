@@ -1,8 +1,9 @@
 (ns stage2.peer-workload
   "Deterministic external-SQL workload for the recovered peer candidate.
 
-  Modes: seed, augment, phase-three (alias fault-seed), snapshot, and
-  post-restore. Invoke through clojure.main -m stage2.peer-workload."
+  Modes: seed, augment, phase-three (alias fault-seed), snapshot,
+  request-index, and post-restore. Invoke through clojure.main
+  -m stage2.peer-workload."
   (:require [clojure.string :as str]
             [datomic.api :as d])
   (:import [datomic Database Datom]
@@ -340,6 +341,28 @@
       (finally
         (d/release conn)))))
 
+(defn- request-index!
+  [uri]
+  (let [conn (d/connect uri)]
+    (try
+      (let [requested-db (d/db conn)
+            requested-t (d/basis-t requested-db)
+            database-id (.id ^Database requested-db)
+            request-accepted? (boolean (d/request-index conn))
+            indexed-db @(d/sync-index conn requested-t)
+            indexed-t (d/basis-t indexed-db)]
+        (ensure! (>= indexed-t requested-t)
+                 "Persistent index did not reach the requested basis"
+                 {:requested-t requested-t
+                  :indexed-t indexed-t})
+        (sorted-map
+          :database-id database-id
+          :indexed-t indexed-t
+          :request-accepted? request-accepted?
+          :requested-t requested-t))
+      (finally
+        (d/release conn)))))
+
 (defn- post-restore!
   [uri expected-logical-sha expected-database-id expected-basis-t]
   (let [conn (d/connect uri)]
@@ -458,6 +481,13 @@
                  {:argument-count argument-count})
         {:mode mode :uri uri :arg (parse-t arg)})
 
+      "request-index"
+      (do
+        (ensure! (= 2 argument-count)
+                 "request-index requires exactly MODE URI"
+                 {:argument-count argument-count})
+        {:mode mode :uri uri})
+
       "post-restore"
       (let [[_ _ expected-logical-sha expected-database-id expected-basis-t]
             args]
@@ -489,6 +519,7 @@
     "phase-three" (phase-three! uri)
     "fault-seed" (phase-three! uri)
     "snapshot" (read-snapshot uri arg)
+    "request-index" (request-index! uri)
     "post-restore" (post-restore! uri
                                   (:expected-logical-sha arg)
                                   (:expected-database-id arg)

@@ -159,6 +159,64 @@
 (defn symbol-occurs? [sym form]
   (contains? (symbols-in form) sym))
 
+(defn compiler-lock-temp?
+  "True only for the locals emitted by clojure.core/locking's macroexpansion.
+  Keeping this test narrow prevents an arbitrary hand-written monitor pair
+  from being rewritten as a source-level locking form."
+  [kind value]
+  (and (symbol? value)
+       (nil? (namespace value))
+       (boolean
+         (re-matches (re-pattern (str kind "__[0-9]+__auto__"))
+                     (name value)))))
+
+(defn unqualified-call?
+  [operation form]
+  (and (seq? form)
+       (= (symbol operation) (first form))))
+
+(defn monitor-call?
+  [operation lock-local form]
+  (and (unqualified-call? operation form)
+       (= 2 (count form))
+       (= lock-local (second form))))
+
+(defn matching-monitor-finally?
+  [lock-local form]
+  (when (and (unqualified-call? "finally" form)
+             (= 2 (count form)))
+    (let [body (second form)]
+      (or (monitor-call? "monitor-exit" lock-local body)
+          (and (unqualified-call? "do" body)
+               (= 3 (count body))
+               (monitor-call? "monitor-exit" lock-local (second body))
+               (nil? (nth body 2)))))))
+
+(defn recover-locking-form
+  "Recover the exact compiler expansion of clojure.core/locking. The strict
+  lockee/locklocal and matching-enter/exit checks are important: a partial
+  monitor pattern is not safe to compact."
+  [form]
+  (when (and (unqualified-call? "let" form)
+             (= 4 (count form))
+             (vector? (second form)))
+    (let [[lockee lock lock-local lockee-source :as bindings] (second form)
+          enter-form (nth form 2)
+          try-form (nth form 3)
+          finally-form (when (unqualified-call? "try" try-form)
+                         (last try-form))
+          try-body (butlast (rest try-form))]
+      (when (and (= 4 (count bindings))
+                 (compiler-lock-temp? "lockee" lockee)
+                 (compiler-lock-temp? "locklocal" lock-local)
+                 (= lockee lockee-source)
+                 (monitor-call? "monitor-enter" lock-local enter-form)
+                 (not-any? #(or (unqualified-call? "catch" %)
+                                (unqualified-call? "finally" %))
+                           try-body)
+                 (matching-monitor-finally? lock-local finally-form))
+        (list* 'locking lock try-body)))))
+
 (defn captured-compiler-temp-binding?
   "Detect a compiler `temp__N__auto__` let binding that is mentioned beyond
   the expansion's test and source-binding alias. Assertion-like macros retain
@@ -1484,6 +1542,9 @@
                      (first expr)))
     (expand-metadata-aware-dynamic-bind-root expr)
 
+    (recover-locking-form expr)
+    (recover-locking-form expr)
+
     :else
     (compact expr
     [(do ?ret) :-> ?ret]
@@ -1608,14 +1669,6 @@
      :->
      `(dotimes [~?n ~?t]
         ~@(butlast ?&body))]
-
-    [(`let [?l ?lock]
-      (try
-        (do (monitor-enter ?l)
-            ?&body)
-        (finally ?&_)))
-     :->
-     `(locking ~?lock ~@?&body)]
 
     [(`let [?t ?x] (if ?t ?y ?t))
      {?t #(and (symbol? %) (-> % name (.startsWith "and__")))}

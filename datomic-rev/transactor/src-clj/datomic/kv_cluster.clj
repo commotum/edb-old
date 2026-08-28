@@ -46,7 +46,7 @@
   (defn root-cause
     ([x]
       (if (instance? java.lang.Throwable x)
-        (do (let [cause (.getCause ^java.lang.Throwable x)] nil) nil)
+        (let [cause (.getCause ^java.lang.Throwable x)] (if cause (recur cause) x))
         x)))
   (defn retry-cause ([result] (.getName (class (root-cause result)))))
   (defn notify-retry

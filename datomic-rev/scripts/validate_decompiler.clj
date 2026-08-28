@@ -1653,6 +1653,44 @@
   (assert (= :loop (get-in statement-result [:statements 0 :op])))
   (println "decompiler impure-loop body-continuation value behavior passed"))
 
+;; Exact control-flow boundary from Transactor
+;; datomic/common$compare_byte_arrays.class (SHA-256 23e34d076e57e17d...).
+;; Its binding-free loop starts at pc 37, but both equal-length values leave
+;; through pc 114's forward GOTO to the shared primitive return at pc 120.
+;; Looking at the loop entry misclassifies the loop as a statement and emits
+;; `(do (loop ...) nil)`; looking at the processed body's continuation keeps
+;; the loop as the branch value.
+(let [body-value {:op :const :val 0}
+      body-processor (fn [body]
+                       (assoc body
+                              :pc 114
+                              :stack [body-value]
+                              :statements []
+                              :ast {}
+                              :recur? true))
+      ctx {:pc 37
+           :impure-loops #{37}
+           :insns [{:insn/name "lload" :insn/label 37 :insn/length 2}
+                   {:insn/name "goto" :insn/label 114 :insn/length 3
+                    :insn/jump-offset 6}
+                   {:insn/name "athrow" :insn/label 117 :insn/length 1}
+                   {:insn/name "lload" :insn/label 118 :insn/length 2}
+                   {:insn/name "lreturn" :insn/label 120 :insn/length 1}]
+           :jump-table {37 0, 114 1, 117 2, 118 3, 120 4}
+           :stack []
+           :statements []
+           :ast {}}
+      recovered (with-redefs [ast/process-insns body-processor]
+                  (ast/process-impure-loop ctx))
+      recovered-form (source/ast->clj (peek (:stack recovered)))]
+  (assert (not (ast/will-ret? ctx 37)))
+  (assert (ast/will-ret? ctx 114))
+  (assert (= 114 (:pc recovered)))
+  (assert (empty? (:statements recovered)))
+  (assert (= '(loop* [] (do 0)) recovered-form))
+  (assert (= 0 (eval recovered-form)))
+  (println "decompiler compare-byte-arrays exact AOT loop value passed"))
+
 (let [ctx {:pc 10 :enclosing-end-label 20}
       crossed (ast/continue-within-enclosing-region ctx {:pc 30})
       exact (ast/continue-within-enclosing-region ctx {:pc 20})
@@ -1712,6 +1750,113 @@
   (assert (= result-expr
              (get-in recovered [:stack 0 :body :ret :else :ret])))
   (println "decompiler lexical branch value across dead ATHROW padding passed"))
+
+(let [x-local #:local-variable{:name "x"
+                                :start-label 0
+                                :end-label 47
+                                :index 0
+                                :type "java.lang.Object"}
+      cause-local #:local-variable{:name "cause"
+                                    :start-label 15
+                                    :end-label 40
+                                    :index 1
+                                    :type "java.lang.Object"}
+      load-local
+      (fn [name label index]
+        {:insn/name name
+         :insn/label label
+         :insn/length 1
+         :insn/local-variable-element
+         {:insn/target-type "java.lang.Object"
+          :insn/target-index index}})
+      store-local load-local
+      bytecode
+      [(load-local "aload_0" 0 0)
+       {:insn/name "instanceof" :insn/label 1 :insn/length 3
+        :insn/pool-element
+        {:insn/target-value "java/lang/Throwable"
+         :insn/target-type "java.lang.Throwable"}}
+       {:insn/name "ifeq" :insn/label 4 :insn/length 3
+        :insn/jump-offset 40}
+       (load-local "aload_0" 7 0)
+       {:insn/name "checkcast" :insn/label 8 :insn/length 3
+        :insn/pool-element
+        {:insn/target-value "java/lang/Throwable"
+         :insn/target-type "java.lang.Throwable"}}
+       {:insn/name "invokevirtual" :insn/label 11 :insn/length 3
+        :insn/pool-element
+        {:insn/target-class "java.lang.Throwable"
+         :insn/target-name "getCause"
+         :insn/target-arg-types []
+         :insn/target-ret-type "java.lang.Throwable"}}
+       (store-local "astore_1" 14 1)
+       (load-local "aload_1" 15 1)
+       {:insn/name "dup" :insn/label 16 :insn/length 1}
+       {:insn/name "ifnull" :insn/label 17 :insn/length 3
+        :insn/jump-offset 19}
+       {:insn/name "getstatic" :insn/label 20 :insn/length 3
+        :insn/pool-element
+        {:insn/target-class "java.lang.Boolean"
+         :insn/target-name "FALSE"
+         :insn/target-type "java.lang.Boolean"}}
+       {:insn/name "if_acmpeq" :insn/label 23 :insn/length 3
+        :insn/jump-offset 14}
+       (load-local "aload_1" 26 1)
+       {:insn/name "aconst_null" :insn/label 27 :insn/length 1}
+       (store-local "astore_1" 28 1)
+       (store-local "astore_0" 29 0)
+       {:insn/name "goto" :insn/label 30 :insn/length 3
+        :insn/jump-offset -30}
+       ;; Clojure 1.11 replaces the unreachable forward GOTO after recur with
+       ;; this dead padding. The lexical end at 40 is therefore the only
+       ;; reliable boundary for the value-bearing `x` branch at 37.
+       {:insn/name "nop" :insn/label 33 :insn/length 1}
+       {:insn/name "nop" :insn/label 34 :insn/length 1}
+       {:insn/name "athrow" :insn/label 35 :insn/length 1}
+       {:insn/name "pop" :insn/label 36 :insn/length 1}
+       (load-local "aload_0" 37 0)
+       {:insn/name "aconst_null" :insn/label 38 :insn/length 1}
+       (store-local "astore_0" 39 0)
+       {:insn/name "goto" :insn/label 40 :insn/length 3
+        :insn/jump-offset 7}
+       {:insn/name "athrow" :insn/label 43 :insn/length 1}
+       (load-local "aload_0" 44 0)
+       {:insn/name "aconst_null" :insn/label 45 :insn/length 1}
+       (store-local "astore_0" 46 0)
+       {:insn/name "areturn" :insn/label 47 :insn/length 1}]
+      method #:method{:name "invokeStatic"
+                      :flags #{:public :static}
+                      :return-type "java.lang.Object"
+                      :arg-types ["java.lang.Object"]
+                      :bytecode bytecode
+                      :jump-table
+                      (into {}
+                            (map-indexed
+                              (fn [index instruction]
+                                [(:insn/label instruction) index])
+                              bytecode))
+                      :local-variable-table #{x-local cause-local}
+                      :exception-table #{}}
+      recovered
+      (ast/process-method-insns
+        {:bc-for (constantly nil)
+         :class-name "fixture.RootCause"
+         :fn-name "root_cause"}
+        method)
+      outer-if (get-in recovered [:ast :ret])
+      cause-let (get-in outer-if [:then :ret])
+      cause-if (get-in cause-let [:body :ret])]
+  (assert (= :if (:op outer-if)))
+  (assert (= :let (:op cause-let)))
+  (assert (= :if (:op cause-if)))
+  (assert (= {:op :recur
+              :args [(assoc (get-in cause-if [:test])
+                            :init
+                            (get-in cause-let [:local-variables 0 :init]))]}
+             (get-in cause-if [:then :ret])))
+  (assert (= "x" (get-in cause-if [:else :ret :name])))
+  (assert (= "x" (get-in outer-if [:else :ret :name])))
+  (println "decompiler recursive root-cause value across dead ATHROW padding passed"))
 
 (let [outer-a {:start-label 0 :end-label 68 :handler-label 273 :type "java.lang.Throwable"}
       outer-b {:start-label 72 :end-label 268 :handler-label 273 :type "java.lang.Throwable"}
@@ -1917,6 +2062,60 @@
   (assert (some #{"clojure.lang.IFn$LL"}
                 (map #(.getName ^Class %) (.getInterfaces (class compiled)))))
   (println "decompiler persisted primitive fn ABI metadata passed"))
+
+;; Exact source shape recovered from the Transactor
+;; datomic.promise/settable-future locking bodies. Raw monitor-enter/exit
+;; special forms compile into an unsafe local-lifetime shape; the original
+;; AOT instead came from clojure.core/locking and must be reconstructed.
+(let [expanded
+      '(let [lockee__5782__auto__ listeners
+             locklocal__5783__auto__ lockee__5782__auto__]
+         (monitor-enter locklocal__5783__auto__)
+         (try
+           (do (.countDown d) nil)
+           (finally
+             (do (monitor-exit locklocal__5783__auto__) nil))))
+      wrong-exit
+      '(let [lockee__5782__auto__ listeners
+             locklocal__5783__auto__ lockee__5782__auto__]
+         (monitor-enter locklocal__5783__auto__)
+         (try
+           :body
+           (finally
+             (do (monitor-exit different-lock) nil))))
+      wrong-source
+      '(let [lockee__5782__auto__ listeners
+             locklocal__5783__auto__ different-lockee]
+         (monitor-enter locklocal__5783__auto__)
+         (try :body
+              (finally (monitor-exit locklocal__5783__auto__))))
+      qualified-lookalike
+      '(let [lockee__5782__auto__ listeners
+             locklocal__5783__auto__ lockee__5782__auto__]
+         (fake/monitor-enter locklocal__5783__auto__)
+         (try :body
+              (finally (monitor-exit locklocal__5783__auto__))))
+      extra-finally-body
+      '(let [lockee__5782__auto__ listeners
+             locklocal__5783__auto__ lockee__5782__auto__]
+         (monitor-enter locklocal__5783__auto__)
+         (try :body
+              (finally (monitor-exit locklocal__5783__auto__) :extra)))
+      recovered (compact/macrocompact expanded)
+      rejected (mapv compact/macrocompact
+                     [wrong-exit wrong-source qualified-lookalike
+                      extra-finally-body])]
+  (assert (= '(locking listeners (do (.countDown d) nil)) recovered))
+  (assert (every? #(not= 'locking (first %)) rejected))
+  (assert (some #{'monitor-enter}
+                (tree-seq coll? seq (first rejected))))
+  (assert (= 0
+             (eval
+               `(let [~'listeners (Object.)
+                      ~'d (java.util.concurrent.CountDownLatch. 1)]
+                  ~recovered
+                  (.getCount ~'d)))))
+  (println "decompiler exact locking monitor-pair recovery passed"))
 
 (let [variadic-method
       (source/ast->clj

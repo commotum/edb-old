@@ -27,10 +27,86 @@
       str
       (str/replace java.io.File/separator "/")))
 
+(defn reader-symbol [form]
+  (cond
+    (symbol? form) form
+    (and (seq? form) (= 'quote (first form)) (symbol? (second form))) (second form)
+    :else nil))
+
+(defn qualify-lib [prefix target]
+  (symbol (if prefix (str prefix "." target) (str target))))
+
+(defn require-spec-aliases
+  ([spec] (require-spec-aliases spec nil))
+  ([spec prefix]
+   (if (and (sequential? spec) (reader-symbol (first spec)))
+     (let [target (qualify-lib prefix (reader-symbol (first spec)))
+           tail (vec (rest spec))
+           alias-position (or (let [position (.indexOf ^java.util.List tail :as)]
+                                (when (not= -1 position) position))
+                              (let [position (.indexOf ^java.util.List tail :as-alias)]
+                                (when (not= -1 position) position)))
+           alias-symbol (when (and alias-position (< (inc alias-position) (count tail)))
+                          (reader-symbol (nth tail (inc alias-position))))
+           nested (filter sequential? tail)]
+       (cond-> (apply merge {} (map #(require-spec-aliases % target) nested))
+         alias-symbol (assoc alias-symbol target)))
+     {})))
+
+(defn ns-reader-context [form]
+  (when (and (seq? form)
+             (symbol? (first form))
+             (= "ns" (name (first form)))
+             (reader-symbol (second form)))
+    (let [namespace-symbol (reader-symbol (second form))
+          aliases (->> (drop 2 form)
+                       (filter #(and (seq? %) (= :require (first %))))
+                       (mapcat rest)
+                       (map require-spec-aliases)
+                       (apply merge {}))]
+      {:namespace namespace-symbol :aliases aliases})))
+
+(defn source-reader-resolver [namespace-symbol aliases]
+  (reify clojure.lang.LispReader$Resolver
+    (currentNS [_] namespace-symbol)
+    (resolveAlias [_ alias-symbol] (get aliases alias-symbol))
+    (resolveClass [_ _] nil)
+    (resolveVar [_ symbol-value]
+      (if-let [symbol-namespace (namespace symbol-value)]
+        (if-let [target (get aliases (symbol symbol-namespace))]
+          (symbol (str target) (name symbol-value))
+          symbol-value)
+        (if (ns-resolve 'clojure.core symbol-value)
+          (symbol "clojure.core" (name symbol-value))
+          (symbol (str namespace-symbol) (name symbol-value)))))))
+
 (defn read-source [file]
   (binding [*read-eval* false]
     (with-open [reader (clojure.lang.LineNumberingPushbackReader. (io/reader file))]
-      (read {:eof nil} reader))))
+      (let [eof (Object.)
+            first-form (read {:eof eof} reader)
+            reader-context (when-not (identical? eof first-form)
+                             (ns-reader-context first-form))
+            resolver (when reader-context
+                       (source-reader-resolver (:namespace reader-context)
+                                               (:aliases reader-context)))
+            forms (if (identical? eof first-form)
+                    []
+                    (binding [*reader-resolver* resolver]
+                      (loop [result [first-form]]
+                        (let [form (read {:eof eof} reader)]
+                          (if (identical? eof form)
+                            result
+                            (recur (conj result form)))))))]
+        ;; Decompiled namespaces are emitted as one encompassing `do` form,
+        ;; while handwritten/reused sources use ordinary, multiple top-level
+        ;; forms.  Normalize both shapes without nesting the decompiled form,
+        ;; because downstream definition discovery operates on (rest top).
+        (if (and (= 1 (count forms))
+                 (seq? (first forms))
+                 (= 'do (ffirst forms)))
+          (first forms)
+          (cons 'do forms))))))
 
 (defn nodes [form]
   (tree-seq #(or (seq? %) (vector? %) (map? %) (set? %)) seq form))
@@ -57,11 +133,24 @@
 (defn find-forms [form wanted]
   (filter #(and (seq? %) (contains? wanted (head-name %))) (nodes form)))
 
+(defn top-level-forms [top]
+  (if (= "do" (head-name top)) (rest top) [top]))
+
+(defn namespace-clauses [top clause-key]
+  (for [form (top-level-forms top)
+        :when (= "ns" (head-name form))
+        clause (drop 2 form)
+        :when (and (seq? clause) (= clause-key (first clause)))]
+    clause))
+
 (defn source-namespace [top]
+  ;; Namespace declarations are executable top-level forms.  Searching the
+  ;; entire tree admits examples inside `(comment ...)` and can silently
+  ;; assign a source file to the wrong namespace.
   (some (fn [form]
-          (when (= "in-ns" (head-name form))
+          (when (contains? #{"ns" "in-ns"} (head-name form))
             (some-> form second quoted-symbol str)))
-        (nodes top)))
+        (top-level-forms top)))
 
 (defn namespace-doc [top]
   (some (fn [node]
@@ -95,7 +184,8 @@
     :else nil))
 
 (defn parse-requires [top]
-  (->> (find-forms top #{"require"})
+  (->> (concat (find-forms top #{"require"})
+               (namespace-clauses top :require))
        (mapcat rest)
        (keep parse-require-spec)
        (remove #(= "clojure.core" (:namespace %)))
@@ -141,7 +231,7 @@
     (find-forms top #{"reset-meta!"})))
 
 (def definition-heads
-  #{"def" "defonce" "defn" "defmacro" "defmulti" "defmethod"
+  #{"def" "defonce" "defn" "defn-" "defmacro" "defmulti" "defmethod"
     "defprotocol" "definterface" "defrecord" "deftype" "declare"})
 
 (defn defn-arglists [form]
@@ -185,14 +275,16 @@
     (when (and kind (contains? definition-heads kind) (symbol? symbol-name))
       (let [name-string (name symbol-name)
             override (get overrides name-string)
-            private? (boolean (or (:private (meta symbol-name)) (:private override)))]
+            private? (boolean (or (= "defn-" kind)
+                                  (:private (meta symbol-name))
+                                  (:private override)))]
         (cond-> {:namespace namespace-name
                  :name name-string
                  :kind kind
                  :line (or (:line (meta form)) 0)
                  :visibility (if private? "private" "public")
                  :form form}
-          (contains? #{"defn" "defmacro"} kind)
+          (contains? #{"defn" "defn-" "defmacro"} kind)
           (assoc :arglists (mapv pr-str (defn-arglists form)))
 
           (or (definition-doc form) (:doc override))
@@ -347,6 +439,9 @@
         (mapv (fn [file]
                 (let [top (read-source file)
                       namespace-name (source-namespace top)
+                      _ (when-not namespace-name
+                          (fail! (str "missing top-level namespace declaration: "
+                                      (.getCanonicalPath ^java.io.File file))))
                       overrides (metadata-overrides top)
                       definitions (->> (rest top)
                                        (keep #(parse-definition namespace-name overrides %))

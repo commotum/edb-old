@@ -60,17 +60,15 @@
     (^long [a b]
       (let [a a b b len (alength ^bytes a) lencomp (- len (alength ^bytes b))]
         (if (= lencomp 0)
-          (do
-            (loop [pos 0]
-              (if (= pos len)
-                0
-                (let [c (-
-                          (unchecked-long
-                            (java.lang.Byte/valueOf (byte (aget ^bytes a (int pos)))))
-                          (unchecked-long
-                            (java.lang.Byte/valueOf (byte (aget ^bytes b (int pos))))))]
-                  (if (= c 0) (recur (inc pos)) c))))
-            nil)
+          (loop [pos 0]
+            (if (= pos len)
+              0
+              (let [c (-
+                        (unchecked-long
+                          (java.lang.Byte/valueOf (byte (aget ^bytes a (int pos)))))
+                        (unchecked-long
+                          (java.lang.Byte/valueOf (byte (aget ^bytes b (int pos))))))]
+                (if (= c 0) (recur (inc pos)) c))))
           lencomp))))
   (def BYTES (java.lang.Class/forName "[B"))
   (declare coll-compare)
@@ -425,7 +423,8 @@
             (bit-shift-right (.getMostSignificantBits ^java.util.UUID squuid) 32))))))
   (defn rand-uuid ([] (squuid)))
   (def run-uuid (rand-uuid))
-  (defn root-cause ([x] (when x (let [cause (.getCause ^java.lang.Throwable x)] nil) nil)))
+  (defn root-cause
+    ([x] (when x (let [cause (.getCause ^java.lang.Throwable x)] (if cause (recur cause) x)))))
   (defn qualified-symbol? ([x] (boolean (and (symbol? x) (namespace x) true))))
   (defn requiring-resolve!
     ([x]

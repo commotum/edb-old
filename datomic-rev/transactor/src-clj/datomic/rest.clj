@@ -85,16 +85,47 @@
         (clojure.core/import 'java.io.InputStreamReader)
         (clojure.core/import 'java.io.PushbackReader))))
   (set! *warn-on-reflection* true)
-  (defonce storages (atom nil))
-  (defonce whitelist (atom nil))
-  (defn set-storage-map ([alias_uri_map] (reset! storages alias_uri_map)))
-  (defn read-edn
-    ([stm encoding]
-      (edn/read
-        {:readers *data-readers*}
-        (java.io.PushbackReader.
-          (java.io.InputStreamReader. ^java.io.InputStream stm ^java.lang.String encoding))))
-    ([str] (when-not (empty? str) (edn/read-string {:readers *data-readers*} str))))
+  (.setMeta (clojure.lang.RT/var "datomic.rest" "storages") {:column (int 1)})
+  (let [v__6812__auto__ #'storages]
+    (when-not (.hasRoot ^clojure.lang.Var v__6812__auto__)
+      (.setMeta (clojure.lang.RT/var "datomic.rest" "storages") {:column (int 1)})
+      (.bindRoot (clojure.lang.RT/var "datomic.rest" "storages") (atom nil))
+      #'storages))
+  (.setMeta (clojure.lang.RT/var "datomic.rest" "whitelist") {:column (int 1)})
+  (let [v__6812__auto__ #'whitelist]
+    (when-not (.hasRoot ^clojure.lang.Var v__6812__auto__)
+      (.setMeta (clojure.lang.RT/var "datomic.rest" "whitelist") {:column (int 1)})
+      (.bindRoot (clojure.lang.RT/var "datomic.rest" "whitelist") (atom nil))
+      #'whitelist))
+  (def set-storage-map (fn set_storage_map ([alias_uri_map] (reset! storages alias_uri_map))))
+  (reset-meta!
+    #'set-storage-map
+    (assoc
+      {:arglists (clojure.core/list ['alias-uri-map]), :column (int 1)}
+      :name
+      'set-storage-map
+      :ns
+      *ns*))
+  (def read-edn
+   (fn read_edn
+     ([stm encoding]
+       (edn/read
+         {:readers *data-readers*}
+         (java.io.PushbackReader.
+           (java.io.InputStreamReader. ^java.io.InputStream stm ^java.lang.String encoding))))
+     ([str] (when-not (empty? str) (edn/read-string {:readers *data-readers*} str)))))
+  (reset-meta!
+    #'read-edn
+    (assoc
+      {:arglists
+       (clojure.core/list
+         [(.withMeta 'str {:tag 'String})]
+         [(.withMeta 'stm {:tag 'InputStream}) (.withMeta 'encoding {:tag 'String})]),
+       :column (int 1)}
+      :name
+      'read-edn
+      :ns
+      *ns*))
   (defn db-uri
     ([storage dbname]
       (let [uri (get (deref storages) storage)]
@@ -106,51 +137,104 @@
                 (subs uri 0 (java.lang.Integer/valueOf (int qidx)))
                 dbname
                 (subs uri (java.lang.Integer/valueOf (int qidx))))))))))
+  (reset-meta!
+    #'db-uri
+    (assoc
+      {:arglists (clojure.core/list ['storage 'dbname]), :column (int 1)}
+      :name
+      'db-uri
+      :ns
+      *ns*))
   (defn conn
     ([storage dbname]
       (let [temp__5804__auto__ (db-uri storage dbname)]
         (when temp__5804__auto__ (let [uri temp__5804__auto__] (d/connect uri))))))
+  (reset-meta!
+    #'conn
+    (assoc
+      {:arglists (clojure.core/list ['storage 'dbname]), :column (int 1)}
+      :name
+      'conn
+      :ns
+      *ns*))
   (defn response
     ([data] (ring/content-type (ring/response (pr-str data)) "application/clojure;charset=UTF-8")))
+  (reset-meta!
+    #'response
+    (assoc {:arglists (clojure.core/list ['data]), :column (int 1)} :name 'response :ns *ns*))
   (defn tst ([req] (response (:headers req))))
-  (defn windowed
-    ([db p__29189]
-      (let [map__29190 p__29189
-            map__29190 (if (seq? map__29190)
-                         (if (next map__29190)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__29190))
-                           (if (seq map__29190) (first map__29190) {}))
-                         map__29190)
-            basis_t (get map__29190 :basis-t)
-            as_of (get map__29190 :as-of)
-            since (get map__29190 :since)
-            history (get map__29190 :history)
-            db (if (or as_of basis_t) (d/as-of db (or as_of basis_t)) db)
-            db (if since (d/since db since) db)
-            db (if history (d/history db) db)]
-        db)))
-  (defn limited
-    ([data p__29194]
-      (let [map__29195 p__29194
-            map__29195 (if (seq? map__29195)
-                         (if (next map__29195)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__29195))
-                           (if (seq map__29195) (first map__29195) {}))
-                         map__29195)
-            offset (get map__29195 :offset)
-            limit (get map__29195 :limit)
-            data (if offset (drop offset data) data)]
-        (if limit (take limit data) data))))
+  (reset-meta!
+    #'tst
+    (assoc {:arglists (clojure.core/list ['req]), :column (int 1)} :name 'tst :ns *ns*))
+  (def windowed
+   (fn windowed
+     ([db p__29189]
+       (let [map__29190 p__29189
+             map__29190 (if (seq? map__29190)
+                          (if (next map__29190)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__29190))
+                            (if (seq map__29190) (first map__29190) {}))
+                          map__29190)
+             basis_t (get map__29190 :basis-t)
+             as_of (get map__29190 :as-of)
+             since (get map__29190 :since)
+             history (get map__29190 :history)
+             db (if (or as_of basis_t) (d/as-of db (or as_of basis_t)) db)
+             db (if since (d/since db since) db)
+             db (if history (d/history db) db)]
+         db))))
+  (reset-meta!
+    #'windowed
+    (assoc
+      {:arglists (clojure.core/list ['db {:keys ['basis-t 'as-of 'since 'history]}]),
+       :column (int 1)}
+      :name
+      'windowed
+      :ns
+      *ns*))
+  (def limited
+   (fn limited
+     ([data p__29194]
+       (let [map__29195 p__29194
+             map__29195 (if (seq? map__29195)
+                          (if (next map__29195)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__29195))
+                            (if (seq map__29195) (first map__29195) {}))
+                          map__29195)
+             offset (get map__29195 :offset)
+             limit (get map__29195 :limit)
+             data (if offset (drop offset data) data)]
+         (if limit (take limit data) data)))))
+  (reset-meta!
+    #'limited
+    (assoc
+      {:arglists (clojure.core/list ['data {:keys ['offset 'limit]}]), :column (int 1)}
+      :name
+      'limited
+      :ns
+      *ns*))
   (defn datom->map ([d] (array-map :e (:e d) :a (:a d) :v (:v d) :tx (:tx d) :added (:added d))))
-  (defn prep-tx-ret
-    ([tx_ret storage dbname]
-      (let [db_base #:db{:alias (str storage "/" dbname)}]
-        {:db-before (assoc db_base :basis-t (d/basis-t (:db-before tx_ret))),
-         :db-after (assoc db_base :basis-t (d/basis-t (:db-after tx_ret))),
-         :tx-data (mapv datom->map (:tx-data tx_ret)),
-         :tempids (:tempids tx_ret)})))
+  (reset-meta!
+    #'datom->map
+    (assoc {:arglists (clojure.core/list ['d]), :column (int 1)} :name 'datom->map :ns *ns*))
+  (def prep-tx-ret
+   (fn prep_tx_ret
+     ([tx_ret storage dbname]
+       (let [db_base #:db{:alias (str storage "/" dbname)}]
+         {:db-before (assoc db_base :basis-t (d/basis-t (:db-before tx_ret))),
+          :db-after (assoc db_base :basis-t (d/basis-t (:db-after tx_ret))),
+          :tx-data (mapv datom->map (:tx-data tx_ret)),
+          :tempids (:tempids tx_ret)}))))
+  (reset-meta!
+    #'prep-tx-ret
+    (assoc
+      {:arglists (clojure.core/list ['tx-ret 'storage 'dbname]), :column (int 1)}
+      :name
+      'prep-tx-ret
+      :ns
+      *ns*))
   (defn wrap-reading-params
     ([handler]
       (fn fn__29201
@@ -191,6 +275,14 @@
                         {}
                         p1__29199#))))
                 req)))))))
+  (reset-meta!
+    #'wrap-reading-params
+    (assoc
+      {:arglists (clojure.core/list ['handler]), :column (int 1)}
+      :name
+      'wrap-reading-params
+      :ns
+      *ns*))
   (defn matches-origin-whitelist?
     ([whitelist origin]
       (when-not origin
@@ -199,6 +291,14 @@
         (= origin "null") false
         (contains? whitelist "*") true
         :default (do (contains? whitelist origin)))))
+  (reset-meta!
+    #'matches-origin-whitelist?
+    (assoc
+      {:arglists (clojure.core/list ['whitelist 'origin]), :column (int 1)}
+      :name
+      'matches-origin-whitelist?
+      :ns
+      *ns*))
   (defn wrap-cors-preflight
     ([handler]
       (fn fn__29216
@@ -211,6 +311,14 @@
                  {"Access-Control-Allow-Origin" origin,
                   "Access-Control-Allow-Headers" "X-Requested-With"})})
             (^clojure.lang.IFn handler req))))))
+  (reset-meta!
+    #'wrap-cors-preflight
+    (assoc
+      {:arglists (clojure.core/list ['handler]), :column (int 1)}
+      :name
+      'wrap-cors-preflight
+      :ns
+      *ns*))
   (defn wrap-cors-request
     ([handler]
       (fn fn__29219
@@ -223,9 +331,22 @@
                   (assoc-in resp [:headers "Access-Control-Allow-Origin"] origin)
                   resp))
               resp))))))
+  (reset-meta!
+    #'wrap-cors-request
+    (assoc
+      {:arglists (clojure.core/list ['handler]), :column (int 1)}
+      :name
+      'wrap-cors-request
+      :ns
+      *ns*))
   (def html-media ["text/html;q=0.9" "application/xhtml+xml;q=0.8"])
+  (reset-meta! #'html-media (assoc {:column (int 1)} :name 'html-media :ns *ns*))
   (def edn-media ["application/edn"])
-  (def edn-or-html-media (concat edn-media html-media))
+  (reset-meta! #'edn-media (assoc {:column (int 1)} :name 'edn-media :ns *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.rest" "edn-or-html-media") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.rest" "edn-or-html-media")
+    (concat edn-media html-media))
   (defn html5
     ([& forms]
       (let [options__28522__auto__ {}]
@@ -250,221 +371,241 @@
                 (into [:div {:class "container"}] forms)
                 (hp/include-js "http://code.jquery.com/jquery-latest.js" "/js/bootstrap.min.js")))
             "</html>")))))
-  (defn index
-    ([request__29068__auto__]
-      (lib/run-resource
-        request__29068__auto__
-        (lib/get-options
-          (clojure.core/list
-            :available-media-types
-            html-media
-            :handle-ok
-            (html5
-              [:h2 "Datomic REST Service"]
-              [:p
-               "The Datomic REST Service provides 2 categories of resources - those based on particular data storages and databases (data),\nand resources that represent activities that might cross data sources, e.g. query (api)."]
-              [:p
-               "Note that this web app "
-               [:em "is"]
-               " the service. It is not an app built on the service, nor a set of documentation pages about the service. The URIs, query params, and POST data are the same ones you will use when accessing the service programmatically."]
-              [:p
-               "The embedded documentation is designed to assist you in using the service API, but is not a reference nor tutorial for Datomic itself. Please consult the "
-               [:a {:rel "help", :href "https://docs.datomic.com/"} "Datomic documentation"]
-               "."]
-              [:hr]
-              [:ul
-               [:li [:a {:rel "item", :href "data/"} "Data"]]
-               [:li [:a {:rel "item", :href "api/"} "API"]]]))))))
-  (defn api
-    ([request__29068__auto__]
-      (lib/run-resource
-        request__29068__auto__
-        (lib/get-options
-          (clojure.core/list
-            :available-media-types
-            html-media
-            :handle-ok
-            (html5
-              [:h3 "GET " [:a {:rel "up", :href ".."} "/"] "api/"]
-              [:span "Currently the only API is query."]
-              [:hr]
-              [:ul [:li [:a {:rel "item", :href "query"} "Query"]]]))))))
-  (defn request-method-in
-    ([method_set]
-      (fn fn__29229
-        ([p1__29228#] (contains? method_set (:request-method (:request p1__29228#)))))))
-  (defn stores
-    ([request__29068__auto__]
-      (lib/run-resource
-        request__29068__auto__
-        (lib/get-options
-          (clojure.core/list
-            :available-media-types
-            edn-or-html-media
-            :method-allowed?
-            (request-method-in #{:get :head :options})
-            :handle-ok
-            (let [stores (keys (deref storages))]
-              (fn fn__29232
-                ([context]
-                  (let [edn_ret (vec stores)
-                        G__29233 (get-in context [:representation :media-type])]
-                    (case
-                      G__29233
-                      "application/xhtml+xml"
-                      (html5
-                        [:h3 "GET " [:a {:rel "up", :href ".."} "/"] "data/"]
-                        [:h4 "storages"]
-                        [:p
-                         "This service was started with the following storages. Note that the storage names used here and elsewhere\nin the API are aliases for storages known only to the service."]
-                        [:p
-                         "You are seeing them this way now because you\n (or your browser) requested the "
-                         [:a {:href "http://www.rfc-editor.org/rfc/rfc2854.txt"} "text/html"]
-                         " media type. The "
-                         [:a {:href "http://edn-format.org"} "application/edn"]
-                         " media type is also supported throughout the API, and is the preferred format for programmatic use. You can choose your preferred media type using an Accept header."]
-                        [:hr]
-                        [:ul
-                         {:id "storages"}
-                         (let [iter__6373__auto__ (fn iter__29234
-                                                    ([s__29235]
-                                                      (lazy-seq
-                                                        (let [s__29235 s__29235
-                                                              temp__5804__auto__ (seq s__29235)]
-                                                          (when temp__5804__auto__
-                                                            (let 
-                                                              [s__29235 temp__5804__auto__]
-                                                              (if
-                                                                (chunked-seq? s__29235)
-                                                                (let 
-                                                                  [c__6371__auto__
-                                                                   (chunk-first s__29235)
-                                                                   size__6372__auto__
-                                                                   (int (count c__6371__auto__))
-                                                                   b__29237
-                                                                   (chunk-buffer
-                                                                     (java.lang.Integer/valueOf
-                                                                       (int size__6372__auto__)))]
-                                                                  (if
-                                                                    (loop 
-                                                                      [i__29236 (int 0)]
-                                                                      (if
-                                                                        (<
-                                                                          i__29236
-                                                                          size__6372__auto__)
-                                                                        (let 
-                                                                          [s
-                                                                           (.nth
-                                                                             ^clojure.lang.Indexed c__6371__auto__
-                                                                             (int i__29236))]
-                                                                          (chunk-append
-                                                                            b__29237
-                                                                            [:li
-                                                                             [:a
-                                                                              {:rel "storage",
-                                                                               :href (str s "/")}
-                                                                              s]])
-                                                                          (recur (inc i__29236)))
-                                                                        true))
-                                                                    (chunk-cons
-                                                                      (chunk b__29237)
-                                                                      (^clojure.lang.IFn iter__29234
-                                                                        (chunk-rest s__29235)))
-                                                                    (chunk-cons
-                                                                      (chunk b__29237)
-                                                                      nil)))
-                                                                (let 
-                                                                  [s (first s__29235)]
-                                                                  (cons
-                                                                    [:li
-                                                                     [:a
-                                                                      {:rel "storage",
-                                                                       :href (str s "/")}
-                                                                      s]]
-                                                                    (^clojure.lang.IFn iter__29234
-                                                                      (rest s__29235)))))))))))]
-                           (^clojure.lang.IFn iter__6373__auto__ stores))]
-                        [:hr]
-                        [:h4 "application/edn"]
-                        [:code (pr-str edn_ret)])
-                      "text/html"
-                      (html5
-                        [:h3 "GET " [:a {:rel "up", :href ".."} "/"] "data/"]
-                        [:h4 "storages"]
-                        [:p
-                         "This service was started with the following storages. Note that the storage names used here and elsewhere\nin the API are aliases for storages known only to the service."]
-                        [:p
-                         "You are seeing them this way now because you\n (or your browser) requested the "
-                         [:a {:href "http://www.rfc-editor.org/rfc/rfc2854.txt"} "text/html"]
-                         " media type. The "
-                         [:a {:href "http://edn-format.org"} "application/edn"]
-                         " media type is also supported throughout the API, and is the preferred format for programmatic use. You can choose your preferred media type using an Accept header."]
-                        [:hr]
-                        [:ul
-                         {:id "storages"}
-                         (let [iter__6373__auto__ (fn iter__29247
-                                                    ([s__29248]
-                                                      (lazy-seq
-                                                        (let [s__29248 s__29248
-                                                              temp__5804__auto__ (seq s__29248)]
-                                                          (when temp__5804__auto__
-                                                            (let 
-                                                              [s__29248 temp__5804__auto__]
-                                                              (if
-                                                                (chunked-seq? s__29248)
-                                                                (let 
-                                                                  [c__6371__auto__
-                                                                   (chunk-first s__29248)
-                                                                   size__6372__auto__
-                                                                   (int (count c__6371__auto__))
-                                                                   b__29250
-                                                                   (chunk-buffer
-                                                                     (java.lang.Integer/valueOf
-                                                                       (int size__6372__auto__)))]
-                                                                  (if
-                                                                    (loop 
-                                                                      [i__29249 (int 0)]
-                                                                      (if
-                                                                        (<
-                                                                          i__29249
-                                                                          size__6372__auto__)
-                                                                        (let 
-                                                                          [s
-                                                                           (.nth
-                                                                             ^clojure.lang.Indexed c__6371__auto__
-                                                                             (int i__29249))]
-                                                                          (chunk-append
-                                                                            b__29250
-                                                                            [:li
-                                                                             [:a
-                                                                              {:rel "storage",
-                                                                               :href (str s "/")}
-                                                                              s]])
-                                                                          (recur (inc i__29249)))
-                                                                        true))
-                                                                    (chunk-cons
-                                                                      (chunk b__29250)
-                                                                      (^clojure.lang.IFn iter__29247
-                                                                        (chunk-rest s__29248)))
-                                                                    (chunk-cons
-                                                                      (chunk b__29250)
-                                                                      nil)))
-                                                                (let 
-                                                                  [s (first s__29248)]
-                                                                  (cons
-                                                                    [:li
-                                                                     [:a
-                                                                      {:rel "storage",
-                                                                       :href (str s "/")}
-                                                                      s]]
-                                                                    (^clojure.lang.IFn iter__29247
-                                                                      (rest s__29248)))))))))))]
-                           (^clojure.lang.IFn iter__6373__auto__ stores))]
-                        [:hr]
-                        [:h4 "application/edn"]
-                        [:code (pr-str edn_ret)])
-                      "application/edn"
-                      (pr-str edn_ret)))))))))))
+  (reset-meta!
+    #'html5
+    (assoc {:arglists (clojure.core/list ['& 'forms]), :column (int 1)} :name 'html5 :ns *ns*))
+  (def index
+   (fn index
+     ([request__29068__auto__]
+       (lib/run-resource
+         request__29068__auto__
+         (lib/get-options
+           (clojure.core/list
+             :available-media-types
+             html-media
+             :handle-ok
+             (html5
+               [:h2 "Datomic REST Service"]
+               [:p
+                "The Datomic REST Service provides 2 categories of resources - those based on particular data storages and databases (data),\nand resources that represent activities that might cross data sources, e.g. query (api)."]
+               [:p
+                "Note that this web app "
+                [:em "is"]
+                " the service. It is not an app built on the service, nor a set of documentation pages about the service. The URIs, query params, and POST data are the same ones you will use when accessing the service programmatically."]
+               [:p
+                "The embedded documentation is designed to assist you in using the service API, but is not a reference nor tutorial for Datomic itself. Please consult the "
+                [:a {:rel "help", :href "https://docs.datomic.com/"} "Datomic documentation"]
+                "."]
+               [:hr]
+               [:ul
+                [:li [:a {:rel "item", :href "data/"} "Data"]]
+                [:li [:a {:rel "item", :href "api/"} "API"]]])))))))
+  (reset-meta! #'index (assoc {:column (int 1)} :name 'index :ns *ns*))
+  (def api
+   (fn api
+     ([request__29068__auto__]
+       (lib/run-resource
+         request__29068__auto__
+         (lib/get-options
+           (clojure.core/list
+             :available-media-types
+             html-media
+             :handle-ok
+             (html5
+               [:h3 "GET " [:a {:rel "up", :href ".."} "/"] "api/"]
+               [:span "Currently the only API is query."]
+               [:hr]
+               [:ul [:li [:a {:rel "item", :href "query"} "Query"]]])))))))
+  (reset-meta! #'api (assoc {:column (int 1)} :name 'api :ns *ns*))
+  (def request-method-in
+   (fn request_method_in
+     ([method_set]
+       (fn fn__29229
+         ([p1__29228#] (contains? method_set (:request-method (:request p1__29228#))))))))
+  (reset-meta!
+    #'request-method-in
+    (assoc
+      {:arglists (clojure.core/list ['method-set]), :column (int 1)}
+      :name
+      'request-method-in
+      :ns
+      *ns*))
+  (def stores
+   (fn stores
+     ([request__29068__auto__]
+       (lib/run-resource
+         request__29068__auto__
+         (lib/get-options
+           (clojure.core/list
+             :available-media-types
+             edn-or-html-media
+             :method-allowed?
+             (request-method-in #{:get :head :options})
+             :handle-ok
+             (let [stores (keys (deref storages))]
+               (fn fn__29232
+                 ([context]
+                   (let [edn_ret (vec stores)
+                         G__29233 (get-in context [:representation :media-type])]
+                     (case
+                       G__29233
+                       "application/xhtml+xml"
+                       (html5
+                         [:h3 "GET " [:a {:rel "up", :href ".."} "/"] "data/"]
+                         [:h4 "storages"]
+                         [:p
+                          "This service was started with the following storages. Note that the storage names used here and elsewhere\nin the API are aliases for storages known only to the service."]
+                         [:p
+                          "You are seeing them this way now because you\n (or your browser) requested the "
+                          [:a {:href "http://www.rfc-editor.org/rfc/rfc2854.txt"} "text/html"]
+                          " media type. The "
+                          [:a {:href "http://edn-format.org"} "application/edn"]
+                          " media type is also supported throughout the API, and is the preferred format for programmatic use. You can choose your preferred media type using an Accept header."]
+                         [:hr]
+                         [:ul
+                          {:id "storages"}
+                          (let [iter__6373__auto__ (fn iter__29234
+                                                     ([s__29235]
+                                                       (lazy-seq
+                                                         (let [s__29235 s__29235
+                                                               temp__5804__auto__ (seq s__29235)]
+                                                           (when
+                                                             temp__5804__auto__
+                                                             (let
+                                                               [s__29235 temp__5804__auto__]
+                                                               (if
+                                                                 (chunked-seq? s__29235)
+                                                                 (let
+                                                                   [c__6371__auto__
+                                                                    (chunk-first s__29235)
+                                                                    size__6372__auto__
+                                                                    (int (count c__6371__auto__))
+                                                                    b__29237
+                                                                    (chunk-buffer
+                                                                      (java.lang.Integer/valueOf
+                                                                        (int size__6372__auto__)))]
+                                                                   (if
+                                                                     (loop
+                                                                       [i__29236 (int 0)]
+                                                                       (if
+                                                                         (<
+                                                                           i__29236
+                                                                           size__6372__auto__)
+                                                                         (let
+                                                                           [s
+                                                                            (.nth
+                                                                              ^clojure.lang.Indexed c__6371__auto__
+                                                                              (int i__29236))]
+                                                                           (chunk-append
+                                                                             b__29237
+                                                                             [:li
+                                                                              [:a
+                                                                               {:rel "storage",
+                                                                                :href (str s "/")}
+                                                                               s]])
+                                                                           (recur (inc i__29236)))
+                                                                         true))
+                                                                     (chunk-cons
+                                                                       (chunk b__29237)
+                                                                       (^clojure.lang.IFn iter__29234
+                                                                         (chunk-rest s__29235)))
+                                                                     (chunk-cons
+                                                                       (chunk b__29237)
+                                                                       nil)))
+                                                                 (let
+                                                                   [s (first s__29235)]
+                                                                   (cons
+                                                                     [:li
+                                                                      [:a
+                                                                       {:rel "storage",
+                                                                        :href (str s "/")}
+                                                                       s]]
+                                                                     (^clojure.lang.IFn iter__29234
+                                                                       (rest s__29235)))))))))))]
+                            (^clojure.lang.IFn iter__6373__auto__ stores))]
+                         [:hr]
+                         [:h4 "application/edn"]
+                         [:code (pr-str edn_ret)])
+                       "text/html"
+                       (html5
+                         [:h3 "GET " [:a {:rel "up", :href ".."} "/"] "data/"]
+                         [:h4 "storages"]
+                         [:p
+                          "This service was started with the following storages. Note that the storage names used here and elsewhere\nin the API are aliases for storages known only to the service."]
+                         [:p
+                          "You are seeing them this way now because you\n (or your browser) requested the "
+                          [:a {:href "http://www.rfc-editor.org/rfc/rfc2854.txt"} "text/html"]
+                          " media type. The "
+                          [:a {:href "http://edn-format.org"} "application/edn"]
+                          " media type is also supported throughout the API, and is the preferred format for programmatic use. You can choose your preferred media type using an Accept header."]
+                         [:hr]
+                         [:ul
+                          {:id "storages"}
+                          (let [iter__6373__auto__ (fn iter__29247
+                                                     ([s__29248]
+                                                       (lazy-seq
+                                                         (let [s__29248 s__29248
+                                                               temp__5804__auto__ (seq s__29248)]
+                                                           (when
+                                                             temp__5804__auto__
+                                                             (let
+                                                               [s__29248 temp__5804__auto__]
+                                                               (if
+                                                                 (chunked-seq? s__29248)
+                                                                 (let
+                                                                   [c__6371__auto__
+                                                                    (chunk-first s__29248)
+                                                                    size__6372__auto__
+                                                                    (int (count c__6371__auto__))
+                                                                    b__29250
+                                                                    (chunk-buffer
+                                                                      (java.lang.Integer/valueOf
+                                                                        (int size__6372__auto__)))]
+                                                                   (if
+                                                                     (loop
+                                                                       [i__29249 (int 0)]
+                                                                       (if
+                                                                         (<
+                                                                           i__29249
+                                                                           size__6372__auto__)
+                                                                         (let
+                                                                           [s
+                                                                            (.nth
+                                                                              ^clojure.lang.Indexed c__6371__auto__
+                                                                              (int i__29249))]
+                                                                           (chunk-append
+                                                                             b__29250
+                                                                             [:li
+                                                                              [:a
+                                                                               {:rel "storage",
+                                                                                :href (str s "/")}
+                                                                               s]])
+                                                                           (recur (inc i__29249)))
+                                                                         true))
+                                                                     (chunk-cons
+                                                                       (chunk b__29250)
+                                                                       (^clojure.lang.IFn iter__29247
+                                                                         (chunk-rest s__29248)))
+                                                                     (chunk-cons
+                                                                       (chunk b__29250)
+                                                                       nil)))
+                                                                 (let
+                                                                   [s (first s__29248)]
+                                                                   (cons
+                                                                     [:li
+                                                                      [:a
+                                                                       {:rel "storage",
+                                                                        :href (str s "/")}
+                                                                       s]]
+                                                                     (^clojure.lang.IFn iter__29247
+                                                                       (rest s__29248)))))))))))]
+                            (^clojure.lang.IFn iter__6373__auto__ stores))]
+                         [:hr]
+                         [:h4 "application/edn"]
+                         [:code (pr-str edn_ret)])
+                       "application/edn"
+                       (pr-str edn_ret))))))))))))
+  (reset-meta! #'stores (assoc {:column (int 1)} :name 'stores :ns *ns*))
   (defn catalog
     ([storage]
       (if (contains? (deref storages) storage)
@@ -498,17 +639,17 @@
                                 (let [iter__6373__auto__ (fn iter__29266
                                                            ([s__29267]
                                                              (lazy-seq
-                                                               (let 
+                                                               (let
                                                                  [s__29267 s__29267
                                                                   temp__5804__auto__
                                                                   (seq s__29267)]
                                                                  (when
                                                                    temp__5804__auto__
-                                                                   (let 
+                                                                   (let
                                                                      [s__29267 temp__5804__auto__]
                                                                      (if
                                                                        (chunked-seq? s__29267)
-                                                                       (let 
+                                                                       (let
                                                                          [c__6371__auto__
                                                                           (chunk-first s__29267)
                                                                           size__6372__auto__
@@ -521,13 +662,13 @@
                                                                               (int
                                                                                 size__6372__auto__)))]
                                                                          (if
-                                                                           (loop 
+                                                                           (loop
                                                                              [i__29268 (int 0)]
                                                                              (if
                                                                                (<
                                                                                  i__29268
                                                                                  size__6372__auto__)
-                                                                               (let 
+                                                                               (let
                                                                                  [db
                                                                                   (.nth
                                                                                     ^clojure.lang.Indexed c__6371__auto__
@@ -554,7 +695,7 @@
                                                                            (chunk-cons
                                                                              (chunk b__29269)
                                                                              nil)))
-                                                                       (let 
+                                                                       (let
                                                                          [db (first s__29267)]
                                                                          (cons
                                                                            [:li
@@ -608,17 +749,17 @@
                                 (let [iter__6373__auto__ (fn iter__29279
                                                            ([s__29280]
                                                              (lazy-seq
-                                                               (let 
+                                                               (let
                                                                  [s__29280 s__29280
                                                                   temp__5804__auto__
                                                                   (seq s__29280)]
                                                                  (when
                                                                    temp__5804__auto__
-                                                                   (let 
+                                                                   (let
                                                                      [s__29280 temp__5804__auto__]
                                                                      (if
                                                                        (chunked-seq? s__29280)
-                                                                       (let 
+                                                                       (let
                                                                          [c__6371__auto__
                                                                           (chunk-first s__29280)
                                                                           size__6372__auto__
@@ -631,13 +772,13 @@
                                                                               (int
                                                                                 size__6372__auto__)))]
                                                                          (if
-                                                                           (loop 
+                                                                           (loop
                                                                              [i__29281 (int 0)]
                                                                              (if
                                                                                (<
                                                                                  i__29281
                                                                                  size__6372__auto__)
-                                                                               (let 
+                                                                               (let
                                                                                  [db
                                                                                   (.nth
                                                                                     ^clojure.lang.Indexed c__6371__auto__
@@ -664,7 +805,7 @@
                                                                            (chunk-cons
                                                                              (chunk b__29282)
                                                                              nil)))
-                                                                       (let 
+                                                                       (let
                                                                          [db (first s__29280)]
                                                                          (cons
                                                                            [:li
@@ -728,6 +869,9 @@
             :handle-ok
             handle))
         (lib/resource :available-media-types edn-or-html-media :exists? false))))
+  (reset-meta!
+    #'catalog
+    (assoc {:arglists (clojure.core/list ['storage]), :column (int 1)} :name 'catalog :ns *ns*))
   (defn datoms-table
     ([id datoms ecell]
       [:table
@@ -811,6 +955,14 @@
                                                   (^clojure.lang.IFn iter__29305
                                                     (rest s__29306)))))))))))]
          (^clojure.lang.IFn iter__6373__auto__ datoms))]))
+  (reset-meta!
+    #'datoms-table
+    (assoc
+      {:arglists (clojure.core/list ['id 'datoms 'ecell]), :column (int 1)}
+      :name
+      'datoms-table
+      :ns
+      *ns*))
   (defn db-transact
     ([storage dbname]
       (let [temp__5802__auto__ (try (conn storage dbname) (catch java.lang.Exception ex nil))]
@@ -889,11 +1041,11 @@
                                                                 temp__5804__auto__ (seq s__29339)]
                                                             (when
                                                               temp__5804__auto__
-                                                              (let 
+                                                              (let
                                                                 [s__29339 temp__5804__auto__]
                                                                 (if
                                                                   (chunked-seq? s__29339)
-                                                                  (let 
+                                                                  (let
                                                                     [c__6371__auto__
                                                                      (chunk-first s__29339)
                                                                      size__6372__auto__
@@ -904,13 +1056,13 @@
                                                                          (int
                                                                            size__6372__auto__)))]
                                                                     (if
-                                                                      (loop 
+                                                                      (loop
                                                                         [i__29340 (int 0)]
                                                                         (if
                                                                           (<
                                                                             i__29340
                                                                             size__6372__auto__)
-                                                                          (let 
+                                                                          (let
                                                                             [vec__29345
                                                                              (.nth
                                                                                ^clojure.lang.Indexed c__6371__auto__
@@ -940,7 +1092,7 @@
                                                                       (chunk-cons
                                                                         (chunk b__29341)
                                                                         nil)))
-                                                                  (let 
+                                                                  (let
                                                                     [vec__29349 (first s__29339)
                                                                      tid
                                                                      (nth vec__29349 (int 0) nil)
@@ -1005,11 +1157,11 @@
                                                                 temp__5804__auto__ (seq s__29361)]
                                                             (when
                                                               temp__5804__auto__
-                                                              (let 
+                                                              (let
                                                                 [s__29361 temp__5804__auto__]
                                                                 (if
                                                                   (chunked-seq? s__29361)
-                                                                  (let 
+                                                                  (let
                                                                     [c__6371__auto__
                                                                      (chunk-first s__29361)
                                                                      size__6372__auto__
@@ -1020,13 +1172,13 @@
                                                                          (int
                                                                            size__6372__auto__)))]
                                                                     (if
-                                                                      (loop 
+                                                                      (loop
                                                                         [i__29362 (int 0)]
                                                                         (if
                                                                           (<
                                                                             i__29362
                                                                             size__6372__auto__)
-                                                                          (let 
+                                                                          (let
                                                                             [vec__29367
                                                                              (.nth
                                                                                ^clojure.lang.Indexed c__6371__auto__
@@ -1056,7 +1208,7 @@
                                                                       (chunk-cons
                                                                         (chunk b__29363)
                                                                         nil)))
-                                                                  (let 
+                                                                  (let
                                                                     [vec__29371 (first s__29361)
                                                                      tid
                                                                      (nth vec__29371 (int 0) nil)
@@ -1079,6 +1231,14 @@
                       "application/edn"
                       (pr-str edn_ret)))))))
           (lib/resource :available-media-types edn-or-html-media :exists? false)))))
+  (reset-meta!
+    #'db-transact
+    (assoc
+      {:arglists (clojure.core/list ['storage 'dbname]), :column (int 1)}
+      :name
+      'db-transact
+      :ns
+      *ns*))
   (defn db-info
     ([storage dbname t]
       (let [temp__5802__auto__ (try (conn storage dbname) (catch java.lang.Exception ex nil))]
@@ -1174,6 +1334,14 @@
                       "application/edn"
                       (pr-str edn_ret)))))))
           (lib/resource :available-media-types edn-or-html-media :exists? false)))))
+  (reset-meta!
+    #'db-info
+    (assoc
+      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      :name
+      'db-info
+      :ns
+      *ns*))
   (defn get-datoms
     ([params db]
       (let [map__29393 params
@@ -1194,6 +1362,14 @@
         (mapv
           datom->map
           (limited (apply d/datoms db index (take-while (complement nil?) args)) params)))))
+  (reset-meta!
+    #'get-datoms
+    (assoc
+      {:arglists (clojure.core/list ['params 'db]), :column (int 1)}
+      :name
+      'get-datoms
+      :ns
+      *ns*))
   (defn get-range
     ([params db]
       (let [map__29396 params
@@ -1208,6 +1384,14 @@
             end (get map__29396 :end)
             db (windowed db params)]
         (mapv datom->map (limited (d/index-range db a start end) params)))))
+  (reset-meta!
+    #'get-range
+    (assoc
+      {:arglists (clojure.core/list ['params 'db]), :column (int 1)}
+      :name
+      'get-range
+      :ns
+      *ns*))
   (defn db-datoms
     ([storage dbname t]
       (let [temp__5802__auto__ (try (conn storage dbname) (catch java.lang.Exception ex nil))]
@@ -1334,6 +1518,14 @@
                       "application/edn"
                       (pr-str datoms)))))))
           (lib/resource :available-media-types edn-or-html-media :exists? false)))))
+  (reset-meta!
+    #'db-datoms
+    (assoc
+      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      :name
+      'db-datoms
+      :ns
+      *ns*))
   (defn db-entity
     ([storage dbname t]
       (let [temp__5802__auto__ (try (conn storage dbname) (catch java.lang.Exception ex nil))]
@@ -1413,23 +1605,23 @@
                                       [:tr
                                        [:td ":db/id"]
                                        [:td (^clojure.lang.IFn elink (:db/id emap))]]
-                                      (let [iter__6373__auto__ (fn 
+                                      (let [iter__6373__auto__ (fn
                                                                  iter__29442
                                                                  ([s__29443]
                                                                    (lazy-seq
-                                                                     (let 
+                                                                     (let
                                                                        [s__29443 s__29443
                                                                         temp__5804__auto__
                                                                         (seq s__29443)]
                                                                        (when
                                                                          temp__5804__auto__
-                                                                         (let 
+                                                                         (let
                                                                            [s__29443
                                                                             temp__5804__auto__]
                                                                            (if
                                                                              (chunked-seq?
                                                                                s__29443)
-                                                                             (let 
+                                                                             (let
                                                                                [c__6371__auto__
                                                                                 (chunk-first
                                                                                   s__29443)
@@ -1443,14 +1635,14 @@
                                                                                     (int
                                                                                       size__6372__auto__)))]
                                                                                (if
-                                                                                 (loop 
+                                                                                 (loop
                                                                                    [i__29444
                                                                                     (int 0)]
                                                                                    (if
                                                                                      (<
                                                                                        i__29444
                                                                                        size__6372__auto__)
-                                                                                     (let 
+                                                                                     (let
                                                                                        [vec__29449
                                                                                         (.nth
                                                                                           ^clojure.lang.Indexed c__6371__auto__
@@ -1482,13 +1674,13 @@
                                                                                                     a
                                                                                                     (first
                                                                                                       v))]]]
-                                                                                               (let 
+                                                                                               (let
                                                                                                  [iter__6373__auto__
-                                                                                                  (fn 
+                                                                                                  (fn
                                                                                                     iter__29452
                                                                                                     ([s__29453]
                                                                                                       (lazy-seq
-                                                                                                        (let 
+                                                                                                        (let
                                                                                                           [s__29453
                                                                                                            s__29453
                                                                                                            temp__5804__auto__
@@ -1496,13 +1688,13 @@
                                                                                                              s__29453)]
                                                                                                           (when
                                                                                                             temp__5804__auto__
-                                                                                                            (let 
+                                                                                                            (let
                                                                                                               [s__29453
                                                                                                                temp__5804__auto__]
                                                                                                               (if
                                                                                                                 (chunked-seq?
                                                                                                                   s__29453)
-                                                                                                                (let 
+                                                                                                                (let
                                                                                                                   [c__6371__auto__
                                                                                                                    (chunk-first
                                                                                                                      s__29453)
@@ -1516,7 +1708,7 @@
                                                                                                                        (int
                                                                                                                          size__6372__auto__)))]
                                                                                                                   (if
-                                                                                                                    (loop 
+                                                                                                                    (loop
                                                                                                                       [i__29454
                                                                                                                        (int
                                                                                                                          0)]
@@ -1524,7 +1716,7 @@
                                                                                                                         (<
                                                                                                                           i__29454
                                                                                                                           size__6372__auto__)
-                                                                                                                        (let 
+                                                                                                                        (let
                                                                                                                           [v
                                                                                                                            (.nth
                                                                                                                              ^clojure.lang.Indexed c__6371__auto__
@@ -1552,7 +1744,7 @@
                                                                                                                       (chunk
                                                                                                                         b__29455)
                                                                                                                       nil)))
-                                                                                                                (let 
+                                                                                                                (let
                                                                                                                   [v
                                                                                                                    (first
                                                                                                                      s__29453)]
@@ -1589,7 +1781,7 @@
                                                                                  (chunk-cons
                                                                                    (chunk b__29445)
                                                                                    nil)))
-                                                                             (let 
+                                                                             (let
                                                                                [vec__29467
                                                                                 (first s__29443)
                                                                                 a
@@ -1617,13 +1809,13 @@
                                                                                             a
                                                                                             (first
                                                                                               v))]]]
-                                                                                       (let 
+                                                                                       (let
                                                                                          [iter__6373__auto__
-                                                                                          (fn 
+                                                                                          (fn
                                                                                             iter__29470
                                                                                             ([s__29471]
                                                                                               (lazy-seq
-                                                                                                (let 
+                                                                                                (let
                                                                                                   [s__29471
                                                                                                    s__29471
                                                                                                    temp__5804__auto__
@@ -1631,13 +1823,13 @@
                                                                                                      s__29471)]
                                                                                                   (when
                                                                                                     temp__5804__auto__
-                                                                                                    (let 
+                                                                                                    (let
                                                                                                       [s__29471
                                                                                                        temp__5804__auto__]
                                                                                                       (if
                                                                                                         (chunked-seq?
                                                                                                           s__29471)
-                                                                                                        (let 
+                                                                                                        (let
                                                                                                           [c__6371__auto__
                                                                                                            (chunk-first
                                                                                                              s__29471)
@@ -1651,7 +1843,7 @@
                                                                                                                (int
                                                                                                                  size__6372__auto__)))]
                                                                                                           (if
-                                                                                                            (loop 
+                                                                                                            (loop
                                                                                                               [i__29472
                                                                                                                (int
                                                                                                                  0)]
@@ -1659,7 +1851,7 @@
                                                                                                                 (<
                                                                                                                   i__29472
                                                                                                                   size__6372__auto__)
-                                                                                                                (let 
+                                                                                                                (let
                                                                                                                   [v
                                                                                                                    (.nth
                                                                                                                      ^clojure.lang.Indexed c__6371__auto__
@@ -1687,7 +1879,7 @@
                                                                                                               (chunk
                                                                                                                 b__29473)
                                                                                                               nil)))
-                                                                                                        (let 
+                                                                                                        (let
                                                                                                           [v
                                                                                                            (first
                                                                                                              s__29471)]
@@ -1758,689 +1950,703 @@
                       "application/edn"
                       (pr-str emap)))))))
           (lib/resource :available-media-types edn-or-html-media :exists? false)))))
-  (defn query
-    ([request__29068__auto__]
-      (lib/run-resource
-        request__29068__auto__
-        (lib/get-options
-          (clojure.core/list
-            :available-media-types
-            edn-or-html-media
-            :method-allowed?
-            (request-method-in #{:get :head :post :options})
-            :post-redirect?
-            false
-            :new?
-            false
-            :respond-with-entity?
-            true
-            :multiple-representations?
-            false
-            :post!
-            true
-            :handle-ok
-            (fn fn__29498
-              ([context]
-                (let [params (:params (:request context))
-                      map__29499 params
-                      map__29499 (if (seq? map__29499)
-                                   (if (next map__29499)
-                                     (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                       (to-array map__29499))
-                                     (if (seq map__29499) (first map__29499) {}))
-                                   map__29499)
-                      q (get map__29499 :q)
-                      args (get map__29499 :args)
-                      offset (get map__29499 :offset)
-                      limit (get map__29499 :limit)
-                      oq q
-                      q (if (sequential? q) (dq/listq->mapq q) q)
-                      xargs (when args
-                              (mapv
-                                (fn fn__29500
-                                  ([p1__29497#]
-                                    (if (:db/alias p1__29497#)
-                                      (let [dbsym (symbol (:db/alias p1__29497#))
-                                            storage (namespace dbsym)
-                                            dbname (name dbsym)
-                                            c (conn storage dbname)]
-                                        (when-not c
-                                          (throw
-                                            (java.lang.AssertionError.
-                                              (str
-                                                "Assert failed: "
-                                                (str "Can't find db: " (:db/alias p1__29497#))
-                                                "\n"
-                                                (pr-str 'c)))))
-                                        (windowed (d/db c) p1__29497#))
-                                      p1__29497#)))
-                                args))
-                      result (if q (vec (limited (apply d/q q xargs) params)) [])
-                      G__29502 (get-in context [:representation :media-type])]
-                  (case
-                    G__29502
-                    "application/xhtml+xml"
-                    (html5
-                      [:h3
-                       "GET "
-                       [:a {:rel "up", :href "../.."} "/"]
-                       [:a {:rel "up", :href "."} "api" "/"]
-                       "query"]
-                      [:p "Issue a query."]
-                      [:p
-                       "The following helper form builds the query params for a GET on this same resource."]
-                      [:p
-                       "The query data (q) should be in "
-                       [:a {:href "http://edn-format.org"} "application/edn"]
-                       " format, as further described in the "
-                       [:a {:rel "help", :href "https://docs.datomic.com/query.html"} "query"]
-                       " documentation, and the reference for "
-                       [:a
-                        {:rel "help",
-                         :href "https://docs.datomic.com/clojure/index.html#datomic.api/q"}
-                        "q"]
-                       "."
-                       " args, if supplied, must be in a vector, as multiple args are conveyed in a single query parameter."]
-                      [:p
-                       "Note that api/query is not associated with any specific db, and is capable of querying any and all dbs accessible by the service. Thus, any dbs must be conveyed in 'args' via descriptors."]
-                      [:hr]
-                      (hf/form-to
-                        [:get ""]
-                        "q *: "
-                        (hf/text-area
-                          {:required "required", :rows "6", :cols "80"}
-                          "q"
-                          (when oq (pr-str oq)))
-                        " args : "
-                        (hf/text-area {:rows "6", :cols "80"} "args" (when args (pr-str args)))
-                        [:br]
-                        "offset : "
-                        (hf/text-field "offset" (when offset (str offset)))
-                        " limit : "
-                        (hf/text-field "limit" (when limit (str limit)))
-                        [:p " "]
-                        (hf/submit-button "Query"))
-                      [:p
-                       "You can try this query: "
-                       [:code "[:find ?e ?v :in $ :where [?e :db/doc ?v]]"]
-                       " with these args: "
-                       [:code "[{:db/alias \"your-storage/your-db\"}]"]]
-                      [:hr]
-                      [:h3 "Result:"]
-                      [:table
-                       {:id "result", :class "table"}
-                       [:tr
-                        (let [iter__6373__auto__ (fn iter__29503
-                                                   ([s__29504]
+  (reset-meta!
+    #'db-entity
+    (assoc
+      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      :name
+      'db-entity
+      :ns
+      *ns*))
+  (def query
+   (fn query
+     ([request__29068__auto__]
+       (lib/run-resource
+         request__29068__auto__
+         (lib/get-options
+           (clojure.core/list
+             :available-media-types
+             edn-or-html-media
+             :method-allowed?
+             (request-method-in #{:get :head :post :options})
+             :post-redirect?
+             false
+             :new?
+             false
+             :respond-with-entity?
+             true
+             :multiple-representations?
+             false
+             :post!
+             true
+             :handle-ok
+             (fn fn__29498
+               ([context]
+                 (let [params (:params (:request context))
+                       map__29499 params
+                       map__29499 (if (seq? map__29499)
+                                    (if (next map__29499)
+                                      (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                        (to-array map__29499))
+                                      (if (seq map__29499) (first map__29499) {}))
+                                    map__29499)
+                       q (get map__29499 :q)
+                       args (get map__29499 :args)
+                       offset (get map__29499 :offset)
+                       limit (get map__29499 :limit)
+                       oq q
+                       q (if (sequential? q) (dq/listq->mapq q) q)
+                       xargs (when args
+                               (mapv
+                                 (fn fn__29500
+                                   ([p1__29497#]
+                                     (if (:db/alias p1__29497#)
+                                       (let [dbsym (symbol (:db/alias p1__29497#))
+                                             storage (namespace dbsym)
+                                             dbname (name dbsym)
+                                             c (conn storage dbname)]
+                                         (when-not c
+                                           (throw
+                                             (java.lang.AssertionError.
+                                               (str
+                                                 "Assert failed: "
+                                                 (str "Can't find db: " (:db/alias p1__29497#))
+                                                 "\n"
+                                                 (pr-str 'c)))))
+                                         (windowed (d/db c) p1__29497#))
+                                       p1__29497#)))
+                                 args))
+                       result (if q (vec (limited (apply d/q q xargs) params)) [])
+                       G__29502 (get-in context [:representation :media-type])]
+                   (case
+                     G__29502
+                     "application/xhtml+xml"
+                     (html5
+                       [:h3
+                        "GET "
+                        [:a {:rel "up", :href "../.."} "/"]
+                        [:a {:rel "up", :href "."} "api" "/"]
+                        "query"]
+                       [:p "Issue a query."]
+                       [:p
+                        "The following helper form builds the query params for a GET on this same resource."]
+                       [:p
+                        "The query data (q) should be in "
+                        [:a {:href "http://edn-format.org"} "application/edn"]
+                        " format, as further described in the "
+                        [:a {:rel "help", :href "https://docs.datomic.com/query.html"} "query"]
+                        " documentation, and the reference for "
+                        [:a
+                         {:rel "help",
+                          :href "https://docs.datomic.com/clojure/index.html#datomic.api/q"}
+                         "q"]
+                        "."
+                        " args, if supplied, must be in a vector, as multiple args are conveyed in a single query parameter."]
+                       [:p
+                        "Note that api/query is not associated with any specific db, and is capable of querying any and all dbs accessible by the service. Thus, any dbs must be conveyed in 'args' via descriptors."]
+                       [:hr]
+                       (hf/form-to
+                         [:get ""]
+                         "q *: "
+                         (hf/text-area
+                           {:required "required", :rows "6", :cols "80"}
+                           "q"
+                           (when oq (pr-str oq)))
+                         " args : "
+                         (hf/text-area {:rows "6", :cols "80"} "args" (when args (pr-str args)))
+                         [:br]
+                         "offset : "
+                         (hf/text-field "offset" (when offset (str offset)))
+                         " limit : "
+                         (hf/text-field "limit" (when limit (str limit)))
+                         [:p " "]
+                         (hf/submit-button "Query"))
+                       [:p
+                        "You can try this query: "
+                        [:code "[:find ?e ?v :in $ :where [?e :db/doc ?v]]"]
+                        " with these args: "
+                        [:code "[{:db/alias \"your-storage/your-db\"}]"]]
+                       [:hr]
+                       [:h3 "Result:"]
+                       [:table
+                        {:id "result", :class "table"}
+                        [:tr
+                         (let [iter__6373__auto__ (fn iter__29503
+                                                    ([s__29504]
+                                                      (lazy-seq
+                                                        (let [s__29504 s__29504
+                                                              temp__5804__auto__ (seq s__29504)]
+                                                          (when temp__5804__auto__
+                                                            (let
+                                                              [s__29504 temp__5804__auto__]
+                                                              (if
+                                                                (chunked-seq? s__29504)
+                                                                (let
+                                                                  [c__6371__auto__
+                                                                   (chunk-first s__29504)
+                                                                   size__6372__auto__
+                                                                   (int (count c__6371__auto__))
+                                                                   b__29506
+                                                                   (chunk-buffer
+                                                                     (java.lang.Integer/valueOf
+                                                                       (int size__6372__auto__)))]
+                                                                  (if
+                                                                    (loop
+                                                                      [i__29505 (int 0)]
+                                                                      (if
+                                                                        (<
+                                                                          i__29505
+                                                                          size__6372__auto__)
+                                                                        (let
+                                                                          [bind
+                                                                           (.nth
+                                                                             ^clojure.lang.Indexed c__6371__auto__
+                                                                             (int i__29505))]
+                                                                          (chunk-append
+                                                                            b__29506
+                                                                            [:th (str bind)])
+                                                                          (recur (inc i__29505)))
+                                                                        true))
+                                                                    (chunk-cons
+                                                                      (chunk b__29506)
+                                                                      (^clojure.lang.IFn iter__29503
+                                                                        (chunk-rest s__29504)))
+                                                                    (chunk-cons
+                                                                      (chunk b__29506)
+                                                                      nil)))
+                                                                (let
+                                                                  [bind (first s__29504)]
+                                                                  (cons
+                                                                    [:th (str bind)]
+                                                                    (^clojure.lang.IFn iter__29503
+                                                                      (rest s__29504)))))))))))]
+                           (^clojure.lang.IFn iter__6373__auto__ (:find q)))]
+                        (let [iter__6373__auto__ (fn iter__29516
+                                                   ([s__29517]
                                                      (lazy-seq
-                                                       (let [s__29504 s__29504
-                                                             temp__5804__auto__ (seq s__29504)]
+                                                       (let [s__29517 s__29517
+                                                             temp__5804__auto__ (seq s__29517)]
                                                          (when temp__5804__auto__
-                                                           (let 
-                                                             [s__29504 temp__5804__auto__]
+                                                           (let
+                                                             [s__29517 temp__5804__auto__]
                                                              (if
-                                                               (chunked-seq? s__29504)
-                                                               (let 
+                                                               (chunked-seq? s__29517)
+                                                               (let
                                                                  [c__6371__auto__
-                                                                  (chunk-first s__29504)
+                                                                  (chunk-first s__29517)
                                                                   size__6372__auto__
                                                                   (int (count c__6371__auto__))
-                                                                  b__29506
+                                                                  b__29519
                                                                   (chunk-buffer
                                                                     (java.lang.Integer/valueOf
                                                                       (int size__6372__auto__)))]
                                                                  (if
-                                                                   (loop 
-                                                                     [i__29505 (int 0)]
+                                                                   (loop
+                                                                     [i__29518 (int 0)]
                                                                      (if
                                                                        (<
-                                                                         i__29505
+                                                                         i__29518
                                                                          size__6372__auto__)
-                                                                       (let 
-                                                                         [bind
+                                                                       (let
+                                                                         [r
                                                                           (.nth
                                                                             ^clojure.lang.Indexed c__6371__auto__
-                                                                            (int i__29505))]
+                                                                            (int i__29518))]
                                                                          (chunk-append
-                                                                           b__29506
-                                                                           [:th (str bind)])
-                                                                         (recur (inc i__29505)))
+                                                                           b__29519
+                                                                           [:tr
+                                                                            (let
+                                                                              [iter__6373__auto__
+                                                                               (fn
+                                                                                 iter__29523
+                                                                                 ([s__29524]
+                                                                                   (lazy-seq
+                                                                                     (let
+                                                                                       [s__29524
+                                                                                        s__29524
+                                                                                        temp__5804__auto__
+                                                                                        (seq
+                                                                                          s__29524)]
+                                                                                       (when
+                                                                                         temp__5804__auto__
+                                                                                         (let
+                                                                                           [s__29524
+                                                                                            temp__5804__auto__]
+                                                                                           (if
+                                                                                             (chunked-seq?
+                                                                                               s__29524)
+                                                                                             (let
+                                                                                               [c__6371__auto__
+                                                                                                (chunk-first
+                                                                                                  s__29524)
+                                                                                                size__6372__auto__
+                                                                                                (int
+                                                                                                  (count
+                                                                                                    c__6371__auto__))
+                                                                                                b__29526
+                                                                                                (chunk-buffer
+                                                                                                  (java.lang.Integer/valueOf
+                                                                                                    (int
+                                                                                                      size__6372__auto__)))]
+                                                                                               (if
+                                                                                                 (loop
+                                                                                                   [i__29525
+                                                                                                    (int
+                                                                                                      0)]
+                                                                                                   (if
+                                                                                                     (<
+                                                                                                       i__29525
+                                                                                                       size__6372__auto__)
+                                                                                                     (let
+                                                                                                       [c
+                                                                                                        (.nth
+                                                                                                          ^clojure.lang.Indexed c__6371__auto__
+                                                                                                          (int
+                                                                                                            i__29525))]
+                                                                                                       (chunk-append
+                                                                                                         b__29526
+                                                                                                         [:td
+                                                                                                          (pr-str
+                                                                                                            c)])
+                                                                                                       (recur
+                                                                                                         (inc
+                                                                                                           i__29525)))
+                                                                                                     true))
+                                                                                                 (chunk-cons
+                                                                                                   (chunk
+                                                                                                     b__29526)
+                                                                                                   (^clojure.lang.IFn iter__29523
+                                                                                                     (chunk-rest
+                                                                                                       s__29524)))
+                                                                                                 (chunk-cons
+                                                                                                   (chunk
+                                                                                                     b__29526)
+                                                                                                   nil)))
+                                                                                             (let
+                                                                                               [c
+                                                                                                (first
+                                                                                                  s__29524)]
+                                                                                               (cons
+                                                                                                 [:td
+                                                                                                  (pr-str
+                                                                                                    c)]
+                                                                                                 (^clojure.lang.IFn iter__29523
+                                                                                                   (rest
+                                                                                                     s__29524)))))))))))]
+                                                                              (^clojure.lang.IFn iter__6373__auto__
+                                                                                r))])
+                                                                         (recur (inc i__29518)))
                                                                        true))
                                                                    (chunk-cons
-                                                                     (chunk b__29506)
-                                                                     (^clojure.lang.IFn iter__29503
-                                                                       (chunk-rest s__29504)))
+                                                                     (chunk b__29519)
+                                                                     (^clojure.lang.IFn iter__29516
+                                                                       (chunk-rest s__29517)))
                                                                    (chunk-cons
-                                                                     (chunk b__29506)
+                                                                     (chunk b__29519)
                                                                      nil)))
-                                                               (let 
-                                                                 [bind (first s__29504)]
+                                                               (let
+                                                                 [r (first s__29517)]
                                                                  (cons
-                                                                   [:th (str bind)]
-                                                                   (^clojure.lang.IFn iter__29503
-                                                                     (rest s__29504)))))))))))]
-                          (^clojure.lang.IFn iter__6373__auto__ (:find q)))]
-                       (let [iter__6373__auto__ (fn iter__29516
-                                                  ([s__29517]
-                                                    (lazy-seq
-                                                      (let [s__29517 s__29517
-                                                            temp__5804__auto__ (seq s__29517)]
-                                                        (when temp__5804__auto__
-                                                          (let [s__29517 temp__5804__auto__]
-                                                            (if
-                                                              (chunked-seq? s__29517)
-                                                              (let 
-                                                                [c__6371__auto__
-                                                                 (chunk-first s__29517)
-                                                                 size__6372__auto__
-                                                                 (int (count c__6371__auto__))
-                                                                 b__29519
-                                                                 (chunk-buffer
-                                                                   (java.lang.Integer/valueOf
-                                                                     (int size__6372__auto__)))]
-                                                                (if
-                                                                  (loop 
-                                                                    [i__29518 (int 0)]
-                                                                    (if
-                                                                      (<
-                                                                        i__29518
-                                                                        size__6372__auto__)
-                                                                      (let 
-                                                                        [r
-                                                                         (.nth
-                                                                           ^clojure.lang.Indexed c__6371__auto__
-                                                                           (int i__29518))]
-                                                                        (chunk-append
-                                                                          b__29519
-                                                                          [:tr
-                                                                           (let 
-                                                                             [iter__6373__auto__
-                                                                              (fn 
-                                                                                iter__29523
-                                                                                ([s__29524]
-                                                                                  (lazy-seq
-                                                                                    (let 
-                                                                                      [s__29524
-                                                                                       s__29524
-                                                                                       temp__5804__auto__
-                                                                                       (seq
-                                                                                         s__29524)]
-                                                                                      (when
-                                                                                        temp__5804__auto__
-                                                                                        (let 
-                                                                                          [s__29524
-                                                                                           temp__5804__auto__]
-                                                                                          (if
-                                                                                            (chunked-seq?
-                                                                                              s__29524)
-                                                                                            (let 
-                                                                                              [c__6371__auto__
-                                                                                               (chunk-first
-                                                                                                 s__29524)
-                                                                                               size__6372__auto__
-                                                                                               (int
-                                                                                                 (count
-                                                                                                   c__6371__auto__))
-                                                                                               b__29526
-                                                                                               (chunk-buffer
-                                                                                                 (java.lang.Integer/valueOf
-                                                                                                   (int
-                                                                                                     size__6372__auto__)))]
-                                                                                              (if
-                                                                                                (loop 
-                                                                                                  [i__29525
-                                                                                                   (int
-                                                                                                     0)]
-                                                                                                  (if
-                                                                                                    (<
-                                                                                                      i__29525
-                                                                                                      size__6372__auto__)
-                                                                                                    (let 
-                                                                                                      [c
-                                                                                                       (.nth
-                                                                                                         ^clojure.lang.Indexed c__6371__auto__
-                                                                                                         (int
-                                                                                                           i__29525))]
-                                                                                                      (chunk-append
-                                                                                                        b__29526
-                                                                                                        [:td
-                                                                                                         (pr-str
-                                                                                                           c)])
-                                                                                                      (recur
-                                                                                                        (inc
-                                                                                                          i__29525)))
-                                                                                                    true))
-                                                                                                (chunk-cons
-                                                                                                  (chunk
-                                                                                                    b__29526)
-                                                                                                  (^clojure.lang.IFn iter__29523
-                                                                                                    (chunk-rest
-                                                                                                      s__29524)))
-                                                                                                (chunk-cons
-                                                                                                  (chunk
-                                                                                                    b__29526)
-                                                                                                  nil)))
-                                                                                            (let 
-                                                                                              [c
-                                                                                               (first
-                                                                                                 s__29524)]
-                                                                                              (cons
-                                                                                                [:td
-                                                                                                 (pr-str
-                                                                                                   c)]
-                                                                                                (^clojure.lang.IFn iter__29523
-                                                                                                  (rest
-                                                                                                    s__29524)))))))))))]
-                                                                             (^clojure.lang.IFn iter__6373__auto__
-                                                                               r))])
-                                                                        (recur (inc i__29518)))
-                                                                      true))
-                                                                  (chunk-cons
-                                                                    (chunk b__29519)
-                                                                    (^clojure.lang.IFn iter__29516
-                                                                      (chunk-rest s__29517)))
-                                                                  (chunk-cons
-                                                                    (chunk b__29519)
-                                                                    nil)))
-                                                              (let 
-                                                                [r (first s__29517)]
-                                                                (cons
-                                                                  [:tr
-                                                                   (let 
-                                                                     [iter__6373__auto__
-                                                                      (fn 
-                                                                        iter__29538
-                                                                        ([s__29539]
-                                                                          (lazy-seq
-                                                                            (let 
-                                                                              [s__29539 s__29539
-                                                                               temp__5804__auto__
-                                                                               (seq s__29539)]
-                                                                              (when
+                                                                   [:tr
+                                                                    (let
+                                                                      [iter__6373__auto__
+                                                                       (fn
+                                                                         iter__29538
+                                                                         ([s__29539]
+                                                                           (lazy-seq
+                                                                             (let
+                                                                               [s__29539 s__29539
                                                                                 temp__5804__auto__
-                                                                                (let 
-                                                                                  [s__29539
-                                                                                   temp__5804__auto__]
-                                                                                  (if
-                                                                                    (chunked-seq?
-                                                                                      s__29539)
-                                                                                    (let 
-                                                                                      [c__6371__auto__
-                                                                                       (chunk-first
-                                                                                         s__29539)
-                                                                                       size__6372__auto__
-                                                                                       (int
-                                                                                         (count
-                                                                                           c__6371__auto__))
-                                                                                       b__29541
-                                                                                       (chunk-buffer
-                                                                                         (java.lang.Integer/valueOf
-                                                                                           (int
-                                                                                             size__6372__auto__)))]
-                                                                                      (if
-                                                                                        (loop 
-                                                                                          [i__29540
-                                                                                           (int 0)]
-                                                                                          (if
-                                                                                            (<
-                                                                                              i__29540
-                                                                                              size__6372__auto__)
-                                                                                            (let 
-                                                                                              [c
-                                                                                               (.nth
-                                                                                                 ^clojure.lang.Indexed c__6371__auto__
-                                                                                                 (int
-                                                                                                   i__29540))]
-                                                                                              (chunk-append
-                                                                                                b__29541
-                                                                                                [:td
-                                                                                                 (pr-str
-                                                                                                   c)])
-                                                                                              (recur
-                                                                                                (inc
-                                                                                                  i__29540)))
-                                                                                            true))
-                                                                                        (chunk-cons
-                                                                                          (chunk
-                                                                                            b__29541)
-                                                                                          (^clojure.lang.IFn iter__29538
-                                                                                            (chunk-rest
-                                                                                              s__29539)))
-                                                                                        (chunk-cons
-                                                                                          (chunk
-                                                                                            b__29541)
-                                                                                          nil)))
-                                                                                    (let 
-                                                                                      [c
-                                                                                       (first
-                                                                                         s__29539)]
-                                                                                      (cons
-                                                                                        [:td
-                                                                                         (pr-str
-                                                                                           c)]
-                                                                                        (^clojure.lang.IFn iter__29538
-                                                                                          (rest
-                                                                                            s__29539)))))))))))]
-                                                                     (^clojure.lang.IFn iter__6373__auto__
-                                                                       r))]
-                                                                  (^clojure.lang.IFn iter__29516
-                                                                    (rest s__29517)))))))))))]
-                         (^clojure.lang.IFn iter__6373__auto__ result))]
-                      [:hr]
-                      [:h4 "application/edn"]
-                      [:code (pr-str result)])
-                    "text/html"
-                    (html5
-                      [:h3
-                       "GET "
-                       [:a {:rel "up", :href "../.."} "/"]
-                       [:a {:rel "up", :href "."} "api" "/"]
-                       "query"]
-                      [:p "Issue a query."]
-                      [:p
-                       "The following helper form builds the query params for a GET on this same resource."]
-                      [:p
-                       "The query data (q) should be in "
-                       [:a {:href "http://edn-format.org"} "application/edn"]
-                       " format, as further described in the "
-                       [:a {:rel "help", :href "https://docs.datomic.com/query.html"} "query"]
-                       " documentation, and the reference for "
-                       [:a
-                        {:rel "help",
-                         :href "https://docs.datomic.com/clojure/index.html#datomic.api/q"}
-                        "q"]
-                       "."
-                       " args, if supplied, must be in a vector, as multiple args are conveyed in a single query parameter."]
-                      [:p
-                       "Note that api/query is not associated with any specific db, and is capable of querying any and all dbs accessible by the service. Thus, any dbs must be conveyed in 'args' via descriptors."]
-                      [:hr]
-                      (hf/form-to
-                        [:get ""]
-                        "q *: "
-                        (hf/text-area
-                          {:required "required", :rows "6", :cols "80"}
-                          "q"
-                          (when oq (pr-str oq)))
-                        " args : "
-                        (hf/text-area {:rows "6", :cols "80"} "args" (when args (pr-str args)))
-                        [:br]
-                        "offset : "
-                        (hf/text-field "offset" (when offset (str offset)))
-                        " limit : "
-                        (hf/text-field "limit" (when limit (str limit)))
-                        [:p " "]
-                        (hf/submit-button "Query"))
-                      [:p
-                       "You can try this query: "
-                       [:code "[:find ?e ?v :in $ :where [?e :db/doc ?v]]"]
-                       " with these args: "
-                       [:code "[{:db/alias \"your-storage/your-db\"}]"]]
-                      [:hr]
-                      [:h3 "Result:"]
-                      [:table
-                       {:id "result", :class "table"}
-                       [:tr
-                        (let [iter__6373__auto__ (fn iter__29557
-                                                   ([s__29558]
+                                                                                (seq s__29539)]
+                                                                               (when
+                                                                                 temp__5804__auto__
+                                                                                 (let
+                                                                                   [s__29539
+                                                                                    temp__5804__auto__]
+                                                                                   (if
+                                                                                     (chunked-seq?
+                                                                                       s__29539)
+                                                                                     (let
+                                                                                       [c__6371__auto__
+                                                                                        (chunk-first
+                                                                                          s__29539)
+                                                                                        size__6372__auto__
+                                                                                        (int
+                                                                                          (count
+                                                                                            c__6371__auto__))
+                                                                                        b__29541
+                                                                                        (chunk-buffer
+                                                                                          (java.lang.Integer/valueOf
+                                                                                            (int
+                                                                                              size__6372__auto__)))]
+                                                                                       (if
+                                                                                         (loop
+                                                                                           [i__29540
+                                                                                            (int
+                                                                                              0)]
+                                                                                           (if
+                                                                                             (<
+                                                                                               i__29540
+                                                                                               size__6372__auto__)
+                                                                                             (let
+                                                                                               [c
+                                                                                                (.nth
+                                                                                                  ^clojure.lang.Indexed c__6371__auto__
+                                                                                                  (int
+                                                                                                    i__29540))]
+                                                                                               (chunk-append
+                                                                                                 b__29541
+                                                                                                 [:td
+                                                                                                  (pr-str
+                                                                                                    c)])
+                                                                                               (recur
+                                                                                                 (inc
+                                                                                                   i__29540)))
+                                                                                             true))
+                                                                                         (chunk-cons
+                                                                                           (chunk
+                                                                                             b__29541)
+                                                                                           (^clojure.lang.IFn iter__29538
+                                                                                             (chunk-rest
+                                                                                               s__29539)))
+                                                                                         (chunk-cons
+                                                                                           (chunk
+                                                                                             b__29541)
+                                                                                           nil)))
+                                                                                     (let
+                                                                                       [c
+                                                                                        (first
+                                                                                          s__29539)]
+                                                                                       (cons
+                                                                                         [:td
+                                                                                          (pr-str
+                                                                                            c)]
+                                                                                         (^clojure.lang.IFn iter__29538
+                                                                                           (rest
+                                                                                             s__29539)))))))))))]
+                                                                      (^clojure.lang.IFn iter__6373__auto__
+                                                                        r))]
+                                                                   (^clojure.lang.IFn iter__29516
+                                                                     (rest s__29517)))))))))))]
+                          (^clojure.lang.IFn iter__6373__auto__ result))]
+                       [:hr]
+                       [:h4 "application/edn"]
+                       [:code (pr-str result)])
+                     "text/html"
+                     (html5
+                       [:h3
+                        "GET "
+                        [:a {:rel "up", :href "../.."} "/"]
+                        [:a {:rel "up", :href "."} "api" "/"]
+                        "query"]
+                       [:p "Issue a query."]
+                       [:p
+                        "The following helper form builds the query params for a GET on this same resource."]
+                       [:p
+                        "The query data (q) should be in "
+                        [:a {:href "http://edn-format.org"} "application/edn"]
+                        " format, as further described in the "
+                        [:a {:rel "help", :href "https://docs.datomic.com/query.html"} "query"]
+                        " documentation, and the reference for "
+                        [:a
+                         {:rel "help",
+                          :href "https://docs.datomic.com/clojure/index.html#datomic.api/q"}
+                         "q"]
+                        "."
+                        " args, if supplied, must be in a vector, as multiple args are conveyed in a single query parameter."]
+                       [:p
+                        "Note that api/query is not associated with any specific db, and is capable of querying any and all dbs accessible by the service. Thus, any dbs must be conveyed in 'args' via descriptors."]
+                       [:hr]
+                       (hf/form-to
+                         [:get ""]
+                         "q *: "
+                         (hf/text-area
+                           {:required "required", :rows "6", :cols "80"}
+                           "q"
+                           (when oq (pr-str oq)))
+                         " args : "
+                         (hf/text-area {:rows "6", :cols "80"} "args" (when args (pr-str args)))
+                         [:br]
+                         "offset : "
+                         (hf/text-field "offset" (when offset (str offset)))
+                         " limit : "
+                         (hf/text-field "limit" (when limit (str limit)))
+                         [:p " "]
+                         (hf/submit-button "Query"))
+                       [:p
+                        "You can try this query: "
+                        [:code "[:find ?e ?v :in $ :where [?e :db/doc ?v]]"]
+                        " with these args: "
+                        [:code "[{:db/alias \"your-storage/your-db\"}]"]]
+                       [:hr]
+                       [:h3 "Result:"]
+                       [:table
+                        {:id "result", :class "table"}
+                        [:tr
+                         (let [iter__6373__auto__ (fn iter__29557
+                                                    ([s__29558]
+                                                      (lazy-seq
+                                                        (let [s__29558 s__29558
+                                                              temp__5804__auto__ (seq s__29558)]
+                                                          (when temp__5804__auto__
+                                                            (let
+                                                              [s__29558 temp__5804__auto__]
+                                                              (if
+                                                                (chunked-seq? s__29558)
+                                                                (let
+                                                                  [c__6371__auto__
+                                                                   (chunk-first s__29558)
+                                                                   size__6372__auto__
+                                                                   (int (count c__6371__auto__))
+                                                                   b__29560
+                                                                   (chunk-buffer
+                                                                     (java.lang.Integer/valueOf
+                                                                       (int size__6372__auto__)))]
+                                                                  (if
+                                                                    (loop
+                                                                      [i__29559 (int 0)]
+                                                                      (if
+                                                                        (<
+                                                                          i__29559
+                                                                          size__6372__auto__)
+                                                                        (let
+                                                                          [bind
+                                                                           (.nth
+                                                                             ^clojure.lang.Indexed c__6371__auto__
+                                                                             (int i__29559))]
+                                                                          (chunk-append
+                                                                            b__29560
+                                                                            [:th (str bind)])
+                                                                          (recur (inc i__29559)))
+                                                                        true))
+                                                                    (chunk-cons
+                                                                      (chunk b__29560)
+                                                                      (^clojure.lang.IFn iter__29557
+                                                                        (chunk-rest s__29558)))
+                                                                    (chunk-cons
+                                                                      (chunk b__29560)
+                                                                      nil)))
+                                                                (let
+                                                                  [bind (first s__29558)]
+                                                                  (cons
+                                                                    [:th (str bind)]
+                                                                    (^clojure.lang.IFn iter__29557
+                                                                      (rest s__29558)))))))))))]
+                           (^clojure.lang.IFn iter__6373__auto__ (:find q)))]
+                        (let [iter__6373__auto__ (fn iter__29570
+                                                   ([s__29571]
                                                      (lazy-seq
-                                                       (let [s__29558 s__29558
-                                                             temp__5804__auto__ (seq s__29558)]
+                                                       (let [s__29571 s__29571
+                                                             temp__5804__auto__ (seq s__29571)]
                                                          (when temp__5804__auto__
-                                                           (let 
-                                                             [s__29558 temp__5804__auto__]
+                                                           (let
+                                                             [s__29571 temp__5804__auto__]
                                                              (if
-                                                               (chunked-seq? s__29558)
-                                                               (let 
+                                                               (chunked-seq? s__29571)
+                                                               (let
                                                                  [c__6371__auto__
-                                                                  (chunk-first s__29558)
+                                                                  (chunk-first s__29571)
                                                                   size__6372__auto__
                                                                   (int (count c__6371__auto__))
-                                                                  b__29560
+                                                                  b__29573
                                                                   (chunk-buffer
                                                                     (java.lang.Integer/valueOf
                                                                       (int size__6372__auto__)))]
                                                                  (if
-                                                                   (loop 
-                                                                     [i__29559 (int 0)]
+                                                                   (loop
+                                                                     [i__29572 (int 0)]
                                                                      (if
                                                                        (<
-                                                                         i__29559
+                                                                         i__29572
                                                                          size__6372__auto__)
-                                                                       (let 
-                                                                         [bind
+                                                                       (let
+                                                                         [r
                                                                           (.nth
                                                                             ^clojure.lang.Indexed c__6371__auto__
-                                                                            (int i__29559))]
+                                                                            (int i__29572))]
                                                                          (chunk-append
-                                                                           b__29560
-                                                                           [:th (str bind)])
-                                                                         (recur (inc i__29559)))
+                                                                           b__29573
+                                                                           [:tr
+                                                                            (let
+                                                                              [iter__6373__auto__
+                                                                               (fn
+                                                                                 iter__29577
+                                                                                 ([s__29578]
+                                                                                   (lazy-seq
+                                                                                     (let
+                                                                                       [s__29578
+                                                                                        s__29578
+                                                                                        temp__5804__auto__
+                                                                                        (seq
+                                                                                          s__29578)]
+                                                                                       (when
+                                                                                         temp__5804__auto__
+                                                                                         (let
+                                                                                           [s__29578
+                                                                                            temp__5804__auto__]
+                                                                                           (if
+                                                                                             (chunked-seq?
+                                                                                               s__29578)
+                                                                                             (let
+                                                                                               [c__6371__auto__
+                                                                                                (chunk-first
+                                                                                                  s__29578)
+                                                                                                size__6372__auto__
+                                                                                                (int
+                                                                                                  (count
+                                                                                                    c__6371__auto__))
+                                                                                                b__29580
+                                                                                                (chunk-buffer
+                                                                                                  (java.lang.Integer/valueOf
+                                                                                                    (int
+                                                                                                      size__6372__auto__)))]
+                                                                                               (if
+                                                                                                 (loop
+                                                                                                   [i__29579
+                                                                                                    (int
+                                                                                                      0)]
+                                                                                                   (if
+                                                                                                     (<
+                                                                                                       i__29579
+                                                                                                       size__6372__auto__)
+                                                                                                     (let
+                                                                                                       [c
+                                                                                                        (.nth
+                                                                                                          ^clojure.lang.Indexed c__6371__auto__
+                                                                                                          (int
+                                                                                                            i__29579))]
+                                                                                                       (chunk-append
+                                                                                                         b__29580
+                                                                                                         [:td
+                                                                                                          (pr-str
+                                                                                                            c)])
+                                                                                                       (recur
+                                                                                                         (inc
+                                                                                                           i__29579)))
+                                                                                                     true))
+                                                                                                 (chunk-cons
+                                                                                                   (chunk
+                                                                                                     b__29580)
+                                                                                                   (^clojure.lang.IFn iter__29577
+                                                                                                     (chunk-rest
+                                                                                                       s__29578)))
+                                                                                                 (chunk-cons
+                                                                                                   (chunk
+                                                                                                     b__29580)
+                                                                                                   nil)))
+                                                                                             (let
+                                                                                               [c
+                                                                                                (first
+                                                                                                  s__29578)]
+                                                                                               (cons
+                                                                                                 [:td
+                                                                                                  (pr-str
+                                                                                                    c)]
+                                                                                                 (^clojure.lang.IFn iter__29577
+                                                                                                   (rest
+                                                                                                     s__29578)))))))))))]
+                                                                              (^clojure.lang.IFn iter__6373__auto__
+                                                                                r))])
+                                                                         (recur (inc i__29572)))
                                                                        true))
                                                                    (chunk-cons
-                                                                     (chunk b__29560)
-                                                                     (^clojure.lang.IFn iter__29557
-                                                                       (chunk-rest s__29558)))
+                                                                     (chunk b__29573)
+                                                                     (^clojure.lang.IFn iter__29570
+                                                                       (chunk-rest s__29571)))
                                                                    (chunk-cons
-                                                                     (chunk b__29560)
+                                                                     (chunk b__29573)
                                                                      nil)))
-                                                               (let 
-                                                                 [bind (first s__29558)]
+                                                               (let
+                                                                 [r (first s__29571)]
                                                                  (cons
-                                                                   [:th (str bind)]
-                                                                   (^clojure.lang.IFn iter__29557
-                                                                     (rest s__29558)))))))))))]
-                          (^clojure.lang.IFn iter__6373__auto__ (:find q)))]
-                       (let [iter__6373__auto__ (fn iter__29570
-                                                  ([s__29571]
-                                                    (lazy-seq
-                                                      (let [s__29571 s__29571
-                                                            temp__5804__auto__ (seq s__29571)]
-                                                        (when temp__5804__auto__
-                                                          (let [s__29571 temp__5804__auto__]
-                                                            (if
-                                                              (chunked-seq? s__29571)
-                                                              (let 
-                                                                [c__6371__auto__
-                                                                 (chunk-first s__29571)
-                                                                 size__6372__auto__
-                                                                 (int (count c__6371__auto__))
-                                                                 b__29573
-                                                                 (chunk-buffer
-                                                                   (java.lang.Integer/valueOf
-                                                                     (int size__6372__auto__)))]
-                                                                (if
-                                                                  (loop 
-                                                                    [i__29572 (int 0)]
-                                                                    (if
-                                                                      (<
-                                                                        i__29572
-                                                                        size__6372__auto__)
-                                                                      (let 
-                                                                        [r
-                                                                         (.nth
-                                                                           ^clojure.lang.Indexed c__6371__auto__
-                                                                           (int i__29572))]
-                                                                        (chunk-append
-                                                                          b__29573
-                                                                          [:tr
-                                                                           (let 
-                                                                             [iter__6373__auto__
-                                                                              (fn 
-                                                                                iter__29577
-                                                                                ([s__29578]
-                                                                                  (lazy-seq
-                                                                                    (let 
-                                                                                      [s__29578
-                                                                                       s__29578
-                                                                                       temp__5804__auto__
-                                                                                       (seq
-                                                                                         s__29578)]
-                                                                                      (when
-                                                                                        temp__5804__auto__
-                                                                                        (let 
-                                                                                          [s__29578
-                                                                                           temp__5804__auto__]
-                                                                                          (if
-                                                                                            (chunked-seq?
-                                                                                              s__29578)
-                                                                                            (let 
-                                                                                              [c__6371__auto__
-                                                                                               (chunk-first
-                                                                                                 s__29578)
-                                                                                               size__6372__auto__
-                                                                                               (int
-                                                                                                 (count
-                                                                                                   c__6371__auto__))
-                                                                                               b__29580
-                                                                                               (chunk-buffer
-                                                                                                 (java.lang.Integer/valueOf
-                                                                                                   (int
-                                                                                                     size__6372__auto__)))]
-                                                                                              (if
-                                                                                                (loop 
-                                                                                                  [i__29579
-                                                                                                   (int
-                                                                                                     0)]
-                                                                                                  (if
-                                                                                                    (<
-                                                                                                      i__29579
-                                                                                                      size__6372__auto__)
-                                                                                                    (let 
-                                                                                                      [c
-                                                                                                       (.nth
-                                                                                                         ^clojure.lang.Indexed c__6371__auto__
-                                                                                                         (int
-                                                                                                           i__29579))]
-                                                                                                      (chunk-append
-                                                                                                        b__29580
-                                                                                                        [:td
-                                                                                                         (pr-str
-                                                                                                           c)])
-                                                                                                      (recur
-                                                                                                        (inc
-                                                                                                          i__29579)))
-                                                                                                    true))
-                                                                                                (chunk-cons
-                                                                                                  (chunk
-                                                                                                    b__29580)
-                                                                                                  (^clojure.lang.IFn iter__29577
-                                                                                                    (chunk-rest
-                                                                                                      s__29578)))
-                                                                                                (chunk-cons
-                                                                                                  (chunk
-                                                                                                    b__29580)
-                                                                                                  nil)))
-                                                                                            (let 
-                                                                                              [c
-                                                                                               (first
-                                                                                                 s__29578)]
-                                                                                              (cons
-                                                                                                [:td
-                                                                                                 (pr-str
-                                                                                                   c)]
-                                                                                                (^clojure.lang.IFn iter__29577
-                                                                                                  (rest
-                                                                                                    s__29578)))))))))))]
-                                                                             (^clojure.lang.IFn iter__6373__auto__
-                                                                               r))])
-                                                                        (recur (inc i__29572)))
-                                                                      true))
-                                                                  (chunk-cons
-                                                                    (chunk b__29573)
-                                                                    (^clojure.lang.IFn iter__29570
-                                                                      (chunk-rest s__29571)))
-                                                                  (chunk-cons
-                                                                    (chunk b__29573)
-                                                                    nil)))
-                                                              (let 
-                                                                [r (first s__29571)]
-                                                                (cons
-                                                                  [:tr
-                                                                   (let 
-                                                                     [iter__6373__auto__
-                                                                      (fn 
-                                                                        iter__29592
-                                                                        ([s__29593]
-                                                                          (lazy-seq
-                                                                            (let 
-                                                                              [s__29593 s__29593
-                                                                               temp__5804__auto__
-                                                                               (seq s__29593)]
-                                                                              (when
+                                                                   [:tr
+                                                                    (let
+                                                                      [iter__6373__auto__
+                                                                       (fn
+                                                                         iter__29592
+                                                                         ([s__29593]
+                                                                           (lazy-seq
+                                                                             (let
+                                                                               [s__29593 s__29593
                                                                                 temp__5804__auto__
-                                                                                (let 
-                                                                                  [s__29593
-                                                                                   temp__5804__auto__]
-                                                                                  (if
-                                                                                    (chunked-seq?
-                                                                                      s__29593)
-                                                                                    (let 
-                                                                                      [c__6371__auto__
-                                                                                       (chunk-first
-                                                                                         s__29593)
-                                                                                       size__6372__auto__
-                                                                                       (int
-                                                                                         (count
-                                                                                           c__6371__auto__))
-                                                                                       b__29595
-                                                                                       (chunk-buffer
-                                                                                         (java.lang.Integer/valueOf
-                                                                                           (int
-                                                                                             size__6372__auto__)))]
-                                                                                      (if
-                                                                                        (loop 
-                                                                                          [i__29594
-                                                                                           (int 0)]
-                                                                                          (if
-                                                                                            (<
-                                                                                              i__29594
-                                                                                              size__6372__auto__)
-                                                                                            (let 
-                                                                                              [c
-                                                                                               (.nth
-                                                                                                 ^clojure.lang.Indexed c__6371__auto__
-                                                                                                 (int
-                                                                                                   i__29594))]
-                                                                                              (chunk-append
-                                                                                                b__29595
-                                                                                                [:td
-                                                                                                 (pr-str
-                                                                                                   c)])
-                                                                                              (recur
-                                                                                                (inc
-                                                                                                  i__29594)))
-                                                                                            true))
-                                                                                        (chunk-cons
-                                                                                          (chunk
-                                                                                            b__29595)
-                                                                                          (^clojure.lang.IFn iter__29592
-                                                                                            (chunk-rest
-                                                                                              s__29593)))
-                                                                                        (chunk-cons
-                                                                                          (chunk
-                                                                                            b__29595)
-                                                                                          nil)))
-                                                                                    (let 
-                                                                                      [c
-                                                                                       (first
-                                                                                         s__29593)]
-                                                                                      (cons
-                                                                                        [:td
-                                                                                         (pr-str
-                                                                                           c)]
-                                                                                        (^clojure.lang.IFn iter__29592
-                                                                                          (rest
-                                                                                            s__29593)))))))))))]
-                                                                     (^clojure.lang.IFn iter__6373__auto__
-                                                                       r))]
-                                                                  (^clojure.lang.IFn iter__29570
-                                                                    (rest s__29571)))))))))))]
-                         (^clojure.lang.IFn iter__6373__auto__ result))]
-                      [:hr]
-                      [:h4 "application/edn"]
-                      [:code (pr-str result)])
-                    "application/edn"
-                    (pr-str result))))))))))
+                                                                                (seq s__29593)]
+                                                                               (when
+                                                                                 temp__5804__auto__
+                                                                                 (let
+                                                                                   [s__29593
+                                                                                    temp__5804__auto__]
+                                                                                   (if
+                                                                                     (chunked-seq?
+                                                                                       s__29593)
+                                                                                     (let
+                                                                                       [c__6371__auto__
+                                                                                        (chunk-first
+                                                                                          s__29593)
+                                                                                        size__6372__auto__
+                                                                                        (int
+                                                                                          (count
+                                                                                            c__6371__auto__))
+                                                                                        b__29595
+                                                                                        (chunk-buffer
+                                                                                          (java.lang.Integer/valueOf
+                                                                                            (int
+                                                                                              size__6372__auto__)))]
+                                                                                       (if
+                                                                                         (loop
+                                                                                           [i__29594
+                                                                                            (int
+                                                                                              0)]
+                                                                                           (if
+                                                                                             (<
+                                                                                               i__29594
+                                                                                               size__6372__auto__)
+                                                                                             (let
+                                                                                               [c
+                                                                                                (.nth
+                                                                                                  ^clojure.lang.Indexed c__6371__auto__
+                                                                                                  (int
+                                                                                                    i__29594))]
+                                                                                               (chunk-append
+                                                                                                 b__29595
+                                                                                                 [:td
+                                                                                                  (pr-str
+                                                                                                    c)])
+                                                                                               (recur
+                                                                                                 (inc
+                                                                                                   i__29594)))
+                                                                                             true))
+                                                                                         (chunk-cons
+                                                                                           (chunk
+                                                                                             b__29595)
+                                                                                           (^clojure.lang.IFn iter__29592
+                                                                                             (chunk-rest
+                                                                                               s__29593)))
+                                                                                         (chunk-cons
+                                                                                           (chunk
+                                                                                             b__29595)
+                                                                                           nil)))
+                                                                                     (let
+                                                                                       [c
+                                                                                        (first
+                                                                                          s__29593)]
+                                                                                       (cons
+                                                                                         [:td
+                                                                                          (pr-str
+                                                                                            c)]
+                                                                                         (^clojure.lang.IFn iter__29592
+                                                                                           (rest
+                                                                                             s__29593)))))))))))]
+                                                                      (^clojure.lang.IFn iter__6373__auto__
+                                                                        r))]
+                                                                   (^clojure.lang.IFn iter__29570
+                                                                     (rest s__29571)))))))))))]
+                          (^clojure.lang.IFn iter__6373__auto__ result))]
+                       [:hr]
+                       [:h4 "application/edn"]
+                       [:code (pr-str result)])
+                     "application/edn"
+                     (pr-str result)))))))))))
+  (reset-meta! #'query (assoc {:column (int 1)} :name 'query :ns *ns*))
   (defn db-events
     ([storage dbname t]
       (let [temp__5802__auto__ (try (conn storage dbname) (catch java.lang.Exception ex nil))]
@@ -2666,6 +2872,14 @@
                             "</body>"
                             "</html>")))))))))
           (lib/resource :available-media-types edn-or-html-media :exists? false)))))
+  (reset-meta!
+    #'db-events
+    (assoc
+      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      :name
+      'db-events
+      :ns
+      *ns*))
   (defn load-resource
     ([req res]
       (let [temp__5802__auto__ (.getResource
@@ -2678,6 +2892,14 @@
               [:headers "Cache-Control"]
               "max-age=3600"))
           (ring/not-found nil)))))
+  (reset-meta!
+    #'load-resource
+    (assoc
+      {:arglists (clojure.core/list ['req 'res]), :column (int 1)}
+      :name
+      'load-resource
+      :ns
+      *ns*))
   (defn parse-edn-post-body
     ([h]
       (fn fn__29685
@@ -2700,6 +2922,14 @@
                                 (read-edn body (or (:character-encoding request) "UTF-8")))
                               request)]
             (^clojure.lang.IFn h new_request))))))
+  (reset-meta!
+    #'parse-edn-post-body
+    (assoc
+      {:arglists (clojure.core/list ['h]), :column (int 1)}
+      :name
+      'parse-edn-post-body
+      :ns
+      *ns*))
   (defn accept-edn-default
     ([h]
       (fn fn__29691
@@ -2709,8 +2939,19 @@
               request
               [:headers "accept"]
               (or (get-in request [:headers "accept"]) "application/edn")))))))
+  (reset-meta!
+    #'accept-edn-default
+    (assoc
+      {:arglists (clojure.core/list ['h]), :column (int 1)}
+      :name
+      'accept-edn-default
+      :ns
+      *ns*))
   (defn log-request
     ([h] (fn fn__29695 ([request] (common/log-and-print request) (^clojure.lang.IFn h request)))))
+  (reset-meta!
+    #'log-request
+    (assoc {:arglists (clojure.core/list ['h]), :column (int 1)} :name 'log-request :ns *ns*))
   (defn remove-nil-params
     ([h]
       (fn fn__29698
@@ -2720,229 +2961,243 @@
               request
               [:params]
               (fn fn__29699 ([param] (into {} (remove (comp nil? val) param))))))))))
-  (def routes
-   (-> (wrap-cors-request
-         (fn fn__29713
-           ([req29712]
-             (let [segments29711 (m/path-info-segments req29712)]
-               (or
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list ""))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29727 temp__5804__auto__] index)))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "data"
-                                                                       ""))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29730 temp__5804__auto__] stores)))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list "api" ""))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29733 temp__5804__auto__] api)))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "api"
-                                                                       "query"))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29736 temp__5804__auto__] query)))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "data"
-                                                                       '_
-                                                                       ""))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29739 temp__5804__auto__
-                                                    storage (nth vec__29739 (int 0) nil)]
-                                                (fn fn__29742
-                                                  ([p1__29703#]
-                                                    ((catalog storage) p1__29703#))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "data"
-                                                                       '_
-                                                                       '_
-                                                                       ""))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29744 temp__5804__auto__
-                                                    storage (nth vec__29744 (int 0) nil)
-                                                    db (nth vec__29744 (int 1) nil)]
-                                                (fn fn__29747
-                                                  ([p1__29704#]
-                                                    ((db-transact storage db) p1__29704#))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "data"
-                                                                       '_
-                                                                       '_
-                                                                       '_
-                                                                       ""))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29749 temp__5804__auto__
-                                                    storage (nth vec__29749 (int 0) nil)
-                                                    db (nth vec__29749 (int 1) nil)
-                                                    t (nth vec__29749 (int 2) nil)]
-                                                (fn fn__29752
-                                                  ([p1__29705#]
-                                                    ((db-info storage db t) p1__29705#))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "data"
-                                                                       '_
-                                                                       '_
-                                                                       '_
-                                                                       "datoms"))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29754 temp__5804__auto__
-                                                    storage (nth vec__29754 (int 0) nil)
-                                                    db (nth vec__29754 (int 1) nil)
-                                                    t (nth vec__29754 (int 2) nil)]
-                                                (fn fn__29757
-                                                  ([p1__29706#]
-                                                    ((db-datoms storage db t) p1__29706#))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "data"
-                                                                       '_
-                                                                       '_
-                                                                       '_
-                                                                       "entity"))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29759 temp__5804__auto__
-                                                    storage (nth vec__29759 (int 0) nil)
-                                                    db (nth vec__29759 (int 1) nil)
-                                                    t (nth vec__29759 (int 2) nil)]
-                                                (fn fn__29762
-                                                  ([p1__29707#]
-                                                    ((db-entity storage db t) p1__29707#))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list
-                                                                       "data"
-                                                                       '_
-                                                                       '_
-                                                                       '_
-                                                                       "events"))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29764 temp__5804__auto__
-                                                    storage (nth vec__29764 (int 0) nil)
-                                                    db (nth vec__29764 (int 1) nil)
-                                                    t (nth vec__29764 (int 2) nil)]
-                                                (fn fn__29767
-                                                  ([p1__29708#]
-                                                    ((db-events storage db t) p1__29708#))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list "css" '_))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29769 temp__5804__auto__
-                                                    css (nth vec__29769 (int 0) nil)]
-                                                (fn fn__29772
-                                                  ([req__28007__auto__]
-                                                    ((let [pred__29773 =
-                                                           expr__29774 (:request-method
-                                                                         req__28007__auto__)]
-                                                       (if (^clojure.lang.IFn pred__29773
-                                                             :get
-                                                             expr__29774)
-                                                         (fn fn__29775
-                                                           ([p1__29709#]
-                                                             (load-resource
-                                                               p1__29709#
-                                                               (str "css/" css))))
-                                                         (constantly
-                                                           {:headers {"Allow" "GET"},
-                                                            :status 405})))
-                                                      req__28007__auto__))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list "js" '_))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29778 temp__5804__auto__
-                                                    js (nth vec__29778 (int 0) nil)]
-                                                (fn fn__29781
-                                                  ([req__28007__auto__]
-                                                    ((let [pred__29782 =
-                                                           expr__29783 (:request-method
-                                                                         req__28007__auto__)]
-                                                       (if (^clojure.lang.IFn pred__29782
-                                                             :get
-                                                             expr__29783)
-                                                         (fn fn__29784
-                                                           ([p1__29710#]
-                                                             (load-resource
-                                                               p1__29710#
-                                                               (str "js/" js))))
-                                                         (constantly
-                                                           {:headers {"Allow" "GET"},
-                                                            :status 405})))
-                                                      req__28007__auto__))))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712))))
-                 (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
-                                                                     segments29711
-                                                                     (clojure.core/list '&))]
-                                            (when temp__5804__auto__
-                                              (let [vec__29787 temp__5804__auto__
-                                                    etc29726 (nth vec__29787 (int 0) nil)]
-                                                (m/alter-request
-                                                  m/not-found
-                                                  assoc
-                                                  :path-info
-                                                  (m/uri etc29726)))))]
-                   (when temp__5804__auto__
-                     (let [handler__27999__auto__ temp__5804__auto__]
-                       (^clojure.lang.IFn handler__27999__auto__ req29712)))))))))
-    (wrap-cors-preflight)
-    (remove-nil-params)
-    (parse-edn-post-body)
-    (wrap-reading-params)
-    (ringkw/wrap-keyword-params)
-    (ringp/wrap-params)
-    (accept-edn-default)))
+  (reset-meta!
+    #'remove-nil-params
+    (assoc
+      {:arglists (clojure.core/list ['h]), :column (int 1)}
+      :name
+      'remove-nil-params
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.rest" "routes") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.rest" "routes")
+    (-> (wrap-cors-request
+          (fn fn__29713
+            ([req29712]
+              (let [segments29711 (m/path-info-segments req29712)]
+                (or
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list ""))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29727 temp__5804__auto__] index)))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "data"
+                                                                        ""))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29730 temp__5804__auto__] stores)))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "api"
+                                                                        ""))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29733 temp__5804__auto__] api)))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "api"
+                                                                        "query"))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29736 temp__5804__auto__] query)))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "data"
+                                                                        '_
+                                                                        ""))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29739 temp__5804__auto__
+                                                     storage (nth vec__29739 (int 0) nil)]
+                                                 (fn fn__29742
+                                                   ([p1__29703#]
+                                                     ((catalog storage) p1__29703#))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "data"
+                                                                        '_
+                                                                        '_
+                                                                        ""))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29744 temp__5804__auto__
+                                                     storage (nth vec__29744 (int 0) nil)
+                                                     db (nth vec__29744 (int 1) nil)]
+                                                 (fn fn__29747
+                                                   ([p1__29704#]
+                                                     ((db-transact storage db) p1__29704#))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "data"
+                                                                        '_
+                                                                        '_
+                                                                        '_
+                                                                        ""))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29749 temp__5804__auto__
+                                                     storage (nth vec__29749 (int 0) nil)
+                                                     db (nth vec__29749 (int 1) nil)
+                                                     t (nth vec__29749 (int 2) nil)]
+                                                 (fn fn__29752
+                                                   ([p1__29705#]
+                                                     ((db-info storage db t) p1__29705#))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "data"
+                                                                        '_
+                                                                        '_
+                                                                        '_
+                                                                        "datoms"))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29754 temp__5804__auto__
+                                                     storage (nth vec__29754 (int 0) nil)
+                                                     db (nth vec__29754 (int 1) nil)
+                                                     t (nth vec__29754 (int 2) nil)]
+                                                 (fn fn__29757
+                                                   ([p1__29706#]
+                                                     ((db-datoms storage db t) p1__29706#))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "data"
+                                                                        '_
+                                                                        '_
+                                                                        '_
+                                                                        "entity"))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29759 temp__5804__auto__
+                                                     storage (nth vec__29759 (int 0) nil)
+                                                     db (nth vec__29759 (int 1) nil)
+                                                     t (nth vec__29759 (int 2) nil)]
+                                                 (fn fn__29762
+                                                   ([p1__29707#]
+                                                     ((db-entity storage db t) p1__29707#))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "data"
+                                                                        '_
+                                                                        '_
+                                                                        '_
+                                                                        "events"))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29764 temp__5804__auto__
+                                                     storage (nth vec__29764 (int 0) nil)
+                                                     db (nth vec__29764 (int 1) nil)
+                                                     t (nth vec__29764 (int 2) nil)]
+                                                 (fn fn__29767
+                                                   ([p1__29708#]
+                                                     ((db-events storage db t) p1__29708#))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list
+                                                                        "css"
+                                                                        '_))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29769 temp__5804__auto__
+                                                     css (nth vec__29769 (int 0) nil)]
+                                                 (fn fn__29772
+                                                   ([req__28007__auto__]
+                                                     ((let [pred__29773 =
+                                                            expr__29774
+                                                            (:request-method req__28007__auto__)]
+                                                        (if (^clojure.lang.IFn pred__29773
+                                                              :get
+                                                              expr__29774)
+                                                          (fn fn__29775
+                                                            ([p1__29709#]
+                                                              (load-resource
+                                                                p1__29709#
+                                                                (str "css/" css))))
+                                                          (constantly
+                                                            {:headers {"Allow" "GET"},
+                                                             :status 405})))
+                                                       req__28007__auto__))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list "js" '_))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29778 temp__5804__auto__
+                                                     js (nth vec__29778 (int 0) nil)]
+                                                 (fn fn__29781
+                                                   ([req__28007__auto__]
+                                                     ((let [pred__29782 =
+                                                            expr__29783
+                                                            (:request-method req__28007__auto__)]
+                                                        (if (^clojure.lang.IFn pred__29782
+                                                              :get
+                                                              expr__29783)
+                                                          (fn fn__29784
+                                                            ([p1__29710#]
+                                                              (load-resource
+                                                                p1__29710#
+                                                                (str "js/" js))))
+                                                          (constantly
+                                                            {:headers {"Allow" "GET"},
+                                                             :status 405})))
+                                                       req__28007__auto__))))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712))))
+                  (let [temp__5804__auto__ (let [temp__5804__auto__ (m/match-route
+                                                                      segments29711
+                                                                      (clojure.core/list '&))]
+                                             (when temp__5804__auto__
+                                               (let [vec__29787 temp__5804__auto__
+                                                     etc29726 (nth vec__29787 (int 0) nil)]
+                                                 (m/alter-request
+                                                   m/not-found
+                                                   assoc
+                                                   :path-info
+                                                   (m/uri etc29726)))))]
+                    (when temp__5804__auto__
+                      (let [handler__27999__auto__ temp__5804__auto__]
+                        (^clojure.lang.IFn handler__27999__auto__ req29712)))))))))
+     (wrap-cors-preflight)
+     (remove-nil-params)
+     (parse-edn-post-body)
+     (wrap-reading-params)
+     (ringkw/wrap-keyword-params)
+     (ringp/wrap-params)
+     (accept-edn-default)))
   (defn servlet
     ([handler]
       (let [servicer (servlet/make-service-method handler)]
@@ -2950,75 +3205,89 @@
           [javax.servlet.http.HttpServlet]
           []
           (service [request response] (^clojure.lang.IFn servicer this request response))))))
-  (defn service-queue
-    ([desc clients]
-      (let [vec__29846 (.split ^java.lang.String desc "/")
-            storage (nth vec__29846 (int 0) nil)
-            dbname (nth vec__29846 (int 1) nil)
-            c (conn storage dbname)]
-        (when c
-          (let [q (d/tx-report-queue c)]
-            (future-call
-              (fn fn__29849
-                ([]
-                  (try
-                    (do
-                      (loop []
-                        (do
-                          (let [tx_ret (.take ^java.util.concurrent.BlockingQueue q)
-                                tx_report (pr-str
-                                            (dissoc (prep-tx-ret tx_ret storage dbname) :tempids))]
-                            (loop [seq_29850 (seq (get (deref clients) desc))
-                                   chunk_29851 nil
-                                   count_29852 0
-                                   i_29853 0]
-                              (if (< i_29853 count_29852)
-                                (let [e (.nth ^clojure.lang.Indexed chunk_29851 (int i_29853))]
-                                  (try
-                                    (do
-                                      (.data
-                                        ^org.eclipse.jetty.servlets.EventSource$Emitter e
-                                        ^java.lang.String tx_report)
-                                      nil)
-                                    (catch java.lang.Exception ex nil))
-                                  (recur seq_29850 chunk_29851 count_29852 (inc i_29853)))
-                                (let [temp__5804__auto__ (seq seq_29850)]
-                                  (when temp__5804__auto__
-                                    (let [seq_29850 temp__5804__auto__]
-                                      (if (chunked-seq? seq_29850)
-                                        (let [c__6065__auto__ (chunk-first seq_29850)]
-                                          (recur
-                                            (chunk-rest seq_29850)
-                                            c__6065__auto__
-                                            (int (count c__6065__auto__))
-                                            (int 0)))
-                                        (let [e (first seq_29850)]
-                                          (try
-                                            (do
-                                              (.data
-                                                ^org.eclipse.jetty.servlets.EventSource$Emitter e
-                                                ^java.lang.String tx_report)
-                                              nil)
-                                            (catch java.lang.Exception ex nil))
-                                          (recur (next seq_29850) nil 0 0)))))))))
-                          (recur)))
-                      nil)
-                    (catch
-                      java.lang.Throwable
-                      t__8829__auto__
-                      (do
-                        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.rest")
-                              ex t__8829__auto__]
-                          (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                            (.warn
-                              ^org.slf4j.Logger logger
-                              (datomic.slf4j/process "error executing future")
-                              ^java.lang.Throwable ex)
-                            (datomic.slf4j/caused-by logger ex))
-                          nil)
-                        (datomic.monitor/alarm :UnhandledException)
-                        (throw ^java.lang.Throwable t__8829__auto__)
-                        nil)))))))))))
+  (reset-meta!
+    #'servlet
+    (assoc {:arglists (clojure.core/list ['handler]), :column (int 1)} :name 'servlet :ns *ns*))
+  (def service-queue
+   (fn service_queue
+     ([desc clients]
+       (let [vec__29846 (.split ^java.lang.String desc "/")
+             storage (nth vec__29846 (int 0) nil)
+             dbname (nth vec__29846 (int 1) nil)
+             c (conn storage dbname)]
+         (when c
+           (let [q (d/tx-report-queue c)]
+             (future-call
+               (fn fn__29849
+                 ([]
+                   (try
+                     (do
+                       (loop []
+                         (do
+                           (let [tx_ret (.take ^java.util.concurrent.BlockingQueue q)
+                                 tx_report (pr-str
+                                             (dissoc
+                                               (prep-tx-ret tx_ret storage dbname)
+                                               :tempids))]
+                             (loop [seq_29850 (seq (get (deref clients) desc))
+                                    chunk_29851 nil
+                                    count_29852 0
+                                    i_29853 0]
+                               (if (< i_29853 count_29852)
+                                 (let [e (.nth ^clojure.lang.Indexed chunk_29851 (int i_29853))]
+                                   (try
+                                     (do
+                                       (.data
+                                         ^org.eclipse.jetty.servlets.EventSource$Emitter e
+                                         ^java.lang.String tx_report)
+                                       nil)
+                                     (catch java.lang.Exception ex nil))
+                                   (recur seq_29850 chunk_29851 count_29852 (inc i_29853)))
+                                 (let [temp__5804__auto__ (seq seq_29850)]
+                                   (when temp__5804__auto__
+                                     (let [seq_29850 temp__5804__auto__]
+                                       (if (chunked-seq? seq_29850)
+                                         (let [c__6065__auto__ (chunk-first seq_29850)]
+                                           (recur
+                                             (chunk-rest seq_29850)
+                                             c__6065__auto__
+                                             (int (count c__6065__auto__))
+                                             (int 0)))
+                                         (let [e (first seq_29850)]
+                                           (try
+                                             (do
+                                               (.data
+                                                 ^org.eclipse.jetty.servlets.EventSource$Emitter e
+                                                 ^java.lang.String tx_report)
+                                               nil)
+                                             (catch java.lang.Exception ex nil))
+                                           (recur (next seq_29850) nil 0 0)))))))))
+                           (recur)))
+                       nil)
+                     (catch
+                       java.lang.Throwable
+                       t__8829__auto__
+                       (do
+                         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.rest")
+                               ex t__8829__auto__]
+                           (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                             (.warn
+                               ^org.slf4j.Logger logger
+                               (datomic.slf4j/process "error executing future")
+                               ^java.lang.Throwable ex)
+                             (datomic.slf4j/caused-by logger ex))
+                           nil)
+                         (datomic.monitor/alarm :UnhandledException)
+                         (throw ^java.lang.Throwable t__8829__auto__)
+                         nil))))))))))))
+  (reset-meta!
+    #'service-queue
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'desc {:tag 'String}) 'clients]), :column (int 1)}
+      :name
+      'service-queue
+      :ns
+      *ns*))
   (defn event-servlet
     ([]
       (let [clients (atom {})
@@ -3057,6 +3326,9 @@
                       (swap! clients update-in [desc] (fnil conj #{}) emitter)
                       (^clojure.lang.IFn ensure_thread desc)
                       nil))))))))))
+  (reset-meta!
+    #'event-servlet
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'event-servlet :ns *ns*))
   (defn start
     ([port]
       (let [s (jetty/create-server {:port (or port 8080), :join? false})
@@ -3074,6 +3346,9 @@
           "/")
         (.start ^org.eclipse.jetty.util.component.AbstractLifeCycle s)
         nil)))
+  (reset-meta!
+    #'start
+    (assoc {:arglists (clojure.core/list ['port]), :column (int 1)} :name 'start :ns *ns*))
   (defn -main
     ([& args]
       (let [vec__29881 (cli/cli
@@ -3138,4 +3413,7 @@
                               a (nth vec__29896 (int 0) nil)
                               u (nth vec__29896 (int 1) nil)]
                           (println "  " a "=" u)
-                          (recur (next seq_29889) nil 0 0))))))))))))))
+                          (recur (next seq_29889) nil 0 0)))))))))))))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))

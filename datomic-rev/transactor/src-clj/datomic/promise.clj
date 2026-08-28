@@ -55,14 +55,10 @@
           (^void addListener
             [this ^java.lang.Runnable listener ^java.util.concurrent.Executor exec]
             (do
-              (let [execute_now (let [lockee__5782__auto__ listeners
-                                      locklocal__5783__auto__ lockee__5782__auto__]
-                                  (monitor-enter locklocal__5783__auto__)
-                                  (try
-                                    (if (.isRealized this)
-                                      true
-                                      (do (swap! listeners conj [listener exec]) false))
-                                    (finally (do (monitor-exit locklocal__5783__auto__) nil))))]
+              (let [execute_now (locking listeners
+                                  (if (.isRealized this)
+                                    true
+                                    (do (swap! listeners conj [listener exec]) false)))]
                 (when execute_now (call-user-code exec listener)))
               nil))
           (invoke
@@ -71,11 +67,8 @@
                     (clojure.lang.Numbers/isPos
                       (long (.getCount ^java.util.concurrent.CountDownLatch d)))
                     (compare-and-set! v d x))
-              (let [lockee__5782__auto__ listeners locklocal__5783__auto__ lockee__5782__auto__]
-                (monitor-enter locklocal__5783__auto__)
-                (try
-                  (do (.countDown ^java.util.concurrent.CountDownLatch d) nil)
-                  (finally (do (monitor-exit locklocal__5783__auto__) nil))))
+              (locking listeners
+                (do (.countDown ^java.util.concurrent.CountDownLatch d) nil))
               (loop [seq_11928 (seq (deref listeners)) chunk_11929 nil count_11930 0 i_11931 0]
                 (if (< i_11931 count_11930)
                   (let [vec__11932 (.nth ^clojure.lang.Indexed chunk_11929 (int i_11931))

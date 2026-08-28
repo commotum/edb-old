@@ -23,6 +23,9 @@ stage2_root=$1
 work_root=$2
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 scripts_root=$(cd -- "$script_dir/.." && pwd -P)
+original_nano_sha=fbde8184da356bd3a9995a9f05f01493efe4baa87c4d48377cda3e53331807cd
+expected_sanitized_nano_sha=08f9699d6e35b9e052ec85ee15e0896b3a685c74e6e226d8cd89d9c61dbf8d5f
+expected_sanitized_nano_bytes=81218
 
 for command_name in awk cmp cp find grep java mkdir mktemp readlink rm sed \
   sha256sum sort tail timeout unzip wc; do
@@ -67,6 +70,8 @@ grep -Fqx 'candidate.boundary.validated=true' "$stage2_root/run-status.propertie
 
 classpath_entries=()
 position=0
+sanitized_nano_role_count=0
+dependency_lib_dir=
 while IFS=$'\t' read -r recorded_position role expected_sha entry extra; do
   [[ "$recorded_position" == position ]] && continue
   ((position += 1))
@@ -125,17 +130,52 @@ while IFS=$'\t' read -r recorded_position role expected_sha entry extra; do
       [[ "$position" -ge 4 && -f "$entry" &&
          "$(sha256sum "$entry" | awk '{print $1}')" == "$expected_sha" ]] ||
         die "candidate dependency differs at position $position"
+      [[ "$expected_sha" != "$original_nano_sha" ]] ||
+        die "original Nano implementation hash entered candidate classpath: $entry"
+      [[ ! -L "$entry" ]] ||
+        die "candidate dependency is symbolic at position $position"
+      entry_dir=${entry%/*}
+      [[ "${entry_dir##*/}" == lib ]] ||
+        die "ordinary candidate dependency is not a direct datomic-home/lib entry: $entry"
+      if [[ -z "$dependency_lib_dir" ]]; then
+        dependency_lib_dir=$entry_dir
+      else
+        [[ "$entry_dir" == "$dependency_lib_dir" ]] ||
+          die "ordinary candidate dependencies do not share one datomic-home/lib: $entry"
+      fi
       case "${entry##*/}" in
-        peer-*.jar|core2-*.jar|datomic-transactor*.jar|*transactor-pro*.jar)
+        peer-*.jar|core2-*.jar|datomic-transactor*.jar|*transactor-pro*.jar|nano-impl-*.jar)
           die "forbidden original implementation entered candidate classpath: $entry"
           ;;
       esac
+      ;;
+    *:sanitized-nano-dependency)
+      # Stage 2 substitutes exactly one manifest row in place, preserving the
+      # 535-entry cardinality. This is the only dependency role allowed outside
+      # the single inferred datomic-home/lib directory checked above.
+      [[ "$position" -ge 4 ]] ||
+        die "sanitized Nano appeared before the dependency portion of the classpath"
+      ((sanitized_nano_role_count += 1))
+      [[ "$sanitized_nano_role_count" -eq 1 ]] ||
+        die "candidate classpath contains more than one sanitized Nano role"
+      [[ "$expected_sha" == "$expected_sanitized_nano_sha" ]] ||
+        die "candidate classpath records a noncanonical sanitized Nano SHA-256"
+      [[ -f "$entry" && ! -L "$entry" ]] ||
+        die "candidate sanitized Nano is missing or symbolic: $entry"
+      [[ "$(sha256sum "$entry" | awk '{print $1}')" == "$expected_sanitized_nano_sha" ]] ||
+        die "candidate sanitized Nano bytes are not canonical"
+      [[ "$(wc -c <"$entry")" -eq "$expected_sanitized_nano_bytes" ]] ||
+        die "candidate sanitized Nano size is not canonical"
       ;;
     *) die "unexpected candidate role at position $position: $role" ;;
   esac
   classpath_entries+=("$entry")
 done <"$classpath_record"
 [[ "$position" -eq 535 ]] || die "candidate classpath cardinality changed"
+[[ "$sanitized_nano_role_count" -eq 1 ]] ||
+  die "candidate classpath must contain exactly one sanitized Nano role"
+[[ -n "$dependency_lib_dir" ]] ||
+  die "candidate classpath contains no ordinary datomic-home/lib dependencies"
 candidate_classpath=$(IFS=:; echo "${classpath_entries[*]}")
 
 timeout_seconds=${STAGE3_LOCAL_TIMEOUT_SECONDS:-60}
@@ -209,4 +249,8 @@ done
   printf 'artifact.origin.gate=true\n'
   printf 'original.peer.aot=false\n'
   printf 'original.core2.aot=false\n'
+  printf 'original.nano.impl=false\n'
+  printf 'sanitized.nano.role.count=%s\n' "$sanitized_nano_role_count"
+  printf 'sanitized.nano.sha256=%s\n' "$expected_sanitized_nano_sha"
+  printf 'sanitized.nano.bytes=%s\n' "$expected_sanitized_nano_bytes"
 } >"$work_root/local-summary.properties"

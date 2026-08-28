@@ -141,12 +141,18 @@ new empty work root to the non-SQL runner:
 DATOMIC_HOME=${DATOMIC_HOME:-../../datomic/datomic-pro-1.0.7277}
 ARTIFACT=/tmp/datomic-stage-1/build-a/datomic-rev-peer-1.0.7277-source.jar
 POSTGRES_ROOT=${POSTGRES_ROOT:?set this to a PostgreSQL 16 installation root}
+SANITIZED_NANO_ROOT=${SANITIZED_NANO_ROOT:?set this to a new path outside the repository}
 STAGE2_DRY_RUN_ROOT=/tmp/datomic-stage2-dry-run
 STAGE3_LOCAL_ROOT=/tmp/datomic-stage3-local
+
+transactor/scripts/sanitize-nano-impl.sh \
+  "$DATOMIC_HOME" "$SANITIZED_NANO_ROOT"
+SANITIZED_NANO="$SANITIZED_NANO_ROOT/nano-impl-0.1.325-sanitized.jar"
 
 scripts/stage2/validate-postgresql.sh \
   --datomic-home "$DATOMIC_HOME" \
   --artifact "$ARTIFACT" \
+  --sanitized-nano "$SANITIZED_NANO" \
   --postgres-root "$POSTGRES_ROOT" \
   --work-root "$STAGE2_DRY_RUN_ROOT" \
   --dry-run
@@ -164,6 +170,7 @@ STAGE3_TRANSACTOR_PORT=${STAGE3_TRANSACTOR_PORT:-54341}
 scripts/stage3/validate-postgresql.sh \
   --datomic-home "$DATOMIC_HOME" \
   --artifact "$ARTIFACT" \
+  --sanitized-nano "$SANITIZED_NANO" \
   --postgres-root "$POSTGRES_ROOT" \
   --pg-port "$STAGE3_PG_PORT" \
   --transactor-port "$STAGE3_TRANSACTOR_PORT" \

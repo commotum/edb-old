@@ -24,6 +24,10 @@ project_dir=$(cd -- "$scripts_dir/.." && pwd)
 artifact_name=datomic-rev-peer-1.0.7277-source.jar
 confirmation_token=DATOMIC_STAGE2_DISPOSABLE
 expected_stub_manifest_sha=5bb9a3440c4fe00f3b299a7e48fbf2aa6ef5f3ef2208fe389af13304eb267e02
+expected_nano_path=lib/nano-impl-0.1.325.jar
+expected_nano_sha=fbde8184da356bd3a9995a9f05f01493efe4baa87c4d48377cda3e53331807cd
+expected_sanitized_nano_sha=08f9699d6e35b9e052ec85ee15e0896b3a685c74e6e226d8cd89d9c61dbf8d5f
+expected_sanitized_nano_bytes=81218
 
 usage() {
   cat <<EOF
@@ -41,6 +45,9 @@ Artifact inputs:
                               canonical artifact below datomic-rev/build.
   --dependency-manifest TSV  Optional external dependencies.tsv; it must match
                               the artifact's embedded manifest byte-for-byte.
+  --sanitized-nano JAR       Required canonical sanitized Nano derivative. The
+                              original recorded Nano dependency is replaced by
+                              this content-addressed JAR in the candidate JVM.
   --stub-dir DIR             Optional prebuilt four-class Hot Rod stub tree.
                               By default, build it inside the run directory.
 
@@ -155,6 +162,7 @@ assert_descendant() {
 
 artifact_input=${DATOMIC_REV_ARTIFACT:-}
 dependency_manifest_input=
+sanitized_nano_input=
 stub_dir_input=
 datomic_home=${DATOMIC_HOME:-}
 postgres_root=${STAGE2_POSTGRES_ROOT:-}
@@ -192,6 +200,7 @@ while (($#)); do
     --datomic-home) datomic_home=${2:?missing value for --datomic-home}; shift 2 ;;
     --artifact) artifact_input=${2:?missing value for --artifact}; shift 2 ;;
     --dependency-manifest) dependency_manifest_input=${2:?missing value for --dependency-manifest}; shift 2 ;;
+    --sanitized-nano) sanitized_nano_input=${2:?missing value for --sanitized-nano}; shift 2 ;;
     --stub-dir) stub_dir_input=${2:?missing value for --stub-dir}; shift 2 ;;
     --postgres-root) postgres_root=${2:?missing value for --postgres-root}; shift 2 ;;
     --pg-bin-dir) pg_bin_dir=${2:?missing value for --pg-bin-dir}; shift 2 ;;
@@ -229,7 +238,7 @@ done
 
 for command_name in \
   awk cat chmod cmp cp dirname find grep java kill mkdir mktemp mv readlink sed \
-  sha256sum sleep sort tail timeout tr uname unzip uniq wc; do
+  sha256sum sleep sort stat tail timeout tr uname unzip uniq wc; do
   need_command "$command_name"
 done
 
@@ -312,6 +321,32 @@ fi
 artifact_jar=$(readlink -f -- "$artifact_input")
 require_safe_path_text artifact "$artifact_jar"
 unzip -tqq "$artifact_jar" || die "artifact is not a valid ZIP/JAR: $artifact_jar"
+
+[[ -n "$sanitized_nano_input" ]] ||
+  die "provide --sanitized-nano with the canonical sanitized Nano derivative"
+[[ ! -L "$sanitized_nano_input" ]] ||
+  die "sanitized Nano input may not be a symbolic link: $sanitized_nano_input"
+[[ -f "$sanitized_nano_input" ]] ||
+  die "missing sanitized Nano derivative: $sanitized_nano_input"
+sanitized_nano_jar=$(readlink -f -- "$sanitized_nano_input")
+[[ -f "$sanitized_nano_jar" && ! -L "$sanitized_nano_jar" ]] ||
+  die "sanitized Nano derivative is not a regular non-symlink file: $sanitized_nano_jar"
+require_safe_path_text sanitized-nano "$sanitized_nano_jar"
+sanitized_nano_name=${sanitized_nano_jar##*/}
+case "$sanitized_nano_name" in
+  *$'\r'*) die "sanitized Nano filename contains a carriage return" ;;
+esac
+sanitized_nano_sha=$(sha256_file "$sanitized_nano_jar")
+[[ "$sanitized_nano_sha" == "$expected_sanitized_nano_sha" ]] ||
+  die "sanitized Nano derivative SHA-256 mismatch: expected $expected_sanitized_nano_sha, got $sanitized_nano_sha"
+sanitized_nano_bytes=$(stat -c '%s' -- "$sanitized_nano_jar")
+[[ "$sanitized_nano_bytes" == "$expected_sanitized_nano_bytes" ]] ||
+  die "sanitized Nano derivative byte-size mismatch: expected $expected_sanitized_nano_bytes, got $sanitized_nano_bytes"
+unzip -tqq "$sanitized_nano_jar" ||
+  die "sanitized Nano derivative is not a valid ZIP/JAR: $sanitized_nano_jar"
+[[ -z "$(unzip -Z1 "$sanitized_nano_jar" |
+  grep -E '\.(jks|p12|pfx|keystore)$' || true)" ]] ||
+  die "sanitized Nano derivative retained a keystore entry"
 
 if [[ -n "$work_root_input" ]]; then
   [[ ! -L "$work_root_input" ]] ||
@@ -412,7 +447,11 @@ duplicate_dependency_paths=$(
   die "dependency manifest contains duplicate paths: $duplicate_dependency_paths"
 
 dependency_paths=()
+candidate_dependency_roles=()
+candidate_dependency_shas=()
+candidate_dependency_paths=()
 dependency_count=0
+nano_substitution_count=0
 while IFS=$'\t' read -r expected_sha relative_path extra; do
   [[ "$expected_sha" == sha256 ]] && continue
   [[ -n "$expected_sha" && -n "$relative_path" && -z "${extra:-}" ]] ||
@@ -437,11 +476,45 @@ while IFS=$'\t' read -r expected_sha relative_path extra; do
   [[ "$actual_sha" == "$expected_sha" ]] ||
     die "dependency SHA-256 mismatch: $relative_path"
   require_safe_path_text dependency "$dependency_path"
-  dependency_paths+=("$dependency_path")
+  if [[ "$relative_path" == "$expected_nano_path" ||
+        "$expected_sha" == "$expected_nano_sha" ]]; then
+    [[ "$relative_path" == "$expected_nano_path" &&
+       "$expected_sha" == "$expected_nano_sha" ]] ||
+      die "original Nano dependency appeared under a non-canonical identity: $relative_path"
+    dependency_paths+=("$sanitized_nano_jar")
+    candidate_dependency_roles+=(sanitized-nano-dependency)
+    candidate_dependency_shas+=("$sanitized_nano_sha")
+    candidate_dependency_paths+=("$sanitized_nano_jar")
+    ((nano_substitution_count += 1))
+  else
+    dependency_paths+=("$dependency_path")
+    candidate_dependency_roles+=(dependency)
+    candidate_dependency_shas+=("$expected_sha")
+    candidate_dependency_paths+=("$dependency_path")
+  fi
   ((dependency_count += 1))
 done <"$dependency_manifest"
 [[ "$dependency_count" -eq 532 ]] ||
   die "expected 532 peer/core2-free dependencies, found $dependency_count"
+[[ "$nano_substitution_count" -eq 1 ]] ||
+  die "expected exactly one original Nano dependency substitution, found $nano_substitution_count"
+
+candidate_sanitized_nano_count=0
+candidate_original_nano_count=0
+for dependency_sha in "${candidate_dependency_shas[@]}"; do
+  [[ "$dependency_sha" != "$expected_sanitized_nano_sha" ]] ||
+    ((candidate_sanitized_nano_count += 1))
+  [[ "$dependency_sha" != "$expected_nano_sha" ]] ||
+    ((candidate_original_nano_count += 1))
+done
+[[ "$candidate_sanitized_nano_count" -eq 1 ]] ||
+  die "candidate classpath must contain exactly one sanitized Nano derivative"
+[[ "$candidate_original_nano_count" -eq 0 ]] ||
+  die "candidate classpath retained the original Nano implementation"
+[[ "${#candidate_dependency_roles[@]}" -eq "$dependency_count" &&
+   "${#candidate_dependency_shas[@]}" -eq "$dependency_count" &&
+   "${#candidate_dependency_paths[@]}" -eq "$dependency_count" ]] ||
+  die "candidate dependency provenance cardinality changed during Nano substitution"
 
 dependency_classpath=$(IFS=:; echo "${dependency_paths[*]}")
 stub_dir="$runtime_dir/infinispan-compile-stubs"
@@ -544,13 +617,24 @@ candidate_classpath_record="$work_root/candidate-classpath.tsv"
   printf '2\tstage2-test-harness\t%s\t%s\n' "$(sha256_file "$harness_manifest")" "$scripts_dir"
   printf '3\tcompile-only-hotrod-stubs\t%s\t%s\n' "$(sha256_file "$stub_manifest")" "$stub_dir"
   position=4
-  while IFS=$'\t' read -r dependency_sha relative_path; do
-    [[ "$dependency_sha" == sha256 ]] && continue
-    printf '%s\tdependency\t%s\t%s/%s\n' "$position" "$dependency_sha" "$datomic_home" "$relative_path"
+  for ((dependency_index = 0;
+       dependency_index < ${#candidate_dependency_paths[@]};
+       dependency_index += 1)); do
+    printf '%s\t%s\t%s\t%s\n' \
+      "$position" \
+      "${candidate_dependency_roles[$dependency_index]}" \
+      "${candidate_dependency_shas[$dependency_index]}" \
+      "${candidate_dependency_paths[$dependency_index]}"
     ((position += 1))
-  done <"$dependency_manifest"
+  done
 } >"$candidate_classpath_record"
 [[ "$position" -eq 536 ]] || die "candidate classpath record has an unexpected size"
+[[ "$(awk -F '\t' '$2 == "sanitized-nano-dependency" {n++} END {print n + 0}' \
+  "$candidate_classpath_record")" -eq 1 ]] ||
+  die "candidate classpath record does not identify exactly one sanitized Nano derivative"
+[[ "$(awk -F '\t' -v sha="$expected_nano_sha" '$3 == sha {n++} END {print n + 0}' \
+  "$candidate_classpath_record")" -eq 0 ]] ||
+  die "candidate classpath record retained the original Nano implementation hash"
 
 # This is the complete Stage 1 origin gate, run before any recovered Datomic
 # namespace is loaded by a workload or backup/restore probe.
@@ -647,6 +731,11 @@ config_record="$work_root/config.properties"
   printf 'candidate.original.peer=false\n'
   printf 'candidate.original.core2=false\n'
   printf 'candidate.original.transactor=false\n'
+  printf 'candidate.original.nano=false\n'
+  printf 'candidate.nano.sanitized=true\n'
+  printf 'candidate.nano.sanitized.path=%s\n' "$sanitized_nano_jar"
+  printf 'candidate.nano.sanitized.sha256=%s\n' "$sanitized_nano_sha"
+  printf 'candidate.nano.sanitized.bytes=%s\n' "$sanitized_nano_bytes"
   printf 'transactor.role=external-fixture-only\n'
   printf 'transactor.fixture.jar.sha256=%s\n' "$(sha256_file "$transactor_jar")"
   printf 'transactor.fixture.launcher.sha256=%s\n' "$(sha256_file "$datomic_home/bin/transactor")"
@@ -698,7 +787,7 @@ if [[ "$dry_run" == true ]]; then
   } >"$work_root/run-status.properties"
   write_evidence_hashes
   echo "Stage 2 PostgreSQL dry-run validation passed"
-  echo "candidate classpath: recovered artifact + Stage 2 harness + four stubs + 532 verified dependencies"
+  echo "candidate classpath: recovered artifact + Stage 2 harness + four stubs + 531 verified distribution dependencies + one verified sanitized Nano derivative"
   echo "no PostgreSQL or Datomic transactor process was started"
   echo "evidence: $work_root"
   exit 0
@@ -1333,6 +1422,9 @@ summary_file="$work_root/stage-2-summary.properties"
   printf 'candidate.original.peer=false\n'
   printf 'candidate.original.core2=false\n'
   printf 'candidate.original.transactor=false\n'
+  printf 'candidate.original.nano=false\n'
+  printf 'candidate.nano.sanitized=true\n'
+  printf 'candidate.nano.sanitized.sha256=%s\n' "$sanitized_nano_sha"
   printf 'source.database.id=%s\n' "$source_database_id"
   printf 'source.current.as-of-t=nil\n'
   printf 'source.t1=%s\n' "$t1"

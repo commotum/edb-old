@@ -180,12 +180,18 @@ Run the complete gate in a new work directory with unused loopback ports:
 DATOMIC_HOME=${DATOMIC_HOME:-../../datomic/datomic-pro-1.0.7277}
 ARTIFACT=/tmp/datomic-stage-1/build-a/datomic-rev-peer-1.0.7277-source.jar
 POSTGRES_ROOT=${POSTGRES_ROOT:?set this to a PostgreSQL 16 installation root}
+SANITIZED_NANO_ROOT=${SANITIZED_NANO_ROOT:?set this to a new path outside the repository}
 STAGE2_PG_PORT=${STAGE2_PG_PORT:-55436}
 STAGE2_TRANSACTOR_PORT=${STAGE2_TRANSACTOR_PORT:-54340}
+
+transactor/scripts/sanitize-nano-impl.sh \
+  "$DATOMIC_HOME" "$SANITIZED_NANO_ROOT"
+SANITIZED_NANO="$SANITIZED_NANO_ROOT/nano-impl-0.1.325-sanitized.jar"
 
 scripts/stage2/validate-postgresql.sh \
   --datomic-home "$DATOMIC_HOME" \
   --artifact "$ARTIFACT" \
+  --sanitized-nano "$SANITIZED_NANO" \
   --postgres-root "$POSTGRES_ROOT" \
   --pg-port "$STAGE2_PG_PORT" \
   --transactor-port "$STAGE2_TRANSACTOR_PORT" \
@@ -202,8 +208,9 @@ example ports are unused before running. Omitting `--work-root` selects a fresh
 
 The script refuses non-loopback PostgreSQL, occupied ports, unsafe or nonempty
 work roots, non-disposable catalog names, reused mutable paths, mismatched
-runtime/tool hashes, wildcard classpaths, and any original peer/core2/transactor
-implementation on a candidate classpath. An exit trap stops the exact verified
+runtime/tool hashes, wildcard classpaths, and any original
+Peer/core2/Transactor/Nano implementation on a candidate classpath. It requires
+exactly one canonical sanitized Nano derivative. An exit trap stops the exact verified
 transactor process and exact new PostgreSQL data directory on every path.
 
 Key hashes in the local hardened adversarial final run are:

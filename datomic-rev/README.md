@@ -204,6 +204,8 @@ EAVT/AVET/range/seek indexes, history/as-of/since, and `d/with`.
 Regenerate the semantic source index:
 
 ```bash
+scripts/validate-analyze-corpus.sh "$DATOMIC_HOME"
+
 java -cp "$DATOMIC_HOME/lib/*" \
   clojure.main scripts/analyze_corpus.clj \
   src-clj \
@@ -236,14 +238,20 @@ temporary work root and print its location:
 
 ```bash
 POSTGRES_ROOT=${POSTGRES_ROOT:?set this to a PostgreSQL 16 installation root}
+SANITIZED_NANO_ROOT=${SANITIZED_NANO_ROOT:?set this to a new path outside the repository}
 STAGE2_PG_PORT=${STAGE2_PG_PORT:-55436}
 STAGE2_TRANSACTOR_PORT=${STAGE2_TRANSACTOR_PORT:-54340}
 STAGE3_PG_PORT=${STAGE3_PG_PORT:-55437}
 STAGE3_TRANSACTOR_PORT=${STAGE3_TRANSACTOR_PORT:-54341}
 
+transactor/scripts/sanitize-nano-impl.sh \
+  "$DATOMIC_HOME" "$SANITIZED_NANO_ROOT"
+SANITIZED_NANO="$SANITIZED_NANO_ROOT/nano-impl-0.1.325-sanitized.jar"
+
 scripts/stage2/validate-postgresql.sh \
   --datomic-home "$DATOMIC_HOME" \
   --artifact "$ARTIFACT" \
+  --sanitized-nano "$SANITIZED_NANO" \
   --postgres-root "$POSTGRES_ROOT" \
   --pg-port "$STAGE2_PG_PORT" \
   --transactor-port "$STAGE2_TRANSACTOR_PORT" \
@@ -252,6 +260,7 @@ scripts/stage2/validate-postgresql.sh \
 scripts/stage3/validate-postgresql.sh \
   --datomic-home "$DATOMIC_HOME" \
   --artifact "$ARTIFACT" \
+  --sanitized-nano "$SANITIZED_NANO" \
   --postgres-root "$POSTGRES_ROOT" \
   --pg-port "$STAGE3_PG_PORT" \
   --transactor-port "$STAGE3_TRANSACTOR_PORT" \
@@ -259,9 +268,25 @@ scripts/stage3/validate-postgresql.sh \
 ```
 
 The example port values are not reservations; replace any occupied value.
+The Nano output root must be absent before the sanitizer runs. Both gates
+replace the licensed Nano entry with that exact content-addressed derivative
+and fail closed if the original, a symlink, or altered bytes enter the
+candidate classpath.
 These gates launch the licensed Transactor only as an isolated external
 fixture. They validate the recovered Peer against PostgreSQL-backed behavior;
 they do not produce or validate a recovered Transactor.
+
+The recovered-Peer/recovered-Transactor gate is separate:
+
+```bash
+transactor/scripts/validate-postgresql-vertical-slice.sh --help
+```
+
+It rebuilds and verifies current candidate inputs, removes licensed JKS
+resources from the Peer runtime derivative, supports a no-service preflight,
+and executes seed/restart/augment/restart against disposable PostgreSQL. See
+[`transactor/reports/postgresql-vertical-slice.md`](transactor/reports/postgresql-vertical-slice.md)
+for the retained proof and current completion boundary.
 
 ## What was repaired
 
