@@ -1,257 +1,189 @@
-# Goal 3 — Finish the Recovered Datomic System Through Evidence-Driven Convergence
+# Goal 3 — Finish the recovered Datomic system
 
 ## Objective
 
-Finish the educational recovery and explanation of Datomic Pro 1.0.7277 by
-turning the already working recovered Peer and Transactor into a completely
-bounded, evidence-backed system. Close the remaining exact-source acceptance
-boundary, reconcile every Peer/Transactor overlap, finish transaction
-acknowledgement and HA correctness against PostgreSQL, and only then complete
-or explicitly bound the lower-priority lifecycle, operational, optional-access,
-and alternative-backend components.
+Finish the educational recovery and explanation of Datomic Pro 1.0.7277 using
+bounded semantic equivalence: a recovered Peer and complete recovered
+Transactor that work together through the PostgreSQL-backed write, log, index,
+transport, acknowledgement, and HA paths without original implementation
+fallback. Resolve every Peer/Transactor overlap before lower-priority lifecycle,
+optional-interface, or alternative-backend work is allowed to obscure the core.
 
-Goal 3 updates the execution strategy for the outcome pursued by Goal 2. The
-Goal 2 plan and retained evidence remain historical inputs; this file is the
-authoritative sequencing and status record for new work.
+Goal 2 and its retained evidence are historical inputs. This file is the
+authoritative policy, status, and next-action record for Goal 3.
 
-## Material constraints
+## Acceptance policy
 
-- Work in `/home/jake/Developer/atomic/datomic-rev` and keep
-  `/home/jake/Developer/atomic/goal-1` untouched and uninspected unless the user
-  explicitly changes that boundary.
-- Bind claims to Datomic Pro 1.0.7277 and the pinned Peer and Transactor
-  artifacts already recorded by Goal 2.
+Global exact-AOT equivalence is not the normal recovery boundary. The normal
+boundary is **bounded semantic equivalence**, established in this order:
+
+1. **Ownership and isolation:** candidate runtimes contain no original Peer or
+   Transactor implementation classes.
+2. **Surface:** namespaces, Vars, callable arities, protocols, class roles,
+   methods, and fields agree where applicable.
+3. **Local structure:** namespace/class-role/method bodies agree under only
+   conservative, evidence-backed normalization.
+4. **JVM validity:** recovered classes load and pass JVM verification.
+5. **Critical behavior:** focused PostgreSQL, transaction, log, index,
+   transport, acknowledgement, and HA gates pass.
+6. **Escalation:** exact-AOT investigation is allowed only for a specific
+   unexplained executable difference, ABI/surface mismatch, differential
+   behavior failure, or explicit user request. It is never a global
+   prerequisite.
+
+Generated numeric IDs, debug metadata, static Var constants, capture clearing,
+Clojure-version lowering, and verifier scaffolding may be normalized only under
+guarded predicates that have positive and negative evidence. Calls, constants,
+arguments, branches, reads/writes, side effects, exception behavior, locking,
+and transaction boundaries remain semantic.
+
+Every overlap has one of four statuses:
+
+- `RESOLVED_EQUIVALENT`: no unexplained difference remains in the claimed
+  domain.
+- `RESOLVED_DIVERGENT`: a real artifact difference is understood, bounded, and
+  intentionally preserved.
+- `BOUNDED_PARTIAL`: supported behavior is proved, but identified dormant
+  behavior or a required evidence rung remains uncovered.
+- `OPEN`: an unexplained executable difference remains.
+
+Only the two `RESOLVED_*` states count toward the 117-row completion boundary.
+
+## Constraints
+
+- Work in `/home/jake/Developer/atomic/datomic-rev`. Keep
+  `/home/jake/Developer/atomic/goal-1` untouched and uninspected.
 - Preserve the recovered Peer as the reference boundary and recover the whole
-  Transactor, including all 117 namespace-name overlaps rather than assuming
-  shared names imply shared implementations.
+  Transactor, including all 117 namespace-name overlaps.
 - Keep licensed originals isolated as fingerprinted evidence or behavioral
-  oracles. Never admit original Peer or Transactor implementation classes into
-  a candidate runtime.
-- Use PostgreSQL as the primary durable backend. Defer alternative stores and
-  optional interfaces until the authoritative PostgreSQL, transaction,
-  transport, and HA paths are complete.
-- Repair recovery causes generically from source, bytecode, and behavior
-  evidence. Do not accumulate one-off compiler-ID or debug-metadata exceptions
-  merely to make a comparator green.
-- Use one focused regression for each confirmed defect and rerun only the
-  downstream gates whose executable inputs changed.
-- Preserve unrelated worktree changes, bound processes and disposable
-  services, and require cleanup and durability evidence before reporting PASS.
-- Keep this plan concise. Put detailed evidence in repository reports and
-  manifests; record here only material facts, decisions, stage status, and the
-  next direct action.
+  oracles; never admit their implementation classes into candidate runtimes.
+- PostgreSQL is the primary durable backend. Defer optional interfaces and
+  alternative stores until the authoritative transaction and HA paths close.
+- Repair generic causes from source, bytecode, and behavior evidence. Add one
+  focused regression for each confirmed defect.
+- Keep one executable boundary active. A rerun requires a named falsified
+  assertion or confirmed defect; after one evidence-backed correction and one
+  rerun, bank the result or record the localized blocker before expanding.
+- Preserve unrelated worktree changes, bound owned processes, and require
+  cleanup and durability evidence before reporting PASS.
 
-## Known starting state
+## Actual state
 
-- Goal 2 Stages 0, 3, 4, and 6 are complete: the artifacts are inventoried;
-  the recovered Transactor boots and fails safely; PostgreSQL catalog,
-  database, value, revision, and publication behavior is proven; and the
-  recovered Peer/Transactor round trip through transaction, log, persistent
-  indexes, transport interruption, and reconnection works.
-- Stage 1 has a complete 247-source recovery. All 272 effective namespaces load
-  and all 247 callable/root/class shapes agree. A fresh production attempt
-  compiled both complete 3,431-class candidate trees, then failed all three
-  exact-AOT relations in the global generated-member pairing search before the
-  scanner or JVM verifier ran. A surgical `G__7081` captured-field
-  classification passes the focused registration corpus, but a bounded full-
-  corpus diagnostic still encountered 1,051 ambiguous nodes in 927 groups and
-  stopped at search index 45 after 1,000 search nodes. Stage 1 is not green;
-  the exact-AOT acceptance gap is frozen rather than allowed to block runtime
-  recovery.
-- Thirteen of 117 Peer/Transactor overlap rows are resolved. The transaction/
-  transport cohort promoted `datomic.queue`, `datomic.builtins`, and
-  `datomic.reconnector2` from one 261-class static pass plus existing live
-  transaction, acknowledgement, reconnect, and HA evidence. `datomic.connector`
-  and `datomic.artemis-client` remain open. The remaining 104 rows are open.
-- Stage 5 proves rejected transactions, concurrent monotonic ordering, both
-  sides of the durable acknowledgement boundary, durable same-Peer recovery,
-  and fresh-Peer restart adoption. The post-publication/pre-result cut passed
-  with exactly one committed CAS/sentinel effect after the Transactor was
-  killed while the Peer was frozen. Complete licensed-oracle equivalence
-  remains open.
-- Stage 7 proves one active-to-standby takeover, same-Peer continuation,
-  durable post-takeover write, and stale-primary self-fencing. In-flight,
-  concurrent, partition, and split-brain rows remain open.
-- The stale Goal 2 tool status is not evidence that execution is blocked.
-  Derive current state from the repository, retained manifests, and this plan.
-
-## Strategic rule
-
-After the first bounded checkpoint, use a downstream-pulls-upstream cycle:
-
-1. Select one concrete Stage 5 or Stage 7 executable boundary.
-2. Run it and localize the first real semantic divergence.
-3. Repair a generic recovery cause when one exists.
-4. Resolve every Peer/Transactor overlap implicated by that boundary.
-5. Rerun the exact boundary and bank the result.
-
-This is not calendar-based alternation. Runtime evidence prioritizes Stage 2
-and supplies behavior proof, but it cannot classify dormant code; an exhaustive
-117-row closure remains mandatory. The exact-AOT Stage 1 gap is now parked.
-Reopen it only after runtime recovery has materially advanced and either an
-executable failure implicates recovered source/tool output or an explicit
-acceptance decision makes exact-AOT the highest-value remaining boundary.
-Comparator work is not a prerequisite for acknowledgement, overlap-cohort, or
-HA progress.
+- **Stage 1 bounded recovery is complete.** The complete 247-source Transactor
+  corpus is deterministic; 272/272 effective namespaces load, and all 247
+  callable/root/class shapes agree. The production exact-AOT attempt at
+  `/tmp/datomic-goal3-stage1-production-v4` failed in the normalized comparator
+  after both 3,431-class candidate trees compiled; scanner and verifier were
+  `NOT_RUN`. The bounded v122 diagnostic stopped with 1,051 ambiguous nodes in
+  927 groups at search index 45 after its 1,000-node limit. This is preserved
+  negative diagnostic evidence, not a Stage 1 failure and not an exact-AOT
+  PASS.
+- **Overlap ledger:** 13/117 are fully resolved; 104 are incomplete. Of those
+  incomplete rows, nine are `BOUNDED_PARTIAL` and 95 are `OPEN`. The nine-row
+  CFG result proves reachable parity between the original Peer and original
+  Transactor artifacts, but it does not compare recovered candidate methods;
+  therefore it is useful evidence, not a completed recovery classification.
+- The parked ownership-corrected classifier reports 116/117 exact class-role
+  rows, 102/117 exact method-ABI rows, 43 exact-field rows, and 69 rows whose
+  field delta is generated static Vars only. These are triage facts, not
+  promotions. The classifier must not be rerun or expanded while the selected
+  HA boundary remains unfinished.
+- The recovered PostgreSQL path proves catalog/database identity, value and
+  revision persistence, log/index roots, coordination, publication, transaction
+  rejection, concurrent monotonic ordering, pre-publication failure, and the
+  post-publication/pre-result acknowledgement cut.
+- **The corrected HA v8 boundary is banked PASS** at
+  `/tmp/datomic-recovered-pair-ha-inflight-v8`. Standby startup replay adopted
+  the in-flight transaction exactly once at t=1003; the original Future failed
+  unavailable; the same Peer committed a new follow-up through promoted B at
+  t=1005; a fresh Peer matched basis, canonical state, and SQL log-root revision
+  6; stale A self-fenced; and all processes, sessions, and ports were cleaned up.
+  The 101-entry evidence manifest verifies, and its file SHA-256 is
+  `5243885f1c0c85dbe2967171856258ad7f7665fd38391bd72444b4c72c1a2887`.
 
 ## Stages
 
-### Stage 1 — Seal the bounded recovery checkpoint
+### Stage 1 — Seal bounded source recovery
 
-**Status:** Frozen with an explicit acceptance gap
+**Status:** Complete at the bounded corpus/structural boundary
 
-**Outcome:** The current whole-corpus recovery and the first pending overlap
-row are promoted from promising diagnostics to independently verified,
-resumable evidence.
+The deterministic recovered corpus, ownership/isolation boundary, complete load
+surface, callable/class surface, JVM-valid exercised runtime, and focused
+regressions satisfy normal acceptance. Exact-AOT remains a failed, nonblocking
+diagnostic and may be reopened only by an escalation trigger in this plan.
 
-**Focus:** Preserve the compiled 3,431-class diagnostic corpus and the focused
-`G__7081` fix, but do not generalize the comparator, expand its self-test
-matrix, or rerun clean builds for comparator-only changes. The latest
-production comparator failed all three relations before scanner/verifier, so
-do not describe this stage as sealed or green. `datomic.promise` is complete
-and no longer part of this stage's open work.
+### Stage 2 — Reconcile all 117 overlaps
 
-**Completion signal:** Both oracle exact-AOT relations and candidate
-determinism pass all 3,431 classes; the scanner and JVM verifier pass inside a
-self-sealed production wrapper; and no original implementation enters candidate
-runtimes. This signal is currently unsatisfied and intentionally non-blocking.
+**Status:** Active — 13 resolved, 9 bounded partial, 95 open
 
-### Stage 2 — Close the durable acknowledgement boundary
+Classify by subsystem and by the evidence ladder, using runtime failures to pull
+high-value rows forward. Static original-artifact parity alone cannot close a
+recovered-candidate row. `BOUNDED_PARTIAL` never counts as resolved. Preserve
+intentional Peer/Transactor and compiler-lineage differences explicitly.
 
-**Status:** Recovered-pair boundary green; licensed-oracle row open
+### Stage 3 — Close transaction acknowledgement
 
-**Outcome:** Transaction success is understood and proven across the complete
-publication-to-client-result interval.
+**Status:** Recovered-pair boundary complete; licensed-oracle breadth remains
+bounded
 
-**Focus:** Preserve the paired prepublication and post-publication/pre-result
-cuts as the recovered-pair boundary. Compare accepted and rejected outcomes
-with the licensed oracle where required; keep authoritative root, log, basis,
-and Peer-visible state explicit; distinguish permitted orphan immutable values
-from published state.
+Rejected and concurrent submissions, pre-publication failure, and
+post-publication/pre-result failure have durable PostgreSQL, same-Peer, and
+fresh-Peer evidence with no duplicate committed effect. Reopen only for a
+specific uncovered oracle or executable difference.
 
-**Completion signal:** Injected failures cannot report success before durable
-publication; a transaction durably published before acknowledgement has one
-unambiguous recoverable outcome with no duplicate committed effect; restart
-and fresh-Peer evidence agree with PostgreSQL; the complete Stage 5 boundary is
-honestly green or a specific semantic blocker is recorded.
+### Stage 4 — Complete PostgreSQL HA
 
-### Stage 3 — Resolve the runtime-pulled shared kernel
+**Status:** Active — in-flight takeover row complete
 
-**Status:** Three of five priority rows resolved; interleaved with Stage 4
+The next HA rows are concurrent submissions across takeover, lease/partition
+behavior, and a deliberate split-brain race. Each must prove one authoritative
+writer, monotonic history, deterministic client outcomes, stale-writer fencing,
+Peer recovery, and cleanup, and may advance only the overlaps it actually
+closes.
 
-**Outcome:** The highest-leverage transaction and transport overlaps are
-resolved using the green main path and acknowledgement evidence rather than
-source notation alone.
+### Stage 5 — Exhaust the core artifact and explain it
 
-**Focus:** Prioritize `datomic.queue`,
-`datomic.builtins`, `datomic.reconnector2`, `datomic.connector`, and
-`datomic.artemis-client`. Pull `datomic.update`, `datomic.log`, `datomic.db`,
-`datomic.fressian`, or `datomic.error` forward when an executable boundary
-implicates them. Attach existing behavior evidence first; add a focused probe
-only for a material uncovered branch. Do not create one four-lane mini-project
-per namespace: classify the five rows as one transaction/transport cohort,
-promote only rows already proved across their supported domain, and leave
-dormant uncovered branches explicitly open. Preserve intentional compiler-
-lineage or product differences explicitly.
+**Status:** Pending completion of Stages 2 and 4
 
-**Completion signal:** Every row in the prioritized cohort has a source/ABI/
-bytecode classification and sufficient focused behavior evidence; no runtime
-success is used to overclaim dormant behavior; all confirmed recovery defects
-have generic regressions; the 117-row ledger and resolved/open count are exact.
+Close all remaining transaction/database, storage/catalog/log/index/
+coordination, transport/adoption, and dormant core overlaps. Produce a source
+and architecture map tracing a transaction from Peer submission through
+durable publication, index adoption, and failover.
 
-### Stage 4 — Converge HA and its implicated overlaps
+### Stage 6 — Lifecycle, operations, and maintenance
 
-**Status:** Pending
+**Status:** Deferred
 
-**Outcome:** Failover preserves one authoritative writer, monotonic committed
-history, and deterministic client outcomes while advancing the relevant Stage
-2 rows.
+After the PostgreSQL/HA core: configuration, startup/shutdown, monitoring,
+process events, caches, full-text search, backup/restore, garbage collection,
+excision, integrity/repair, licensing, authentication, diagnostics, and
+provisioning. Each included facility needs an artifact/source map, isolated
+candidate validation, meaningful failure coverage, and cleanup.
 
-**Focus:** Run one bounded HA row at a time in this order: in-flight transaction
-during takeover; concurrent submissions across takeover; acknowledgement loss
-around publication; lease expiry and network partition; deliberate split-brain
-race. Let failures pull coordination, cluster, reconnect, transport, log, and
-database overlaps upstream, then rerun the exact HA boundary before moving on.
+### Stage 7 — Optional access tiers and alternative stores
 
-**Completion signal:** The HA matrix proves one active writer, stale-writer
-fencing, no duplicate or lost acknowledged transaction, monotonic committed
-order, same-Peer and fresh-Peer recovery, no writable split-brain interval, and
-complete cleanup; every implicated overlap is resolved or has a genuine,
-localized blocker.
+**Status:** Deferred
 
-### Stage 5 — Exhaust the artifact and explain the core
-
-**Status:** Pending
-
-**Outcome:** Stage 2 is complete for the entire artifact, and the recovered
-PostgreSQL-backed Peer/Transactor system is both trustworthy and teachable.
-
-**Focus:** Classify the remaining overlaps by subsystem rather than by
-alphabetical one-off tests: transaction/database semantics; storage,
-catalog, log, index, and coordination; transport and Peer adoption; caches and
-maintenance; then dormant residuals. Close the partial central rows and all
-117 total rows with exact guarded normalization, static proof, existing runtime
-evidence, or a focused behavior gate as appropriate. Consolidate the
-architecture explanation of Peer, Transactor, storage, log, indexing,
-transport, coordination, and HA.
-
-**Completion signal:** All 117 overlaps are classified and resolved with no
-unexplained semantic difference; the recovered source builds and runs without
-original implementation fallback; all affected PostgreSQL, transaction,
-index, transport, and HA regressions pass; the architecture/source map lets a
-reader trace a transaction from Peer submission through durable publication,
-index adoption, and failover.
-
-### Stage 6 — Complete lifecycle, features, and operations
-
-**Status:** Pending
-
-**Outcome:** Correctness-sensitive facilities beyond ordinary transactions
-compose with the proven PostgreSQL core.
-
-**Focus:** In priority order: full-text indexing/search; filesystem and S3
-backup/restore; stored-value garbage collection, excision, integrity, and
-repair; non-authoritative caches/value-cache layers; monitoring, metrics,
-logging, licensing, authentication, diagnostics, and provisioning.
-
-**Completion signal:** Each included facility has a clear artifact/source map,
-an isolated candidate validation with meaningful failure and cleanup coverage,
-and a bounded explanation of how it composes with the authoritative core.
-
-### Stage 7 — Close optional access tiers and the system map
-
-**Status:** Pending
-
-**Outcome:** The complete classic Datomic topology is recovered and explained,
-with optional or deferred components bounded honestly.
-
-**Focus:** In order: Peer Server and thin Client API; REST; Presto integration;
-Console; then DynamoDB/S3, Cassandra, H2/dev, Hot Rod, and other alternative
-stores only after the PostgreSQL system is stable. Recover and validate where
-material; otherwise record precise artifact, source, dependency, and deferral
-boundaries.
-
-**Completion signal:** Required core stages remain green; optional artifacts
-and interfaces have reproducible recovery/evidence or a justified explicit
-boundary; the final subsystem and source-ownership map contains no component
-misrepresented as recovered or validated.
+Classify and recover or precisely bound Peer Server/thin Client, REST, Presto,
+Console, DynamoDB/S3, Cassandra, H2/dev, Hot Rod, and other alternative stores
+only after the authoritative PostgreSQL/HA core is stable or when a specific
+core blocker requires one.
 
 ## Goal completion
 
 Goal 3 is complete only when the recovered Peer and complete recovered
-Transactor can be studied and exercised together through PostgreSQL-backed
-write, log, index, transport, acknowledgement, and HA paths without original
-implementation fallback; all 117 overlaps are resolved; the remaining ranked
-components satisfy Stages 6 and 7 through recovery or precise explicit
-bounding; and all important claims are supported by reproducible evidence.
+Transactor operate together through the required PostgreSQL-backed core without
+original implementation fallback; every overlap is `RESOLVED_EQUIVALENT` or
+`RESOLVED_DIVERGENT`; the HA matrix is complete; remaining ranked components
+are recovered and validated or precisely bounded; and all material claims have
+reproducible evidence.
 
 ## Next direct action
 
-Run the in-flight transaction-during-takeover HA row using the deterministic
-publication mechanism from the acknowledgement cut. Prove the client outcome,
-one authoritative writer, one committed-or-absent effect, monotonic root/basis,
-same-Peer continuation, fresh-Peer equality, stale-primary fencing, and full
-cleanup. Use the result to advance the still-open connector/Artemis and any
-coordination/log/database overlaps it actually implicates. Do not resume
-exact-AOT work or add per-namespace evidence ceremony while the HA boundary can
-still advance.
+At the next continuation, make concurrent accepted submissions during
+active-to-standby takeover the single executable boundary. Use it to test one
+monotonic committed order with no duplicates or losses, deterministic outcomes
+for every submitting Peer, one authoritative writer, fresh-Peer equality,
+stale-primary fencing, and cleanup. Advance only overlap rows whose remaining
+behavior this boundary actually closes; do not reopen exact-AOT or the parked
+global classifier without an explicit escalation trigger.

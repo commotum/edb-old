@@ -2,9 +2,32 @@
 
 ## Current checkpoint
 
-The current promoted-tree ledger resolves 13 of the 117 shared namespaces. The
-remaining 104 are open. This is a semantic-evidence count, not a count of files
-that merely load.
+The current ledger fully resolves 13 of the 117 shared namespaces. Of the 104
+incomplete rows, nine are `BOUNDED_PARTIAL` and 95 are `OPEN`. This is a
+semantic-evidence count, not a count of files that merely load or of original
+artifacts whose reachable bytecode happens to agree.
+
+Goal 3 uses four classifications:
+
+- `RESOLVED_EQUIVALENT`: no unexplained difference remains in the claimed
+  domain.
+- `RESOLVED_DIVERGENT`: a real artifact difference is understood, bounded, and
+  intentionally preserved.
+- `BOUNDED_PARTIAL`: supported behavior is proved, but identified dormant
+  behavior or a required recovery-evidence rung remains uncovered.
+- `OPEN`: an unexplained executable difference remains.
+
+Only the two `RESOLVED_*` states count toward completion. In particular,
+`BOUNDED_PARTIAL` is useful progress but never a resolved overlap.
+
+The normal evidence ladder is: candidate ownership/isolation; namespace, Var,
+arity, protocol, class-role, method, and field surface; conservative local
+method structure; JVM load/verification; and focused critical behavior.
+Exact-AOT is an escalation tool only for a specific unexplained executable
+difference, ABI/surface mismatch, differential behavior failure, or explicit
+user request. Compiler noise is normalized only under guarded predicates;
+calls, constants, arguments, branches, effects, exceptions, locking, and
+transaction boundaries remain semantic.
 
 A fresh whole-cohort source-form run at
 `/tmp/datomic-stage2-overlap-current-full-v1` compares the preserved Peer tree
@@ -28,6 +51,84 @@ the same index is retained as `stage-2-shared-namespaces.tsv`.
 The bridged runtime surfaces come from the already sealed Stage 1 structural
 run whose evidence-manifest SHA-256 is
 `4921abcfb0926790780c21889e71ab05889d0347496d3272fafd5464f5d073a2`.
+
+## Parked global classifier diagnostic
+
+The one-pass classifier at
+`/tmp/datomic-stage2-global-overlap-classifier-v8` replaces namespace-at-a-time
+static ceremony. It records source ownership, exact namespace class roles,
+method ABI, normalized method bodies, field deltas, provisional recurring-
+family signals, and machine-recorded runtime coverage for all 117 rows. Its
+ownership rule uses the artifacts' complete namespace-initializer inventory:
+real child namespaces are excluded from a parent row, while generated helper
+classes without their own initializer remain with their actual namespace. This
+corrects an earlier prefix-contamination diagnostic involving
+`datomic.tools/*` and `datomic.cast2slf4j/*` before any promotion used it.
+
+The corrected sweep finds 116 exact class-role rows and one different row; 102
+exact method-ABI rows and 15 different rows; 43 rows with exact fields, 69 with
+only Transactor generated-static-Var fields, and five with other field deltas.
+The sweep snapshot's conservative triage is 13 already resolved, 48 recurring-
+family review, 38 semantic investigation, and 18 ABI/field investigation.
+Every ABI-exact row still has a normalized whole-body residual, so the sweep
+alone promotes nothing. It is parked and must not be rerun or expanded while
+the selected HA boundary is unfinished. The evidence manifest verifies at SHA-256
+`cd1b8adf665169bd280392173cf1aaf0da464f7db0b4b11a2e801b840e3575d2`;
+classifier and summary SHA-256 values are respectively
+`ceb96f1a51a257b60c97e4cef3a1cc17b0c76d44d0c5ccd33f3a00af658514d2`
+and `2a2466a5a6263926d1b5ff33cc763129b6141841b33f20ea8d88bdd5a50e4c35`.
+
+The sweep is triage beneath the evidence ladder above. It cannot promote a row
+merely because the two original artifacts have the same ABI or reachable
+method relation; the recovered candidate must satisfy the applicable recovery
+evidence as well.
+
+## Bounded original-artifact CFG cohort
+
+The CFG proof at
+`/tmp/datomic-stage2-dead-verifier-slots-global-v2-corrected-v8` analyzes all
+20,044 methods in the exact 117-namespace corpus. It roots method entry and
+every exception handler, follows branches, switches, fallthrough, and
+conservative exception edges, and compares reachable instruction streams, CFG
+targets, constants, and projected exception tables after generated-ID
+normalization. Negative controls reject both a differing block with a reachable
+predecessor and a differing handler target; the unreachable `pop`/`athrow`
+positive is accepted.
+
+That proof usefully bounds nine rows: `datomic.adopter`,
+`datomic.aggregation`, `datomic.codec`, `datomic.combined-cluster`,
+`datomic.data`, `datomic.garbage.fressian`, `datomic.memory`,
+`datomic.process.events`, and `datomic.validators`. Their class roles, method
+ABI, and fields are exact between the original artifacts. Across those rows,
+every reachable instruction, CFG edge, and exception projection agrees; the
+only bytecode differences occupy 60 unreachable blocks in 50 methods. However,
+the proof compares the licensed original Peer JAR with the licensed original
+Transactor JAR; it does not compile or compare the recovered candidate methods.
+The nine rows are therefore `BOUNDED_PARTIAL`, not resolved. The other 108 rows fail closed;
+107 still contain reachable instruction/CFG differences and 57 contain
+reachable exception-table differences, with overlaps between those sets.
+
+A claimed supplemental 87-class pairing table was not retained inside the
+sealed evidence manifest. It is not used for promotion. Generated-role pairing
+therefore remains an additional recovery-evidence gap for any affected row.
+
+The proof manifest verifies at SHA-256
+`682ea3b8e4b808a2b8fb878e6b6b09d9f86692e964d837510ebd79f89ee7745e`.
+Namespace-summary, promoted-row, and negative-control SHA-256 values are
+respectively
+`d74416be55af820277378ab14b9598a93d52551843240bfa244f6c0893a8c456`,
+`6bea7f537dd6b0c5e71261ae16d6ddb36afa34373cb8ae0260c8b208aabf3db6`,
+and `8f42765aa841736f9b8902a77e1fab4529bd21f683dff5dce616688656427710`.
+The proof advances nine rows from `OPEN` to `BOUNDED_PARTIAL`; the fully
+resolved count remains 13/117.
+
+The first generated-static-Var mapper attempt is deliberately not promoted.
+It found 711 candidate fields but mapped zero safely and reported 1,027 target/
+use join blockers across 69 namespaces; 48 namespaces had no such delta. With
+no accepted mapping, it could not run a meaningful swapped-target negative.
+The failed diagnostic remains at `/tmp/datomic-stage2-global-var-fields-dev`,
+but its unused helper was not retained in the repository. This family is frozen
+until its target/use model is the highest-value remaining blocker.
 
 ## First four resolved rows
 
@@ -325,8 +426,9 @@ The compiler-domain differences are retained: Transactor protocol docs and
 metadata, Clojure 1.9/1.11 sequence-map expansion, locking/`do` lowering,
 capture/clearing order, and dead verifier slots. Synthetic malformed singleton
 sequences can differ, but they are outside the supported queue payload,
-database-datom, and reconnector keyword-pair domains. The detailed ledger now
-records 13 resolved rows.
+database-datom, and reconnector keyword-pair domains. The detailed ledger at
+that checkpoint records all 13 fully resolved rows. The original-artifact CFG
+cohort above adds nine bounded partial rows but does not increase that count.
 
 `datomic.connector` and `datomic.artemis-client` remain open. Their live send,
 wait, failure, reconnect, and shutdown path is strong, and their class/method
@@ -336,12 +438,18 @@ not a promotion for those two rows.
 
 ## Next boundary
 
-Advance to the in-flight transaction-during-takeover HA cut. Use its live send,
-wait, unavailable, reconnect, result, and shutdown evidence to pull the still-
-open `datomic.connector` and `datomic.artemis-client` rows forward only if it
-bounds their remaining behavior. Keep broad `datomic.db`, `datomic.peer`,
-`datomic.fressian`, and `datomic.error` rows and the other six central-cohort
-rows explicitly partial. Return to a partial row only when a focused dormant-
-branch probe or sealed namespace-wide bytecode relation can close it. Do not
-normalize arbitrary compiler scaffolding merely to improve the source-form
-acceptance count.
+The corrected in-flight transaction-during-takeover v8 passes at
+`/tmp/datomic-recovered-pair-ha-inflight-v8`. Its 101-entry evidence manifest
+verifies at file SHA-256
+`5243885f1c0c85dbe2967171856258ad7f7665fd38391bd72444b4c72c1a2887`.
+It proves startup replay of the adopted transaction at t=1003, an unavailable
+original Future, exactly one committed effect, a new same-Peer write at t=1005,
+fresh-Peer/canonical/SQL-root equality, stale-primary fencing, and complete
+cleanup. This strengthens the live transaction/transport/coordination evidence,
+but it does not cover the remaining connector administrative, temporary
+queue/stream, RPC-server, or other dormant branches. No overlap row advances;
+the ledger remains 13 resolved, nine bounded partial, and 95 open.
+
+At the next continuation, use concurrent accepted submissions during takeover
+as the single executable boundary. Bank it or record its localized blocker
+before any classifier, overlap cohort, lifecycle work, or further HA row.

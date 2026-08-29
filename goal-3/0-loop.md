@@ -1,43 +1,37 @@
 # Goal 3 Working Loop
 
-Use `/home/jake/Developer/atomic/goal-3/0-plan.md` as the authoritative
-strategy and status record.
+Use `/home/jake/Developer/atomic/goal-3/0-plan.md` as the authoritative policy,
+status, and next-action record.
 
-1. Sync the plan with the actual repository, current worktree, retained
-   manifests, and observed test results. Treat Goal 2 as inherited evidence,
-   not automatically current truth. Keep Goal 1 untouched and uninspected.
-2. Select the first unfinished Goal 3 stage and identify the shortest action
-   that materially changes or verifies its completion signal.
-3. Keep one primary executable boundary at a time. Parallelize only disjoint,
-   outcome-bearing work whose integration owner and acceptance check are clear.
-4. For the Stage 2/Stage 5/Stage 7 convergence work, use this pull cycle:
-   - run one concrete transaction or HA boundary;
-   - localize the first semantic divergence;
-   - repair the generic recovery cause, if any;
-   - classify all implicated Peer/Transactor overlap rows;
-   - add one focused regression per confirmed defect;
-   - rerun the same executable boundary and bank the result.
-5. Do not alternate stages on a schedule. Reopen Stage 1 only when an actual
-   recovery-tool or promoted-source change invalidates its evidence. Do not
-   infer dormant Stage 2 equivalence from a green runtime path.
-6. Prefer existing evidence before creating a new harness. Group related
-   overlap rows by subsystem, and avoid residual-by-residual compiler-ID,
-   debug-metadata, review-of-review, or tracker work.
-7. Confirm important outcomes with checks proportionate to risk: source and
-   artifact hashes, classpath origin/isolation, focused behavior, PostgreSQL
-   durability, JVM verification, bounded process ownership, cleanup, and
-   self-verifying evidence manifests as applicable.
-8. Rerun downstream gates only when their executable inputs changed. Keep
-   licensed originals isolated as oracles and never use them to make a
-   candidate pass.
-9. Fold material findings, decisions, exact evidence locations, honest stage
-   status, and one next direct action into `0-plan.md`. Put detailed ledgers in
-   repository reports rather than allowing this plan to become an activity log.
-10. Continue through the stages toward the original objective. If the session
-    ends mid-stage, leave the repository safe and record the precise first
-    action for continuation.
+1. Sync the plan with the repository, worktree, and retained manifests. Treat
+   Goal 2 as historical evidence. Keep Goal 1 untouched and uninspected.
+2. Select the highest-priority unfinished stage that is not complete, frozen,
+   parked, or explicitly deferred. Honor the plan's single next direct action.
+3. Keep exactly one executable boundary active. Do not start a broad classifier,
+   optional feature, another overlap cohort, or another HA row while it is open.
+4. Name the falsified assertion or confirmed defect before changing code or
+   rerunning a gate. Make one evidence-backed correction and one rerun; then
+   bank the result or record the localized blocker before expanding scope. A
+   failed rerun never silently creates a v+1 loop.
+5. Apply bounded semantic equivalence in order: ownership/isolation, surface,
+   local conservative structure, JVM validity, and focused critical behavior.
+   Normalize compiler differences only under guarded, proven predicates.
+6. Classify overlap rows only as `RESOLVED_EQUIVALENT`,
+   `RESOLVED_DIVERGENT`, `BOUNDED_PARTIAL`, or `OPEN`. Partial rows do not count
+   as resolved; runtime success does not prove dormant behavior.
+7. Investigate exact-AOT only for a specific unexplained executable difference,
+   ABI/surface mismatch, differential behavior failure, or explicit user
+   request. Never use it as a global prerequisite.
+8. Prefer retained evidence and rerun only gates whose executable inputs changed.
+   Prohibit review-of-review, residual-by-residual compiler-ID work, and broad
+   comparator/classifier expansion while a selected runtime boundary is open.
+9. Require proportional evidence: source/artifact hashes, candidate classpath
+   isolation, focused behavior, PostgreSQL durability, JVM validity, bounded
+   process ownership, cleanup, and a self-verifying manifest where applicable.
+10. Fold material facts, honest status, evidence locations, and one next direct
+    action into `0-plan.md`; keep detailed ledgers in repository reports.
 
-Completion language must match observation: implemented is not verified,
-preflight is not production acceptance, a passing exercised path is not an
-exhaustive overlap classification, and permitted orphan immutable data is not
-authoritative publication.
+Completion language must match observation: compiled is not equivalent,
+original-to-original parity is not recovered-candidate parity, a semantic marker
+is not an outer-harness PASS, and orphan immutable data is not authoritative
+publication.

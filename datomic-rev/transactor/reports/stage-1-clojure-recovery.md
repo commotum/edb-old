@@ -1,6 +1,28 @@
 # Stage 1 Transactor Clojure source recovery
 
-## Current checkpoint — integrated corpus promoted, exact AOT open
+## Goal 3 checkpoint — bounded recovery complete
+
+Goal 3 now accepts this stage by **bounded semantic equivalence**, not by global
+exact-AOT identity. Ownership/isolation, the deterministic recovered corpus,
+the complete namespace and callable/class surface, JVM-valid exercised classes,
+and focused runtime regressions close the normal Stage 1 boundary. Exact-AOT is
+retained only as a diagnostic for a specific unexplained executable difference,
+ABI/surface mismatch, differential behavior failure, or explicit user request.
+
+The sealed production exact-AOT attempt at
+`/tmp/datomic-goal3-stage1-production-v4` is honest negative evidence. Its
+`result.tsv` says `FAIL` because the normalized whole-cohort comparator failed;
+both complete 3,431-class candidate trees had compiled. The production
+`gate-status.tsv` records comparator `FAIL`, scanner `NOT_RUN`, verifier
+`NOT_RUN`, and final seal `PASS`; scanner and verifier self-tests passing does
+not mean their production gates ran. The output-manifest file SHA-256 is
+`68d80b1112def5308863443ee62726e0d5fe986ee72ee99d089885458e6b34fa`.
+The bounded v122 follow-up also did not pass: it stopped at search index 45
+after the 1,000-node limit with 1,051 ambiguous nodes in 927 groups. Neither
+result is an exact-AOT PASS, and neither reopens this completed bounded stage by
+itself.
+
+## Integrated corpus evidence
 
 Fresh canonical recoveries at
 `/tmp/datomic-stage1-integrated-twin-v3-a` and
@@ -62,11 +84,11 @@ The promoted generator output retains deterministic trailing spaces on some
 multiline forms, so `git diff --check` reports generated-source whitespace;
 those twin-bound bytes were not silently normalized during promotion.
 
-Stage 1 remains in progress only at the separately bounded normalized
-exact-source AOT acceptance wrapper and its whole 3,431-class relation. The
+Under the superseded global exact-AOT policy, Stage 1 remained open at the
+whole 3,431-class relation. Under Goal 3's bounded-semantic policy, the
 integrated Clojure corpus, protocol metadata family, load boundary, callable
-surface, and focused executable regressions are now promoted rather than
-pending.
+surface, JVM-valid exercised runtime, and focused regressions close Stage 1;
+the failed relation above remains nonblocking diagnostic evidence.
 
 ## Superseded historical checkpoint
 
@@ -266,7 +288,7 @@ transactor/scripts/validate-exact-datomic-sources.sh \
 Both commands refuse a non-empty output directory and verify the frozen input
 hashes before recovery.
 
-## Remaining Stage 1 gates
+## Parked exact-AOT diagnostics
 
 - The 85 exact bundled namespaces plus the two exact Datomic sources compile
   twice in fresh JVMs to the complete expected 3,431-class closure, with
@@ -278,15 +300,16 @@ hashes before recovery.
   captured-field/constructor-order differences. A strict ASM relation must
   still prove bijective per-fresh-JVM compilation-unit mappings, exact
   cross-namespace routing, and complete normalized ABI/code
-  equivalence without erasing ambiguity.
+  equivalence without erasing ambiguity. That investigation is parked unless a
+  Goal 3 escalation trigger selects it.
 - The promoted 247-namespace plus 25 Peer-core2 structural gate is sealed at
   272/272 effective loads and 247/247 callable/root/class surface agreement,
   without original Peer, Transactor, or `core2` AOT fallback. The protocol
   family is integrated. Its strict one-tier status remains an expected FAIL
   only for fifteen hash-bound shipped-source namespaces: 31 metadata rows in
-  `:arglists` and `:name`. The normalized exact-AOT lane must classify those
-  source-evaluation-versus-AOT differences without weakening the exact typed
-  surface.
+  `:arglists` and `:name`. Those source-evaluation-versus-AOT differences are
+  recorded diagnostics; they are not a global prerequisite under the current
+  acceptance policy.
 - The deterministic JKS-free `nano-impl` derivative, the clean hash-bound
   532-JAR dependency manifest, and four separately authored/generated
   candidate resources are integrated into that structural classpath. The

@@ -3484,8 +3484,10 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     grep -Fq ':authoritative-publication :committed-during-takeover' \
       "$ha_inflight_marker" &&
     grep -Fq ':fault-sentinel-present? true' "$ha_inflight_marker" &&
-    grep -Fq ':state :returned' "$ha_inflight_marker" &&
-    grep -Fq ':original-future-returned-adopted-transaction? true' \
+    grep -Fq ':state :failed-unavailable' "$ha_inflight_marker" &&
+    grep -Fq ':anomaly-categories [:cognitect.anomalies/unavailable]' \
+      "$ha_inflight_marker" &&
+    grep -Fq ':original-future-unavailable-with-adopted-transaction? true' \
       "$ha_inflight_marker" &&
     grep -Fq ':no-duplicate-committed-effect true' "$ha_inflight_marker" &&
     grep -Fq ':same-peer-recovered-through-promoted-endpoint? true' \
@@ -3513,6 +3515,7 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     die "HA in-flight takeover/recovery basis ordering differs"
   [[ "$ack_recovery_event_t" == "$ack_final_basis" ]] ||
     die "HA in-flight recovery event differs from final basis"
+  require_log_catchup "$ha_standby_label" "$ack_takeover_event_t"
   capture_sql_metrics after-ha-inflight-same-peer
   ack_recovery_sql_rows=$last_sql_rows
   ack_recovery_sql_bytes=$last_sql_bytes
@@ -3525,7 +3528,6 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" file \
     "$ack_database_id" "$ack_final_sha" "$ack_final_basis"
   ack_audit_marker=$last_marker_file
-  require_log_catchup "$ha_standby_label" "$ack_final_basis"
   grep -Fq ':fault-sentinel-present? true' "$ack_audit_marker" &&
     grep -Fq ':recovery-sentinel-present? true' "$ack_audit_marker" &&
     grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
@@ -3584,7 +3586,7 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     printf 'ha.inflight.standby-promotion=PASS\n'
     printf 'ha.inflight.exact-writer-abort=PASS\n'
     printf 'ha.inflight.orphan-adopted-once=PASS\n'
-    printf 'ha.inflight.client-outcome=returned\n'
+    printf 'ha.inflight.client-outcome=unavailable\n'
     printf 'ha.inflight.stale-active-self-fence=PASS\n'
     printf 'ha.inflight.same-peer-promoted-write=PASS\n'
     printf 'ha.inflight.fresh-peer-audit=PASS\n'
@@ -3617,7 +3619,8 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
   run_succeeded=true
   echo "Recovered in-flight transaction-during-takeover gate passed"
   echo "the promoted standby adopted the in-flight tail exactly once"
-  echo "the original Future returned; the same Peer then committed through promoted B"
+  echo "the original Future was unavailable; the same Peer observed the adopted write"
+  echo "the same Peer then committed a follow-up through promoted B"
   echo "stale A self-fenced; PostgreSQL is shut down; evidence: $work_root"
   exit 0
 fi

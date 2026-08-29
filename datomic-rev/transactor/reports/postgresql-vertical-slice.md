@@ -44,11 +44,15 @@ the primary PostgreSQL runtime path:
 21. one exact post-publication/pre-result cut in which the Peer is frozen,
     PostgreSQL durably advances the authoritative root, the owned Transactor is
     killed before result delivery, and the same Peer plus a fresh Peer recover
-    exactly one committed CAS/sentinel effect with no duplicate execution.
+    exactly one committed CAS/sentinel effect with no duplicate execution; and
+22. one in-flight transaction during active/standby takeover in which startup
+    replay adopts the transaction exactly once, the original Future reports
+    unavailable, the same Peer commits through the promoted standby, a fresh
+    Peer and SQL root agree, and the stale primary self-fences.
 
 This is a real vertical-slice milestone, not Goal 2 completion. The broader
-licensed-oracle comparison and remaining HA race/in-flight boundaries remain
-open.
+licensed-oracle comparison and remaining HA concurrency, partition, and
+split-brain boundaries remain open.
 
 ## Repository-owned executing gate
 
@@ -83,9 +87,9 @@ remains. Only coordination revisions and counts are retained; the SQL heartbeat
 map is not copied into evidence.
 
 This closes one narrow active/standby takeover and stale-primary self-fence
-slice. It does not establish all partition timing, concurrent/in-flight
-transaction, acknowledgement, or writable split-brain cases, so Stage 7 is
-still in progress.
+slice. The later v8 cut below also closes one in-flight transaction case. The
+concurrent-submission, partition-timing, and writable split-brain cases remain,
+so HA is still in progress.
 
 The dedicated startup-failure run passed at
 `/tmp/datomic-recovered-pair-startup-failure-v1` using the current repository
@@ -624,11 +628,40 @@ publication, fresh-process adoption, same-connection transport recovery, the
 first recovered-pair takeover/self-fence row, and one focused missing-schema
 startup-failure row. The exact PostgreSQL index-ref and log-root rejection row
 is also closed. Both recovered-pair sides of the durable
-commit/acknowledgement edge are now closed. The next runtime boundary is an
-in-flight transaction during active/standby takeover, interleaved with the
-transaction/transport overlap cohort. The bounded surface run
+commit/acknowledgement edge are now closed. The corrected focused in-flight
+takeover run passes at `/tmp/datomic-recovered-pair-ha-inflight-v8`. While A's
+authoritative-root update was blocked, the Peer Future remained incomplete and
+PostgreSQL contained one immutable orphan tail. After B became coordination
+owner, A's exact blocked writer was terminated and the holder released. B's
+startup `log/catchup` replayed 1,832 bytes and adopted that transaction exactly
+once at `t=1003`; the original Future failed with
+`:cognitect.anomalies/unavailable`, so no success was reported across the
+ambiguous acknowledgement boundary. The same Peer reconnected through B after
+four unavailable attempts and committed one new follow-up at `t=1005`.
+
+A fresh Peer reproduced final basis 1005 and canonical SHA-256
+`380c636a1ad2e0943022fea80021e927888a1b37cb1fe9967cb349baedfcbb87`.
+It also observed the authoritative SQL log root at revision 6 with SHA-256
+`b6c976816723532b3fb49770b20d87f04d0770ae746d506d06b1a5dba0031491`.
+Stale A self-fenced on one heartbeat conflict. The promoted standby stopped
+gracefully, the Datomic PostgreSQL session count reached zero, PostgreSQL's
+control state is `shut down`, and all three dedicated ports are closed.
+
+The blocked, same-Peer, and fresh-Peer result SHA-256 values are respectively
+`7d2d8020f1ccb1727e51053036b74c701aeaeb808ed91c2bcdc05bd588164377`,
+`ca63dc29302a297964d309bf49790e0e3d64ffd26238de17ec2c5992b0c5ac24`,
+and `1abe2f1977d6e0a214752a045d57cfefad4ae1da199518742006eb9ca09c9546`.
+The outer summary and semantic/audit markers all pass. The 101-entry evidence
+manifest verifies; its file SHA-256 is
+`5243885f1c0c85dbe2967171856258ad7f7665fd38391bd72444b4c72c1a2887`.
+Runner and probe SHA-256 values are respectively
+`f71f3aa719fc760b68805bbbcf5e9b65d433e11c4ec2adba9fce2a0722ca7d15`
+and `0ffba8b6d3cf480a799dde3b48d8ffbe8aefbd02eca4dbce2a772d2c23b3d172`.
+
+The bounded surface run
 separately proves 272/272 effective loads and 247/247 callable/class shapes;
-the protocol family passes a focused fresh recovery, but integrated strict-
-metadata promotion and exact-AOT acceptance remain open. The 117 Stage 2
-overlaps and remaining HA failure boundaries remain required; none
+the protocol family passes a focused fresh recovery. Strict metadata and
+exact-AOT differences remain recorded diagnostics rather than global
+prerequisites. The 104 incomplete Stage 2 overlaps and remaining HA failure
+boundaries remain required; none
 justify another unconstrained source-residual pass.

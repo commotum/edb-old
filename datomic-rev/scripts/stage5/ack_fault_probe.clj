@@ -1001,8 +1001,8 @@
                               :blocked-count (count blocked-ids)})
                     (if ha-takeover?
                       (do
-                        (ensure! (= :returned (:state future-state))
-                                 "In-flight takeover Future did not return"
+                        (ensure! (= :failed-unavailable (:state future-state))
+                                 "In-flight takeover Future did not fail unavailable"
                                  {:future-outcome future-state})
                         (let [takeover-t (fact-t final-db fault-id)
                               takeover-rows (:rows final-canonical)
@@ -1025,9 +1025,8 @@
                                                 takeover-rows)))
                                    "Takeover logical state differs"
                                    {:rows takeover-rows})
-                          (ensure! (= takeover-t (d/basis-t final-db)
-                                      (:db-after-basis future-state))
-                                   "Takeover Future, fact, and basis differ"
+                          (ensure! (= takeover-t (d/basis-t final-db))
+                                   "Takeover fact and basis differ"
                                    {:basis-t (d/basis-t final-db)
                                     :future-outcome future-state
                                     :takeover-t takeover-t})
@@ -1108,7 +1107,7 @@
                               true
                               :no-duplicate-committed-effect true
                               :orphan-candidate-count (count orphan-rows)
-                              :original-future-returned-adopted-transaction?
+                              :original-future-unavailable-with-adopted-transaction?
                               true
                               :precrash-root-sha256 baseline-root-sha
                               :recovery-event-t recovery-t
