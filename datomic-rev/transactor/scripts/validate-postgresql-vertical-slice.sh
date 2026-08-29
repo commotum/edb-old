@@ -109,6 +109,12 @@ Runtime and evidence:
                          are frozen, abort that exact writer, resume/fence the
                          stale active, then prove same-Peer recovery and one
                          durable follow-up transaction through the promoted node.
+  --transaction-ha-concurrent-only
+                         Hold the first of four accepted asynchronous writes at
+                         PostgreSQL publication, promote the recovered standby,
+                         then prove every outcome is accounted, all four logical
+                         writes commit exactly once in one monotonic order, and
+                         a fresh Peer observes the same state.
   --with-ha               After transport recovery, run one bounded recovered
                           active/standby takeover and self-fencing cycle.
   --standby-port PORT     Dedicated standby transport port (default: 54340).
@@ -148,6 +154,12 @@ Transaction-ha-inflight-only order:
   active + blocked Peer transaction -> standby -> freeze active -> promote ->
   abort exact blocked writer -> resume and self-fence stale active -> same-Peer
   unavailable outcome and promoted-node write -> fresh-Peer audit -> shutdown.
+
+Transaction-ha-concurrent-only order:
+  active + four in-flight Peer writes -> block first authoritative publication ->
+  standby promotion -> abort exact writer -> stale-active self-fence -> account
+  all Futures -> idempotent recovery through promoted standby -> fresh audit ->
+  shutdown.
 
 Main executing order:
   seed -> graceful stop -> restart -> equal snapshot -> augment -> graceful ->
@@ -315,6 +327,7 @@ transaction_boundaries_only=false
 transaction_ack_fault_only=false
 transaction_postpublication_fault_only=false
 transaction_ha_inflight_only=false
+transaction_ha_concurrent_only=false
 with_ha=false
 confirmation=${RECOVERED_PAIR_CONFIRM_DISPOSABLE:-}
 dry_run=false
@@ -353,6 +366,8 @@ while (($#)); do
       transaction_postpublication_fault_only=true; shift ;;
     --transaction-ha-inflight-only)
       transaction_ha_inflight_only=true; with_ha=true; shift ;;
+    --transaction-ha-concurrent-only)
+      transaction_ha_concurrent_only=true; with_ha=true; shift ;;
     --with-ha) with_ha=true; shift ;;
     --standby-port) standby_port=${2:?missing value for --standby-port}; shift 2 ;;
     --startup-timeout) startup_timeout=${2:?missing value for --startup-timeout}; shift 2 ;;
@@ -411,9 +426,16 @@ require_positive_integer probe-timeout "$probe_timeout"
   die "--transaction-post-publication-fault-only and --with-ha are mutually exclusive"
 for focused_mode in startup_failure_only storage_cas_only \
                     transaction_boundaries_only transaction_ack_fault_only \
-                    transaction_postpublication_fault_only; do
+                    transaction_postpublication_fault_only \
+                    transaction_ha_concurrent_only; do
   [[ "$transaction_ha_inflight_only" != true || "${!focused_mode}" != true ]] ||
     die "--transaction-ha-inflight-only and ${focused_mode//_/-} are mutually exclusive"
+done
+for focused_mode in startup_failure_only storage_cas_only \
+                    transaction_boundaries_only transaction_ack_fault_only \
+                    transaction_postpublication_fault_only; do
+  [[ "$transaction_ha_concurrent_only" != true || "${!focused_mode}" != true ]] ||
+    die "--transaction-ha-concurrent-only and ${focused_mode//_/-} are mutually exclusive"
 done
 [[ "$pg_host" == 127.0.0.1 ]] || die "PostgreSQL must bind only to 127.0.0.1"
 require_port pg-port "$pg_port"
@@ -1201,6 +1223,7 @@ config_record="$work_root/config.properties"
   printf 'transaction.postpublication.fault.only=%s\n' \
     "$transaction_postpublication_fault_only"
   printf 'transaction.ha.inflight.only=%s\n' "$transaction_ha_inflight_only"
+  printf 'transaction.ha.concurrent.only=%s\n' "$transaction_ha_concurrent_only"
   printf 'transaction.ack.fault.timeout.seconds=%s\n' "$ack_fault_timeout"
   printf 'ha.enabled=%s\n' "$with_ha"
   printf 'ha.standby.port=%s\n' "$standby_port"
@@ -2099,6 +2122,7 @@ run_ack_fault_probe() {
     recover) marker_prefix=STAGE5-ACK-RECOVER ;;
     audit) marker_prefix=STAGE5-ACK-AUDIT ;;
     ha-takeover-audit) marker_prefix=STAGE7-HA-INFLIGHT-AUDIT ;;
+    ha-concurrent-audit) marker_prefix=STAGE7-HA-CONCURRENT-AUDIT ;;
     publication-audit) marker_prefix=STAGE5-ACK-POSTPUBLICATION-AUDIT ;;
     *) die "unknown acknowledgement-fault probe mode: $mode" ;;
   esac
@@ -3301,7 +3325,21 @@ if [[ "$transaction_postpublication_fault_only" == true ]]; then
   exit 0
 fi
 
-if [[ "$transaction_ha_inflight_only" == true ]]; then
+if [[ "$transaction_ha_inflight_only" == true ||
+      "$transaction_ha_concurrent_only" == true ]]; then
+  if [[ "$transaction_ha_concurrent_only" == true ]]; then
+    ha_window_mode=ha-concurrent-window
+    ha_cut_marker=':cut :ha-concurrent'
+    ha_result_prefix=STAGE7-HA-CONCURRENT-RESULT
+    ha_audit_mode=ha-concurrent-audit
+    ha_concurrent_case=true
+  else
+    ha_window_mode=ha-takeover-window
+    ha_cut_marker=':cut :ha-takeover'
+    ha_result_prefix=STAGE7-HA-INFLIGHT-RESULT
+    ha_audit_mode=ha-takeover-audit
+    ha_concurrent_case=false
+  fi
   ack_jdbc_url="jdbc:postgresql://$pg_host:$pg_port/$catalog"
   ack_fifo="$runtime_dir/ha-inflight-control.fifo"
   ack_stdout="$logs_dir/ha-inflight-window.out"
@@ -3327,7 +3365,7 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     -cp "$peer_classpath"
     clojure.main
     -m stage5.ack-fault-probe
-    ha-takeover-window "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password"
+    "$ha_window_mode" "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password"
     true file "$ack_fifo"
   )
   (
@@ -3350,14 +3388,22 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
   awk '/^STAGE5-ACK-BLOCKED / {print}' "$ack_stdout" >"$ack_blocked_marker"
   [[ "$(wc -l <"$ack_blocked_marker")" -eq 1 ]] ||
     die "HA in-flight probe emitted a non-unique blocked marker"
-  grep -Fq ':cut :ha-takeover' "$ack_blocked_marker" &&
+  grep -Fq "$ha_cut_marker" "$ack_blocked_marker" &&
     grep -Fq ':future-incomplete? true' "$ack_blocked_marker" &&
     grep -Fq ':peer-state-unchanged? true' "$ack_blocked_marker" &&
     grep -Fq ':root-row-byte-identical? true' "$ack_blocked_marker" &&
-    grep -Fq ':fault-sentinel-present? false' "$ack_blocked_marker" &&
     grep -Fq ':orphan-candidate-count 1' "$ack_blocked_marker" &&
     grep -Fq ':transactor-wait-event-type "Lock"' "$ack_blocked_marker" ||
     die "HA in-flight blocked marker omitted a required invariant"
+  if [[ "$ha_concurrent_case" == true ]]; then
+    grep -Fq ':blocked-writer-count 1' "$ack_blocked_marker" &&
+      grep -Fq ':concurrent-future-done-count 0' "$ack_blocked_marker" &&
+      grep -Fq ':concurrent-submission-count 4' "$ack_blocked_marker" ||
+      die "HA concurrent blocked marker omitted its cohort invariants"
+  else
+    grep -Fq ':fault-sentinel-present? false' "$ack_blocked_marker" ||
+      die "HA in-flight blocked marker omitted its fault invariant"
+  fi
 
   ack_database_id=$(extract_marker_string "$ack_blocked_marker" database-id)
   ack_baseline_basis=$(extract_marker_number \
@@ -3474,47 +3520,75 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
   }
   verify_runtime_seal after-ha-inflight-probe
   [[ "$(marker_count "$ack_stdout" 'STAGE5-ACK-BLOCKED ')" -eq 1 &&
-     "$(marker_count "$ack_stdout" 'STAGE7-HA-INFLIGHT-RESULT ')" -eq 1 &&
+     "$(marker_count "$ack_stdout" "$ha_result_prefix ")" -eq 1 &&
      "$(marker_count "$ack_stderr" 'STAGE5-ACK-ERROR ')" -eq 0 ]] ||
     die "HA in-flight marker cardinality differs"
   ha_inflight_marker="$results_dir/ha-inflight-result.result"
-  awk '/^STAGE7-HA-INFLIGHT-RESULT / {print}' \
+  awk -v prefix="$ha_result_prefix " \
+    'substr($0, 1, length(prefix)) == prefix {print}' \
     "$ack_stdout" >"$ha_inflight_marker"
-  grep -Fq ':status :passed' "$ha_inflight_marker" &&
+  grep -Fq ':status :passed' "$ha_inflight_marker" ||
+    die "HA takeover result did not pass"
+  if [[ "$ha_concurrent_case" == true ]]; then
+    grep -Fq ':authoritative-writer-count 1' "$ha_inflight_marker" &&
+      grep -Fq ':concurrent-submission-count 4' "$ha_inflight_marker" &&
+      grep -Fq ':every-submission-outcome-accounted? true' \
+        "$ha_inflight_marker" &&
+      grep -Fq ':no-duplicate-committed-effect true' "$ha_inflight_marker" &&
+      grep -Fq ':no-lost-submission true' "$ha_inflight_marker" &&
+      grep -Fq ':strict-monotonic-committed-order true' \
+        "$ha_inflight_marker" ||
+      die "HA concurrent result omitted a required invariant"
+  else
     grep -Fq ':authoritative-publication :committed-during-takeover' \
-      "$ha_inflight_marker" &&
-    grep -Fq ':fault-sentinel-present? true' "$ha_inflight_marker" &&
-    grep -Fq ':state :failed-unavailable' "$ha_inflight_marker" &&
-    grep -Fq ':anomaly-categories [:cognitect.anomalies/unavailable]' \
-      "$ha_inflight_marker" &&
-    grep -Fq ':original-future-unavailable-with-adopted-transaction? true' \
-      "$ha_inflight_marker" &&
-    grep -Fq ':no-duplicate-committed-effect true' "$ha_inflight_marker" &&
-    grep -Fq ':same-peer-recovered-through-promoted-endpoint? true' \
-      "$ha_inflight_marker" &&
-    grep -Fq ':recovery-sentinel-present? true' "$ha_inflight_marker" ||
-    die "HA in-flight result omitted a required invariant"
+        "$ha_inflight_marker" &&
+      grep -Fq ':fault-sentinel-present? true' "$ha_inflight_marker" &&
+      grep -Fq ':state :failed-unavailable' "$ha_inflight_marker" &&
+      grep -Fq ':anomaly-categories [:cognitect.anomalies/unavailable]' \
+        "$ha_inflight_marker" &&
+      grep -Fq ':original-future-unavailable-with-adopted-transaction? true' \
+        "$ha_inflight_marker" &&
+      grep -Fq ':no-duplicate-committed-effect true' "$ha_inflight_marker" &&
+      grep -Fq ':same-peer-recovered-through-promoted-endpoint? true' \
+        "$ha_inflight_marker" &&
+      grep -Fq ':recovery-sentinel-present? true' "$ha_inflight_marker" ||
+      die "HA in-flight result omitted a required invariant"
+  fi
   [[ "$(extract_marker_string "$ha_inflight_marker" database-id)" == \
      "$ack_database_id" &&
      "$(extract_marker_number "$ha_inflight_marker" baseline-basis-t)" == \
      "$ack_baseline_basis" &&
      "$(extract_marker_hash "$ha_inflight_marker" baseline-canonical-sha256)" == \
      "$ack_baseline_sha" &&
-     "$(extract_marker_hash "$ha_inflight_marker" precrash-root-sha256)" == \
+     "$(extract_marker_hash "$ha_inflight_marker" baseline-root-sha256)" == \
      "$ack_baseline_root_sha" ]] ||
     die "HA in-flight result differs from its blocked baseline"
   ack_final_basis=$(extract_marker_number "$ha_inflight_marker" final-basis-t)
   ack_final_sha=$(extract_marker_hash \
     "$ha_inflight_marker" final-canonical-sha256)
-  ack_recovery_event_t=$(extract_marker_number \
-    "$ha_inflight_marker" recovery-event-t)
-  ack_takeover_event_t=$(extract_marker_number \
-    "$ha_inflight_marker" takeover-event-t)
-  ((ack_takeover_event_t > ack_baseline_basis &&
-    ack_final_basis > ack_takeover_event_t)) ||
-    die "HA in-flight takeover/recovery basis ordering differs"
-  [[ "$ack_recovery_event_t" == "$ack_final_basis" ]] ||
-    die "HA in-flight recovery event differs from final basis"
+  if [[ "$ha_concurrent_case" == true ]]; then
+    ack_takeover_event_t=$(extract_marker_number \
+      "$ha_inflight_marker" adopted-event-t)
+    ack_first_commit_t=$(extract_marker_number \
+      "$ha_inflight_marker" first-commit-t)
+    ack_last_commit_t=$(extract_marker_number \
+      "$ha_inflight_marker" last-commit-t)
+    ((ack_takeover_event_t > ack_baseline_basis &&
+      ack_first_commit_t >= ack_takeover_event_t &&
+      ack_last_commit_t >= ack_first_commit_t &&
+      ack_final_basis >= ack_last_commit_t)) ||
+      die "HA concurrent committed order differs"
+  else
+    ack_recovery_event_t=$(extract_marker_number \
+      "$ha_inflight_marker" recovery-event-t)
+    ack_takeover_event_t=$(extract_marker_number \
+      "$ha_inflight_marker" takeover-event-t)
+    ((ack_takeover_event_t > ack_baseline_basis &&
+      ack_final_basis > ack_takeover_event_t)) ||
+      die "HA in-flight takeover/recovery basis ordering differs"
+    [[ "$ack_recovery_event_t" == "$ack_final_basis" ]] ||
+      die "HA in-flight recovery event differs from final basis"
+  fi
   require_log_catchup "$ha_standby_label" "$ack_takeover_event_t"
   capture_sql_metrics after-ha-inflight-same-peer
   ack_recovery_sql_rows=$last_sql_rows
@@ -3524,14 +3598,24 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     die "HA in-flight promoted standby did not continue heartbeating"
 
   current_step=ha-inflight-fresh-peer-audit
-  run_ack_fault_probe ha-inflight-audit ha-takeover-audit \
+  run_ack_fault_probe ha-inflight-audit "$ha_audit_mode" \
     "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" file \
     "$ack_database_id" "$ack_final_sha" "$ack_final_basis"
   ack_audit_marker=$last_marker_file
-  grep -Fq ':fault-sentinel-present? true' "$ack_audit_marker" &&
-    grep -Fq ':recovery-sentinel-present? true' "$ack_audit_marker" &&
-    grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
-    die "HA in-flight fresh audit omitted a required invariant"
+  if [[ "$ha_concurrent_case" == true ]]; then
+    grep -Fq ':concurrent-submission-count 4' "$ack_audit_marker" &&
+      grep -Fq ':every-submission-present? true' "$ack_audit_marker" &&
+      grep -Fq ':no-duplicate-committed-effect true' "$ack_audit_marker" &&
+      grep -Fq ':no-lost-submission true' "$ack_audit_marker" &&
+      grep -Fq ':strict-monotonic-committed-order true' "$ack_audit_marker" &&
+      grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
+      die "HA concurrent fresh audit omitted a required invariant"
+  else
+    grep -Fq ':fault-sentinel-present? true' "$ack_audit_marker" &&
+      grep -Fq ':recovery-sentinel-present? true' "$ack_audit_marker" &&
+      grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
+      die "HA in-flight fresh audit omitted a required invariant"
+  fi
   [[ "$(extract_marker_string "$ack_audit_marker" database-id)" == \
      "$ack_database_id" &&
      "$(extract_marker_number "$ack_audit_marker" final-basis-t)" == \
@@ -3575,38 +3659,62 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     die "standby port remains occupied after HA in-flight run"
   {
     printf 'status=PASS\n'
-    printf 'mode=transaction-ha-inflight-only\n'
+    if [[ "$ha_concurrent_case" == true ]]; then
+      printf 'mode=transaction-ha-concurrent-only\n'
+    else
+      printf 'mode=transaction-ha-inflight-only\n'
+    fi
     printf 'peer.current-repo-build=PASS\n'
     printf 'peer.origin=PASS\n'
     printf 'transactor.fresh-runtime-preparation=PASS\n'
     printf 'candidate.runtime.seal=PASS\n'
     printf 'postgresql.fresh-catalog=PASS\n'
-    printf 'ha.inflight.root-lock-observed=PASS\n'
-    printf 'ha.inflight.future-incomplete-before-takeover=PASS\n'
-    printf 'ha.inflight.standby-promotion=PASS\n'
-    printf 'ha.inflight.exact-writer-abort=PASS\n'
-    printf 'ha.inflight.orphan-adopted-once=PASS\n'
-    printf 'ha.inflight.client-outcome=unavailable\n'
-    printf 'ha.inflight.stale-active-self-fence=PASS\n'
-    printf 'ha.inflight.same-peer-promoted-write=PASS\n'
-    printf 'ha.inflight.fresh-peer-audit=PASS\n'
-    printf 'ha.inflight.database.id=%s\n' "$ack_database_id"
-    printf 'ha.inflight.baseline.basis-t=%s\n' "$ack_baseline_basis"
-    printf 'ha.inflight.takeover.basis-t=%s\n' "$ack_takeover_event_t"
-    printf 'ha.inflight.final.basis-t=%s\n' "$ack_final_basis"
-    printf 'ha.inflight.baseline.canonical.sha256=%s\n' "$ack_baseline_sha"
-    printf 'ha.inflight.final.canonical.sha256=%s\n' "$ack_final_sha"
-    printf 'ha.inflight.blocked.result.sha256=%s\n' \
+    if [[ "$ha_concurrent_case" == true ]]; then
+      printf 'ha.concurrent.root-lock-observed=PASS\n'
+      printf 'ha.concurrent.submission-count=4\n'
+      printf 'ha.concurrent.all-futures-incomplete-before-takeover=PASS\n'
+      printf 'ha.concurrent.standby-promotion=PASS\n'
+      printf 'ha.concurrent.exact-writer-abort=PASS\n'
+      printf 'ha.concurrent.every-outcome-accounted=PASS\n'
+      printf 'ha.concurrent.no-loss-or-duplicate=PASS\n'
+      printf 'ha.concurrent.strict-monotonic-order=PASS\n'
+      printf 'ha.concurrent.stale-active-self-fence=PASS\n'
+      printf 'ha.concurrent.fresh-peer-audit=PASS\n'
+      printf 'ha.concurrent.database.id=%s\n' "$ack_database_id"
+      printf 'ha.concurrent.baseline.basis-t=%s\n' "$ack_baseline_basis"
+      printf 'ha.concurrent.adopted.basis-t=%s\n' "$ack_takeover_event_t"
+      printf 'ha.concurrent.first-commit.t=%s\n' "$ack_first_commit_t"
+      printf 'ha.concurrent.last-commit.t=%s\n' "$ack_last_commit_t"
+      printf 'ha.concurrent.final.basis-t=%s\n' "$ack_final_basis"
+      printf 'ha.concurrent.baseline.canonical.sha256=%s\n' "$ack_baseline_sha"
+      printf 'ha.concurrent.final.canonical.sha256=%s\n' "$ack_final_sha"
+      printf 'ha.concurrent-submissions=PASS\n'
+    else
+      printf 'ha.inflight.root-lock-observed=PASS\n'
+      printf 'ha.inflight.future-incomplete-before-takeover=PASS\n'
+      printf 'ha.inflight.standby-promotion=PASS\n'
+      printf 'ha.inflight.exact-writer-abort=PASS\n'
+      printf 'ha.inflight.orphan-adopted-once=PASS\n'
+      printf 'ha.inflight.client-outcome=unavailable\n'
+      printf 'ha.inflight.stale-active-self-fence=PASS\n'
+      printf 'ha.inflight.same-peer-promoted-write=PASS\n'
+      printf 'ha.inflight.fresh-peer-audit=PASS\n'
+      printf 'ha.inflight.database.id=%s\n' "$ack_database_id"
+      printf 'ha.inflight.baseline.basis-t=%s\n' "$ack_baseline_basis"
+      printf 'ha.inflight.takeover.basis-t=%s\n' "$ack_takeover_event_t"
+      printf 'ha.inflight.final.basis-t=%s\n' "$ack_final_basis"
+      printf 'ha.concurrent-submissions=NOT_RUN\n'
+    fi
+    printf 'ha.takeover.blocked.result.sha256=%s\n' \
       "$(sha256_file "$ack_blocked_marker")"
-    printf 'ha.inflight.result.sha256=%s\n' \
+    printf 'ha.takeover.result.sha256=%s\n' \
       "$(sha256_file "$ha_inflight_marker")"
-    printf 'ha.inflight.audit.result.sha256=%s\n' \
+    printf 'ha.takeover.audit.result.sha256=%s\n' \
       "$(sha256_file "$ack_audit_marker")"
     printf 'postgresql.datomic-user-sessions-after-stop=0\n'
     printf 'transactor.stale-active-self-fence.count=1\n'
     printf 'transactor.graceful-stop.count=1\n'
     printf 'transaction.full-licensed-oracle-equality=NOT_RUN\n'
-    printf 'ha.concurrent-submissions=NOT_RUN\n'
     printf 'ha.partition-split-brain=NOT_RUN\n'
     printf 'services.finally-stopped=PASS\n'
   } >"$work_root/summary.properties"
@@ -3617,10 +3725,16 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
   } >"$work_root/run-status.properties"
   write_evidence_hashes
   run_succeeded=true
-  echo "Recovered in-flight transaction-during-takeover gate passed"
-  echo "the promoted standby adopted the in-flight tail exactly once"
-  echo "the original Future was unavailable; the same Peer observed the adopted write"
-  echo "the same Peer then committed a follow-up through promoted B"
+  if [[ "$ha_concurrent_case" == true ]]; then
+    echo "Recovered concurrent-submission takeover gate passed"
+    echo "all four outcomes were accounted and all four writes committed exactly once"
+    echo "the commits formed one strict order observed by a fresh Peer"
+  else
+    echo "Recovered in-flight transaction-during-takeover gate passed"
+    echo "the promoted standby adopted the in-flight tail exactly once"
+    echo "the original Future was unavailable; the same Peer observed the adopted write"
+    echo "the same Peer then committed a follow-up through promoted B"
+  fi
   echo "stale A self-fenced; PostgreSQL is shut down; evidence: $work_root"
   exit 0
 fi

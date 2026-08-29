@@ -69,6 +69,10 @@
   "STAGE7-HA-INFLIGHT-RESULT ")
 (def ^:private ha-inflight-audit-prefix
   "STAGE7-HA-INFLIGHT-AUDIT ")
+(def ^:private ha-concurrent-result-prefix
+  "STAGE7-HA-CONCURRENT-RESULT ")
+(def ^:private ha-concurrent-audit-prefix
+  "STAGE7-HA-CONCURRENT-AUDIT ")
 (def ^:private recover-result-prefix "STAGE5-ACK-RECOVER ")
 (def ^:private audit-prefix "STAGE5-ACK-AUDIT ")
 (def ^:private error-prefix "STAGE5-ACK-ERROR ")
@@ -87,6 +91,9 @@
 (def ^:private fault-id "fault-before-publication")
 (def ^:private recovery-id "recovery-after-crash")
 (def ^:private published-kind :stage5-ack/published)
+(def ^:private concurrent-kind :stage7-ha/concurrent-submission)
+(def ^:private concurrent-ids
+  (mapv #(str "takeover-concurrent-" %) (range 4)))
 
 (defn- fail!
   [message data]
@@ -715,6 +722,56 @@
         :error-profile (error-profile failure)
         :state :failed-unavailable))))
 
+(defn- concurrent-future-outcome!
+  [id ^Future future]
+  (assoc (publication-future-outcome! future) :id id))
+
+(defn- concurrent-history!
+  [db id]
+  (let [eid (d/entid db [:stage5-ack/id id])
+        event-t (fact-t db id)
+        id-history (attribute-history db eid :stage5-ack/id)
+        kind-history (attribute-history db eid :stage5-ack/kind)]
+    (ensure! (= [[id true event-t]] id-history)
+             "Concurrent identity was duplicated or retracted"
+             {:history id-history :id id})
+    (ensure! (= [[concurrent-kind true event-t]] kind-history)
+             "Concurrent kind was duplicated, changed, or retracted"
+             {:history kind-history :id id})
+    (sorted-map :event-t event-t
+                :id id
+                :id-history id-history
+                :kind-history kind-history)))
+
+(defn- recover-concurrent-submissions!
+  [connection initial-db]
+  (loop [ids concurrent-ids
+         db initial-db
+         recovery []]
+    (if-let [id (first ids)]
+      (if (entity-present? db id)
+        (recur (next ids)
+               db
+               (conj recovery (sorted-map :action :already-committed :id id)))
+        (let [report
+              (transact-before!
+                connection
+                [{:stage5-ack/id id :stage5-ack/kind concurrent-kind}]
+                :ha-concurrent-recovery)
+              after (:db-after report)]
+          (ensure! (>= (d/basis-t (:db-before report)) (d/basis-t db))
+                   "Concurrent recovery report regressed the Peer basis"
+                   {:actual (d/basis-t (:db-before report))
+                    :expected-at-least (d/basis-t db)
+                    :id id})
+          (recur (next ids)
+                 after
+                 (conj recovery
+                       (sorted-map :action :resubmitted
+                                   :event-t (fact-t after id)
+                                   :id id)))))
+      {:db db :recovery recovery})))
+
 (defn- require-published-state!
   [^Database db expected-database-id expected-publication-t]
   (let [rows (probe-rows db)
@@ -1171,6 +1228,215 @@
             (catch Throwable _)))
         (release! @peer-connection)))))
 
+(defn- ha-concurrent-window!
+  [{:keys [expected-created expected-source-protocol jdbc-url password
+           token-file uri user]}]
+  (let [boundary (audit-candidate-boundary! expected-source-protocol)
+        created? (boolean
+                   (bounded-call! connect-timeout-ms
+                                  :create-database
+                                  #(d/create-database uri)))
+        peer-connection (atom nil)
+        holder (atom nil)
+        holder-active? (atom false)
+        transaction-futures (atom [])]
+    (ensure! (= expected-created created?)
+             "Unexpected create-database result"
+             {:actual created? :expected expected-created})
+    (try
+      (reset! peer-connection (connect! uri))
+      (transact-before! @peer-connection (schema-tx) :schema)
+      (transact-before! @peer-connection
+                        [{:stage5-ack/id baseline-id
+                          :stage5-ack/kind :stage5-ack/baseline}]
+                        :baseline)
+      (let [baseline-db (d/db @peer-connection)
+            database-id (str (.id ^Database baseline-db))
+            baseline-basis (d/basis-t baseline-db)
+            baseline-canonical (canonical-state baseline-db)
+            baseline-sha (sha256 baseline-canonical)
+            baseline-root (sql-log-root jdbc-url user password database-id)
+            baseline-root-sha (sha256 baseline-root)
+            baseline-ids (sql-ids jdbc-url user password)]
+        (ensure! (= [[baseline-id :stage5-ack/baseline
+                      (fact-t baseline-db baseline-id)]]
+                    (:rows baseline-canonical))
+                 "Fresh concurrent-takeover baseline contains unexpected rows"
+                 {:rows (:rows baseline-canonical)})
+        (reset! holder (open-sql! jdbc-url user password))
+        (let [{:keys [holder-backend-pid root-id]}
+              (lock-log-root! @holder database-id baseline-root)]
+          (reset! holder-active? true)
+          (reset! transaction-futures
+                  (mapv (fn [id]
+                          [id (d/transact-async
+                                @peer-connection
+                                [{:stage5-ack/id id
+                                  :stage5-ack/kind concurrent-kind}])])
+                        concurrent-ids))
+          (let [writer (wait-for-blocking-writer!
+                         jdbc-url user password holder-backend-pid)
+                blocked-root (sql-log-root jdbc-url user password database-id)
+                blocked-ids (sql-ids jdbc-url user password)
+                orphan-rows (require-one-immutable-tail!
+                              jdbc-url user password baseline-ids blocked-ids
+                              root-id baseline-root)
+                blocked-db (d/db @peer-connection)
+                blocked-canonical (canonical-state blocked-db)
+                completed-count
+                (count (filter (fn [[_ ^Future pending]] (.isDone pending))
+                               @transaction-futures))]
+            (ensure! (= baseline-root blocked-root)
+                     "Authoritative root changed while concurrent publication was blocked"
+                     {:actual-sha256 (sha256 blocked-root)
+                      :expected-sha256 baseline-root-sha})
+            (ensure! (= baseline-canonical blocked-canonical)
+                     "Peer state advanced before concurrent authoritative publication"
+                     {:actual-sha256 (sha256 blocked-canonical)
+                      :expected-sha256 baseline-sha})
+            (ensure! (every? #(not (entity-present? blocked-db %))
+                             concurrent-ids)
+                     "A concurrent sentinel became visible before publication"
+                     {:visible-ids (filterv #(entity-present? blocked-db %)
+                                            concurrent-ids)})
+            (ensure! (zero? completed-count)
+                     "A concurrent Future completed before takeover"
+                     {:completed-count completed-count})
+            (emit-marker!
+              blocked-prefix
+              (sorted-map
+                :authoritative-root-id root-id
+                :baseline-basis-t baseline-basis
+                :baseline-canonical-sha256 baseline-sha
+                :baseline-root-revision (:rev baseline-root)
+                :baseline-root-sha256 baseline-root-sha
+                :blocked-backend-pid (:pid writer)
+                :blocked-writer-count 1
+                :candidate-boundary boundary
+                :concurrent-future-done-count completed-count
+                :concurrent-submission-count (count concurrent-ids)
+                :cut :ha-concurrent
+                :database-id database-id
+                :future-incomplete? true
+                :holder-backend-pid holder-backend-pid
+                :immutable-tail-rows orphan-rows
+                :orphan-candidate-count (count orphan-rows)
+                :peer-state-unchanged? true
+                :root-row-byte-identical? true
+                :transactor-wait-event (:wait-event writer)
+                :transactor-wait-event-type (:wait-event-type writer)))
+            (read-control-token! token-file expected-ha-takeover-token)
+            (wait-for-backend-exit! jdbc-url user password (:pid writer))
+            (let [locked-root
+                  (sql-log-root jdbc-url user password database-id)]
+              (ensure! (= baseline-root locked-root)
+                       "Terminated writer changed the root before holder rollback"
+                       {:actual-sha256 (sha256 locked-root)
+                        :expected-sha256 baseline-root-sha}))
+            (.rollback ^Connection @holder)
+            (reset! holder-active? false)
+            (.close ^Connection @holder)
+            (reset! holder nil)
+            (let [initial-outcomes
+                  (mapv (fn [[id pending]]
+                          (concurrent-future-outcome! id pending))
+                        @transaction-futures)
+                  sync-result (sync-after-restart! @peer-connection)
+                  adopted-db (:db sync-result)
+                  adopted-ids
+                  (filterv #(entity-present? adopted-db %) concurrent-ids)]
+              (ensure! (entity-present? adopted-db (first concurrent-ids))
+                       "Promoted standby did not adopt the first immutable tail"
+                       {:adopted-ids adopted-ids})
+              (doseq [{:keys [db-after-basis id state] :as outcome}
+                      initial-outcomes]
+                (ensure! (#{:returned :failed-unavailable} state)
+                         "Concurrent Future has an unaccounted outcome"
+                         {:outcome outcome})
+                (when (= :returned state)
+                  (ensure! (and (entity-present? adopted-db id)
+                                (= db-after-basis (fact-t adopted-db id)))
+                           "Returned concurrent Future disagrees with durable state"
+                           {:outcome outcome})))
+              (let [{final-db :db recovery :recovery}
+                    (recover-concurrent-submissions!
+                      @peer-connection adopted-db)
+                    histories (mapv #(concurrent-history! final-db %)
+                                    concurrent-ids)
+                    committed-order (vec (sort-by :event-t histories))
+                    event-ts (mapv :event-t committed-order)
+                    final-canonical (canonical-state final-db)
+                    final-root (sql-log-root
+                                 jdbc-url user password database-id)
+                    final-id-set (set (map first (:rows final-canonical)))
+                    resubmitted-count
+                    (count (filter #(= :resubmitted (:action %)) recovery))]
+                (ensure! (= (set (conj concurrent-ids baseline-id))
+                            final-id-set)
+                         "Concurrent takeover final identity set differs"
+                         {:actual final-id-set})
+                (ensure! (and (= (count concurrent-ids) (count event-ts))
+                              (= (count event-ts) (count (distinct event-ts)))
+                              (every? #(< baseline-basis %) event-ts)
+                              (apply < event-ts))
+                         "Concurrent commits do not form one strict monotonic order"
+                         {:event-ts event-ts})
+                (ensure! (>= (d/basis-t final-db) (last event-ts))
+                         "Final Peer basis precedes a concurrent commit"
+                         {:event-ts event-ts
+                          :final-basis (d/basis-t final-db)})
+                (ensure! (and (integer? (:rev final-root))
+                              (> (:rev final-root) (:rev baseline-root))
+                              (not= final-root baseline-root))
+                         "Concurrent recovery did not advance the authoritative root"
+                         {:after-revision (:rev final-root)
+                          :before-revision (:rev baseline-root)})
+                (sorted-map
+                  :adopted-before-recovery-count (count adopted-ids)
+                  :adopted-before-recovery-ids adopted-ids
+                  :adopted-event-t (fact-t final-db (first concurrent-ids))
+                  :authoritative-writer-count 1
+                  :baseline-basis-t baseline-basis
+                  :baseline-canonical-sha256 baseline-sha
+                  :baseline-root-revision (:rev baseline-root)
+                  :baseline-root-sha256 baseline-root-sha
+                  :blocked-backend-pid (:pid writer)
+                  :candidate-boundary boundary
+                  :committed-order committed-order
+                  :concurrent-submission-count (count concurrent-ids)
+                  :database-id database-id
+                  :every-submission-outcome-accounted? true
+                  :final-basis-t (d/basis-t final-db)
+                  :final-canonical-sha256 (sha256 final-canonical)
+                  :final-root-revision (:rev final-root)
+                  :final-root-sha256 (sha256 final-root)
+                  :first-commit-t (first event-ts)
+                  :initial-outcomes initial-outcomes
+                  :last-commit-t (last event-ts)
+                  :no-duplicate-committed-effect true
+                  :no-lost-submission true
+                  :recovery recovery
+                  :resubmitted-count resubmitted-count
+                  :status :passed
+                  :strict-monotonic-committed-order true
+                  :sync-attempt-count (:attempt-count sync-result)
+                  :sync-timeout-count (:timeout-count sync-result)
+                  :sync-unavailable-count (:unavailable-count sync-result)
+                  :transactor-backend-exited? true))))))
+      (finally
+        (doseq [[_ ^Future pending] @transaction-futures]
+          (when-not (.isDone pending)
+            (.cancel pending true)))
+        (when (and @holder @holder-active?)
+          (try
+            (.rollback ^Connection @holder)
+            (catch Throwable _)))
+        (when @holder
+          (try
+            (.close ^Connection @holder)
+            (catch Throwable _)))
+        (release! @peer-connection)))))
+
 (defn- recover!
   [{:keys [expected-baseline-basis expected-baseline-sha expected-database-id
            expected-precrash-root-sha expected-source-protocol jdbc-url password
@@ -1312,6 +1578,65 @@
           :sql-log-root-revision (:rev root)
           :sql-log-root-sha256 (sha256 root)
           :status :passed))
+      (finally
+        (release! connection)))))
+
+(defn- ha-concurrent-audit!
+  [{:keys [expected-database-id expected-final-basis expected-final-sha
+           expected-source-protocol jdbc-url password uri user]}]
+  (let [boundary (audit-candidate-boundary! expected-source-protocol)
+        connection (connect! uri)]
+    (try
+      (let [db (d/db connection)
+            canonical (canonical-state db)
+            actual-sha (sha256 canonical)
+            actual-ids (set (map first (:rows canonical)))
+            histories (mapv #(concurrent-history! db %) concurrent-ids)
+            committed-order (vec (sort-by :event-t histories))
+            event-ts (mapv :event-t committed-order)
+            root (sql-log-root jdbc-url user password expected-database-id)]
+        (ensure! (= expected-database-id (str (.id ^Database db)))
+                 "Concurrent audit database identity differs"
+                 {:actual (str (.id ^Database db))
+                  :expected expected-database-id})
+        (ensure! (= expected-final-basis (d/basis-t db))
+                 "Concurrent audit basis differs"
+                 {:actual (d/basis-t db) :expected expected-final-basis})
+        (ensure! (= expected-final-sha actual-sha)
+                 "Concurrent audit canonical state differs"
+                 {:actual actual-sha :expected expected-final-sha})
+        (ensure! (= (set (conj concurrent-ids baseline-id)) actual-ids)
+                 "Concurrent audit identity set differs"
+                 {:actual actual-ids})
+        (ensure! (= :stage5-ack/baseline
+                    (:stage5-ack/kind
+                      (d/entity db [:stage5-ack/id baseline-id])))
+                 "Concurrent audit baseline differs"
+                 {})
+        (ensure! (and (= (count concurrent-ids) (count event-ts))
+                      (= (count event-ts) (count (distinct event-ts)))
+                      (apply < event-ts))
+                 "Concurrent audit order is not strict and unique"
+                 {:event-ts event-ts})
+        (ensure! (and (integer? (:rev root)) (not (neg? (:rev root))))
+                 "Concurrent audit PostgreSQL log root is invalid"
+                 {:root-revision (:rev root)})
+        (sorted-map
+          :candidate-boundary boundary
+          :canonical-sha256 actual-sha
+          :committed-order committed-order
+          :concurrent-submission-count (count concurrent-ids)
+          :database-id expected-database-id
+          :every-submission-present? true
+          :final-basis-t expected-final-basis
+          :final-canonical-sha256 actual-sha
+          :no-duplicate-committed-effect true
+          :no-lost-submission true
+          :sql-log-root :present
+          :sql-log-root-revision (:rev root)
+          :sql-log-root-sha256 (sha256 root)
+          :status :passed
+          :strict-monotonic-committed-order true))
       (finally
         (release! connection)))))
 
@@ -1464,6 +1789,11 @@
          :uri (require-uri! uri)
          :user user})
 
+      "ha-concurrent-window"
+      (assoc (parse-command (cons "ha-takeover-window" (rest args)))
+             :cut :ha-concurrent
+             :mode mode)
+
       "recover"
       (let [[_ uri jdbc-url user password source-protocol database-id
              baseline-sha baseline-basis precrash-root-sha & extra] args]
@@ -1512,6 +1842,10 @@
              :ha-takeover? true
              :mode mode)
 
+      "ha-concurrent-audit"
+      (assoc (parse-command (cons "audit" (rest args)))
+             :mode mode)
+
       "publication-audit"
       (let [[_ uri jdbc-url user password source-protocol database-id
              final-sha final-basis publication-t & extra] args]
@@ -1541,9 +1875,11 @@
     "crash-window" (crash-window! command)
     "publication-window" (crash-window! command)
     "ha-takeover-window" (crash-window! command)
+    "ha-concurrent-window" (ha-concurrent-window! command)
     "recover" (recover! command)
     "audit" (audit! command)
     "ha-takeover-audit" (audit! command)
+    "ha-concurrent-audit" (ha-concurrent-audit! command)
     "publication-audit" (publication-audit! command)))
 
 (defn- shutdown!
@@ -1568,6 +1904,8 @@
           "publication-window" publication-result-prefix
           "ha-takeover-window" ha-inflight-result-prefix
           "ha-takeover-audit" ha-inflight-audit-prefix
+          "ha-concurrent-window" ha-concurrent-result-prefix
+          "ha-concurrent-audit" ha-concurrent-audit-prefix
           "recover" recover-result-prefix
           "audit" audit-prefix
           "publication-audit" publication-audit-prefix)
