@@ -7,9 +7,45 @@ substituted for the Transactor's 117 same-named but byte-different namespace
 initializers.
 
 Licensed Peer and Transactor JARs remain outside this repository. Tools in this
-subtree may read exact, hash-checked originals as structural evidence. A later
-candidate runtime must exclude both original implementation JARs and record an
-explicit decision for every additional Datomic-owned dependency it retains.
+subtree may read exact, hash-checked originals as structural evidence. The
+current candidate runtime excludes both original implementation JARs, excludes
+the original Nano implementation, and records every retained dependency.
+
+## Current runnable boundary
+
+The recovery now contains all 247 Transactor Clojure sources, 46 recovered Java
+sources producing 52 exact classes, and the Peer/core2 support needed by the
+standalone service. The sealed structural candidate loads all 272 effective
+Transactor/core2 namespaces without original implementation fallback. Exact-AOT
+and dormant overlap differences remain useful diagnostics, but are not a
+universal promotion gate for the supported PostgreSQL system.
+
+The primary entry point is:
+
+```bash
+transactor/scripts/validate-postgresql-vertical-slice.sh --help
+```
+
+It reconstructs both candidate classpaths from current source, verifies their
+origins and seals, provisions a fresh disposable PostgreSQL catalog, and can run
+the complete seed/restart/index/transport/HA path or one focused boundary. The
+focused modes include storage CAS, transaction rejection/order, both sides of
+the durable publication/acknowledgement edge, in-flight and concurrent
+takeover, and asymmetric credential-scoped PostgreSQL partition/heal.
+
+The accepted partition/heal result is
+`/tmp/datomic-recovered-pair-ha-partition-v6`: all 126 evidence entries verify,
+B promotes while A is live with zero storage sessions, healed stale A loses its
+heartbeat CAS and self-fences, same/fresh Peers agree on one authoritative
+lineage, all owned sessions reach zero, and every port closes. This claim is
+deliberately bounded to credential-scoped PostgreSQL reachability; arbitrary
+packet loss/reordering and universal multi-node topology are not claimed. See
+`reports/postgresql-vertical-slice.md` for the complete evidence boundary.
+
+The sections below preserve the recovery chronology and rejected intermediate
+boundaries. Statements such as “blocked,” “not promoted,” or “remains open” in
+those checkpoint narratives describe that retained run unless the current
+boundary above or a linked current report repeats the limitation.
 
 The first reproducible boundary is generated with:
 
@@ -25,7 +61,7 @@ The runner uses the POM embedded in the Transactor JAR. The distribution-root
 See `reports/stage-0-boundary.md` for the frozen corpus, dependency, launch,
 and candidate/oracle boundaries.
 
-## Stage 1 source recovery
+## Recovery history — Stage 1 source recovery
 
 Bundled library namespaces are recovered from their exact, hash-bound source
 entries rather than being mislabeled as Datomic code:
@@ -238,13 +274,11 @@ bytecode-supported production-order load) with the original Peer, Transactor,
 core2, and unsanitized Nano implementations absent. Surfaces were explicitly
 not executed in this run.
 
-Stage 1 therefore remains incomplete at the exact-source normalized AOT and
-full bounded surface boundaries, not at structural namespace load. Separately,
-the repository-owned gate at
-`/tmp/datomic-recovered-pair-live-v3` now proves the recovered Transactor and
-recovered Peer through PostgreSQL boot, seed, durable commit, two fresh-process
-restart/adoption checks, and a post-restart augment transaction. It also runs
-the sealed focused recovery regressions. This runtime result does not close
-persistent-index publication, injected-failure cleanup, transport interruption,
-or HA/fencing. See `reports/postgresql-vertical-slice.md` for its exact evidence
-and limits.
+At that structural checkpoint, exact-source normalized AOT and the full bounded
+surface were still incomplete; namespace loading itself was not the blocker.
+Subsequent focused surface work and recovered-pair execution supersede the old
+promotion conclusion. `/tmp/datomic-recovered-pair-live-v3` remains the early
+boot/seed/restart milestone; later retained gates close persistent-index
+publication, injected startup cleanup, transport interruption,
+acknowledgement, concurrent takeover, and the supported HA/fencing boundary.
+See `reports/postgresql-vertical-slice.md` for the current evidence and limits.

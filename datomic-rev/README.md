@@ -1,10 +1,11 @@
 # Datomic Pro 1.0.7277 reverse engineering
 
-This repository is a bytecode-bound recovery of the local Datomic Pro
-`peer-1.0.7277.jar`. The structural recovery is complete for that exact
-artifact: every class is classified, every Clojure AOT namespace has recovered
-source, all handwritten Java sources compile, and the recovered source tree can
-be loaded without the original peer/core2 AOT classes.
+This repository is a bytecode-bound educational recovery of the local Datomic
+Pro 1.0.7277 Peer and Transactor. The root tree recovers
+`peer-1.0.7277.jar`; `transactor/` recovers
+`datomic-transactor-pro-1.0.7277.jar`. Their source-owned runtime paths compose
+through PostgreSQL without original Peer, core2, Transactor, or Nano
+implementation fallback.
 
 It is a research artifact, not a clean-room implementation or a redistributable
 replacement for Datomic. Comments, original formatting, some macro surface
@@ -12,21 +13,21 @@ syntax, and names erased by AOT compilation cannot be recovered.
 
 ## Architectural boundary
 
-This repository recovers the **Peer**, not the complete Datomic system. The
-Peer is the application-linked query/client runtime. The separately launched
-**Transactor** owns the serialized write path and coordinates Datomic's log and
-indexes. **PostgreSQL** is the durable storage service beneath that Transactor;
-it does not replace it. Stage 2 and Stage 3 use the licensed original
-Transactor only as an isolated external interoperability oracle, never as a
-candidate classpath dependency.
+The **Peer** is the application-linked query/client runtime. The separately
+launched recovered **Transactor** owns the serialized write path and
+coordinates Datomic's log and indexes. **PostgreSQL** is the durable authority
+beneath that Transactor; it does not replace it. The primary recovered-pair
+gate proves boot, transactions, log publication, persistent indexes, restart,
+transport recovery, acknowledgement fault cuts, and bounded HA takeover using
+only recovered implementation roots plus ordinary distribution dependencies
+and a content-addressed sanitized Nano derivative.
 
-For studying Datomic's construction, this Peer recovery is therefore a
-foundation rather than the finish line. Transaction validation, tempid/upsert
-resolution, write serialization, log publication, index production, storage
-coordination, and HA behavior remain Transactor-side subjects for a separate
-educational recovery target. Nothing in this repository claims that the
-licensed Transactor has been recovered or that the educational target is
-complete.
+Legacy Peer Stage 2/3 gates still use the licensed original Transactor as an
+isolated external interoperability oracle. They are historical evidence, not
+the current candidate. Licensed originals remain outside candidate classpaths
+and are admitted only by explicit hash-bound structural/oracle boundaries.
+The result is a study-quality reconstruction, not a redistributable Datomic
+replacement or a claim of universal equivalence for every dormant facility.
 
 ## Closure status
 
@@ -55,6 +56,11 @@ complete.
 | PostgreSQL backup/recovery matrix | PASS (full, incremental, corruption, interruption, retry) |
 | Bounded concurrency/transport matrix | PASS (cancellation, lifecycle, 8×8 CAS, verified `SIGSTOP`/`SIGCONT`) |
 | Conservative source-navigation pass | 142 namespaces / 2,906 definitions indexed |
+| Recovered Transactor Clojure sources | 247 / 247 |
+| Recovered Transactor Java | 46 sources -> 52 classes, exact ABI/normalized code |
+| Recovered Transactor/core2 effective namespace loads | 272 / 272 |
+| Recovered Peer + Transactor PostgreSQL core | PASS (transaction, log, index, restart, transport, acknowledgement) |
+| Bounded HA authority | PASS (both concurrent descriptor-CAS schedules and credential-scoped partition/heal) |
 
 The latest hardened adversarial final reruns used the unchanged artifact above.
 Stage 1 recorded 1,230 hashed evidence files with manifest SHA-256
@@ -109,6 +115,9 @@ subsystem map, generated-source cautions, and conservative navigation pass.
   focused recovered-behavior regressions, original-versus-recovered API parity,
   disposable PostgreSQL backup/recovery validation, and bounded concurrency and
   transport-fault validation.
+- `transactor/` — all recovered Transactor Clojure/Java sources, isolated
+  structural construction, the recovered-pair PostgreSQL runner, focused
+  probes, and reports that bind runtime claims to recovered source.
 
 ## Reproduce the final Clojure recovery
 
@@ -272,9 +281,9 @@ The Nano output root must be absent before the sanitizer runs. Both gates
 replace the licensed Nano entry with that exact content-addressed derivative
 and fail closed if the original, a symlink, or altered bytes enter the
 candidate classpath.
-These gates launch the licensed Transactor only as an isolated external
-fixture. They validate the recovered Peer against PostgreSQL-backed behavior;
-they do not produce or validate a recovered Transactor.
+These two legacy gates launch the licensed Transactor only as an isolated
+external fixture. They remain useful Peer-oracle checks, but they are not the
+recovered-pair acceptance path.
 
 The recovered-Peer/recovered-Transactor gate is separate:
 
@@ -284,7 +293,11 @@ transactor/scripts/validate-postgresql-vertical-slice.sh --help
 
 It rebuilds and verifies current candidate inputs, removes licensed JKS
 resources from the Peer runtime derivative, supports a no-service preflight,
-and executes seed/restart/augment/restart against disposable PostgreSQL. See
+and executes focused or complete PostgreSQL paths for the recovered Peer and
+Transactor. Its focused modes cover storage CAS, transaction ordering,
+pre-/post-publication acknowledgement faults, concurrent takeover schedules,
+and credential-scoped asymmetric partition/heal; `--help` is the authoritative
+option list. See
 [`transactor/reports/postgresql-vertical-slice.md`](transactor/reports/postgresql-vertical-slice.md)
 for the retained proof and current completion boundary.
 

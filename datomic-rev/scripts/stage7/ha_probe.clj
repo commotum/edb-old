@@ -2,9 +2,9 @@
   "One-connection active/standby takeover probe for the recovered Peer.
 
   Connect while Transactor A is active, emit STAGE7-HA-READY, and wait for
-  the exact line TAKEOVER.  The controller must keep A stopped until this
-  process has synchronized through Transactor B and durably committed the
-  unique sentinel."
+  the exact line TAKEOVER.  The controller must withhold that command until B
+  is authoritative and A can no longer serve writes; this process then
+  synchronizes through B and durably commits the unique sentinel."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [datomic.api :as d])

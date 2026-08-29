@@ -45,14 +45,96 @@ the primary PostgreSQL runtime path:
     PostgreSQL durably advances the authoritative root, the owned Transactor is
     killed before result delivery, and the same Peer plus a fresh Peer recover
     exactly one committed CAS/sentinel effect with no duplicate execution; and
-22. one in-flight transaction during active/standby takeover in which startup
-    replay adopts the transaction exactly once, the original Future reports
-    unavailable, the same Peer commits through the promoted standby, a fresh
-    Peer and SQL root agree, and the stale primary self-fences.
+22. one in-flight transaction during active/standby takeover in which A's
+    descriptor CAS makes its prepared transaction authoritative before B
+    claims and catches up that referenced lineage; the original Future reports
+    unavailable, the same Peer commits through B, a fresh Peer and SQL root
+    agree, and stale A self-fences;
+23. two concurrent accepted-submission takeover schedules: A wins descriptor
+    publication and B catches up all four writes, or B first claims the
+    unchanged baseline and the Peer resubmits exactly the four absent logical
+    intents; both finish in one strict order with exact-once effects;
+24. one credential-scoped asymmetric PostgreSQL partition/heal in which A stays
+    live and transport-open with zero storage sessions, B wins coordination,
+    healed stale A conflicts and self-fences, and same/fresh Peers agree on one
+    authoritative lineage; and
+25. secret-safe evidence generation that retains a reason-specific negative
+    login result outside the raw diagnostic, generically redacts node passwords
+    from manifest-eligible text, and fails closed on a final literal scan.
 
-This is a real vertical-slice milestone, not Goal 2 completion. The broader
-licensed-oracle comparison and remaining HA concurrency, partition, and
-split-brain boundaries remain open.
+These results close the authoritative HA spine at the supported
+credential-scoped PostgreSQL boundary. They do not claim universal packet-loss
+or reordering behavior, arbitrary multi-node topology, transparent survival of
+the original asynchronous Futures, or exhaustive equivalence of dormant
+overlap code. Licensed-oracle comparison remains optional corroboration rather
+than a recovered-pair completion prerequisite.
+
+## Authority and HA source map
+
+The recovered source makes authority a pair of compare-and-set decisions, not
+a process label:
+
+1. **Coordination authority.** `pod-coord` is the active endpoint reference;
+   `pod-standby` records observational standby state
+   ([`datomic.coordination`](../src-clj/datomic/coordination.clj#L153)). A
+   standby samples `pod-coord`, records unchanged timestamps, and after two
+   misses attempts the next expected-revision heartbeat
+   ([`datomic.lifecycle-ext`](../src-clj/datomic/lifecycle_ext.clj#L92)). Only a
+   successful CAS produces a beat and invokes `serve`
+   ([`datomic.lifecycle`](../src-clj/datomic/lifecycle.clj#L32)); `serve` marks
+   the node active and constructs its transaction master
+   ([`datomic.transactor`](../src-clj/datomic/transactor.clj#L92)). There can be
+   a bounded promotion/readiness gap; this is not an atomic zero-downtime
+   endpoint switch.
+2. **Per-database log authority.** Database-master startup finds and claims the
+   log before accepting writes
+   ([`datomic.update`](../src-clj/datomic/update.clj#L2778)).
+   [`read-tail-descriptor`](../src-clj/datomic/log.clj#L512) reads the one tail
+   descriptor, and [`find-log`](../src-clj/datomic/log.clj#L1373) reconstructs
+   visible history only from that descriptor and its referenced buffer.
+   [`LogImpl.append`](../src-clj/datomic/log.clj#L1183) prepares immutable tail
+   bytes, but they become authoritative only if `write-tail-descriptor` accepts
+   the expected revision/etag. On an ambiguous storage write, the cluster
+   adapter rereads the authoritative pod and accepts only the exact attempted
+   revision/tail; otherwise it reports conflict
+   ([`datomic.kv-cluster`](../src-clj/datomic/kv_cluster.clj#L409)). An
+   unreferenced append can therefore remain physically stored without becoming
+   Peer-visible history.
+3. **Fencing and Peer recovery.** An active repeats its coordination CAS. A
+   timeout or stale revision yields no beat; `master-loop` raises
+   `HeartbeatFailed` and fails the process
+   ([`datomic.lifecycle`](../src-clj/datomic/lifecycle.clj#L106)). The shared
+   critical-failure path runs registered shutdown handlers and exits after its
+   bounded delay ([`datomic.process`](../src-clj/datomic/process.clj#L85)). The
+   Peer fails pending transaction promises on connection failure, rereads
+   coordination, and reconnects when the endpoint changes
+   ([`datomic.peer`](../../src-clj/datomic/peer.clj#L923)). This supports
+   logical-intent recovery, not transparent survival of original Futures.
+
+```text
+standby observes A@revision r
+  -> two unchanged heartbeat timestamps
+  -> B attempts coordination CAS r -> r+1
+     -> success: publish B endpoint -> start serving -> heartbeat as active
+     -> conflict/timeout: no authority
+
+database append under the serving node
+  -> prepare immutable candidate
+  -> descriptor CAS
+     -> success: candidate joins the authoritative lineage
+     -> conflict: candidate is unreachable and must not be called adopted
+
+resumed/healed stale A
+  -> heartbeat CAS at its stale revision conflicts
+  -> shared critical failure -> shutdown handlers -> self-fence
+```
+
+The in-flight and concurrent gates vary which log-descriptor CAS wins; the
+credential-partition gate varies which coordination CAS wins. Across all of
+them, Peer-visible truth is the descriptor-referenced lineage, and serving
+authority is the latest successful coordination CAS. “One authoritative
+lineage” means one descriptor order, not one process identity for the whole
+run.
 
 ## Repository-owned executing gate
 
@@ -87,9 +169,9 @@ remains. Only coordination revisions and counts are retained; the SQL heartbeat
 map is not copied into evidence.
 
 This closes one narrow active/standby takeover and stale-primary self-fence
-slice. The later v8 cut below also closes one in-flight transaction case. The
-concurrent-submission, partition-timing, and writable split-brain cases remain,
-so HA is still in progress.
+slice. The later in-flight, concurrent-submission, and credential-partition
+cuts below close the supported authority boundary; arbitrary network/topology
+matrices remain outside that bounded claim.
 
 The dedicated startup-failure run passed at
 `/tmp/datomic-recovered-pair-startup-failure-v1` using the current repository
@@ -579,7 +661,7 @@ updated 247-entry source-manifest file has SHA-256
 `d1dce5d974827ccc8b86714e7a3569c34a61ed0e034a69ea4e23b9a1e56ca83f`
 and every entry verifies.
 
-## Honest boundary and next probe
+## Honest boundary
 
 - The HA gate proves three bounded graceful `SIGINT` shutdowns plus one
   conflict-driven stale-active self-fence, exact PID/argv/start-time ownership,
@@ -596,9 +678,10 @@ and every entry verifies.
   rejection while preserving the winner. The focused transaction gate closes
   stale-CAS/uniqueness rejection and concurrent accepted ordering. The paired
   fault-injected acknowledgement cuts close both sides of durable publication
-  for the recovered pair. Delayed/partitioned writers, full licensed-oracle
-  transaction equivalence, and the bounded no-writable-split-brain matrix
-  remain open.
+  for the recovered pair. The two concurrent takeover schedules and the
+  credential-scoped asymmetric partition/heal close the supported HA authority
+  claim. Full licensed-oracle equivalence, arbitrary packet schedules and
+  topologies, and other storage backends remain unproved and are not implied.
 
 The Peer PostgreSQL Stage 2 and Stage 3 harnesses require an explicit,
 content-addressed sanitized Nano input, preserve the 535-entry dependency
@@ -630,11 +713,13 @@ startup-failure row. The exact PostgreSQL index-ref and log-root rejection row
 is also closed. Both recovered-pair sides of the durable
 commit/acknowledgement edge are now closed. The corrected focused in-flight
 takeover run passes at `/tmp/datomic-recovered-pair-ha-inflight-v8`. While A's
-authoritative-root update was blocked, the Peer Future remained incomplete and
-PostgreSQL contained one immutable orphan tail. After B became coordination
-owner, A's exact blocked writer was terminated and the holder released. B's
-startup `log/catchup` replayed 1,832 bytes and adopted that transaction exactly
-once at `t=1003`; the original Future failed with
+authoritative descriptor update was blocked, the Peer Future remained
+incomplete and PostgreSQL contained one immutable append candidate that was
+not yet referenced by the authoritative tail descriptor. After the lock was
+released, A's descriptor CAS won and published that prepared transaction at
+`t=1003`. B then claimed and caught up the descriptor-referenced lineage,
+replaying 1,832 bytes; it did not discover or adopt an unreferenced orphan.
+The original Future failed with
 `:cognitect.anomalies/unavailable`, so no success was reported across the
 ambiguous acknowledgement boundary. The same Peer reconnected through B after
 four unavailable attempts and committed one new follow-up at `t=1005`.
@@ -658,10 +743,82 @@ Runner and probe SHA-256 values are respectively
 `f71f3aa719fc760b68805bbbcf5e9b65d433e11c4ec2adba9fce2a0722ca7d15`
 and `0ffba8b6d3cf480a799dde3b48d8ffbe8aefbd02eca4dbce2a772d2c23b3d172`.
 
+### Concurrent takeover schedules
+
+The four-accepted-write gate passes both descriptor-CAS schedules. In
+`/tmp/datomic-recovered-pair-ha-concurrent-v6`, stale A publishes all four
+logical writes before fencing; B catches up the referenced lineage, so the
+recovery ledger records four adopted effects and zero resubmissions. Its
+101-entry manifest verifies at file SHA-256
+`773dd1f4c7e6c78f1a55d4f2742f6b4852008c8f2236da2ce2aa31ea27948d47`.
+
+In deterministic
+`/tmp/datomic-recovered-pair-ha-concurrent-v7`, B first claims and catches up
+the unchanged basis-1001 descriptor while A remains frozen. A's staged append
+never becomes authoritative; after stale A conflicts and fences, the Peer
+resubmits exactly the four absent logical intents. The ledger records zero
+adopted and four resubmitted effects. Its 102-entry manifest verifies at file
+SHA-256
+`e3866a7611b8ac8a6132f8be12d0a5cc4f4391226911684b98bb6d432f4e4798`.
+
+Both schedules end with commits at `t=1003/1005/1007/1009`, one effect per
+logical intent, unavailable original Futures, exact same-Peer recovery,
+fresh-Peer agreement at basis 1009, stale-A self-fencing, and clean shutdown.
+The claim is logical-intent accounting and one authoritative descriptor order;
+it is not transparent Future survival or automatic adoption of unreachable
+immutable rows.
+
+### Credential-scoped PostgreSQL partition and heal
+
+The accepted asymmetric gate passes at
+`/tmp/datomic-recovered-pair-ha-partition-v6`. The active Transactor, standby,
+and Peer use distinct PostgreSQL identities. Immediately after a synchronized A
+heartbeat at revision 6, the runner disables only A's login and terminates only
+A-owned catalog sessions. The cut takes 87 ms. A remains live, non-stopped, and
+transport-open with zero SQL sessions; the Peer retains three and B retains
+four. A's negative login exits 2 for the required
+`postgresql-role-login-disabled` reason, while Peer and B login probes remain
+positive. B then wins coordination at revision 7.
+
+The runner heals A's login immediately after B's coordination CAS. Stale A's
+next heartbeat loses with exact `:cause :conflict`; its process failure path
+self-fences with status 255. The continuing Peer writes exactly one sentinel
+through B and advances basis 1001 to 1066. A fresh Peer independently sees
+basis 1066, the same database id, 64-row logical view, and the same semantic
+hashes. The sole authoritative log-root row advances from revision 3 (SHA-256
+`f86d316919cbd1db8aa8c3fc21d736b1e949bd3b2c3d43693560c75e917a19ff`)
+to revision 5 (SHA-256
+`ebb9f0b0302fe5f47b0e79e5f0995fc2f4b54858b00812793fb6dcfb3d235083`).
+
+All active/Peer/standby owned sessions finish at `0/0/0`, PostgreSQL reports
+`shut down`, and the three dedicated ports are closed. The raw negative-login
+stderr is not retained; a reason-specific result is retained instead. The
+evidence generator applies generic node-password redaction to every
+manifest-eligible text file and then requires an empty literal-secret scan.
+The 126-entry manifest verifies in full at file SHA-256
+`4e0a4ca8c8c58863712f8252dd66e320756dd70a02a38288f320ecf924299272`.
+The runner and HA-probe SHA-256 values are
+`3ea5147924ce78a067e9254c4723ba9b97ac55521cdb12f2ccf4d31f1577680c`
+and `6bcdad60cb30aaa14c793273819cff2d190bfbfe087b01e67dc075bea4fc9867`.
+The result, handoff, fresh-snapshot, and redaction-result SHA-256 values are
+respectively
+`cb3bff15f5c069f8b098dbba5f99a6ca99fb8ee99cbfbbcd843d3770a3f606c0`,
+`4215c725f0142bd49d2749f202a2c0fff91f0292f1c48790134e74152a009ffd`,
+`648c5ce9b479d74df6f365a2eb0444d35330031dd9990730cd56b11c56fd9787`,
+and `19f7042b1ef1fd613e1e9abaef701e2302ceef368d0cfaac154c5e3de70111fb`.
+
+The behaviorally green v4 predecessor remains failed and unmodified: its
+`run-status.properties` records `status=failed` because the evidence-secret
+check rejected retained password text. v6 alone is the accepted gate. Its
+scope is credential-scoped PostgreSQL reachability loss with exact-session
+termination and later heal. Universal packet loss/reordering, arbitrary
+multi-host topology/schedules, other storage backends, and dormant overlap
+branches remain `NOT_RUN`.
+
 The bounded surface run
 separately proves 272/272 effective loads and 247/247 callable/class shapes;
 the protocol family passes a focused fresh recovery. Strict metadata and
 exact-AOT differences remain recorded diagnostics rather than global
-prerequisites. The 104 incomplete Stage 2 overlaps and remaining HA failure
-boundaries remain required; none
+prerequisites. The 104 non-resolved overlap rows remain an advisory residual
+ledger, not a prerequisite for the supported PostgreSQL/HA boundary; none
 justify another unconstrained source-residual pass.

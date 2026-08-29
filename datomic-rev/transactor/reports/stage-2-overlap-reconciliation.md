@@ -436,20 +436,55 @@ ABI is exact, but administrative requests, temporary queue/stream helpers, and
 RPC-server branches are not yet bounded. The static pass is partial evidence,
 not a promotion for those two rows.
 
-## Next boundary
+## Stage 2 closure and residual ledger
 
 The corrected in-flight transaction-during-takeover v8 passes at
 `/tmp/datomic-recovered-pair-ha-inflight-v8`. Its 101-entry evidence manifest
 verifies at file SHA-256
 `5243885f1c0c85dbe2967171856258ad7f7665fd38391bd72444b4c72c1a2887`.
-It proves startup replay of the adopted transaction at t=1003, an unavailable
-original Future, exactly one committed effect, a new same-Peer write at t=1005,
-fresh-Peer/canonical/SQL-root equality, stale-primary fencing, and complete
-cleanup. This strengthens the live transaction/transport/coordination evidence,
-but it does not cover the remaining connector administrative, temporary
-queue/stream, RPC-server, or other dormant branches. No overlap row advances;
-the ledger remains 13 resolved, nine bounded partial, and 95 open.
+While its descriptor update was blocked, A's immutable append was merely an
+unreferenced candidate. A's descriptor CAS later won and published `t=1003`;
+B claimed and caught up that referenced lineage rather than adopting an
+orphan. The original Future is unavailable, the effect exists exactly once, a
+new same-Peer write commits at `t=1005`, a fresh Peer and SQL root agree, stale
+A fences, and cleanup completes.
 
-At the next continuation, use concurrent accepted submissions during takeover
-as the single executable boundary. Bank it or record its localized blocker
-before any classifier, overlap cohort, lifecycle work, or further HA row.
+Concurrent accepted submissions now pass both relevant descriptor-CAS
+schedules. `/tmp/datomic-recovered-pair-ha-concurrent-v6` records A publishing
+all four logical writes before fencing and B catching up the referenced tail
+(four adopted, zero resubmitted). Its manifest-file SHA-256 is
+`773dd1f4c7e6c78f1a55d4f2742f6b4852008c8f2236da2ce2aa31ea27948d47`.
+In `/tmp/datomic-recovered-pair-ha-concurrent-v7`, B first claims the unchanged
+baseline while A is frozen; A's append remains unreachable and the Peer
+resubmits exactly the four absent intents (zero adopted, four resubmitted). Its
+manifest-file SHA-256 is
+`e3866a7611b8ac8a6132f8be12d0a5cc4f4391226911684b98bb6d432f4e4798`.
+Both finish at one exact order through basis 1009 with unavailable original
+Futures, stale-A fencing, fresh-Peer agreement, and clean shutdown.
+
+The accepted credential-scoped asymmetric partition/heal gate passes at
+`/tmp/datomic-recovered-pair-ha-partition-v6`; all 126 manifest entries verify
+at file SHA-256
+`4e0a4ca8c8c58863712f8252dd66e320756dd70a02a38288f320ecf924299272`.
+After a synchronized A heartbeat at revision 6, an 87 ms credential/session cut
+leaves A live and transport-open with zero SQL sessions while Peer and B retain
+reachability. B wins coordination at revision 7. Healing A causes its stale
+heartbeat CAS to conflict and its process to self-fence. The continuing and
+fresh Peers agree at basis 1066, the authoritative root advances revision 3 to
+5, all three owned-role session counts finish at zero, PostgreSQL shuts down,
+and all ports close. Raw negative-login stderr is not evidence; a
+reason-specific result, generic node-password redaction, and an empty final
+secret scan are. The v4 predecessor remains failed and unmodified.
+
+These results close Goal 4 Stage 2 at the supported PostgreSQL authority
+boundary. No additional scheduler/topology gate is justified: retained
+frozen-active and concurrent schedules already pressure dual-writable
+coordination, while arbitrary packet loss/reordering and multi-host topology
+exceed the credential-scoped claim. Connector administration, temporary
+queue/stream helpers, RPC-server branches, other dormant paths, and the 95 open
+overlap rows remain classified residuals rather than automatic implementation
+obligations. No overlap classification changes here; the ledger remains 13
+resolved, nine bounded partial, and 95 open.
+
+The next outcome-bearing boundary is the interleaved operational/architectural
+configuration, startup, and readiness slice, not another overlap classifier.

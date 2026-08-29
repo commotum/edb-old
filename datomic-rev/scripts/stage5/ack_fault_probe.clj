@@ -191,6 +191,7 @@
       :anomaly-categories
       (vec (keep #(some-> % ex-data :cognitect.anomalies/category) causes))
       :cause-classes (mapv #(.getName (class %)) causes)
+      :cause-messages (mapv #(.getMessage ^Throwable %) causes)
       :db-errors (vec (keep #(some-> % ex-data :db/error) causes))
       :exception-class (.getName (class throwable))
       :probe-errors (vec (keep #(some-> % ex-data ::error) causes)))))
@@ -1341,13 +1342,16 @@
                   (mapv (fn [[id pending]]
                           (concurrent-future-outcome! id pending))
                         @transaction-futures)
+                  initial-returned-count
+                  (count (filter #(= :returned (:state %)) initial-outcomes))
+                  initial-unavailable-count
+                  (count (filter #(= :failed-unavailable (:state %))
+                                 initial-outcomes))
                   sync-result (sync-after-restart! @peer-connection)
                   adopted-db (:db sync-result)
+                  adopted-basis (d/basis-t adopted-db)
                   adopted-ids
                   (filterv #(entity-present? adopted-db %) concurrent-ids)]
-              (ensure! (entity-present? adopted-db (first concurrent-ids))
-                       "Promoted standby did not adopt the first immutable tail"
-                       {:adopted-ids adopted-ids})
               (doseq [{:keys [db-after-basis id state] :as outcome}
                       initial-outcomes]
                 (ensure! (#{:returned :failed-unavailable} state)
@@ -1392,10 +1396,10 @@
                          {:after-revision (:rev final-root)
                           :before-revision (:rev baseline-root)})
                 (sorted-map
+                  :adopted-basis-t adopted-basis
                   :adopted-before-recovery-count (count adopted-ids)
                   :adopted-before-recovery-ids adopted-ids
-                  :adopted-event-t (fact-t final-db (first concurrent-ids))
-                  :authoritative-writer-count 1
+                  :authoritative-log-serialized? true
                   :baseline-basis-t baseline-basis
                   :baseline-canonical-sha256 baseline-sha
                   :baseline-root-revision (:rev baseline-root)
@@ -1412,9 +1416,11 @@
                   :final-root-sha256 (sha256 final-root)
                   :first-commit-t (first event-ts)
                   :initial-outcomes initial-outcomes
+                  :initial-returned-count initial-returned-count
+                  :initial-unavailable-count initial-unavailable-count
                   :last-commit-t (last event-ts)
                   :no-duplicate-committed-effect true
-                  :no-lost-submission true
+                  :no-lost-logical-submission true
                   :recovery recovery
                   :resubmitted-count resubmitted-count
                   :status :passed
@@ -1631,7 +1637,7 @@
           :final-basis-t expected-final-basis
           :final-canonical-sha256 actual-sha
           :no-duplicate-committed-effect true
-          :no-lost-submission true
+          :no-lost-logical-submission true
           :sql-log-root :present
           :sql-log-root-revision (:rev root)
           :sql-log-root-sha256 (sha256 root)

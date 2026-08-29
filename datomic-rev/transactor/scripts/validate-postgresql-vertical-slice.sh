@@ -112,9 +112,16 @@ Runtime and evidence:
   --transaction-ha-concurrent-only
                          Hold the first of four accepted asynchronous writes at
                          PostgreSQL publication, promote the recovered standby,
-                         then prove every outcome is accounted, all four logical
-                         writes commit exactly once in one monotonic order, and
-                         a fresh Peer observes the same state.
+                         let that standby claim the unchanged baseline log while
+                         the stale active remains frozen, then prove every outcome
+                         is accounted, all four logical writes commit exactly once
+                         in one monotonic order, and a fresh Peer sees that state.
+  --ha-storage-partition-only
+                         Give active A a dedicated PostgreSQL login, remove only
+                         that login's storage reachability, prove B promotes
+                         while A stays live but storage-incapable, heal the login,
+                         then require stale A to conflict and self-fence before
+                         same-Peer and fresh-Peer recovery through B.
   --with-ha               After transport recovery, run one bounded recovered
                           active/standby takeover and self-fencing cycle.
   --standby-port PORT     Dedicated standby transport port (default: 54340).
@@ -157,9 +164,16 @@ Transaction-ha-inflight-only order:
 
 Transaction-ha-concurrent-only order:
   active + four in-flight Peer writes -> block first authoritative publication ->
-  standby promotion -> abort exact writer -> stale-active self-fence -> account
-  all Futures -> idempotent recovery through promoted standby -> fresh audit ->
-  shutdown.
+  standby promotion -> abort exact writer -> standby baseline claim/catchup ->
+  resume and self-fence stale active -> account all Futures -> idempotent recovery
+  through promoted standby -> fresh audit -> shutdown.
+
+HA-storage-partition-only order:
+  active A and standby B on distinct SQL logins + seeded Peer on the owner
+  login -> revoke A login and terminate only A's SQL sessions -> prove B's
+  coordination CAS wins while A's endpoint remains live but storage-incapable ->
+  restore A login -> stale heartbeat CAS conflict/self-fence -> same-Peer
+  sentinel -> fresh audit -> shutdown.
 
 Main executing order:
   seed -> graceful stop -> restart -> equal snapshot -> augment -> graceful ->
@@ -320,6 +334,8 @@ transport_peer_ttl_msec=10000
 transport_tx_timeout_msec=10000
 ha_timeout=180
 ha_watchdog_seconds=150
+ha_partition_active_heartbeat_msec=8000
+ha_partition_standby_heartbeat_msec=5000
 startup_failure_timeout=60
 startup_failure_only=false
 storage_cas_only=false
@@ -328,6 +344,7 @@ transaction_ack_fault_only=false
 transaction_postpublication_fault_only=false
 transaction_ha_inflight_only=false
 transaction_ha_concurrent_only=false
+ha_storage_partition_only=false
 with_ha=false
 confirmation=${RECOVERED_PAIR_CONFIRM_DISPOSABLE:-}
 dry_run=false
@@ -368,6 +385,8 @@ while (($#)); do
       transaction_ha_inflight_only=true; with_ha=true; shift ;;
     --transaction-ha-concurrent-only)
       transaction_ha_concurrent_only=true; with_ha=true; shift ;;
+    --ha-storage-partition-only)
+      ha_storage_partition_only=true; with_ha=true; shift ;;
     --with-ha) with_ha=true; shift ;;
     --standby-port) standby_port=${2:?missing value for --standby-port}; shift 2 ;;
     --startup-timeout) startup_timeout=${2:?missing value for --startup-timeout}; shift 2 ;;
@@ -427,15 +446,23 @@ require_positive_integer probe-timeout "$probe_timeout"
 for focused_mode in startup_failure_only storage_cas_only \
                     transaction_boundaries_only transaction_ack_fault_only \
                     transaction_postpublication_fault_only \
-                    transaction_ha_concurrent_only; do
+                    transaction_ha_concurrent_only ha_storage_partition_only; do
   [[ "$transaction_ha_inflight_only" != true || "${!focused_mode}" != true ]] ||
     die "--transaction-ha-inflight-only and ${focused_mode//_/-} are mutually exclusive"
 done
 for focused_mode in startup_failure_only storage_cas_only \
                     transaction_boundaries_only transaction_ack_fault_only \
-                    transaction_postpublication_fault_only; do
+                    transaction_postpublication_fault_only \
+                    ha_storage_partition_only; do
   [[ "$transaction_ha_concurrent_only" != true || "${!focused_mode}" != true ]] ||
     die "--transaction-ha-concurrent-only and ${focused_mode//_/-} are mutually exclusive"
+done
+for focused_mode in startup_failure_only storage_cas_only \
+                    transaction_boundaries_only transaction_ack_fault_only \
+                    transaction_postpublication_fault_only \
+                    transaction_ha_inflight_only transaction_ha_concurrent_only; do
+  [[ "$ha_storage_partition_only" != true || "${!focused_mode}" != true ]] ||
+    die "--ha-storage-partition-only and ${focused_mode//_/-} are mutually exclusive"
 done
 [[ "$pg_host" == 127.0.0.1 ]] || die "PostgreSQL must bind only to 127.0.0.1"
 require_port pg-port "$pg_port"
@@ -450,8 +477,26 @@ require_identifier pg-superuser "$pg_superuser"
 require_identifier pg-user "$pg_user"
 [[ "$pg_superuser" != "$pg_user" ]] || die "PostgreSQL roles must differ"
 [[ "$pg_password" =~ ^[A-Za-z0-9_.-]+$ ]] || die "pg-password contains unsafe characters"
+partition_active_pg_user="${pg_user}_active"
+partition_standby_pg_user="${pg_user}_standby"
+partition_active_pg_password="${pg_password}.pw-active"
+partition_standby_pg_password="${pg_password}.pw-standby"
+if [[ "$ha_storage_partition_only" == true ]]; then
+  require_identifier partition-active-pg-user "$partition_active_pg_user"
+  require_identifier partition-standby-pg-user "$partition_standby_pg_user"
+  ((${#partition_active_pg_user} <= 63 &&
+    ${#partition_standby_pg_user} <= 63)) ||
+    die "derived partition PostgreSQL role is too long"
+  [[ "$partition_active_pg_user" != "$pg_user" &&
+     "$partition_active_pg_user" != "$pg_superuser" &&
+     "$partition_standby_pg_user" != "$pg_user" &&
+     "$partition_standby_pg_user" != "$pg_superuser" &&
+     "$partition_active_pg_user" != "$partition_standby_pg_user" ]] ||
+    die "derived partition PostgreSQL roles are not distinct"
+fi
 require_identifier catalog "$catalog"
-[[ "$catalog" == datomic_* ]] || die "catalog must be visibly Datomic-specific: $catalog"
+[[ "$catalog" == datomic_* ]] ||
+  die "catalog must be visibly Datomic-specific: $catalog"
 require_database_name "$database_name"
 
 [[ -n "$datomic_home" ]] || die "provide --datomic-home"
@@ -483,14 +528,20 @@ for input_spec in \
   esac
 done
 
-case "$peer_artifact" in "$datomic_home"/*) die "recovered Peer artifact may not live in datomic-home" ;; esac
-case "$sanitized_nano" in "$datomic_home"/*) die "sanitized Nano may not live in datomic-home" ;; esac
+case "$peer_artifact" in "$datomic_home"/*)
+  die "recovered Peer artifact may not live in datomic-home" ;;
+esac
+case "$sanitized_nano" in "$datomic_home"/*)
+  die "sanitized Nano may not live in datomic-home" ;;
+esac
 [[ "$(sha256_file "$sanitized_nano")" == "$expected_sanitized_nano_sha" ]] ||
   die "sanitized Nano SHA-256 mismatch"
-[[ "$(stat -c '%s' -- "$sanitized_nano")" == "$expected_sanitized_nano_bytes" ]] ||
+[[ "$(stat -c '%s' -- "$sanitized_nano")" == \
+   "$expected_sanitized_nano_bytes" ]] ||
   die "sanitized Nano byte-size mismatch"
 unzip -tqq "$sanitized_nano" || die "sanitized Nano is not a valid JAR"
-[[ -z "$(unzip -Z1 "$sanitized_nano" | grep -E '\.(jks|p12|pfx|keystore)$' || true)" ]] ||
+[[ -z "$(unzip -Z1 "$sanitized_nano" | \
+  grep -E '\.(jks|p12|pfx|keystore)$' || true)" ]] ||
   die "sanitized Nano contains a key/trust-store entry"
 
 if [[ -n "$work_root_input" ]]; then
@@ -502,7 +553,8 @@ if [[ -n "$work_root_input" ]]; then
     die "work-root basename must start datomic-recovered-pair-: $work_root"
   assert_no_symlink_components work-root-parent "$(dirname -- "$work_root")"
   if [[ -e "$work_root" ]]; then
-    [[ -d "$work_root" && ! -L "$work_root" ]] || die "work-root is not a plain directory"
+    [[ -d "$work_root" && ! -L "$work_root" ]] ||
+      die "work-root is not a plain directory"
     [[ -z "$(find -P "$work_root" -mindepth 1 -print -quit)" ]] ||
       die "refusing non-empty work-root: $work_root"
   fi
@@ -510,7 +562,6 @@ if [[ -n "$work_root_input" ]]; then
 else
   work_root=$(mktemp -d -t datomic-recovered-pair-run.XXXXXXXX)
 fi
-
 inputs_dir="$work_root/inputs"
 logs_dir="$work_root/logs"
 results_dir="$work_root/results"
@@ -1224,6 +1275,19 @@ config_record="$work_root/config.properties"
     "$transaction_postpublication_fault_only"
   printf 'transaction.ha.inflight.only=%s\n' "$transaction_ha_inflight_only"
   printf 'transaction.ha.concurrent.only=%s\n' "$transaction_ha_concurrent_only"
+  printf 'ha.storage.partition.only=%s\n' "$ha_storage_partition_only"
+  if [[ "$ha_storage_partition_only" == true ]]; then
+    printf 'ha.partition.active.sql.user=%s\n' "$partition_active_pg_user"
+    printf 'ha.partition.standby.sql.user=%s\n' "$partition_standby_pg_user"
+    printf 'ha.partition.active.sql.password.sha256=%s\n' \
+      "$(sha256_text "$partition_active_pg_password")"
+    printf 'ha.partition.standby.sql.password.sha256=%s\n' \
+      "$(sha256_text "$partition_standby_pg_password")"
+    printf 'ha.partition.active.heartbeat.interval.msec=%s\n' \
+      "$ha_partition_active_heartbeat_msec"
+    printf 'ha.partition.standby.heartbeat.interval.msec=%s\n' \
+      "$ha_partition_standby_heartbeat_msec"
+  fi
   printf 'transaction.ack.fault.timeout.seconds=%s\n' "$ack_fault_timeout"
   printf 'ha.enabled=%s\n' "$with_ha"
   printf 'ha.standby.port=%s\n' "$standby_port"
@@ -1310,6 +1374,8 @@ ha_standby_starttime=
 ha_standby_properties=
 ha_standby_label=
 ha_standby_expected_argv=()
+storage_partition_armed=false
+partition_evidence_redacted=false
 pause_state_file="$runtime_dir/transactor-pause.state"
 run_succeeded=false
 
@@ -1754,6 +1820,75 @@ stop_ha_standby() {
   fi
 }
 
+heal_storage_partition() {
+  [[ "$storage_partition_armed" == true ]] || return 0
+  "$pg_bin_dir/psql" -X -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    --set=active_role="$partition_active_pg_user" \
+    >>"$logs_dir/postgres-partition-heal-cleanup.out" \
+    2>>"$logs_dir/postgres-partition-heal-cleanup.err" <<'SQL'
+ALTER ROLE :"active_role" LOGIN;
+SQL
+  storage_partition_armed=false
+}
+
+redact_ha_partition_evidence() {
+  [[ "$ha_storage_partition_only" == true ]] || return 0
+  [[ "$partition_evidence_redacted" == true ]] && return 0
+
+  local evidence_file temporary_file
+  local redacted_file_count=0
+  local -a evidence_files=()
+  while IFS= read -r -d '' evidence_file; do
+    evidence_files+=("$evidence_file")
+  done < <(find "$inputs_dir" "$logs_dir" "$results_dir" -type f -print0)
+  [[ -f "$config_record" ]] && evidence_files+=("$config_record")
+
+  for evidence_file in "${evidence_files[@]}"; do
+    if ! grep -Fq -- "$partition_active_pg_password" "$evidence_file" &&
+       ! grep -Fq -- "$partition_standby_pg_password" "$evidence_file"; then
+      continue
+    fi
+    temporary_file=$(mktemp "$runtime_dir/evidence-redaction.XXXXXXXX") ||
+      return 1
+    if ! awk -v active_secret="$partition_active_pg_password" \
+      -v standby_secret="$partition_standby_pg_password" '
+        function redact_literal(value, secret, replacement, result, at) {
+          result = ""
+          while ((at = index(value, secret)) > 0) {
+            result = result substr(value, 1, at - 1) replacement
+            value = substr(value, at + length(secret))
+          }
+          return result value
+        }
+        {
+          value = redact_literal($0, active_secret,
+            "<redacted:ha-active-sql-password>")
+          value = redact_literal(value, standby_secret,
+            "<redacted:ha-standby-sql-password>")
+          print value
+        }
+      ' "$evidence_file" >"$temporary_file"; then
+      return 1
+    fi
+    chmod --reference="$evidence_file" -- "$temporary_file" || return 1
+    mv -f -- "$temporary_file" "$evidence_file" || return 1
+    ((redacted_file_count += 1))
+  done
+
+  {
+    printf 'status=PASS\n'
+    printf 'scope=manifest-eligible-text-evidence\n'
+    printf 'files.redacted=%s\n' "$redacted_file_count"
+    printf 'active.password.sha256=%s\n' \
+      "$(sha256_text "$partition_active_pg_password")"
+    printf 'standby.password.sha256=%s\n' \
+      "$(sha256_text "$partition_standby_pg_password")"
+    printf 'raw.negative-login.retained=false\n'
+  } >"$results_dir/ha-partition-evidence-redaction.properties"
+  partition_evidence_redacted=true
+}
+
 cleanup() {
   local status=$?
   local cleanup_status=0
@@ -1761,6 +1896,7 @@ cleanup() {
   set +e
   stop_ha_probe || cleanup_status=1
   stop_ha_watchdog || cleanup_status=1
+  heal_storage_partition || cleanup_status=1
   stop_ha_standby false || cleanup_status=1
   resume_transactor_owned || cleanup_status=1
   stop_transport_watchdog || cleanup_status=1
@@ -1768,6 +1904,7 @@ cleanup() {
   stop_ack_fault_probe || cleanup_status=1
   stop_transactor false || cleanup_status=1
   stop_postgres || cleanup_status=1
+  redact_ha_partition_evidence || cleanup_status=1
   if ((status != 0 || cleanup_status != 0)); then
     {
       printf 'status=failed\n'
@@ -1785,6 +1922,9 @@ trap cleanup EXIT
 write_transactor_properties() {
   local label=$1
   local service_port=${2:-$transactor_port}
+  local service_user=${3:-$pg_user}
+  local service_password=${4:-$pg_password}
+  local heartbeat_interval_msec=${5:-}
   local properties="$runtime_dir/transactor-$label.properties"
   local data_dir="$runtime_dir/transactor-$label-data"
   local pid_file="$runtime_dir/transactor-$label.pid"
@@ -1794,14 +1934,16 @@ write_transactor_properties() {
     printf 'host=%s\n' "$pg_host"
     printf 'port=%s\n' "$service_port"
     printf 'sql-url=jdbc:postgresql://%s:%s/%s\n' "$pg_host" "$pg_port" "$catalog"
-    printf 'sql-user=%s\n' "$pg_user"
-    printf 'sql-password=%s\n' "$pg_password"
+    printf 'sql-user=%s\n' "$service_user"
+    printf 'sql-password=%s\n' "$service_password"
     printf 'sql-driver-class=org.postgresql.Driver\n'
     printf 'sql-validation-query=select 1\n'
     printf 'memory-index-threshold=32m\n'
     printf 'memory-index-max=256m\n'
     printf 'object-cache-max=128m\n'
     printf 'encrypt-channel=false\n'
+    [[ -z "$heartbeat_interval_msec" ]] ||
+      printf 'heartbeat-interval-msec=%s\n' "$heartbeat_interval_msec"
     printf 'data-dir=%s\n' "$data_dir"
     printf 'pid-file=%s\n' "$pid_file"
   } >"$properties"
@@ -1816,6 +1958,9 @@ start_ha_standby() {
   local internal_dir="$logs_dir/transactor-$label-internal"
   local pid_file="$runtime_dir/transactor-$label.pid"
   local standby_rev_before=$2
+  local service_user=${3:-$pg_user}
+  local service_password=${4:-$pg_password}
+  local heartbeat_interval_msec=${5:-}
   local standby_events
   local standby_state
   local standby_rev
@@ -1827,7 +1972,9 @@ start_ha_standby() {
     die "active Transactor ownership changed before standby launch"
   verify_runtime_seal "before-transactor-$label-start"
   ha_standby_label=$label
-  ha_standby_properties=$(write_transactor_properties "$label" "$standby_port")
+  ha_standby_properties=$(write_transactor_properties \
+    "$label" "$standby_port" "$service_user" "$service_password" \
+    "$heartbeat_interval_msec")
   mkdir -p -- "$internal_dir"
   ha_standby_expected_argv=(
     "$java_bin"
@@ -1900,6 +2047,9 @@ start_ha_standby() {
 start_transactor() {
   local label=$1
   local expectation=${2:-ready}
+  local service_user=${3:-$pg_user}
+  local service_password=${4:-$pg_password}
+  local heartbeat_interval_msec=${5:-}
   local stdout_log="$logs_dir/transactor-$label.out"
   local stderr_log="$logs_dir/transactor-$label.err"
   local internal_dir="$logs_dir/transactor-$label-internal"
@@ -1917,7 +2067,9 @@ start_transactor() {
     die "Transactor port became occupied before $label"
   verify_runtime_seal "before-transactor-$label-start"
   transactor_label=$label
-  transactor_properties=$(write_transactor_properties "$label")
+  transactor_properties=$(write_transactor_properties \
+    "$label" "$transactor_port" "$service_user" "$service_password" \
+    "$heartbeat_interval_msec")
   pid_file="$runtime_dir/transactor-$label.pid"
   mkdir -p -- "$internal_dir"
   transactor_expected_argv=(
@@ -2308,6 +2460,59 @@ wait_for_ha_promotion() {
   return 1
 }
 
+ha_partition_active_session_count=
+ha_partition_peer_session_count=
+ha_partition_standby_session_count=
+ha_partition_role_can_login=
+wait_for_ha_partition_coordination_win() {
+  local active_rev_before=$1
+  local active_log="$logs_dir/transactor-$transactor_label.err"
+  local attempt
+  local active_rev
+  local session_state
+  local active_sessions
+  local peer_sessions
+  local standby_sessions
+  local role_can_login
+  local active_state
+  for ((attempt = 0; attempt < ha_timeout * 10; attempt += 1)); do
+    process_running "$transactor_pid" || return 1
+    active_state=$(process_state "$transactor_pid")
+    [[ "$active_state" != T && "$active_state" != t ]] || return 1
+    verify_transactor_identity "$transactor_pid" || return 1
+    verify_ha_standby_identity "$ha_standby_pid" || return 1
+    port_is_open "$pg_host" "$transactor_port" || return 1
+    if grep -Fq ':event :transactor/heartbeat-failed' "$active_log" ||
+       grep -Fq 'Terminating process -' "$active_log"; then
+      return 1
+    fi
+    active_rev=$(coordination_rev_maybe pod-coord)
+    session_state=$("$pg_bin_dir/psql" -X -A -t -F $'\t' \
+      -v ON_ERROR_STOP=1 -h "$pg_socket_dir" -p "$pg_port" \
+      -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*) FILTER (WHERE usename='$partition_active_pg_user'), count(*) FILTER (WHERE usename='$pg_user'), count(*) FILTER (WHERE usename='$partition_standby_pg_user'), (SELECT rolcanlogin FROM pg_roles WHERE rolname='$partition_active_pg_user') FROM pg_stat_activity WHERE datname=current_database();" \
+      2>>"$logs_dir/sql-ha-partition-promotion.err" || true)
+    IFS=$'\t' read -r active_sessions peer_sessions standby_sessions \
+      role_can_login \
+      <<<"$session_state"
+    if [[ "$active_rev" =~ ^[0-9]+$ && "$active_sessions" =~ ^[0-9]+$ &&
+          "$peer_sessions" =~ ^[0-9]+$ && "$standby_sessions" =~ ^[0-9]+$ ]] &&
+       ((active_rev > active_rev_before && active_sessions == 0 &&
+         peer_sessions > 0 && standby_sessions > 0)) &&
+       [[ "$role_can_login" == f ]] &&
+       port_is_open "$pg_host" "$transactor_port"; then
+      ha_promoted_rev=$active_rev
+      ha_partition_active_session_count=$active_sessions
+      ha_partition_peer_session_count=$peer_sessions
+      ha_partition_standby_session_count=$standby_sessions
+      ha_partition_role_can_login=$role_can_login
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 ha_final_rev=
 ha_final_heartbeat_count=
 wait_for_ha_standby_continuity() {
@@ -2472,6 +2677,25 @@ CREATE TABLE public.datomic_kvs (
 );
 ALTER TABLE public.datomic_kvs OWNER TO :"gate_owner";
 SQL
+if [[ "$ha_storage_partition_only" == true ]]; then
+  current_step=postgres-partition-role
+  "$pg_bin_dir/psql" -X -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    --set=active_role="$partition_active_pg_user" \
+    --set=active_password="$partition_active_pg_password" \
+    --set=standby_role="$partition_standby_pg_user" \
+    --set=standby_password="$partition_standby_pg_password" \
+    --set=gate_catalog="$catalog" \
+    >"$logs_dir/postgres-partition-role.out" \
+    2>"$logs_dir/postgres-partition-role.err" <<'SQL'
+CREATE ROLE :"active_role" LOGIN PASSWORD :'active_password';
+CREATE ROLE :"standby_role" LOGIN PASSWORD :'standby_password';
+GRANT CONNECT ON DATABASE :"gate_catalog" TO :"active_role", :"standby_role";
+GRANT USAGE ON SCHEMA public TO :"active_role", :"standby_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.datomic_kvs
+  TO :"active_role", :"standby_role";
+SQL
+fi
 capture_sql_metrics initial
 [[ "$last_sql_rows" -eq 0 && "$last_sql_bytes" -eq 0 && "$last_sql_revisioned" -eq 0 ]] ||
   die "fresh datomic_kvs table is unexpectedly nonempty"
@@ -3412,13 +3636,16 @@ if [[ "$transaction_ha_inflight_only" == true ||
     "$ack_blocked_marker" baseline-canonical-sha256)
   ack_baseline_root_sha=$(extract_marker_hash \
     "$ack_blocked_marker" baseline-root-sha256)
+  ack_baseline_root_revision=$(extract_marker_number \
+    "$ack_blocked_marker" baseline-root-revision)
   ack_holder_backend_pid=$(extract_marker_number \
     "$ack_blocked_marker" holder-backend-pid)
   ack_writer_backend_pid=$(extract_marker_number \
     "$ack_blocked_marker" blocked-backend-pid)
   [[ "$ack_database_id" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die "HA in-flight database-id has an unsafe shape"
-  ((ack_baseline_basis > 0 && ack_holder_backend_pid > 0 &&
+  ((ack_baseline_basis > 0 && ack_baseline_root_revision >= 0 &&
+    ack_holder_backend_pid > 0 &&
     ack_writer_backend_pid > 0 &&
     ack_holder_backend_pid != ack_writer_backend_pid)) ||
     die "HA in-flight marker has invalid basis or backend identities"
@@ -3489,6 +3716,32 @@ if [[ "$transaction_ha_inflight_only" == true ||
     >"$results_dir/ha-inflight-writer-exit.properties"
 
   printf 'STANDBY_PROMOTED_AND_WRITER_TERMINATED\n' >&"$ack_fault_fd"
+  if [[ "$ha_concurrent_case" == true ]]; then
+    current_step=ha-concurrent-standby-log-claim
+    stopped_state=$(process_state "$transactor_pid")
+    [[ "$stopped_state" == T || "$stopped_state" == t ]] &&
+      verify_transactor_identity "$transactor_pid" &&
+      verify_ha_standby_identity "$ha_standby_pid" &&
+      verify_ack_fault_probe_identity "$ack_fault_probe_pid" ||
+      die "HA concurrent ownership changed before standby log claim"
+    require_log_catchup "$ha_standby_label" "$ack_baseline_basis"
+    ack_root_revision_after_standby_catchup=$(coordination_rev_maybe \
+      "pod-log-tail/$ack_database_id")
+    [[ "$ack_root_revision_after_standby_catchup" =~ ^[0-9]+$ ]] &&
+      ((ack_root_revision_after_standby_catchup > ack_baseline_root_revision)) ||
+      die "promoted standby did not advance the baseline log-root revision"
+    stopped_state=$(process_state "$transactor_pid")
+    [[ "$stopped_state" == T || "$stopped_state" == t ]] &&
+      [[ "$(sed -n '1p' "$pause_state_file" 2>/dev/null || true)" == paused ]] &&
+      verify_transactor_identity "$transactor_pid" &&
+      verify_ha_standby_identity "$ha_standby_pid" ||
+      die "stale active resumed before the standby catchup proof completed"
+    printf 'baseline-root-revision\troot-revision-observed-after-standby-catchup\tcatchup-tail-t\n%s\t%s\t%s\n' \
+      "$ack_baseline_root_revision" \
+      "$ack_root_revision_after_standby_catchup" \
+      "$ack_baseline_basis" \
+      >"$results_dir/ha-concurrent-standby-log-claim.tsv"
+  fi
   current_step=ha-inflight-stale-active-resume
   resume_transactor_owned || die "could not resume HA in-flight stale active"
   stop_ha_watchdog
@@ -3530,12 +3783,12 @@ if [[ "$transaction_ha_inflight_only" == true ||
   grep -Fq ':status :passed' "$ha_inflight_marker" ||
     die "HA takeover result did not pass"
   if [[ "$ha_concurrent_case" == true ]]; then
-    grep -Fq ':authoritative-writer-count 1' "$ha_inflight_marker" &&
+    grep -Fq ':authoritative-log-serialized? true' "$ha_inflight_marker" &&
       grep -Fq ':concurrent-submission-count 4' "$ha_inflight_marker" &&
       grep -Fq ':every-submission-outcome-accounted? true' \
         "$ha_inflight_marker" &&
       grep -Fq ':no-duplicate-committed-effect true' "$ha_inflight_marker" &&
-      grep -Fq ':no-lost-submission true' "$ha_inflight_marker" &&
+      grep -Fq ':no-lost-logical-submission true' "$ha_inflight_marker" &&
       grep -Fq ':strict-monotonic-committed-order true' \
         "$ha_inflight_marker" ||
       die "HA concurrent result omitted a required invariant"
@@ -3567,17 +3820,30 @@ if [[ "$transaction_ha_inflight_only" == true ||
   ack_final_sha=$(extract_marker_hash \
     "$ha_inflight_marker" final-canonical-sha256)
   if [[ "$ha_concurrent_case" == true ]]; then
-    ack_takeover_event_t=$(extract_marker_number \
-      "$ha_inflight_marker" adopted-event-t)
+    ack_adopted_basis=$(extract_marker_number \
+      "$ha_inflight_marker" adopted-basis-t)
+    ack_adopted_count=$(extract_marker_number \
+      "$ha_inflight_marker" adopted-before-recovery-count)
     ack_first_commit_t=$(extract_marker_number \
       "$ha_inflight_marker" first-commit-t)
+    ack_initial_returned_count=$(extract_marker_number \
+      "$ha_inflight_marker" initial-returned-count)
+    ack_initial_unavailable_count=$(extract_marker_number \
+      "$ha_inflight_marker" initial-unavailable-count)
     ack_last_commit_t=$(extract_marker_number \
       "$ha_inflight_marker" last-commit-t)
-    ((ack_takeover_event_t > ack_baseline_basis &&
-      ack_first_commit_t >= ack_takeover_event_t &&
+    ack_resubmitted_count=$(extract_marker_number \
+      "$ha_inflight_marker" resubmitted-count)
+    ((ack_adopted_basis == ack_baseline_basis &&
+      ack_adopted_count == 0 &&
+      ack_resubmitted_count == 4 &&
+      ack_initial_returned_count == 0 &&
+      ack_initial_unavailable_count == 4 &&
+      ack_first_commit_t > ack_baseline_basis &&
       ack_last_commit_t >= ack_first_commit_t &&
       ack_final_basis >= ack_last_commit_t)) ||
       die "HA concurrent committed order differs"
+    ack_expected_catchup_tail=$ack_adopted_basis
   else
     ack_recovery_event_t=$(extract_marker_number \
       "$ha_inflight_marker" recovery-event-t)
@@ -3588,8 +3854,9 @@ if [[ "$transaction_ha_inflight_only" == true ||
       die "HA in-flight takeover/recovery basis ordering differs"
     [[ "$ack_recovery_event_t" == "$ack_final_basis" ]] ||
       die "HA in-flight recovery event differs from final basis"
+    ack_expected_catchup_tail=$ack_takeover_event_t
   fi
-  require_log_catchup "$ha_standby_label" "$ack_takeover_event_t"
+  require_log_catchup "$ha_standby_label" "$ack_expected_catchup_tail"
   capture_sql_metrics after-ha-inflight-same-peer
   ack_recovery_sql_rows=$last_sql_rows
   ack_recovery_sql_bytes=$last_sql_bytes
@@ -3606,7 +3873,7 @@ if [[ "$transaction_ha_inflight_only" == true ||
     grep -Fq ':concurrent-submission-count 4' "$ack_audit_marker" &&
       grep -Fq ':every-submission-present? true' "$ack_audit_marker" &&
       grep -Fq ':no-duplicate-committed-effect true' "$ack_audit_marker" &&
-      grep -Fq ':no-lost-submission true' "$ack_audit_marker" &&
+      grep -Fq ':no-lost-logical-submission true' "$ack_audit_marker" &&
       grep -Fq ':strict-monotonic-committed-order true' "$ack_audit_marker" &&
       grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
       die "HA concurrent fresh audit omitted a required invariant"
@@ -3674,15 +3941,28 @@ if [[ "$transaction_ha_inflight_only" == true ||
       printf 'ha.concurrent.submission-count=4\n'
       printf 'ha.concurrent.all-futures-incomplete-before-takeover=PASS\n'
       printf 'ha.concurrent.standby-promotion=PASS\n'
+      printf 'ha.concurrent.standby-baseline-log-claim-before-stale-resume=PASS\n'
+      printf 'ha.concurrent.claim-wins-idempotent-recovery=PASS\n'
       printf 'ha.concurrent.exact-writer-abort=PASS\n'
       printf 'ha.concurrent.every-outcome-accounted=PASS\n'
-      printf 'ha.concurrent.no-loss-or-duplicate=PASS\n'
+      printf 'ha.concurrent.logical-intent-no-loss-or-duplicate=PASS\n'
       printf 'ha.concurrent.strict-monotonic-order=PASS\n'
       printf 'ha.concurrent.stale-active-self-fence=PASS\n'
       printf 'ha.concurrent.fresh-peer-audit=PASS\n'
       printf 'ha.concurrent.database.id=%s\n' "$ack_database_id"
       printf 'ha.concurrent.baseline.basis-t=%s\n' "$ack_baseline_basis"
-      printf 'ha.concurrent.adopted.basis-t=%s\n' "$ack_takeover_event_t"
+      printf 'ha.concurrent.baseline.root.revision=%s\n' \
+        "$ack_baseline_root_revision"
+      printf 'ha.concurrent.root.revision.observed-after-standby-catchup=%s\n' \
+        "$ack_root_revision_after_standby_catchup"
+      printf 'ha.concurrent.adopted.basis-t=%s\n' "$ack_adopted_basis"
+      printf 'ha.concurrent.adopted-before-recovery.count=%s\n' \
+        "$ack_adopted_count"
+      printf 'ha.concurrent.resubmitted.count=%s\n' "$ack_resubmitted_count"
+      printf 'ha.concurrent.initial-returned.count=%s\n' \
+        "$ack_initial_returned_count"
+      printf 'ha.concurrent.initial-unavailable.count=%s\n' \
+        "$ack_initial_unavailable_count"
       printf 'ha.concurrent.first-commit.t=%s\n' "$ack_first_commit_t"
       printf 'ha.concurrent.last-commit.t=%s\n' "$ack_last_commit_t"
       printf 'ha.concurrent.final.basis-t=%s\n' "$ack_final_basis"
@@ -3736,6 +4016,544 @@ if [[ "$transaction_ha_inflight_only" == true ||
     echo "the same Peer then committed a follow-up through promoted B"
   fi
   echo "stale A self-fenced; PostgreSQL is shut down; evidence: $work_root"
+  exit 0
+fi
+
+if [[ "$ha_storage_partition_only" == true ]]; then
+  current_step=ha-partition-active-start
+  start_transactor ha-partition-active ready \
+    "$partition_active_pg_user" "$partition_active_pg_password" \
+    "$ha_partition_active_heartbeat_msec"
+
+  current_step=ha-partition-seed
+  run_peer_workload ha-partition-seed seed "$sql_uri" true
+  partition_seed_marker=$last_marker_file
+  partition_seed_basis=$(extract_marker_number \
+    "$partition_seed_marker" basis-t)
+  partition_seed_rows=$(extract_marker_number \
+    "$partition_seed_marker" row-count)
+  partition_database_id=$(extract_marker_string \
+    "$partition_seed_marker" database-id)
+  ((partition_seed_basis > 0 && partition_seed_rows > 0)) ||
+    die "HA partition seed did not produce a nonempty database"
+  [[ "$partition_database_id" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "HA partition database-id has an unsafe shape"
+  capture_sql_metrics ha-partition-seed
+  partition_seed_sql_rows=$last_sql_rows
+  partition_seed_sql_bytes=$last_sql_bytes
+  partition_seed_sql_revisioned=$last_sql_revisioned
+  ((partition_seed_sql_rows > 0 && partition_seed_sql_bytes > 0 &&
+    partition_seed_sql_revisioned > 0)) ||
+    die "HA partition seed produced no durable PostgreSQL state"
+  partition_baseline_root="$results_dir/ha-partition-baseline-log-root.tsv"
+  "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT id, rev, COALESCE(map, ''), octet_length(val), encode(val, 'hex') FROM public.datomic_kvs WHERE id='pod-log-tail/$partition_database_id';" \
+    >"$partition_baseline_root" \
+    2>"$logs_dir/sql-ha-partition-baseline-root.err"
+  [[ "$(wc -l <"$partition_baseline_root")" -eq 1 ]] ||
+    die "HA partition baseline did not have exactly one log-root row"
+  IFS=$'\t' read -r partition_baseline_root_id \
+    partition_baseline_root_revision partition_baseline_root_map \
+    partition_baseline_root_bytes partition_baseline_root_hex \
+    <"$partition_baseline_root"
+  [[ "$partition_baseline_root_id" == \
+       "pod-log-tail/$partition_database_id" &&
+     "$partition_baseline_root_revision" =~ ^[0-9]+$ &&
+     -n "$partition_baseline_root_map" ]] ||
+    die "HA partition baseline log-root row was malformed"
+  partition_baseline_root_sha=$(sha256_file "$partition_baseline_root")
+
+  current_step=ha-partition-standby-start
+  partition_standby_rev_before=$(coordination_rev_maybe pod-standby)
+  [[ "$partition_standby_rev_before" =~ ^-?[0-9]+$ ]] ||
+    die "could not read standby revision before HA partition start"
+  start_ha_standby ha-partition-standby "$partition_standby_rev_before" \
+    "$partition_standby_pg_user" "$partition_standby_pg_password" \
+    "$ha_partition_standby_heartbeat_msec"
+
+  current_step=ha-partition-peer-ready
+  ha_fifo="$runtime_dir/ha-partition-control.fifo"
+  [[ ! -e "$ha_fifo" ]] || die "HA partition FIFO path already exists"
+  mkfifo -m 600 "$ha_fifo"
+  exec {ha_fd}<>"$ha_fifo"
+  ha_stdout="$logs_dir/ha-partition.out"
+  ha_stderr="$logs_dir/ha-partition.err"
+  verify_runtime_seal before-ha-partition-probe
+  timeout --foreground --signal=TERM --kill-after=15s "${ha_timeout}s" \
+    "$java_bin" -XX:-UsePerfData -Djava.awt.headless=true -Duser.timezone=UTC \
+    -Dcom.amazonaws.sdk.disableEc2Metadata=true \
+    "-Ddatomic.peerConnectionTTLMsec=$transport_peer_ttl_msec" \
+    "-Ddatomic.txTimeoutMsec=$transport_tx_timeout_msec" \
+    "-Dlogback.configurationFile=$peer_harness_root/logback-stage7.xml" \
+    -cp "$peer_classpath" clojure.main -m stage7.ha-probe "$sql_uri" file \
+    <"$ha_fifo" >"$ha_stdout" 2>"$ha_stderr" &
+  ha_probe_pid=$!
+  if ! wait_for_marker "$ha_stdout" 'STAGE7-HA-READY ' \
+    "$startup_timeout" "$ha_probe_pid"; then
+    tail -n 100 "$ha_stdout" >&2 || true
+    tail -n 100 "$ha_stderr" >&2 || true
+    die "HA partition Peer probe did not become ready"
+  fi
+  partition_ready_result="$results_dir/ha-partition-ready.result"
+  awk '/^STAGE7-HA-READY / {print}' "$ha_stdout" \
+    >"$partition_ready_result"
+  [[ "$(extract_marker_number "$partition_ready_result" basis-t)" == \
+     "$partition_seed_basis" ]] ||
+    die "HA partition probe did not start at the seed basis"
+  partition_active_connect_line=$(peer_connect_line_for_port \
+    "$ha_stderr" "$transactor_port")
+  [[ "$partition_active_connect_line" =~ ^[0-9]+$ ]] ||
+    die "HA partition Peer did not connect to active A"
+  port_is_open "$pg_host" "$standby_port" &&
+    die "HA partition standby served before the storage cut"
+
+  # Find an acknowledged A heartbeat revision that B has sampled with no miss.
+  # This removes the committed-but-unacknowledged heartbeat ambiguity before
+  # the measured credential/session cut begins.
+  current_step=ha-partition-synchronized-cut-window
+  partition_active_log="$logs_dir/transactor-$transactor_label.err"
+  partition_standby_log="$logs_dir/transactor-$ha_standby_label.err"
+  partition_sync_rev=
+  partition_standby_event_count=
+  partition_active_heartbeat_count=
+  for ((partition_sync_attempt = 0;
+        partition_sync_attempt < ha_timeout * 10;
+        partition_sync_attempt += 1)); do
+    partition_standby_line=$(awk \
+      'index($0, ":event :transactor/standby,") {line=$0; n++} END {print n + 0 "\t" line}' \
+      "$partition_standby_log" 2>/dev/null || true)
+    partition_standby_event_count=${partition_standby_line%%$'\t'*}
+    partition_standby_latest=${partition_standby_line#*$'\t'}
+    partition_candidate_rev=$(sed -nE \
+      's/.*:event :transactor\/standby, :rev ([0-9]+), :missed 0,.*/\1/p' \
+      <<<"$partition_standby_latest")
+    if [[ "$partition_candidate_rev" =~ ^[0-9]+$ ]] &&
+       grep -F ':event :transactor/heartbeat,' "$partition_active_log" | \
+         grep -Eq ":rev $partition_candidate_rev(,|})" &&
+       [[ "$(coordination_rev_maybe pod-coord)" == \
+          "$partition_candidate_rev" ]] &&
+       process_running "$transactor_pid" &&
+       [[ "$(process_state "$transactor_pid")" != T &&
+          "$(process_state "$transactor_pid")" != t ]] &&
+       verify_transactor_identity "$transactor_pid" &&
+       verify_ha_standby_identity "$ha_standby_pid" &&
+       ! port_is_open "$pg_host" "$standby_port"; then
+      partition_sync_rev=$partition_candidate_rev
+      partition_active_heartbeat_count=$(awk \
+        'index($0, ":event :transactor/heartbeat,") {n++} END {print n + 0}' \
+        "$partition_active_log")
+      partition_cut_started=$EPOCHREALTIME
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$partition_sync_rev" =~ ^[0-9]+$ &&
+     "$partition_standby_event_count" =~ ^[0-9]+$ &&
+     "$partition_active_heartbeat_count" =~ ^[0-9]+$ ]] ||
+    die "could not synchronize an acknowledged A heartbeat sampled by B"
+
+  partition_precut_sessions=$("$pg_bin_dir/psql" -X -A -t -F $'\t' \
+    -v ON_ERROR_STOP=1 -h "$pg_socket_dir" -p "$pg_port" \
+    -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT count(*) FILTER (WHERE usename='$partition_active_pg_user'), count(*) FILTER (WHERE usename='$pg_user'), count(*) FILTER (WHERE usename='$partition_standby_pg_user') FROM pg_stat_activity WHERE datname=current_database();" \
+    2>"$logs_dir/sql-ha-partition-precut-sessions.err")
+  IFS=$'\t' read -r partition_precut_active_sessions \
+    partition_precut_peer_sessions partition_precut_standby_sessions \
+    <<<"$partition_precut_sessions"
+  [[ "$partition_precut_active_sessions" =~ ^[0-9]+$ &&
+     "$partition_precut_peer_sessions" =~ ^[0-9]+$ &&
+     "$partition_precut_standby_sessions" =~ ^[0-9]+$ ]] &&
+    ((partition_precut_active_sessions > 0 &&
+      partition_precut_peer_sessions > 0 &&
+      partition_precut_standby_sessions > 0)) ||
+    die "HA partition pre-cut role sessions were not all live"
+
+  current_step=ha-partition-active-role-nologin
+  "$pg_bin_dir/psql" -X -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    --set=active_role="$partition_active_pg_user" \
+    >"$logs_dir/postgres-partition-cut.out" \
+    2>"$logs_dir/postgres-partition-cut.err" <<'SQL'
+ALTER ROLE :"active_role" NOLOGIN;
+SQL
+  storage_partition_armed=true
+
+  partition_session_targets="$results_dir/ha-partition-active-sessions-before-cut.tsv"
+  "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT pid, state, COALESCE(wait_event_type, ''), COALESCE(wait_event, '') FROM pg_stat_activity WHERE datname=current_database() AND usename='$partition_active_pg_user' ORDER BY pid;" \
+    >"$partition_session_targets" \
+    2>"$logs_dir/sql-ha-partition-session-targets.err"
+  partition_target_count=$(wc -l <"$partition_session_targets")
+  ((partition_target_count > 0)) ||
+    die "HA partition found no active-role PostgreSQL sessions to cut"
+
+  partition_termination_result="$results_dir/ha-partition-active-session-termination.tsv"
+  "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT pid, pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND usename='$partition_active_pg_user' ORDER BY pid;" \
+    >"$partition_termination_result" \
+    2>"$logs_dir/sql-ha-partition-session-termination.err"
+  partition_terminated_count=$(awk -F $'\t' \
+    '$2 == "t" {n++} END {print n + 0}' "$partition_termination_result")
+  ((partition_terminated_count == partition_target_count)) ||
+    die "HA partition did not terminate every targeted active-role session"
+
+  partition_active_sessions=-1
+  for ((partition_drain_attempt = 0;
+        partition_drain_attempt < 10;
+        partition_drain_attempt += 1)); do
+    partition_active_sessions=$("$pg_bin_dir/psql" -X -A -t \
+      -v ON_ERROR_STOP=1 -h "$pg_socket_dir" -p "$pg_port" \
+      -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='$partition_active_pg_user';" \
+      2>>"$logs_dir/sql-ha-partition-session-drain.err")
+    [[ "$partition_active_sessions" == 0 ]] && break
+    sleep 0.1
+  done
+  [[ "$partition_active_sessions" == 0 ]] ||
+    die "active-role PostgreSQL sessions did not drain to zero"
+  partition_cut_finished=$EPOCHREALTIME
+  partition_cut_elapsed_msec=$(awk \
+    -v start="$partition_cut_started" -v finish="$partition_cut_finished" \
+    'BEGIN {printf "%.0f", (finish - start) * 1000}')
+  [[ "$partition_cut_elapsed_msec" =~ ^[0-9]+$ ]] &&
+    ((partition_cut_elapsed_msec < 2000)) ||
+    die "HA partition cut exceeded its synchronized timing budget"
+
+  partition_standby_event_count_after=$(awk \
+    'index($0, ":event :transactor/standby,") {n++} END {print n + 0}' \
+    "$partition_standby_log")
+  partition_active_heartbeat_count_after=$(awk \
+    'index($0, ":event :transactor/heartbeat,") {n++} END {print n + 0}' \
+    "$partition_active_log")
+  partition_role_can_login=$("$pg_bin_dir/psql" -X -A -t \
+    -v ON_ERROR_STOP=1 -h "$pg_socket_dir" -p "$pg_port" \
+    -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT rolcanlogin FROM pg_roles WHERE rolname='$partition_active_pg_user';" \
+    2>"$logs_dir/sql-ha-partition-role-state.err")
+  [[ "$partition_standby_event_count_after" == \
+       "$partition_standby_event_count" &&
+     "$partition_active_heartbeat_count_after" == \
+       "$partition_active_heartbeat_count" &&
+     "$(coordination_rev_maybe pod-coord)" == "$partition_sync_rev" &&
+     "$partition_role_can_login" == f ]] ||
+    die "authoritative heartbeat or role state changed during the storage cut"
+  process_running "$transactor_pid" &&
+    [[ "$(process_state "$transactor_pid")" != T &&
+       "$(process_state "$transactor_pid")" != t ]] &&
+    verify_transactor_identity "$transactor_pid" &&
+    port_is_open "$pg_host" "$transactor_port" &&
+    ! grep -Fq ':event :transactor/heartbeat-failed' "$partition_active_log" &&
+    ! grep -Fq 'Terminating process -' "$partition_active_log" ||
+    die "active A failed or stopped during the synchronized storage cut"
+
+  current_step=ha-partition-login-probes
+  partition_negative_login_raw="$runtime_dir/ha-partition-active-login-negative.err"
+  set +e
+  PGPASSWORD="$partition_active_pg_password" \
+    "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_host" -p "$pg_port" -U "$partition_active_pg_user" \
+      -d "$catalog" -c 'SELECT 1;' \
+      >"$logs_dir/ha-partition-active-login-negative.out" \
+      2>"$partition_negative_login_raw"
+  partition_negative_login_status=$?
+  set -e
+  ((partition_negative_login_status != 0)) ||
+    die "partitioned active role unexpectedly opened a PostgreSQL session"
+  grep -Fq 'is not permitted to log in' "$partition_negative_login_raw" ||
+    die "active-role negative login failed for an unexpected reason"
+  {
+    printf 'status=PASS\n'
+    printf 'exit.status=%s\n' "$partition_negative_login_status"
+    printf 'reason=postgresql-role-login-disabled\n'
+    printf 'raw.stderr.retained=false\n'
+    printf 'raw.stderr.sha256=%s\n' \
+      "$(sha256_file "$partition_negative_login_raw")"
+  } >"$results_dir/ha-partition-active-login-negative.properties"
+  PGPASSWORD="$pg_password" "$pg_bin_dir/psql" -X -A -t \
+    -v ON_ERROR_STOP=1 -h "$pg_host" -p "$pg_port" -U "$pg_user" \
+    -d "$catalog" -c 'SELECT 1;' \
+    >"$logs_dir/ha-partition-peer-login-positive.out" \
+    2>"$logs_dir/ha-partition-peer-login-positive.err"
+  PGPASSWORD="$partition_standby_pg_password" \
+    "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_host" -p "$pg_port" -U "$partition_standby_pg_user" \
+      -d "$catalog" -c 'SELECT 1;' \
+      >"$logs_dir/ha-partition-standby-login-positive.out" \
+      2>"$logs_dir/ha-partition-standby-login-positive.err"
+
+  current_step=ha-partition-standby-coordination-win
+  if ! wait_for_ha_partition_coordination_win "$partition_sync_rev"; then
+    tail -n 160 "$partition_active_log" >&2 || true
+    tail -n 160 "$partition_standby_log" >&2 || true
+    die "B did not win coordination while A remained storage-isolated"
+  fi
+
+  # Heal immediately after observing B's authoritative coordination CAS. Do
+  # not wait for transport readiness: A's retry must retain time to observe the
+  # now-stale expected revision and conflict.
+  current_step=ha-partition-active-role-heal
+  "$pg_bin_dir/psql" -X -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    --set=active_role="$partition_active_pg_user" \
+    >"$logs_dir/postgres-partition-heal.out" \
+    2>"$logs_dir/postgres-partition-heal.err" <<'SQL'
+ALTER ROLE :"active_role" LOGIN;
+SQL
+  storage_partition_armed=false
+  partition_role_can_login_after_heal=$("$pg_bin_dir/psql" -X -A -t \
+    -v ON_ERROR_STOP=1 -h "$pg_socket_dir" -p "$pg_port" \
+    -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT rolcanlogin FROM pg_roles WHERE rolname='$partition_active_pg_user';" \
+    2>"$logs_dir/sql-ha-partition-role-healed.err")
+  [[ "$partition_role_can_login_after_heal" == t ]] ||
+    die "active PostgreSQL role was not restored after B won coordination"
+  {
+    printf 'synchronized.active.rev\tpromoted.rev\tcut.msec\tactive.sessions\tpeer.sessions\tstandby.sessions\n'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$partition_sync_rev" "$ha_promoted_rev" \
+      "$partition_cut_elapsed_msec" \
+      "$ha_partition_active_session_count" \
+      "$ha_partition_peer_session_count" \
+      "$ha_partition_standby_session_count"
+  } >"$results_dir/ha-partition-authoritative-handoff.tsv"
+
+  current_step=ha-partition-stale-active-conflict
+  reap_stale_active_after_fence || {
+    tail -n 180 "$partition_active_log" >&2 || true
+    die "healed stale A did not self-fence on heartbeat conflict"
+  }
+
+  partition_standby_heartbeat_count=$(awk -v port="$standby_port" \
+    'index($0, ":event :transactor/heartbeat,") && index($0, ":port " port) {n++} END {print n + 0}' \
+    "$partition_standby_log")
+  [[ "$partition_standby_heartbeat_count" =~ ^[0-9]+$ ]] &&
+    ((partition_standby_heartbeat_count >= 1)) &&
+    verify_ha_standby_identity "$ha_standby_pid" &&
+    port_is_open "$pg_host" "$standby_port" ||
+    die "promoted B did not remain serving after stale A fenced"
+  ha_promotion_heartbeat_count=$partition_standby_heartbeat_count
+
+  printf 'TAKEOVER\n' >&"$ha_fd"
+  current_step=ha-partition-same-peer-result
+  set +e
+  wait "$ha_probe_pid"
+  partition_probe_status=$?
+  set -e
+  ha_probe_pid=
+  exec {ha_fd}>&-
+  ha_fd=
+  [[ "$partition_probe_status" -eq 0 ]] || {
+    tail -n 160 "$ha_stdout" >&2 || true
+    tail -n 160 "$ha_stderr" >&2 || true
+    die "HA partition Peer probe failed with status $partition_probe_status"
+  }
+  verify_runtime_seal after-ha-partition-probe
+
+  for marker_prefix in \
+    'STAGE7-HA-READY ' \
+    'STAGE7-TAKEOVER-SYNC-START ' \
+    'STAGE7-SENTINEL-START ' \
+    'STAGE7-RESULT '; do
+    [[ "$(marker_count "$ha_stdout" "$marker_prefix")" -eq 1 ]] ||
+      die "HA partition output did not contain exactly one $marker_prefix marker"
+  done
+  partition_previous_marker_line=0
+  for marker_prefix in \
+    'STAGE7-HA-READY ' \
+    'STAGE7-TAKEOVER-SYNC-START ' \
+    'STAGE7-SENTINEL-START ' \
+    'STAGE7-RESULT '; do
+    partition_marker_line=$(awk -v prefix="$marker_prefix" \
+      'substr($0, 1, length(prefix)) == prefix {print NR}' "$ha_stdout")
+    [[ "$partition_marker_line" =~ ^[0-9]+$ &&
+       "$partition_marker_line" -gt "$partition_previous_marker_line" ]] ||
+      die "HA partition markers were emitted out of order at $marker_prefix"
+    partition_previous_marker_line=$partition_marker_line
+  done
+  [[ "$(marker_count "$ha_stderr" 'STAGE7-ERROR ')" -eq 0 ]] ||
+    die "HA partition Peer emitted STAGE7-ERROR"
+  awk '/^STAGE7-/ {print}' "$ha_stdout" \
+    >"$results_dir/ha-partition-markers.result"
+  awk '/^STAGE7-RESULT / {print}' "$ha_stdout" \
+    >"$results_dir/ha-partition.result"
+  partition_result="$results_dir/ha-partition.result"
+  grep -Fq ':status :succeeded' "$partition_result" &&
+    grep -Fq ':operation :zero-argument-sync' "$partition_result" &&
+    grep -Fq ':value "stage7/ha-takeover-sentinel/v1"' "$partition_result" &&
+    grep -Fq ':read-count 1' "$partition_result" &&
+    grep -Fq ':transaction-sentinel-datom-count 1' "$partition_result" &&
+    grep -Fq ':forbidden-implementation-entry-count 0' "$partition_result" &&
+    grep -Fq ':peer-source-protocol "file"' "$partition_result" &&
+    grep -Fq ':core2-source-protocol "file"' "$partition_result" ||
+    die "HA partition result omitted recovery, sentinel, or source evidence"
+  partition_initial_basis=$(extract_marker_number \
+    "$partition_result" initial-basis-t)
+  partition_before_basis=$(extract_marker_number \
+    "$partition_result" before-basis-t)
+  partition_after_basis=$(extract_marker_number \
+    "$partition_result" after-basis-t)
+  [[ "$partition_initial_basis" == "$partition_seed_basis" &&
+     "$partition_before_basis" == "$partition_seed_basis" ]] ||
+    die "HA partition did not preserve the seed basis before its sentinel"
+  ((partition_after_basis > partition_before_basis)) ||
+    die "HA partition sentinel did not advance the database basis"
+  partition_standby_connect_line=$(peer_connect_line_for_port \
+    "$ha_stderr" "$standby_port")
+  [[ "$partition_standby_connect_line" =~ ^[0-9]+$ &&
+     "$partition_standby_connect_line" -gt \
+       "$partition_active_connect_line" ]] ||
+    die "same Peer did not reconnect from partitioned A to promoted B"
+
+  current_step=ha-partition-fresh-peer-audit
+  run_peer_workload ha-partition-fresh-snapshot snapshot "$sql_uri"
+  partition_fresh_marker=$last_marker_file
+  partition_fresh_basis=$(extract_marker_number \
+    "$partition_fresh_marker" basis-t)
+  partition_fresh_rows=$(extract_marker_number \
+    "$partition_fresh_marker" row-count)
+  [[ "$(extract_marker_string "$partition_fresh_marker" database-id)" == \
+       "$partition_database_id" &&
+     "$partition_fresh_basis" == "$partition_after_basis" &&
+     "$partition_fresh_rows" == "$partition_seed_rows" ]] ||
+    die "fresh Peer state differed after the HA storage partition"
+  for hash_key in datoms-sha256 history-sha256 logical-sha256 rows-sha256; do
+    [[ "$(extract_marker_hash "$partition_fresh_marker" "$hash_key")" == \
+       "$(extract_marker_hash "$partition_seed_marker" "$hash_key")" ]] ||
+      die "HA partition changed deterministic Stage 2 hash $hash_key"
+  done
+  partition_final_root="$results_dir/ha-partition-final-log-root.tsv"
+  "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT id, rev, COALESCE(map, ''), octet_length(val), encode(val, 'hex') FROM public.datomic_kvs WHERE id='pod-log-tail/$partition_database_id';" \
+    >"$partition_final_root" \
+    2>"$logs_dir/sql-ha-partition-final-root.err"
+  [[ "$(wc -l <"$partition_final_root")" -eq 1 ]] ||
+    die "HA partition final state did not have exactly one log-root row"
+  IFS=$'\t' read -r partition_final_root_id \
+    partition_final_root_revision partition_final_root_map \
+    partition_final_root_bytes partition_final_root_hex \
+    <"$partition_final_root"
+  [[ "$partition_final_root_id" == "$partition_baseline_root_id" &&
+     "$partition_final_root_revision" =~ ^[0-9]+$ &&
+     -n "$partition_final_root_map" ]] &&
+    ((partition_final_root_revision > partition_baseline_root_revision)) ||
+    die "HA partition final authoritative log root did not advance"
+  partition_final_root_sha=$(sha256_file "$partition_final_root")
+  capture_sql_metrics ha-partition-fresh-audit
+  ((last_sql_rows >= partition_seed_sql_rows &&
+    last_sql_bytes > partition_seed_sql_bytes &&
+    last_sql_revisioned >= partition_seed_sql_revisioned)) ||
+    die "HA partition durable SQL state did not advance with the sentinel"
+
+  wait_for_ha_standby_continuity ||
+    die "promoted B did not continue heartbeating after partition recovery"
+  {
+    printf 'synchronized.active.rev=%s\n' "$partition_sync_rev"
+    printf 'promoted.rev=%s\n' "$ha_promoted_rev"
+    printf 'continued.rev=%s\n' "$ha_final_rev"
+    printf 'promoted.heartbeat.count=%s\n' "$ha_promotion_heartbeat_count"
+    printf 'continued.heartbeat.count=%s\n' "$ha_final_heartbeat_count"
+  } >"$results_dir/ha-partition-redacted-coordination.properties"
+
+  current_step=ha-partition-standby-stop
+  stop_ha_standby true ||
+    die "promoted B did not stop gracefully after HA partition recovery"
+  partition_final_sessions=$("$pg_bin_dir/psql" -X -A -t -F $'\t' \
+    -v ON_ERROR_STOP=1 -h "$pg_socket_dir" -p "$pg_port" \
+    -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT count(*) FILTER (WHERE usename='$partition_active_pg_user'), count(*) FILTER (WHERE usename='$pg_user'), count(*) FILTER (WHERE usename='$partition_standby_pg_user') FROM pg_stat_activity WHERE datname=current_database();" \
+    2>"$logs_dir/sql-ha-partition-final-sessions.err")
+  [[ "$partition_final_sessions" == $'0\t0\t0' ]] ||
+    die "HA partition left PostgreSQL role sessions: $partition_final_sessions"
+  printf 'active-role-sessions\tpeer-role-sessions\tstandby-role-sessions\n%s\n' \
+    "$partition_final_sessions" \
+    >"$results_dir/ha-partition-final-sessions.tsv"
+
+  current_step=postgres-stop-after-ha-partition
+  stop_postgres || die "PostgreSQL did not stop after HA partition recovery"
+  verify_runtime_seal final-after-ha-partition
+  port_is_open "$pg_host" "$pg_port" &&
+    die "PostgreSQL port remains occupied after HA partition recovery"
+  port_is_open "$pg_host" "$transactor_port" &&
+    die "active port remains occupied after HA partition recovery"
+  port_is_open "$pg_host" "$standby_port" &&
+    die "standby port remains occupied after HA partition recovery"
+
+  current_step=ha-partition-evidence-redaction
+  redact_ha_partition_evidence ||
+    die "HA partition evidence redaction failed"
+  partition_secret_hits="$results_dir/ha-partition-forbidden-secret-hits.txt"
+  partition_secret_hits_pending="$runtime_dir/ha-partition-forbidden-secret-hits.txt"
+  {
+    grep -R -F -l -- "$partition_active_pg_password" \
+      "$inputs_dir" "$logs_dir" "$results_dir" "$config_record" || true
+    grep -R -F -l -- "$partition_standby_pg_password" \
+      "$inputs_dir" "$logs_dir" "$results_dir" "$config_record" || true
+  } | sort -u >"$partition_secret_hits_pending"
+  mv -- "$partition_secret_hits_pending" "$partition_secret_hits"
+  [[ ! -s "$partition_secret_hits" ]] ||
+    die "HA partition evidence leaked a node SQL password after redaction"
+
+  {
+    printf 'status=PASS\n'
+    printf 'mode=ha-storage-partition-only\n'
+    printf 'peer.current-repo-build=PASS\n'
+    printf 'peer.origin=PASS\n'
+    printf 'transactor.fresh-runtime-preparation=PASS\n'
+    printf 'candidate.runtime.seal=PASS\n'
+    printf 'postgresql.fresh-catalog=PASS\n'
+    printf 'ha.storage-partition.credential-scoped=PASS\n'
+    printf 'ha.storage-partition.synchronized-heartbeat-cut=PASS\n'
+    printf 'ha.storage-partition.cut-under-two-seconds=PASS\n'
+    printf 'ha.storage-partition.active-live-nonstopped-at-handoff=PASS\n'
+    printf 'ha.storage-partition.active-transport-open-with-zero-storage-sessions=PASS\n'
+    printf 'ha.storage-partition.active-negative-login-reason=PASS\n'
+    printf 'ha.storage-partition.standby-coordination-win=PASS\n'
+    printf 'ha.storage-partition.active-role-healed=PASS\n'
+    printf 'ha.storage-partition.stale-active-conflict-self-fence=PASS\n'
+    printf 'ha.storage-partition.same-peer-promoted-write=PASS\n'
+    printf 'ha.storage-partition.fresh-peer-audit=PASS\n'
+    printf 'ha.storage-partition.one-authoritative-log-root=PASS\n'
+    printf 'ha.storage-partition.evidence-redaction=PASS\n'
+    printf 'ha.storage-partition.evidence-secret-scan=PASS\n'
+    printf 'ha.storage-partition.database.id=%s\n' "$partition_database_id"
+    printf 'ha.storage-partition.seed.basis-t=%s\n' "$partition_seed_basis"
+    printf 'ha.storage-partition.final.basis-t=%s\n' "$partition_after_basis"
+    printf 'ha.storage-partition.synchronized.active.rev=%s\n' \
+      "$partition_sync_rev"
+    printf 'ha.storage-partition.promoted.rev=%s\n' "$ha_promoted_rev"
+    printf 'ha.storage-partition.cut.msec=%s\n' "$partition_cut_elapsed_msec"
+    printf 'ha.storage-partition.baseline.root.revision=%s\n' \
+      "$partition_baseline_root_revision"
+    printf 'ha.storage-partition.final.root.revision=%s\n' \
+      "$partition_final_root_revision"
+    printf 'ha.storage-partition.baseline.root.sha256=%s\n' \
+      "$partition_baseline_root_sha"
+    printf 'ha.storage-partition.final.root.sha256=%s\n' \
+      "$partition_final_root_sha"
+    printf 'postgresql.active-role-sessions-after-stop=0\n'
+    printf 'postgresql.peer-role-sessions-after-stop=0\n'
+    printf 'postgresql.standby-role-sessions-after-stop=0\n'
+    printf 'transactor.stale-active-self-fence.count=1\n'
+    printf 'transactor.graceful-stop.count=1\n'
+    printf 'ha.partition-split-brain.scope=credential-scoped-postgresql-reachability\n'
+    printf 'ha.partition-split-brain.universal=NOT_RUN\n'
+    printf 'services.finally-stopped=PASS\n'
+  } >"$work_root/summary.properties"
+  {
+    printf 'status=passed\n'
+    printf 'last.step=complete\n'
+    printf 'services.running=false\n'
+  } >"$work_root/run-status.properties"
+  write_evidence_hashes
+  run_succeeded=true
+  echo "Recovered asymmetric PostgreSQL storage-partition gate passed"
+  echo "B won coordination while A remained live but had zero storage sessions"
+  echo "healed stale A self-fenced; same and fresh Peers agreed through B"
+  echo "PostgreSQL is shut down; evidence: $work_root"
   exit 0
 fi
 
