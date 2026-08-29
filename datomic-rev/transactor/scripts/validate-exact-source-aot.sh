@@ -6,6 +6,11 @@ export LC_ALL=C
 export TZ=UTC
 umask 077
 
+[[ $- == *p* ]] || {
+  echo "invoke this validator executable directly so /usr/bin/bash -p owns startup" >&2
+  exit 1
+}
+
 # Reject shell/native/path helpers before the first command lookup.  Privileged
 # Bash also declines BASH_ENV/SHELLOPTS startup injection when this executable
 # is invoked normally; the explicit checks keep an accidental `bash script`
@@ -107,7 +112,7 @@ for number in "$per_namespace_timeout_seconds" "$tool_timeout_seconds" \
 done
 
 for command_name in awk cmp cp cut diff dirname find grep head mkdir mktemp \
-  realpath sed setsid sha256sum sort stat timeout tr unzip uniq wc xargs; do
+  readlink realpath sed setsid sha256sum sort stat timeout tr unzip uniq wc xargs; do
   command -v "$command_name" >/dev/null || {
     echo "missing required command: $command_name" >&2
     exit 1
@@ -350,6 +355,41 @@ write_tree_manifest() {
   ) > "$destination"
 }
 
+# Tool self-tests deliberately create hostile filesystem fixtures (including
+# symlinks and FIFOs) below their isolated HOME/TMP roots.  Exit evidence must
+# describe those nodes without following them; it must not confuse a proved
+# negative fixture with contamination of the strict candidate/input trees.
+write_mutable_tree_manifest() {
+  local root=$1 destination=$2 path relative escaped target_sha kind metadata
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  (
+    cd "$root"
+    printf 'type\tpath\tcontent_sha256\tmetadata\n'
+    printf 'directory\t.\t-\tmode=%s\n' "$(stat -c '%a' .)"
+    while IFS= read -r -d '' path; do
+      relative=${path#./}; printf -v escaped '%q' "$relative"
+      printf 'directory\t%s\t-\tmode=%s\n' "$escaped" "$(stat -c '%a' "$path")"
+    done < <(find . -mindepth 1 -type d -print0 | sort -z)
+    while IFS= read -r -d '' path; do
+      relative=${path#./}; printf -v escaped '%q' "$relative"
+      printf 'file\t%s\t%s\tbytes=%s,mode=%s\n' "$escaped" \
+        "$(sha_of "$path")" "$(stat -c '%s' "$path")" "$(stat -c '%a' "$path")"
+    done < <(find . -type f -print0 | sort -z)
+    while IFS= read -r -d '' path; do
+      relative=${path#./}; printf -v escaped '%q' "$relative"
+      target_sha=$(readlink -z "$path" | sha256sum | awk '{print $1}') || exit 1
+      printf 'symlink\t%s\t%s\tbytes=%s,mode=%s\n' "$escaped" "$target_sha" \
+        "$(stat -c '%s' "$path")" "$(stat -c '%a' "$path")"
+    done < <(find . -type l -print0 | sort -z)
+    while IFS= read -r -d '' path; do
+      relative=${path#./}; printf -v escaped '%q' "$relative"
+      kind=$(stat -c '%F' "$path"); kind=${kind// /_}
+      metadata="mode=$(stat -c '%a' "$path"),rdev=$(stat -c '%r' "$path")"
+      printf '%s\t%s\t-\t%s\n' "$kind" "$escaped" "$metadata"
+    done < <(find . ! -type d ! -type f ! -type l -print0 | sort -z)
+  ) > "$destination"
+}
+
 tree_digest() {
   local root=$1
   (
@@ -391,15 +431,23 @@ finalize() {
         failure_reason="${failure_reason:+$failure_reason; }failed exit tree seal: $root"
       fi
     }
+    seal_mutable_exit_tree() {
+      local root=$1 name=$2
+      if [[ ! -d "$root" || -L "$root" ]] || \
+          ! write_mutable_tree_manifest "$root" "$output_abs/evidence/$name"; then
+        exit_seal_failed=true
+        failure_reason="${failure_reason:+$failure_reason; }failed mutable exit tree seal: $root"
+      fi
+    }
     # These exit seals are attempted on both success and failure.  A failed
     # Java gate therefore cannot suppress the final state of its mutable and
     # immutable execution roots.
     seal_exit_tree "$staged_source" staged-source-exit.tsv
     seal_exit_tree "$candidate_a" candidate-a-exit.tsv
     seal_exit_tree "$candidate_b" candidate-b-exit.tsv
-    seal_exit_tree "$work_root" work-root-exit.tsv
-    seal_exit_tree "$isolated_home" home-root-exit.tsv
-    seal_exit_tree "$isolated_tmp" tmp-root-exit.tsv
+    seal_mutable_exit_tree "$work_root" work-root-exit.tsv
+    seal_mutable_exit_tree "$isolated_home" home-root-exit.tsv
+    seal_mutable_exit_tree "$isolated_tmp" tmp-root-exit.tsv
     seal_exit_tree "$jdk_root" jdk-tree-exit.tsv
     if [[ -f "$output_abs/evidence/jdk-tree-exit.tsv" ]] && \
        [[ $(sha_of "$output_abs/evidence/jdk-tree-exit.tsv") != \
@@ -683,7 +731,7 @@ while IFS=$'\t' read -r position role kind jar_path expected_sha; do
     END {if (!finished) flush(); print found ? "true" : "false"}
   ' "$manifest")
   awk -v mr="$multi_release" '
-    function unsafe(v) {return v=="" || v ~ /^\// || v ~ /\\/ || v ~ /\/\.\.\// || v ~ /^\.\.\// || v ~ /\/\.\.$/ || v ~ /\/\//}
+    function unsafe(v) {return v=="" || index(v,"\t") || index(v,"\r") || v ~ /^\// || v ~ /\\/ || v ~ /\/\.\.\// || v ~ /^\.\.\// || v ~ /\/\.\.$/ || v ~ /\/\//}
     {if (unsafe($0)) {print "unsafe ZIP entry: " $0 > "/dev/stderr"; exit 2}}
     /\/$/ {next}
     /^META-INF\/versions\/[0-9]+\/.*\.class$/ {
