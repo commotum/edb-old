@@ -2098,6 +2098,7 @@ run_ack_fault_probe() {
   case "$mode" in
     recover) marker_prefix=STAGE5-ACK-RECOVER ;;
     audit) marker_prefix=STAGE5-ACK-AUDIT ;;
+    ha-takeover-audit) marker_prefix=STAGE7-HA-INFLIGHT-AUDIT ;;
     publication-audit) marker_prefix=STAGE5-ACK-POSTPUBLICATION-AUDIT ;;
     *) die "unknown acknowledgement-fault probe mode: $mode" ;;
   esac
@@ -3480,11 +3481,13 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
   awk '/^STAGE7-HA-INFLIGHT-RESULT / {print}' \
     "$ack_stdout" >"$ha_inflight_marker"
   grep -Fq ':status :passed' "$ha_inflight_marker" &&
-    grep -Fq ':authoritative-publication :not-committed' "$ha_inflight_marker" &&
-    grep -Fq ':fault-sentinel-absent? true' "$ha_inflight_marker" &&
-    grep -Fq ':state :failed' "$ha_inflight_marker" &&
-    grep -Fq ':anomaly-categories [:cognitect.anomalies/unavailable]' \
+    grep -Fq ':authoritative-publication :committed-during-takeover' \
       "$ha_inflight_marker" &&
+    grep -Fq ':fault-sentinel-present? true' "$ha_inflight_marker" &&
+    grep -Fq ':state :returned' "$ha_inflight_marker" &&
+    grep -Fq ':original-future-returned-adopted-transaction? true' \
+      "$ha_inflight_marker" &&
+    grep -Fq ':no-duplicate-committed-effect true' "$ha_inflight_marker" &&
     grep -Fq ':same-peer-recovered-through-promoted-endpoint? true' \
       "$ha_inflight_marker" &&
     grep -Fq ':recovery-sentinel-present? true' "$ha_inflight_marker" ||
@@ -3503,8 +3506,11 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     "$ha_inflight_marker" final-canonical-sha256)
   ack_recovery_event_t=$(extract_marker_number \
     "$ha_inflight_marker" recovery-event-t)
-  ((ack_final_basis > ack_baseline_basis)) ||
-    die "HA in-flight recovery write did not advance basis"
+  ack_takeover_event_t=$(extract_marker_number \
+    "$ha_inflight_marker" takeover-event-t)
+  ((ack_takeover_event_t > ack_baseline_basis &&
+    ack_final_basis > ack_takeover_event_t)) ||
+    die "HA in-flight takeover/recovery basis ordering differs"
   [[ "$ack_recovery_event_t" == "$ack_final_basis" ]] ||
     die "HA in-flight recovery event differs from final basis"
   capture_sql_metrics after-ha-inflight-same-peer
@@ -3515,12 +3521,12 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     die "HA in-flight promoted standby did not continue heartbeating"
 
   current_step=ha-inflight-fresh-peer-audit
-  run_ack_fault_probe ha-inflight-audit audit \
+  run_ack_fault_probe ha-inflight-audit ha-takeover-audit \
     "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" file \
     "$ack_database_id" "$ack_final_sha" "$ack_final_basis"
   ack_audit_marker=$last_marker_file
   require_log_catchup "$ha_standby_label" "$ack_final_basis"
-  grep -Fq ':fault-sentinel-absent? true' "$ack_audit_marker" &&
+  grep -Fq ':fault-sentinel-present? true' "$ack_audit_marker" &&
     grep -Fq ':recovery-sentinel-present? true' "$ack_audit_marker" &&
     grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
     die "HA in-flight fresh audit omitted a required invariant"
@@ -3577,13 +3583,14 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
     printf 'ha.inflight.future-incomplete-before-takeover=PASS\n'
     printf 'ha.inflight.standby-promotion=PASS\n'
     printf 'ha.inflight.exact-writer-abort=PASS\n'
-    printf 'ha.inflight.interrupted-write-absent=PASS\n'
-    printf 'ha.inflight.client-outcome=unavailable\n'
+    printf 'ha.inflight.orphan-adopted-once=PASS\n'
+    printf 'ha.inflight.client-outcome=returned\n'
     printf 'ha.inflight.stale-active-self-fence=PASS\n'
     printf 'ha.inflight.same-peer-promoted-write=PASS\n'
     printf 'ha.inflight.fresh-peer-audit=PASS\n'
     printf 'ha.inflight.database.id=%s\n' "$ack_database_id"
     printf 'ha.inflight.baseline.basis-t=%s\n' "$ack_baseline_basis"
+    printf 'ha.inflight.takeover.basis-t=%s\n' "$ack_takeover_event_t"
     printf 'ha.inflight.final.basis-t=%s\n' "$ack_final_basis"
     printf 'ha.inflight.baseline.canonical.sha256=%s\n' "$ack_baseline_sha"
     printf 'ha.inflight.final.canonical.sha256=%s\n' "$ack_final_sha"
@@ -3609,7 +3616,8 @@ if [[ "$transaction_ha_inflight_only" == true ]]; then
   write_evidence_hashes
   run_succeeded=true
   echo "Recovered in-flight transaction-during-takeover gate passed"
-  echo "the interrupted write stayed absent; the same Peer committed through promoted B"
+  echo "the promoted standby adopted the in-flight tail exactly once"
+  echo "the original Future returned; the same Peer then committed through promoted B"
   echo "stale A self-fenced; PostgreSQL is shut down; evidence: $work_root"
   exit 0
 fi

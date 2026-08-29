@@ -67,6 +67,8 @@
   "STAGE5-ACK-POSTPUBLICATION-AUDIT ")
 (def ^:private ha-inflight-result-prefix
   "STAGE7-HA-INFLIGHT-RESULT ")
+(def ^:private ha-inflight-audit-prefix
+  "STAGE7-HA-INFLIGHT-AUDIT ")
 (def ^:private recover-result-prefix "STAGE5-ACK-RECOVER ")
 (def ^:private audit-prefix "STAGE5-ACK-AUDIT ")
 (def ^:private error-prefix "STAGE5-ACK-ERROR ")
@@ -964,44 +966,79 @@
                   (reset! holder-active? false)
                   (.close ^Connection @holder)
                   (reset! holder nil)
-                  (let [future-state (wait-for-future-terminal!
-                                       ^Future @transaction-future)
+                  (let [ha-takeover? (= cut :ha-takeover)
+                        future-state
+                        (if ha-takeover?
+                          (publication-future-outcome!
+                            ^Future @transaction-future)
+                          (wait-for-future-terminal!
+                            ^Future @transaction-future))
+                        sync-result
+                        (when ha-takeover?
+                          (sync-after-restart! @peer-connection))
                         final-root (sql-log-root
                                      jdbc-url user password database-id)
                         final-ids (sql-ids jdbc-url user password)
-                        final-db (d/db @peer-connection)
+                        final-db (if ha-takeover?
+                                   (:db sync-result)
+                                   (d/db @peer-connection))
                         final-canonical (canonical-state final-db)]
-                    (ensure! (= baseline-root final-root)
-                             "Authoritative root changed after killed-writer rollback"
-                             {:actual-sha256 (sha256 final-root)
-                              :expected-sha256 baseline-root-sha})
+                    (if ha-takeover?
+                      (ensure! (and (integer? (:rev final-root))
+                                    (> (:rev final-root)
+                                       (:rev baseline-root))
+                                    (not= baseline-root final-root))
+                               "Promoted standby did not adopt the in-flight tail"
+                               {:after-revision (:rev final-root)
+                                :before-revision (:rev baseline-root)})
+                      (ensure! (= baseline-root final-root)
+                               "Authoritative root changed after killed-writer rollback"
+                               {:actual-sha256 (sha256 final-root)
+                                :expected-sha256 baseline-root-sha}))
                     (ensure! (= blocked-ids final-ids)
                              "PostgreSQL KV membership changed after writer death"
                              {:after-count (count final-ids)
                               :blocked-count (count blocked-ids)})
-                    (ensure! (= baseline-canonical final-canonical)
-                             "Peer basis or projection advanced after writer death"
-                             {:actual-sha256 (sha256 final-canonical)
-                              :expected-sha256 baseline-sha})
-                    (ensure! (not (entity-present? final-db fault-id))
-                             "Interrupted transaction sentinel became visible"
-                             {})
-                    (if (= cut :ha-takeover)
+                    (if ha-takeover?
                       (do
-                        (ensure! (= :failed (:state future-state))
-                                 "In-flight takeover Future did not fail terminally"
+                        (ensure! (= :returned (:state future-state))
+                                 "In-flight takeover Future did not return"
                                  {:future-outcome future-state})
-                        (ensure! (= #{:cognitect.anomalies/unavailable}
-                                    (set (get-in future-state
-                                                 [:error-profile
-                                                  :anomaly-categories])))
-                                 "In-flight takeover Future did not fail unavailable"
-                                 {:future-outcome future-state})
-                        (let [sync-result (sync-after-restart!
-                                           @peer-connection)
-                              synced-db (:db sync-result)]
-                          (require-baseline-state!
-                            synced-db database-id baseline-basis baseline-sha)
+                        (let [takeover-t (fact-t final-db fault-id)
+                              takeover-rows (:rows final-canonical)
+                              fault-eid
+                              (d/entid final-db [:stage5-ack/id fault-id])
+                              fault-id-history
+                              (attribute-history
+                                final-db fault-eid :stage5-ack/id)
+                              fault-kind-history
+                              (attribute-history
+                                final-db fault-eid :stage5-ack/kind)]
+                          (ensure! (= database-id (str (.id ^Database final-db)))
+                                   "Takeover database identity differs"
+                                   {:actual (str (.id ^Database final-db))
+                                    :expected database-id})
+                          (ensure! (= #{[baseline-id :stage5-ack/baseline]
+                                        [fault-id
+                                         :stage5-ack/fault-before-publication]}
+                                      (set (map #(subvec % 0 2)
+                                                takeover-rows)))
+                                   "Takeover logical state differs"
+                                   {:rows takeover-rows})
+                          (ensure! (= takeover-t (d/basis-t final-db)
+                                      (:db-after-basis future-state))
+                                   "Takeover Future, fact, and basis differ"
+                                   {:basis-t (d/basis-t final-db)
+                                    :future-outcome future-state
+                                    :takeover-t takeover-t})
+                          (ensure! (and (= [[fault-id true takeover-t]]
+                                            fault-id-history)
+                                        (= [[:stage5-ack/fault-before-publication
+                                             true takeover-t]]
+                                           fault-kind-history))
+                                   "Takeover transaction was duplicated or incomplete"
+                                   {:fault-id-history fault-id-history
+                                    :fault-kind-history fault-kind-history})
                           (let [report
                                 (transact-before!
                                   @peer-connection
@@ -1016,20 +1053,20 @@
                                 recovered-canonical
                                 (canonical-state recovered-db)
                                 recovery-t (fact-t recovered-db recovery-id)]
-                            (ensure! (= baseline-basis
+                            (ensure! (= takeover-t
                                         (d/basis-t (:db-before report)))
-                                     "HA recovery write did not begin at baseline"
+                                     "HA recovery write did not begin after takeover"
                                      {:actual
                                       (d/basis-t (:db-before report))
-                                      :expected baseline-basis})
+                                      :expected takeover-t})
                             (ensure! (= recovery-t
                                         (d/basis-t recovered-db))
                                      "HA recovery write/report basis differs"
                                      {:event-t recovery-t
                                       :report-basis
                                       (d/basis-t recovered-db)})
-                            (ensure! (and (not (entity-present?
-                                                recovered-db fault-id))
+                            (ensure! (and (entity-present?
+                                           recovered-db fault-id)
                                           (entity-present?
                                             recovered-db recovery-id))
                                      "HA recovery state has the wrong sentinels"
@@ -1044,7 +1081,8 @@
                                       :before-revision
                                       (:rev baseline-root)})
                             (sorted-map
-                              :authoritative-publication :not-committed
+                              :authoritative-publication
+                              :committed-during-takeover
                               :baseline-basis-t baseline-basis
                               :baseline-canonical-sha256 baseline-sha
                               :baseline-root-revision (:rev baseline-root)
@@ -1053,8 +1091,8 @@
                               :candidate-boundary boundary
                               :created? created?
                               :database-id database-id
-                              :fault-sentinel-absent? true
-                              :fault-sentinel-present? false
+                              :fault-sentinel-absent? false
+                              :fault-sentinel-present? true
                               :final-basis-t (d/basis-t recovered-db)
                               :final-canonical-sha256
                               (sha256 recovered-canonical)
@@ -1068,8 +1106,10 @@
                               :immutable-orphan-rows orphan-rows
                               :no-success-before-authoritative-publication
                               true
+                              :no-duplicate-committed-effect true
                               :orphan-candidate-count (count orphan-rows)
-                              :peer-basis-unchanged-before-recovery? true
+                              :original-future-returned-adopted-transaction?
+                              true
                               :precrash-root-sha256 baseline-root-sha
                               :recovery-event-t recovery-t
                               :recovery-sentinel-present? true
@@ -1081,31 +1121,43 @@
                               :sync-timeout-count (:timeout-count sync-result)
                               :sync-unavailable-count
                               (:unavailable-count sync-result)
+                              :takeover-event-t takeover-t
+                              :takeover-history
+                              {:fault-id fault-id-history
+                               :fault-kind fault-kind-history}
                               :transactor-backend-exited? true))))
-                      (sorted-map
-                        :authoritative-publication :not-committed
-                        :baseline-basis-t baseline-basis
-                        :baseline-canonical-sha256 baseline-sha
-                        :baseline-root-revision (:rev baseline-root)
-                        :baseline-root-sha256 baseline-root-sha
-                        :blocked-backend-pid (:pid writer)
-                        :candidate-boundary boundary
-                        :created? created?
-                        :database-id database-id
-                        :fault-sentinel-absent? true
-                        :fault-sentinel-present? false
-                        :future-outcome future-state
-                        :future-done-while-blocked? false
-                        :holder-backend-pid holder-backend-pid
-                        :immutable-orphan-row-count (count orphan-rows)
-                        :immutable-orphan-rows orphan-rows
-                        :no-success-before-authoritative-publication true
-                        :orphan-candidate-count (count orphan-rows)
-                        :peer-basis-unchanged? true
-                        :precrash-root-sha256 baseline-root-sha
-                        :root-row-byte-identical? true
-                        :status :passed
-                        :transactor-backend-exited? true)))))))))
+                      (do
+                        (ensure! (= baseline-canonical final-canonical)
+                                 "Peer basis or projection advanced after writer death"
+                                 {:actual-sha256 (sha256 final-canonical)
+                                  :expected-sha256 baseline-sha})
+                        (ensure! (not (entity-present? final-db fault-id))
+                                 "Interrupted transaction sentinel became visible"
+                                 {})
+                        (sorted-map
+                          :authoritative-publication :not-committed
+                          :baseline-basis-t baseline-basis
+                          :baseline-canonical-sha256 baseline-sha
+                          :baseline-root-revision (:rev baseline-root)
+                          :baseline-root-sha256 baseline-root-sha
+                          :blocked-backend-pid (:pid writer)
+                          :candidate-boundary boundary
+                          :created? created?
+                          :database-id database-id
+                          :fault-sentinel-absent? true
+                          :fault-sentinel-present? false
+                          :future-outcome future-state
+                          :future-done-while-blocked? false
+                          :holder-backend-pid holder-backend-pid
+                          :immutable-orphan-row-count (count orphan-rows)
+                          :immutable-orphan-rows orphan-rows
+                          :no-success-before-authoritative-publication true
+                          :orphan-candidate-count (count orphan-rows)
+                          :peer-basis-unchanged? true
+                          :precrash-root-sha256 baseline-root-sha
+                          :root-row-byte-identical? true
+                          :status :passed
+                          :transactor-backend-exited? true))))))))))
       (finally
         (when (and @transaction-future
                    (not (.isDone ^Future @transaction-future)))
@@ -1199,7 +1251,8 @@
         (release! connection)))))
 
 (defn- require-final-state!
-  [^Database db expected-database-id expected-basis expected-sha]
+  [^Database db expected-database-id expected-basis expected-sha
+   ha-takeover?]
   (let [canonical (canonical-state db)
         actual-sha (sha256 canonical)
         rows (:rows canonical)]
@@ -1212,12 +1265,21 @@
     (ensure! (= expected-sha actual-sha)
              "Audit canonical state differs"
              {:actual actual-sha :expected expected-sha})
-    (ensure! (= #{baseline-id recovery-id} (set (map first rows)))
+    (ensure! (= (if ha-takeover?
+                  #{baseline-id fault-id recovery-id}
+                  #{baseline-id recovery-id})
+                (set (map first rows)))
              "Audit probe identity set differs"
              {:actual (set (map first rows))})
-    (ensure! (not (entity-present? db fault-id))
-             "Interrupted transaction appeared in fresh audit"
-             {})
+    (if ha-takeover?
+      (ensure! (= :stage5-ack/fault-before-publication
+                  (:stage5-ack/kind
+                    (d/entity db [:stage5-ack/id fault-id])))
+               "Adopted takeover transaction differs in fresh audit"
+               {})
+      (ensure! (not (entity-present? db fault-id))
+               "Interrupted transaction appeared in fresh audit"
+               {}))
     (ensure! (= expected-basis (fact-t db recovery-id))
              "Recovery fact transaction differs from final basis"
              {:event-t (fact-t db recovery-id)
@@ -1226,14 +1288,14 @@
 
 (defn- audit!
   [{:keys [expected-database-id expected-final-basis expected-final-sha
-           expected-source-protocol jdbc-url password uri user]}]
+           expected-source-protocol ha-takeover? jdbc-url password uri user]}]
   (let [boundary (audit-candidate-boundary! expected-source-protocol)
         connection (connect! uri)]
     (try
       (let [db (d/db connection)
             canonical (require-final-state!
                         db expected-database-id
-                        expected-final-basis expected-final-sha)
+                        expected-final-basis expected-final-sha ha-takeover?)
             root (sql-log-root jdbc-url user password expected-database-id)]
         (ensure! (and (integer? (:rev root)) (not (neg? (:rev root))))
                  "Fresh audit PostgreSQL log root has an invalid revision"
@@ -1242,8 +1304,8 @@
           :candidate-boundary boundary
           :canonical-sha256 (sha256 canonical)
           :database-id expected-database-id
-          :fault-sentinel-absent? true
-          :fault-sentinel-present? false
+          :fault-sentinel-absent? (not ha-takeover?)
+          :fault-sentinel-present? (boolean ha-takeover?)
           :final-basis-t expected-final-basis
           :final-canonical-sha256 (sha256 canonical)
           :recovery-sentinel-present? true
@@ -1446,6 +1508,11 @@
          :uri (require-uri! uri)
          :user user})
 
+      "ha-takeover-audit"
+      (assoc (parse-command (cons "audit" (rest args)))
+             :ha-takeover? true
+             :mode mode)
+
       "publication-audit"
       (let [[_ uri jdbc-url user password source-protocol database-id
              final-sha final-basis publication-t & extra] args]
@@ -1477,6 +1544,7 @@
     "ha-takeover-window" (crash-window! command)
     "recover" (recover! command)
     "audit" (audit! command)
+    "ha-takeover-audit" (audit! command)
     "publication-audit" (publication-audit! command)))
 
 (defn- shutdown!
@@ -1500,6 +1568,7 @@
           "crash-window" fault-result-prefix
           "publication-window" publication-result-prefix
           "ha-takeover-window" ha-inflight-result-prefix
+          "ha-takeover-audit" ha-inflight-audit-prefix
           "recover" recover-result-prefix
           "audit" audit-prefix
           "publication-audit" publication-audit-prefix)
