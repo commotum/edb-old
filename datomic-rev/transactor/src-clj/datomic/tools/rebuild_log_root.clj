@@ -61,4 +61,10 @@
                 root_id (:d/r (first (log/read-tail-descriptor (:cluster cr))))]
             (println "Dry run. Changes needed: ")
             (pp/pprint (:rebuilt (lt/rebuild-root (:olookup cr) root_id))))))))
-  (defn -main ([& args] (try (apply -main* args) (finally (shutdown-agents))))))
+  (reset-meta!
+    #'-main*
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main* :ns *ns*))
+  (defn -main ([& args] (try (apply -main* args) (finally (shutdown-agents)))))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))

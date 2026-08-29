@@ -1,5 +1,6 @@
 (require '[datomic.common :as common]
          '[datomic.db :as db]
+         '[datomic.index :as index]
          '[datomic.iter :as iter]
          '[datomic.kv-cluster :as kv-cluster]
          '[datomic.promise :as promise]
@@ -100,5 +101,67 @@
   (assert (identical? pending (deliver pending :published)))
   (assert (= :published @pending))
   (assert (= [:called] @calls)))
+
+;; An empty persistent index must return the initialized disjoined-datom
+;; partition. The stale recovery evaluated the result-producing loop and then
+;; returned nil, which disabled repair-disjoined's downstream classification.
+(let [empty-tree-iter
+      (reify datomic.index.ITreeIter
+        datomic.iter.Iter
+        (seg+item-seq [_] [])
+        (seg-seq [_] [])
+        (dir-seq [_] [])
+        (get [_] nil)
+        (next [_] nil)
+        (prev [_] nil))
+      empty-index
+      (reify datomic.btset.IDataSet
+        (^long longCount [_] 0)
+        (seek [_] empty-tree-iter)
+        (seek [_ _] empty-tree-iter)
+        (seekLast [_] empty-tree-iter))
+      fake-db {:history {:eavt empty-index}
+               :recent {:aevt empty-index}}]
+  (assert (= {:segmented [], :separated [], :absent []}
+             (index/disjoined-datoms fake-db :history :eavt)))
+  (assert (= {:segmented [], :separated []}
+             (index/disjoined-datoms fake-db :recent :aevt))))
+
+;; Persistent-index construction must continue past no-history retractions.
+;; The stale recovery discarded both branch values below, truncating the
+;; index input at its first retraction and suppressing the history stream.
+(let [historic-attr (db/->Attribute 101 :test/historic nil nil nil nil nil nil nil false nil)
+      nohist-attr (db/->Attribute 102 :test/no-history nil nil nil nil nil nil nil true nil)
+      attr-by-id {101 historic-attr, 102 nohist-attr}
+      historic-retract (db/retracting-datum 2001 101 :historic 1060)
+      nohist-retract (db/retracting-datum 2002 102 :replace 1061)
+      nohist-assert (db/asserting-datum 2002 102 :replace 1062)
+      tail-assert (db/asserting-datum 2003 101 :tail 1063)
+      fake-db (Object.)]
+  (with-redefs [db/attribute (fn [_ attr-id] (get attr-by-id attr-id))]
+    (assert (= [historic-retract tail-assert]
+               (vec (index/filter-nohist-pairs
+                      fake-db
+                      [historic-retract nohist-retract nohist-assert tail-assert])))))
+  (let [historic-pair-retract (db/retracting-datum 3001 101 :historic-pair 1064)
+        historic-pair-assert (db/asserting-datum 3001 101 :historic-pair 1065)
+        nohist-pair-retract (db/retracting-datum 3002 102 :nohist-pair 1066)
+        nohist-pair-assert (db/asserting-datum 3002 102 :nohist-pair 1067)
+        historic-unmatched (db/retracting-datum 3003 101 :historic-only 1068)
+        tail-assert (db/asserting-datum 3004 101 :tail 1069)
+        retractions (atom [])]
+    (with-redefs [db/attribute (fn [_ attr-id] (get attr-by-id attr-id))]
+      (assert (= [tail-assert]
+                 (vec (index/separating-retractions
+                        fake-db
+                        retractions
+                        [historic-pair-retract
+                         historic-pair-assert
+                         nohist-pair-retract
+                         nohist-pair-assert
+                         historic-unmatched
+                         tail-assert])))))
+    (assert (= [historic-pair-retract historic-pair-assert historic-unmatched]
+               @retractions))))
 
 (println "transactor focused runtime regressions passed")

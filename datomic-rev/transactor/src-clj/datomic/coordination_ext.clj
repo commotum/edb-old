@@ -104,7 +104,8 @@
           'datomic.kv-couchbase/kv-couchbase
           (select-keys cluster_conf [:host :bucket :password]))
         cluster_conf)))
-  (def remote-sql-stores (atom {}))
+  (.setMeta (clojure.lang.RT/var "datomic.coordination-ext" "remote-sql-stores") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.coordination-ext" "remote-sql-stores") (atom {}))
   (defmethod
     coord/create-cluster
     :sql

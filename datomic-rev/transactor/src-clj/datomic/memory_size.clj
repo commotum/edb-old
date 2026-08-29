@@ -5,64 +5,95 @@
     (dosync (commute (deref #'clojure.core/*loaded-libs*) conj 'datomic.memory-size))
     (clojure.core/with-loading-context (clojure.core/refer 'clojure.core)))
   (set! *warn-on-reflection* true)
-  (defonce MemorySize {})
-  (defprotocol MemorySize (memory-size [_]))
+  (let [protocol_metadata__7420 {:column (int 1)}]
+    (defprotocol MemorySize (memory-size [_] "Return best guess of the memory size of an object."))
+    (reset-meta!
+      (clojure.lang.RT/var "datomic.memory-size" "MemorySize")
+      (assoc (assoc protocol_metadata__7420 :doc nil) :name 'MemorySize :ns *ns*))
+    (let [protocol_signature__7421 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta
+                                        'memory-size
+                                        {:arglists (clojure.core/list ['_])}),
+                                      :arglists (clojure.core/list ['_]),
+                                      :doc "Return best guess of the memory size of an object."}
+                                     :protocol
+                                     (clojure.lang.RT/var "datomic.memory-size" "MemorySize"))
+          protocol_method_name__7422 (with-meta
+                                       (:name protocol_signature__7421)
+                                       protocol_signature__7421)]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.memory-size" "memory-size")
+        (assoc protocol_signature__7421 :name protocol_method_name__7422 :ns *ns*))))
   (def REFERENCE 8)
-  (reset-meta! #'REFERENCE (assoc {:const true, :column 1} :name 'REFERENCE :ns *ns*))
+  (reset-meta! #'REFERENCE (assoc {:const true, :column (int 1)} :name 'REFERENCE :ns *ns*))
   (def LONG 8)
-  (reset-meta! #'LONG (assoc {:const true, :column 1} :name 'LONG :ns *ns*))
+  (reset-meta! #'LONG (assoc {:const true, :column (int 1)} :name 'LONG :ns *ns*))
   (def INT 4)
-  (reset-meta! #'INT (assoc {:const true, :column 1} :name 'INT :ns *ns*))
+  (reset-meta! #'INT (assoc {:const true, :column (int 1)} :name 'INT :ns *ns*))
   (def CHAR 2)
-  (reset-meta! #'CHAR (assoc {:const true, :column 1} :name 'CHAR :ns *ns*))
+  (reset-meta! #'CHAR (assoc {:const true, :column (int 1)} :name 'CHAR :ns *ns*))
   (def ARRAY 16)
-  (reset-meta! #'ARRAY (assoc {:const true, :column 1} :name 'ARRAY :ns *ns*))
+  (reset-meta! #'ARRAY (assoc {:const true, :column (int 1)} :name 'ARRAY :ns *ns*))
   (def STRING 56)
-  (reset-meta! #'STRING (assoc {:const true, :column 1} :name 'STRING :ns *ns*))
+  (reset-meta! #'STRING (assoc {:const true, :column (int 1)} :name 'STRING :ns *ns*))
   (defn array-type
     ([t] (.getClass (java.lang.reflect.Array/newInstance ^java.lang.Class t (int 0)))))
-  (defn handle-primitive-arrays
-    ([&form &env & typesizes]
-      (seq
-        (concat
-          (clojure.core/list 'do)
-          (map
-            (fn fn__9143
-              ([p__9142]
-                (let [vec__9144 p__9142
-                      type (nth vec__9144 (int 0) nil)
-                      size (nth vec__9144 (int 1) nil)]
-                  (seq
-                    (concat
-                      (clojure.core/list 'clojure.core/extend-type)
-                      (clojure.core/list
-                        (seq
-                          (concat
-                            (clojure.core/list 'datomic.memory-size/array-type)
-                            (clojure.core/list type))))
-                      (clojure.core/list 'datomic.memory-size/MemorySize)
-                      (clojure.core/list
-                        (seq
-                          (concat
-                            (clojure.core/list 'memory-size)
-                            (clojure.core/list
-                              (apply vector (seq (concat (clojure.core/list 'x)))))
-                            (clojure.core/list
-                              (seq
-                                (concat
-                                  (clojure.core/list 'clojure.core/+)
-                                  (clojure.core/list 16)
-                                  (clojure.core/list
-                                    (seq
-                                      (concat
-                                        (clojure.core/list 'clojure.core/*)
-                                        (clojure.core/list size)
-                                        (clojure.core/list
-                                          (seq
-                                            (concat
-                                              (clojure.core/list 'clojure.core/count)
-                                              (clojure.core/list 'x))))))))))))))))))
-            (partition 2 typesizes))))))
+  (reset-meta!
+    #'array-type
+    (assoc {:arglists (clojure.core/list ['t]), :column (int 1)} :name 'array-type :ns *ns*))
+  (def handle-primitive-arrays
+   (fn handle_primitive_arrays
+     ([&form &env & typesizes]
+       (seq
+         (concat
+           (clojure.core/list 'do)
+           (map
+             (fn fn__9143
+               ([p__9142]
+                 (let [vec__9144 p__9142
+                       type (nth vec__9144 (int 0) nil)
+                       size (nth vec__9144 (int 1) nil)]
+                   (seq
+                     (concat
+                       (clojure.core/list 'clojure.core/extend-type)
+                       (clojure.core/list
+                         (seq
+                           (concat
+                             (clojure.core/list 'datomic.memory-size/array-type)
+                             (clojure.core/list type))))
+                       (clojure.core/list 'datomic.memory-size/MemorySize)
+                       (clojure.core/list
+                         (seq
+                           (concat
+                             (clojure.core/list 'memory-size)
+                             (clojure.core/list
+                               (apply vector (seq (concat (clojure.core/list 'x)))))
+                             (clojure.core/list
+                               (seq
+                                 (concat
+                                   (clojure.core/list 'clojure.core/+)
+                                   (clojure.core/list 16)
+                                   (clojure.core/list
+                                     (seq
+                                       (concat
+                                         (clojure.core/list 'clojure.core/*)
+                                         (clojure.core/list size)
+                                         (clojure.core/list
+                                           (seq
+                                             (concat
+                                               (clojure.core/list 'clojure.core/count)
+                                               (clojure.core/list 'x))))))))))))))))))
+             (partition 2 typesizes)))))))
+  (reset-meta!
+    #'handle-primitive-arrays
+    (assoc
+      {:arglists (clojure.core/list ['& 'typesizes]), :column (int 1)}
+      :name
+      'handle-primitive-arrays
+      :ns
+      *ns*))
   (.setMacro #'handle-primitive-arrays)
   (extend
     (array-type java.lang.Long/TYPE)

@@ -41,4 +41,7 @@
           (println "Usage: datomic.tools.gc-db {uri} {older-than}")
           (println "older-than is an RFC3339-like timestamp.")
           (java.lang.System/exit (int -1))
-          nil)))))
+          nil))))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))

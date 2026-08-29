@@ -4,7 +4,12 @@
   (when-not (.equals 'datomic.process.events 'clojure.core)
     (dosync (commute (deref #'clojure.core/*loaded-libs*) conj 'datomic.process.events))
     (clojure.core/with-loading-context (clojure.core/refer 'clojure.core)))
-  (defonce subscribers-ref (atom {}))
+  (.setMeta (clojure.lang.RT/var "datomic.process.events" "subscribers-ref") {:column (int 1)})
+  (let [v__6812__auto__ #'subscribers-ref]
+    (when-not (.hasRoot ^clojure.lang.Var v__6812__auto__)
+      (.setMeta (clojure.lang.RT/var "datomic.process.events" "subscribers-ref") {:column (int 1)})
+      (.bindRoot (clojure.lang.RT/var "datomic.process.events" "subscribers-ref") (atom {}))
+      #'subscribers-ref))
   (defn publish
     ([e]
       (let [n (:key e) subscribers (get (deref subscribers-ref) n)]
@@ -26,5 +31,24 @@
                     (let [f (first seq_12465)]
                       (^clojure.lang.IFn f e)
                       (recur (next seq_12465) nil 0 0)))))))))))
+  (reset-meta!
+    #'publish
+    (assoc {:arglists (clojure.core/list ['e]), :column (int 1)} :name 'publish :ns *ns*))
   (defn subscribe ([reference key fn] (swap! subscribers-ref update key assoc reference fn)))
-  (defn unsubscribe ([reference key] (swap! subscribers-ref update key dissoc reference))))
+  (reset-meta!
+    #'subscribe
+    (assoc
+      {:arglists (clojure.core/list ['reference 'key 'fn]), :column (int 1)}
+      :name
+      'subscribe
+      :ns
+      *ns*))
+  (defn unsubscribe ([reference key] (swap! subscribers-ref update key dissoc reference)))
+  (reset-meta!
+    #'unsubscribe
+    (assoc
+      {:arglists (clojure.core/list ['reference 'key]), :column (int 1)}
+      :name
+      'unsubscribe
+      :ns
+      *ns*)))

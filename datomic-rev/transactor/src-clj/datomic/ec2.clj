@@ -74,63 +74,77 @@
         (clojure.core/import 'com.amazonaws.services.ec2.model.Filter)
         (clojure.core/import 'com.amazonaws.services.ec2.model.DeleteSecurityGroupRequest))))
   (set! *warn-on-reflection* true)
-  (defn client
-    ([creds config]
-      (if config
-        (let [region (get config :region)
-              override_endpoint (get config :override-endpoint)
-              conf (d/data-to-object
-                     (dissoc config :region :override-endpoint)
-                     com.amazonaws.ClientConfiguration)
-              conn (if creds
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (aws/credentials creds))
-                       (com.amazonaws.services.ec2.AmazonEC2Client.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.ec2.AmazonEC2Client.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf))
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-                       (com.amazonaws.services.ec2.AmazonEC2Client.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.ec2.AmazonEC2Client.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)))]
-          (cond
-            override_endpoint (.setEndpoint
-                                ^com.amazonaws.AmazonWebServiceClient conn
-                                (str "http://" override_endpoint))
-            region (do
-                     (.setEndpoint
-                       ^com.amazonaws.AmazonWebServiceClient conn
-                       (aws/endpoint-for :ec2 region))))
-          conn)
-        (client creds)))
-    ([creds]
-      (if creds
-        (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
-          (com.amazonaws.services.ec2.AmazonEC2Client. (aws/credentials creds))
-          (com.amazonaws.services.ec2.AmazonEC2Client. (aws/credentials creds)))
-        (if (instance?
-              com.amazonaws.auth.AWSCredentialsProvider
-              (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.ec2.AmazonEC2Client.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.ec2.AmazonEC2Client.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-    ([]
-      (if (instance?
-            com.amazonaws.auth.AWSCredentialsProvider
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.ec2.AmazonEC2Client.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.ec2.AmazonEC2Client.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+  (def client
+   (fn client
+     ([creds config]
+       (if config
+         (let [region (get config :region)
+               override_endpoint (get config :override-endpoint)
+               conf (d/data-to-object
+                      (dissoc config :region :override-endpoint)
+                      com.amazonaws.ClientConfiguration)
+               conn (if creds
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (aws/credentials creds))
+                        (com.amazonaws.services.ec2.AmazonEC2Client.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.ec2.AmazonEC2Client.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf))
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+                        (com.amazonaws.services.ec2.AmazonEC2Client.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.ec2.AmazonEC2Client.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)))]
+           (cond
+             override_endpoint (.setEndpoint
+                                 ^com.amazonaws.AmazonWebServiceClient conn
+                                 (str "http://" override_endpoint))
+             region (do
+                      (.setEndpoint
+                        ^com.amazonaws.AmazonWebServiceClient conn
+                        (aws/endpoint-for :ec2 region))))
+           conn)
+         (client creds)))
+     ([creds]
+       (if creds
+         (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
+           (com.amazonaws.services.ec2.AmazonEC2Client. (aws/credentials creds))
+           (com.amazonaws.services.ec2.AmazonEC2Client. (aws/credentials creds)))
+         (if (instance?
+               com.amazonaws.auth.AWSCredentialsProvider
+               (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.ec2.AmazonEC2Client.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.ec2.AmazonEC2Client.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+     ([]
+       (if (instance?
+             com.amazonaws.auth.AWSCredentialsProvider
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.ec2.AmazonEC2Client.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.ec2.AmazonEC2Client.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))
+  (reset-meta!
+    #'client
+    (assoc
+      {:arglists
+       (clojure.core/list
+         (.withMeta [] {:tag 'com.amazonaws.services.ec2.AmazonEC2Client})
+         (.withMeta ['creds] {:tag 'com.amazonaws.services.ec2.AmazonEC2Client})
+         (.withMeta ['creds 'config] {:tag 'com.amazonaws.services.ec2.AmazonEC2Client})),
+       :column (int 1)}
+      :name
+      'client
+      :ns
+      *ns*))
   (alter-var-root
     #'d/list-property-types
     assoc
@@ -1385,110 +1399,94 @@
                (when temp__5804__auto__
                  (let [v__19409__auto__ temp__5804__auto__]
                    [:userId (d/object-to-data-wrapper v__19409__auto__)])))))))})
-  (defn create-keypair
-    ([o x1]
-      (d/object-to-data
-        (.createKeyPair
-          ^com.amazonaws.services.ec2.AmazonEC2Client o
-          (d/data-to-object x1 com.amazonaws.services.ec2.model.CreateKeyPairRequest)))))
-  (reset-meta!
-    #'create-keypair
-    (assoc
-      {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
-       :column 1}
-      :name
-      'create-keypair
-      :ns
-      *ns*))
-  (defn describe-instances
-    ([o x1]
-      (d/object-to-data
-        (.describeInstances
-          ^com.amazonaws.services.ec2.AmazonEC2Client o
-          (d/data-to-object x1 com.amazonaws.services.ec2.model.DescribeInstancesRequest)))))
-  (reset-meta!
-    #'describe-instances
-    (assoc
-      {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
-       :column 1}
-      :name
-      'describe-instances
-      :ns
-      *ns*))
-  (defn delete-security-group
-    ([o x1]
-      (d/object-to-data
-        (.deleteSecurityGroup
-          ^com.amazonaws.services.ec2.AmazonEC2Client o
-          (d/data-to-object x1 com.amazonaws.services.ec2.model.DeleteSecurityGroupRequest)))))
-  (reset-meta!
-    #'delete-security-group
-    (assoc
-      {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
-       :column 1}
-      :name
-      'delete-security-group
-      :ns
-      *ns*))
-  (defn describe-security-groups
-    ([o x1]
-      (d/object-to-data
-        (.describeSecurityGroups
-          ^com.amazonaws.services.ec2.AmazonEC2Client o
-          (d/data-to-object x1 com.amazonaws.services.ec2.model.DescribeSecurityGroupsRequest)))))
-  (reset-meta!
-    #'describe-security-groups
-    (assoc
-      {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
-       :column 1}
-      :name
-      'describe-security-groups
-      :ns
-      *ns*))
-  (defn create-security-group
-    ([o x1]
-      (d/object-to-data
-        (.createSecurityGroup
-          ^com.amazonaws.services.ec2.AmazonEC2Client o
-          (d/data-to-object x1 com.amazonaws.services.ec2.model.CreateSecurityGroupRequest)))))
-  (reset-meta!
-    #'create-security-group
-    (assoc
-      {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
-       :column 1}
-      :name
-      'create-security-group
-      :ns
-      *ns*))
-  (defn authorize-security-group-ingress
-    ([o x1]
-      (d/object-to-data
-        (.authorizeSecurityGroupIngress
-          ^com.amazonaws.services.ec2.AmazonEC2Client o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.ec2.model.AuthorizeSecurityGroupIngressRequest)))))
-  (reset-meta!
-    #'authorize-security-group-ingress
-    (assoc
-      {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
-       :column 1}
-      :name
-      'authorize-security-group-ingress
-      :ns
-      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ec2" "create-keypair")
+    {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ec2" "create-keypair")
+    (fn create_keypair
+      ([o x1]
+        (d/object-to-data
+          (.createKeyPair
+            ^com.amazonaws.services.ec2.AmazonEC2Client o
+            (d/data-to-object x1 com.amazonaws.services.ec2.model.CreateKeyPairRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ec2" "describe-instances")
+    {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ec2" "describe-instances")
+    (fn describe_instances
+      ([o x1]
+        (d/object-to-data
+          (.describeInstances
+            ^com.amazonaws.services.ec2.AmazonEC2Client o
+            (d/data-to-object x1 com.amazonaws.services.ec2.model.DescribeInstancesRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ec2" "delete-security-group")
+    {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ec2" "delete-security-group")
+    (fn delete_security_group
+      ([o x1]
+        (d/object-to-data
+          (.deleteSecurityGroup
+            ^com.amazonaws.services.ec2.AmazonEC2Client o
+            (d/data-to-object x1 com.amazonaws.services.ec2.model.DeleteSecurityGroupRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ec2" "describe-security-groups")
+    {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ec2" "describe-security-groups")
+    (fn describe_security_groups
+      ([o x1]
+        (d/object-to-data
+          (.describeSecurityGroups
+            ^com.amazonaws.services.ec2.AmazonEC2Client o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.ec2.model.DescribeSecurityGroupsRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ec2" "create-security-group")
+    {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ec2" "create-security-group")
+    (fn create_security_group
+      ([o x1]
+        (d/object-to-data
+          (.createSecurityGroup
+            ^com.amazonaws.services.ec2.AmazonEC2Client o
+            (d/data-to-object x1 com.amazonaws.services.ec2.model.CreateSecurityGroupRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ec2" "authorize-security-group-ingress")
+    {:related-class com.amazonaws.services.ec2.AmazonEC2Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.ec2.AmazonEC2Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ec2" "authorize-security-group-ingress")
+    (fn authorize_security_group_ingress
+      ([o x1]
+        (d/object-to-data
+          (.authorizeSecurityGroupIngress
+            ^com.amazonaws.services.ec2.AmazonEC2Client o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.ec2.model.AuthorizeSecurityGroupIngressRequest))))))
   (defn create-tags
     ([m]
       (map
@@ -1499,117 +1497,195 @@
                   v (nth vec__31878 (int 1) nil)]
               (com.amazonaws.services.ec2.model.Tag. (name k) (name v)))))
         m)))
-  (defn tag-resources
-    ([client tags & resources]
-      (.createTags
-        ^com.amazonaws.services.ec2.AmazonEC2Client client
-        (com.amazonaws.services.ec2.model.CreateTagsRequest.
-          ^java.util.List resources
-          (create-tags tags)))))
-  (defn authorize-security-group-ingress-command
-    ([p__31884]
-      (let [map__31885 p__31884
-            map__31885 (if (seq? map__31885)
-                         (if (next map__31885)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__31885))
-                           (if (seq map__31885) (first map__31885) {}))
-                         map__31885)
-            group_name (get map__31885 :group-name)
-            address (get map__31885 :address)
-            protocol (get map__31885 :protocol)
-            port (get map__31885 :port)
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (println
-              (authorize-security-group-ingress
-                (client)
-                {:groupName group_name,
-                 :ipPermissions
-                 [{:ipProtocol protocol, :toPort port, :fromPort port, :ipRanges [address]}]}))
-            (str s__6419__auto__))))))
-  (defn create-security-group-command
-    ([p__31888]
-      (let [map__31889 p__31888
-            map__31889 (if (seq? map__31889)
-                         (if (next map__31889)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__31889))
-                           (if (seq map__31889) (first map__31889) {}))
-                         map__31889)
-            group_name (get map__31889 :group-name)
-            description (get map__31889 :description)
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (println
-              (create-security-group (client) {:groupName group_name, :description description}))
-            (str s__6419__auto__))))))
-  (defn security-group-exists?
-    ([ec2_client group_name]
-      (boolean
-        (seq
-          (:securityGroups
-            (describe-security-groups
-              ec2_client
-              {:filters [{:name "group-name", :values [group_name]}]}))))))
-  (defn ensure-security-group
-    ([ec2_client group_name description]
-      (if (security-group-exists? ec2_client group_name)
-        :already-exists
-        (do
-          (create-security-group ec2_client {:groupName group_name, :description description})
-          :created))))
-  (defn group-id->group-name
-    ([ec2_client group_id]
-      (get-in
-        (describe-security-groups ec2_client {:filters [{:name "group-id", :values [group_id]}]})
-        [:securityGroups 0 :groupName])))
-  (defn ensure-group-name
-    ([ec2_client ingress]
-      (update-in
-        ingress
-        [:userIdGroupPairs]
-        (fn fn__31896
-          ([group]
-            (mapv
-              (fn fn__31897
-                ([p1__31895#]
-                  (let [group_id (:groupId p1__31895#)]
-                    (dissoc
-                      (assoc
-                        p1__31895#
-                        :groupName
-                        (:groupName p1__31895# (group-id->group-name ec2_client group_id)))
-                      :groupId))))
-              group))))))
-  (defn ingresses
-    ([ec2_client security_group_desc pred]
-      (let [permissions (map
-                          (partial ensure-group-name ec2_client)
-                          (:ipPermissions (first (:securityGroups security_group_desc))))]
-        (reduce
-          (fn fn__31904
-            ([m p__31903]
-              (let [map__31905 p__31903
-                    map__31905 (if (seq? map__31905)
-                                 (if (next map__31905)
-                                   (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                     (to-array map__31905))
-                                   (if (seq map__31905) (first map__31905) {}))
-                                 map__31905)
-                    ipRanges (get map__31905 :ipRanges)
-                    userIdGroupPairs (get map__31905 :userIdGroupPairs)]
-                (update-in
-                  (update-in
-                    m
-                    [:ipRanges]
-                    (fn fn__31906 ([p1__31901#] (into p1__31901# ipRanges))))
-                  [:userIdGroupPairs]
-                  (fn fn__31908 ([p1__31902#] (into p1__31902# userIdGroupPairs)))))))
-          {:ipRanges #{}, :userIdGroupPairs #{}}
-          (filter pred permissions)))))
+  (reset-meta!
+    #'create-tags
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'create-tags :ns *ns*))
+  (def tag-resources
+   (fn tag_resources
+     ([client tags & resources]
+       (.createTags
+         ^com.amazonaws.services.ec2.AmazonEC2Client client
+         (com.amazonaws.services.ec2.model.CreateTagsRequest.
+           ^java.util.List resources
+           (create-tags tags))))))
+  (reset-meta!
+    #'tag-resources
+    (assoc
+      {:arglists
+       (clojure.core/list [(.withMeta 'client {:tag 'AmazonEC2Client}) 'tags '& 'resources]),
+       :column (int 1)}
+      :name
+      'tag-resources
+      :ns
+      *ns*))
+  (def authorize-security-group-ingress-command
+   (fn authorize_security_group_ingress_command
+     ([p__31884]
+       (let [map__31885 p__31884
+             map__31885 (if (seq? map__31885)
+                          (if (next map__31885)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__31885))
+                            (if (seq map__31885) (first map__31885) {}))
+                          map__31885)
+             group_name (get map__31885 :group-name)
+             address (get map__31885 :address)
+             protocol (get map__31885 :protocol)
+             port (get map__31885 :port)
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (println
+               (authorize-security-group-ingress
+                 (client)
+                 {:groupName group_name,
+                  :ipPermissions
+                  [{:ipProtocol protocol, :toPort port, :fromPort port, :ipRanges [address]}]}))
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'authorize-security-group-ingress-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['group-name 'address 'protocol 'port]}]),
+       :column (int 1)}
+      :name
+      'authorize-security-group-ingress-command
+      :ns
+      *ns*))
+  (def create-security-group-command
+   (fn create_security_group_command
+     ([p__31888]
+       (let [map__31889 p__31888
+             map__31889 (if (seq? map__31889)
+                          (if (next map__31889)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__31889))
+                            (if (seq map__31889) (first map__31889) {}))
+                          map__31889)
+             group_name (get map__31889 :group-name)
+             description (get map__31889 :description)
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (println
+               (create-security-group (client) {:groupName group_name, :description description}))
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'create-security-group-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['group-name 'description]}]), :column (int 1)}
+      :name
+      'create-security-group-command
+      :ns
+      *ns*))
+  (def security-group-exists?
+   (fn security_group_exists_QMARK_
+     ([ec2_client group_name]
+       (boolean
+         (seq
+           (:securityGroups
+             (describe-security-groups
+               ec2_client
+               {:filters [{:name "group-name", :values [group_name]}]})))))))
+  (reset-meta!
+    #'security-group-exists?
+    (assoc
+      {:arglists (clojure.core/list ['ec2-client 'group-name]), :column (int 1)}
+      :name
+      'security-group-exists?
+      :ns
+      *ns*))
+  (def ensure-security-group
+   (fn ensure_security_group
+     ([ec2_client group_name description]
+       (if (security-group-exists? ec2_client group_name)
+         :already-exists
+         (do
+           (create-security-group ec2_client {:groupName group_name, :description description})
+           :created)))))
+  (reset-meta!
+    #'ensure-security-group
+    (assoc
+      {:arglists (clojure.core/list ['ec2-client 'group-name 'description]), :column (int 1)}
+      :name
+      'ensure-security-group
+      :ns
+      *ns*))
+  (def group-id->group-name
+   (fn group_id__GT_group_name
+     ([ec2_client group_id]
+       (get-in
+         (describe-security-groups ec2_client {:filters [{:name "group-id", :values [group_id]}]})
+         [:securityGroups 0 :groupName]))))
+  (reset-meta!
+    #'group-id->group-name
+    (assoc
+      {:arglists (clojure.core/list ['ec2-client 'group-id]), :column (int 1)}
+      :name
+      'group-id->group-name
+      :ns
+      *ns*))
+  (def ensure-group-name
+   (fn ensure_group_name
+     ([ec2_client ingress]
+       (update-in
+         ingress
+         [:userIdGroupPairs]
+         (fn fn__31896
+           ([group]
+             (mapv
+               (fn fn__31897
+                 ([p1__31895#]
+                   (let [group_id (:groupId p1__31895#)]
+                     (dissoc
+                       (assoc
+                         p1__31895#
+                         :groupName
+                         (:groupName p1__31895# (group-id->group-name ec2_client group_id)))
+                       :groupId))))
+               group)))))))
+  (reset-meta!
+    #'ensure-group-name
+    (assoc
+      {:arglists (clojure.core/list ['ec2-client 'ingress]), :column (int 1)}
+      :name
+      'ensure-group-name
+      :ns
+      *ns*))
+  (def ingresses
+   (fn ingresses
+     ([ec2_client security_group_desc pred]
+       (let [permissions (map
+                           (partial ensure-group-name ec2_client)
+                           (:ipPermissions (first (:securityGroups security_group_desc))))]
+         (reduce
+           (fn fn__31904
+             ([m p__31903]
+               (let [map__31905 p__31903
+                     map__31905 (if (seq? map__31905)
+                                  (if (next map__31905)
+                                    (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                      (to-array map__31905))
+                                    (if (seq map__31905) (first map__31905) {}))
+                                  map__31905)
+                     ipRanges (get map__31905 :ipRanges)
+                     userIdGroupPairs (get map__31905 :userIdGroupPairs)]
+                 (update-in
+                   (update-in
+                     m
+                     [:ipRanges]
+                     (fn fn__31906 ([p1__31901#] (into p1__31901# ipRanges))))
+                   [:userIdGroupPairs]
+                   (fn fn__31908 ([p1__31902#] (into p1__31902# userIdGroupPairs)))))))
+           {:ipRanges #{}, :userIdGroupPairs #{}}
+           (filter pred permissions))))))
+  (reset-meta!
+    #'ingresses
+    (assoc
+      {:arglists (clojure.core/list ['ec2-client 'security-group-desc 'pred]), :column (int 1)}
+      :name
+      'ingresses
+      :ns
+      *ns*))
   (defn novel-ingresses
     ([ingresses ingress]
       (let [new_cidr (fn new_cidr
@@ -1621,23 +1697,40 @@
                     [:userIdGroupPairs]
                     (partial filterv new_group))]
         (when (or (seq (:ipRanges novel)) (seq (:userIdGroupPairs novel))) novel))))
-  (defn ensure-ingress
-    ([ec2_client group_name ingress]
-      (let [desc (describe-security-groups
-                   ec2_client
-                   {:filters [{:name "group-name", :values [group_name]}]})
-            match_map (dissoc ingress :userIdGroupPairs :ipRanges)
-            pred (fn pred ([p1__31920#] (= match_map (select-keys p1__31920# (keys match_map)))))
-            temp__5804__auto__ (novel-ingresses (ingresses ec2_client desc pred) ingress)]
-        (when temp__5804__auto__
-          (let [novel temp__5804__auto__]
-            (authorize-security-group-ingress
-              ec2_client
-              {:groupName group_name, :ipPermissions [ingress]})
-            (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.ec2")]
-              (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                (.info
-                  ^org.slf4j.Logger logger
-                  (logger/process {:event :ec2/ensure-ingress, :group group_name, :added novel})))
-              nil)
-            novel))))))
+  (reset-meta!
+    #'novel-ingresses
+    (assoc
+      {:arglists (clojure.core/list ['ingresses 'ingress]), :column (int 1)}
+      :name
+      'novel-ingresses
+      :ns
+      *ns*))
+  (def ensure-ingress
+   (fn ensure_ingress
+     ([ec2_client group_name ingress]
+       (let [desc (describe-security-groups
+                    ec2_client
+                    {:filters [{:name "group-name", :values [group_name]}]})
+             match_map (dissoc ingress :userIdGroupPairs :ipRanges)
+             pred (fn pred ([p1__31920#] (= match_map (select-keys p1__31920# (keys match_map)))))
+             temp__5804__auto__ (novel-ingresses (ingresses ec2_client desc pred) ingress)]
+         (when temp__5804__auto__
+           (let [novel temp__5804__auto__]
+             (authorize-security-group-ingress
+               ec2_client
+               {:groupName group_name, :ipPermissions [ingress]})
+             (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.ec2")]
+               (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                 (.info
+                   ^org.slf4j.Logger logger
+                   (logger/process {:event :ec2/ensure-ingress, :group group_name, :added novel})))
+               nil)
+             novel))))))
+  (reset-meta!
+    #'ensure-ingress
+    (assoc
+      {:arglists (clojure.core/list ['ec2-client 'group-name 'ingress]), :column (int 1)}
+      :name
+      'ensure-ingress
+      :ns
+      *ns*)))

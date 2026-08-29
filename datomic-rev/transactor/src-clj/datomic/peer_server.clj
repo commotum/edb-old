@@ -60,21 +60,28 @@
           ['datomic.slf4j :as 'logger]
           ['datomic.specs :as 'specs]
           ['datomic.uri :as 'uri]))))
-  (defn id-and-conn
-    ([db_uri]
-      (let [map__24326 (uri/parse-db db_uri)
-            map__24326 (if (seq? map__24326)
-                         (if (next map__24326)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__24326))
-                           (if (seq map__24326) (first map__24326) {}))
-                         map__24326)
-            protocol (get map__24326 :protocol)
-            db_name (get map__24326 :db-name)
-            uri (get map__24326 :uri)]
-        (when (= protocol :mem) (peer/create-local-database db_name uri))
-        (let [conn (d/connect uri)] [(:id (d/db conn)) conn]))))
+  (def id-and-conn
+   (fn id_and_conn
+     ([db_uri]
+       (let [map__24326 (uri/parse-db db_uri)
+             map__24326 (if (seq? map__24326)
+                          (if (next map__24326)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__24326))
+                            (if (seq map__24326) (first map__24326) {}))
+                          map__24326)
+             protocol (get map__24326 :protocol)
+             db_name (get map__24326 :db-name)
+             uri (get map__24326 :uri)]
+         (when (= protocol :mem) (peer/create-local-database db_name uri))
+         (let [conn (d/connect uri)] [(:id (d/db conn)) conn])))))
+  (reset-meta!
+    #'id-and-conn
+    (assoc {:arglists (clojure.core/list ['db-uri]), :column (int 1)} :name 'id-and-conn :ns *ns*))
   (defn database-uri? ([s] (boolean (:db-name (uri/parse s)))))
+  (reset-meta!
+    #'database-uri?
+    (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'database-uri? :ns *ns*))
   (s/def-impl
     :datomic.peer-server/non-empty-string
     (clojure.core/list
@@ -353,135 +360,182 @@
                 id))))
         #:datomic.peer-server{:id->conn {}, :name->id {}}
         db)))
-  (defn cache-entry->db-config
-    ([p__24389]
-      (let [vec__24390 p__24389 k (nth vec__24390 (int 0) nil) v (nth vec__24390 (int 1) nil)]
-        {:db-id k, :db-name (:name v)})))
-  (defn add-admin-ops
-    ([nsm name_>id]
-      (update
-        (update
-          (update nsm :groups conj {:group :peer-server})
-          :ops
-          assoc
-          :datomic.catalog/resolve-db
-          {:fn
-           (fn fn__24394
-             ([req ch]
-               (let [db_name (some-> req (:body) (:db-name))
-                     temp__5802__auto__ (get name_>id db_name)]
-                 (if temp__5802__auto__
-                   (let [db_id temp__5802__auto__] {:status 200, :body {:database-id db_id}})
-                   {:status 400, :body {:cause (str "Database " db_name " not found")}})))),
-           :groups [{:group :peer-server}],
-           :routing :balanced})
-        :ops
-        assoc
-        :datomic.catalog/list-dbs
-        {:fn (fn fn__24398 ([req ch] {:status 200, :body {:result (into [] (keys name_>id))}})),
-         :groups [{:group :peer-server}],
-         :routing :balanced})))
-  (defn create
-    ([p__24401]
-      (let [map__24402 p__24401
-            map__24402 (if (seq? map__24402)
-                         (if (next map__24402)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__24402))
-                           (if (seq map__24402) (first map__24402) {}))
-                         map__24402)
-            args map__24402
-            host (get map__24402 :host)
-            port (get map__24402 :port)
-            auth (get map__24402 :auth)
-            db (get map__24402 :db)
-            concurrency (get map__24402 :concurrency)]
-        (cast2slf4j/redirect)
-        (client-spi/initialize! spi-support/client-spi-config)
-        (let [caches (connection-caches db)
-              token_manager (auth/create-token-manager args)
-              server_spi (spi-support/create-spi
-                           (:datomic.peer-server/id->conn caches)
-                           token_manager)
-              nsm (client-spi/nano-services-map server_spi :peer-server)
-              nsm (add-admin-ops nsm (:datomic.peer-server/name->id caches))
-              op_limit (* 2 (.availableProcessors (java.lang.Runtime/getRuntime)))
-              ncm {:marshaling marshal/instance,
-                   :server
-                   {:connection-concurrency concurrency,
-                    :bind-address {:host host, :ssl-port port},
-                    :pending-ops-limit 127,
-                    :processing-concurrency concurrency,
-                    :ping-path "/health",
-                    :auth-callback (partial auth/callback auth),
-                    :ssl (auth/ssl-config),
-                    :bounding-timeout 60000},
-                   :casters cast/casters,
-                   :advertise-addr {:server-name host, :server-port port, :scheme "https"},
-                   :nano-services nsm}]
-          {:caches caches, :server-spi server_spi, :ncm ncm, :nano (nano-impl/create ncm)}))))
+  (reset-meta!
+    #'connection-caches
+    (assoc
+      {:arglists (clojure.core/list ['db]), :column (int 1)}
+      :name
+      'connection-caches
+      :ns
+      *ns*))
+  (def cache-entry->db-config
+   (fn cache_entry__GT_db_config
+     ([p__24389]
+       (let [vec__24390 p__24389 k (nth vec__24390 (int 0) nil) v (nth vec__24390 (int 1) nil)]
+         {:db-id k, :db-name (:name v)}))))
+  (reset-meta!
+    #'cache-entry->db-config
+    (assoc
+      {:arglists (clojure.core/list [['k 'v]]), :column (int 1)}
+      :name
+      'cache-entry->db-config
+      :ns
+      *ns*))
+  (def add-admin-ops
+   (fn add_admin_ops
+     ([nsm name_>id]
+       (update
+         (update
+           (update nsm :groups conj {:group :peer-server})
+           :ops
+           assoc
+           :datomic.catalog/resolve-db
+           {:fn
+            (fn fn__24394
+              ([req ch]
+                (let [db_name (some-> req (:body) (:db-name))
+                      temp__5802__auto__ (get name_>id db_name)]
+                  (if temp__5802__auto__
+                    (let [db_id temp__5802__auto__] {:status 200, :body {:database-id db_id}})
+                    {:status 400, :body {:cause (str "Database " db_name " not found")}})))),
+            :groups [{:group :peer-server}],
+            :routing :balanced})
+         :ops
+         assoc
+         :datomic.catalog/list-dbs
+         {:fn (fn fn__24398 ([req ch] {:status 200, :body {:result (into [] (keys name_>id))}})),
+          :groups [{:group :peer-server}],
+          :routing :balanced}))))
+  (reset-meta!
+    #'add-admin-ops
+    (assoc
+      {:arglists (clojure.core/list ['nsm 'name->id]), :column (int 1)}
+      :name
+      'add-admin-ops
+      :ns
+      *ns*))
+  (def create
+   (fn create
+     ([p__24401]
+       (let [map__24402 p__24401
+             map__24402 (if (seq? map__24402)
+                          (if (next map__24402)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__24402))
+                            (if (seq map__24402) (first map__24402) {}))
+                          map__24402)
+             args map__24402
+             host (get map__24402 :host)
+             port (get map__24402 :port)
+             auth (get map__24402 :auth)
+             db (get map__24402 :db)
+             concurrency (get map__24402 :concurrency)]
+         (cast2slf4j/redirect)
+         (client-spi/initialize! spi-support/client-spi-config)
+         (let [caches (connection-caches db)
+               token_manager (auth/create-token-manager args)
+               server_spi (spi-support/create-spi
+                            (:datomic.peer-server/id->conn caches)
+                            token_manager)
+               nsm (client-spi/nano-services-map server_spi :peer-server)
+               nsm (add-admin-ops nsm (:datomic.peer-server/name->id caches))
+               op_limit (* 2 (.availableProcessors (java.lang.Runtime/getRuntime)))
+               ncm {:marshaling marshal/instance,
+                    :server
+                    {:connection-concurrency concurrency,
+                     :bind-address {:host host, :ssl-port port},
+                     :pending-ops-limit 127,
+                     :processing-concurrency concurrency,
+                     :ping-path "/health",
+                     :auth-callback (partial auth/callback auth),
+                     :ssl (auth/ssl-config),
+                     :bounding-timeout 60000},
+                    :casters cast/casters,
+                    :advertise-addr {:server-name host, :server-port port, :scheme "https"},
+                    :nano-services nsm}]
+           {:caches caches, :server-spi server_spi, :ncm ncm, :nano (nano-impl/create ncm)})))))
+  (reset-meta!
+    #'create
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['host 'port 'auth 'db 'concurrency], :as 'args}]),
+       :column (int 1)}
+      :name
+      'create
+      :ns
+      *ns*))
   (defn cli-split-by-comma ([s] (take 2 (str/split s #","))))
   (reset-meta!
     #'cli-split-by-comma
     (assoc
-      {:private true, :arglists (clojure.core/list ['s]), :column 1}
+      {:private true, :arglists (clojure.core/list ['s]), :column (int 1)}
       :name
       'cli-split-by-comma
       :ns
       *ns*))
-  (defn cli-add-to-map
-    ([m k p__24405]
-      (let [vec__24406 p__24405
-            access_key (nth vec__24406 (int 0) nil)
-            secret (nth vec__24406 (int 1) nil)]
-        (update m k assoc access_key secret))))
+  (def cli-add-to-map
+   (fn cli_add_to_map
+     ([m k p__24405]
+       (let [vec__24406 p__24405
+             access_key (nth vec__24406 (int 0) nil)
+             secret (nth vec__24406 (int 1) nil)]
+         (update m k assoc access_key secret)))))
   (reset-meta!
     #'cli-add-to-map
     (assoc
-      {:private true, :arglists (clojure.core/list ['m 'k ['access-key 'secret]]), :column 1}
+      {:private true, :arglists (clojure.core/list ['m 'k ['access-key 'secret]]), :column (int 1)}
       :name
       'cli-add-to-map
       :ns
       *ns*))
-  (def cli-options
-   [["-h" "--host HOST" "Listen on this host" :default "localhost"]
-    ["-c"
-     "--concurrency N"
-     "Max number of concurrent requests"
-     :default
-     16
-     :parse-fn
-     (fn fn__24412 ([p1__24410#] (let [n (edn/read-string p1__24410#)] (when (integer? n) n))))]
-    ["-p"
-     "--port PORT"
-     "Listen on this port"
-     :default
-     8998
-     :parse-fn
-     (fn fn__24414 ([p1__24411#] (let [n (edn/read-string p1__24411#)] (when (integer? n) n))))]
-    ["-d"
-     "--db NAME,URL"
-     "Comma-separated database name and URL, repeatable."
-     :default
-     nil
-     :parse-fn
-     cli-split-by-comma
-     :assoc-fn
-     cli-add-to-map]
-    ["-a"
-     "--auth ACCESS,SECRET"
-     "Comma-separated access key and secret, repeatable."
-     :default
-     nil
-     :parse-fn
-     cli-split-by-comma
-     :assoc-fn
-     cli-add-to-map]])
+  (.setMeta (clojure.lang.RT/var "datomic.peer-server" "cli-options") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.peer-server" "cli-options")
+    [["-h" "--host HOST" "Listen on this host" :default "localhost"]
+     ["-c"
+      "--concurrency N"
+      "Max number of concurrent requests"
+      :default
+      16
+      :parse-fn
+      (fn fn__24412 ([p1__24410#] (let [n (edn/read-string p1__24410#)] (when (integer? n) n))))]
+     ["-p"
+      "--port PORT"
+      "Listen on this port"
+      :default
+      8998
+      :parse-fn
+      (fn fn__24414 ([p1__24411#] (let [n (edn/read-string p1__24411#)] (when (integer? n) n))))]
+     ["-d"
+      "--db NAME,URL"
+      "Comma-separated database name and URL, repeatable."
+      :default
+      nil
+      :parse-fn
+      cli-split-by-comma
+      :assoc-fn
+      cli-add-to-map]
+     ["-a"
+      "--auth ACCESS,SECRET"
+      "Comma-separated access key and secret, repeatable."
+      :default
+      nil
+      :parse-fn
+      cli-split-by-comma
+      :assoc-fn
+      cli-add-to-map]])
   (defn print-summary
     ([summary]
       (println "\nCommand-line arguments:\n")
       (println summary)
       (println "\nSee https://docs.datomic.com/peer-server.html for more information")))
+  (reset-meta!
+    #'print-summary
+    (assoc
+      {:arglists (clojure.core/list ['summary]), :column (int 1)}
+      :name
+      'print-summary
+      :ns
+      *ns*))
   (defn -main*
     ([& args]
       (let [map__24417 (cli/parse-opts args cli-options)
@@ -555,7 +609,13 @@
                                     (println "Serving" alias)
                                     (recur (next seq_24428) nil 0 0)))))))))
                     result))))))
+  (reset-meta!
+    #'-main*
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main* :ns *ns*))
   (defn -main
     ([& args]
       (process/claim-pid-file)
-      (when-not (apply -main* args) (java.lang.System/exit (int 1)) nil))))
+      (when-not (apply -main* args) (java.lang.System/exit (int 1)) nil)))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))

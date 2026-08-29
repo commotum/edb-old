@@ -17,22 +17,36 @@
           ['clojure.set :as 'set]
           ['datomic.slf4j :as 'logger]))))
   (set! *warn-on-reflection* true)
-  (defn has-callback-signature?
-    ([cls mname]
-      (when-not (symbol? mname)
-        (throw
-          (java.lang.AssertionError.
-            (str "Assert failed: " (pr-str (clojure.core/list 'symbol? 'mname))))))
-      (boolean
-        (seq
-          (filter
-            (fn fn__25760
-              ([member]
-                (and
-                  (= (:name member) mname)
-                  (= (:parameter-types member) ['java.lang.Object])
-                  (= #{:public :static} (set/intersection #{:public :static} (:flags member))))))
-            (:members (reflect/reflect cls)))))))
+  (def has-callback-signature?
+   (fn has_callback_signature_QMARK_
+     ([cls mname]
+       (when-not (symbol? mname)
+         (throw
+           (java.lang.AssertionError.
+             (str "Assert failed: " (pr-str (clojure.core/list 'symbol? 'mname))))))
+       (boolean
+         (seq
+           (filter
+             (fn fn__25760
+               ([member]
+                 (and
+                   (= (:name member) mname)
+                   (= (:parameter-types member) ['java.lang.Object])
+                   (= #{:public :static} (set/intersection #{:public :static} (:flags member))))))
+             (:members (reflect/reflect cls))))))))
+  (reset-meta!
+    #'has-callback-signature?
+    (assoc
+      {:arglists
+       (clojure.core/list
+         (.withMeta
+           ['cls 'mname]
+           {:pre [(.withMeta (clojure.core/list 'symbol? 'mname) {:column (int 10)})]})),
+       :column (int 1)}
+      :name
+      'has-callback-signature?
+      :ns
+      *ns*))
   (defn compile-static-method-callback
     ([sym]
       (let [temp__5802__auto__ (re-matches #"(.*)\.(.*)" (str sym))]
@@ -77,6 +91,14 @@
                 (logger/process
                   (str "Callback symbol " sym " does not have the required format"))))
             nil)))))
+  (reset-meta!
+    #'compile-static-method-callback
+    (assoc
+      {:arglists (clojure.core/list ['sym]), :column (int 1)}
+      :name
+      'compile-static-method-callback
+      :ns
+      *ns*))
   (defn create-callback
     ([sym]
       (if (namespace sym)
@@ -91,4 +113,12 @@
                     ^org.slf4j.Logger logger
                     (logger/process (str "Callback " sym " does not exist"))))
                 nil))))
-        (compile-static-method-callback sym)))))
+        (compile-static-method-callback sym))))
+  (reset-meta!
+    #'create-callback
+    (assoc
+      {:arglists (clojure.core/list ['sym]), :column (int 1)}
+      :name
+      'create-callback
+      :ns
+      *ns*)))

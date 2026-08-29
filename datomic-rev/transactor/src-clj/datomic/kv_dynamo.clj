@@ -23,7 +23,7 @@
   (reset-meta!
     #'key-path
     (assoc
-      {:private true, :arglists (clojure.core/list ['prefix 'k]), :column 1}
+      {:private true, :arglists (clojure.core/list ['prefix 'k]), :column (int 1)}
       :name
       'key-path
       :ns
@@ -33,24 +33,33 @@
   (reset-meta!
     #'remove-prefix
     (assoc
-      {:private true, :arglists (clojure.core/list ['prefix 'k]), :column 1}
+      {:private true, :arglists (clojure.core/list ['prefix 'k]), :column (int 1)}
       :name
       'remove-prefix
       :ns
       *ns*))
-  (defn expected-map
-    ([expect_map]
-      (into
-        {}
-        (map
-          (fn fn__30641
-            ([p__30640]
-              (let [vec__30642 p__30640
-                    k (nth vec__30642 (int 0) nil)
-                    v (nth vec__30642 (int 1) nil)]
-                [(name k)
-                 (if (nil? v) {:exists false} {:value {(if (number? v) :n :s) (str v)}})])))
-          expect_map))))
+  (def expected-map
+   (fn expected_map
+     ([expect_map]
+       (into
+         {}
+         (map
+           (fn fn__30641
+             ([p__30640]
+               (let [vec__30642 p__30640
+                     k (nth vec__30642 (int 0) nil)
+                     v (nth vec__30642 (int 1) nil)]
+                 [(name k)
+                  (if (nil? v) {:exists false} {:value {(if (number? v) :n :s) (str v)}})])))
+           expect_map)))))
+  (reset-meta!
+    #'expected-map
+    (assoc
+      {:arglists (clojure.core/list ['expect-map]), :column (int 1)}
+      :name
+      'expected-map
+      :ns
+      *ns*))
   (deftype
     KVDynamo
     [client table prefix]
@@ -94,6 +103,23 @@
         (catch com.amazonaws.services.dynamodbv2.model.ConditionalCheckFailedException ex nil))))
   (clojure.core/import 'datomic.kv_dynamo.KVDynamo)
   (defn ->KVDynamo ([client table prefix] (datomic.kv_dynamo.KVDynamo. client table prefix)))
-  (defn kv-dynamo
-    ([client table prefix] (datomic.kv_dynamo.KVDynamo. client table prefix))
-    ([client table] (datomic.kv_dynamo.KVDynamo. client table nil))))
+  (reset-meta!
+    #'->KVDynamo
+    (assoc
+      {:arglists (clojure.core/list ['client 'table 'prefix]), :column (int 1)}
+      :name
+      '->KVDynamo
+      :ns
+      *ns*))
+  (def kv-dynamo
+   (fn kv_dynamo
+     ([client table prefix] (datomic.kv_dynamo.KVDynamo. client table prefix))
+     ([client table] (datomic.kv_dynamo.KVDynamo. client table nil))))
+  (reset-meta!
+    #'kv-dynamo
+    (assoc
+      {:arglists (clojure.core/list ['client 'table] ['client 'table 'prefix]), :column (int 1)}
+      :name
+      'kv-dynamo
+      :ns
+      *ns*)))

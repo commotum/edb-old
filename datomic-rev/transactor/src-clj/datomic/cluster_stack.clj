@@ -35,7 +35,14 @@
           ['datomic.future :as 'df]
           ['datomic.val-cluster :as 'val-cluster]))))
   (set! *warn-on-reflection* true)
-  (defonce pool-ref (delay (common/cached-thread-pool {:name "KVCache"})))
+  (.setMeta (clojure.lang.RT/var "datomic.cluster-stack" "pool-ref") {:column (int 1)})
+  (let [v__6812__auto__ #'pool-ref]
+    (when-not (.hasRoot ^clojure.lang.Var v__6812__auto__)
+      (.setMeta (clojure.lang.RT/var "datomic.cluster-stack" "pool-ref") {:column (int 1)})
+      (.bindRoot
+        (clojure.lang.RT/var "datomic.cluster-stack" "pool-ref")
+        (delay (common/cached-thread-pool {:name "KVCache"})))
+      #'pool-ref))
   (deftype
     ValStoreOnKvCache
     [exec kv_cache]
@@ -67,15 +74,41 @@
         (cache/put kv_cache k (:val v))
         (let [G__16260 (a/promise-chan)] (a/put! G__16260 {:result :unknown}) G__16260))))
   (clojure.core/import 'datomic.cluster_stack.ValStoreOnKvCache)
-  (defn ->ValStoreOnKvCache
-    ([exec kv_cache] (datomic.cluster_stack.ValStoreOnKvCache. exec kv_cache)))
-  (defn val-store-on-kv-cache ([exec kv_cache] (->ValStoreOnKvCache exec kv_cache)))
+  (def ->ValStoreOnKvCache
+   (fn __GT_ValStoreOnKvCache
+     ([exec kv_cache] (datomic.cluster_stack.ValStoreOnKvCache. exec kv_cache))))
+  (reset-meta!
+    #'->ValStoreOnKvCache
+    (assoc
+      {:arglists (clojure.core/list ['exec 'kv-cache]), :column (int 1)}
+      :name
+      '->ValStoreOnKvCache
+      :ns
+      *ns*))
+  (def val-store-on-kv-cache
+   (fn val_store_on_kv_cache ([exec kv_cache] (->ValStoreOnKvCache exec kv_cache))))
+  (reset-meta!
+    #'val-store-on-kv-cache
+    (assoc
+      {:arglists (clojure.core/list ['exec 'kv-cache]), :column (int 1)}
+      :name
+      'val-store-on-kv-cache
+      :ns
+      *ns*))
   (defn result->anom
     ([result]
       (if (:cognitect.anomalies/category result)
         result
         {:cognitect.anomalies/category :cognitect.anomalies/fault,
          :datomic.cluster-stack/cluster-result result})))
+  (reset-meta!
+    #'result->anom
+    (assoc
+      {:arglists (clojure.core/list ['result]), :column (int 1)}
+      :name
+      'result->anom
+      :ns
+      *ns*))
   (deftype
     ValStoreOnCluster
     [cluster]
@@ -815,7 +848,23 @@
         c__6079__auto__)))
   (clojure.core/import 'datomic.cluster_stack.ValStoreOnCluster)
   (defn ->ValStoreOnCluster ([cluster] (datomic.cluster_stack.ValStoreOnCluster. cluster)))
+  (reset-meta!
+    #'->ValStoreOnCluster
+    (assoc
+      {:arglists (clojure.core/list ['cluster]), :column (int 1)}
+      :name
+      '->ValStoreOnCluster
+      :ns
+      *ns*))
   (defn val-store-on-cluster ([cluster] (->ValStoreOnCluster cluster)))
+  (reset-meta!
+    #'val-store-on-cluster
+    (assoc
+      {:arglists (clojure.core/list ['cluster]), :column (int 1)}
+      :name
+      'val-store-on-cluster
+      :ns
+      *ns*))
   (deftype
     ValStoreWithClose
     [store close]
@@ -829,11 +878,29 @@
     (^void close [this] (do (^clojure.lang.IFn close) nil)))
   (clojure.core/import 'datomic.cluster_stack.ValStoreWithClose)
   (defn ->ValStoreWithClose ([store close] (datomic.cluster_stack.ValStoreWithClose. store close)))
+  (reset-meta!
+    #'->ValStoreWithClose
+    (assoc
+      {:arglists (clojure.core/list ['store 'close]), :column (int 1)}
+      :name
+      '->ValStoreWithClose
+      :ns
+      *ns*))
   (defn val-store-with-close ([store close] (->ValStoreWithClose store close)))
-  (def kv-cache-ref
-   (let [G__16442 (atom nil)]
-     (add-watch G__16442 :datomic.cluster-stack/closer common/closing-watch)
-     G__16442))
+  (reset-meta!
+    #'val-store-with-close
+    (assoc
+      {:arglists (clojure.core/list ['store 'close]), :column (int 1)}
+      :name
+      'val-store-with-close
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.cluster-stack" "kv-cache-ref") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cluster-stack" "kv-cache-ref")
+    (let [G__16442 (atom nil)]
+      (add-watch G__16442 :datomic.cluster-stack/closer common/closing-watch)
+      G__16442))
   (defn start-kv-cache
     ([]
       (let [wrap (fn wrap ([x] (when x (val-store-on-kv-cache (deref pool-ref) x))))
@@ -887,14 +954,26 @@
                                     (recur (next seq_16456) nil 0 0))))))))))
             stack (some-> stack (val-store-with-close close))]
         (reset! kv-cache-ref stack))))
-  (defn cluster-with-cache
-    ([cluster cache opts]
-      (let [cluster_store (val-store-on-cluster cluster)
-            caching_store (double-store/create
-                            (merge
-                              {:repair-metric :kvc.repair}
-                              opts
-                              {:near-store cache, :far-store cluster_store}))
-            val_cluster (val-cluster/val-cluster caching_store)]
-        (combined-cluster/combined-cluster cluster val_cluster)))
-    ([cluster cache] (cluster-with-cache cluster cache nil))))
+  (reset-meta!
+    #'start-kv-cache
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'start-kv-cache :ns *ns*))
+  (def cluster-with-cache
+   (fn cluster_with_cache
+     ([cluster cache opts]
+       (let [cluster_store (val-store-on-cluster cluster)
+             caching_store (double-store/create
+                             (merge
+                               {:repair-metric :kvc.repair}
+                               opts
+                               {:near-store cache, :far-store cluster_store}))
+             val_cluster (val-cluster/val-cluster caching_store)]
+         (combined-cluster/combined-cluster cluster val_cluster)))
+     ([cluster cache] (cluster-with-cache cluster cache nil))))
+  (reset-meta!
+    #'cluster-with-cache
+    (assoc
+      {:arglists (clojure.core/list ['cluster 'cache] ['cluster 'cache 'opts]), :column (int 1)}
+      :name
+      'cluster-with-cache
+      :ns
+      *ns*)))

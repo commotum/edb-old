@@ -57,7 +57,10 @@ import org.objectweb.asm.Type;
  * Owned bytes are child-first, while every non-owned dependency comes only
  * from the explicit ordered, hash-bound lane ledger over the platform loader.
  * Candidate loaders never receive oracle URLs; the original loader alone gets
- * the separately bound oracle ledger and may use the exact original JAR.</p>
+ * the separately bound oracle ledger and may use the exact original JAR.
+ * Candidate effective-class collisions must match the separately sealed
+ * collision policy and resolve under the real ordered URLs to the declared
+ * first code source; no runtime element is deduplicated.</p>
  *
  * <p>The current relation is intentionally strict: mapped classes must expose
  * an unambiguous exact method name plus class-mapped descriptor, access, code
@@ -67,8 +70,13 @@ import org.objectweb.asm.Type;
  */
 public final class VerifyExactAotRuntime {
     private static final int ASM = Opcodes.ASM9;
+    private static final int JAVA_FEATURE = 11;
     private static final long MAX_CLASS_BYTES = 32L * 1024L * 1024L;
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
+    private static final String CANDIDATE_COLLISION_HEADER =
+            "lane\tinternal_name\tfirst_position\tfirst_role\tfirst_entry"
+            + "\tfirst_release\tfirst_sha256\tlater_position\tlater_role"
+            + "\tlater_entry\tlater_release\tlater_sha256\tbyte_relation";
     private static final List<String> RELATIONS = List.of(
             "candidate-a--candidate-b",
             "candidate-a--original",
@@ -90,22 +98,26 @@ public final class VerifyExactAotRuntime {
         final Path runtimePolicy;
         final Path candidateRuntimeLedger;
         final Path oracleRuntimeLedger;
+        final Path candidateCollisionPolicy;
         final Path output;
         final boolean requireProductionShape;
 
         Config(Path candidateA, Path candidateB, Path originalJar,
                Path cohort, Path ownership, Path classMappings,
                Path runtimePolicy, Path candidateRuntimeLedger,
-               Path oracleRuntimeLedger, Path output) {
+               Path oracleRuntimeLedger, Path candidateCollisionPolicy,
+               Path output) {
             this(candidateA, candidateB, originalJar, cohort, ownership,
                     classMappings, runtimePolicy, candidateRuntimeLedger,
-                    oracleRuntimeLedger, output, true);
+                    oracleRuntimeLedger, candidateCollisionPolicy, output,
+                    true);
         }
 
         Config(Path candidateA, Path candidateB, Path originalJar,
                Path cohort, Path ownership, Path classMappings,
                Path runtimePolicy, Path candidateRuntimeLedger,
-               Path oracleRuntimeLedger, Path output,
+               Path oracleRuntimeLedger, Path candidateCollisionPolicy,
+               Path output,
                boolean requireProductionShape) {
             this.candidateA = absolute(candidateA);
             this.candidateB = absolute(candidateB);
@@ -116,6 +128,8 @@ public final class VerifyExactAotRuntime {
             this.runtimePolicy = absolute(runtimePolicy);
             this.candidateRuntimeLedger = absolute(candidateRuntimeLedger);
             this.oracleRuntimeLedger = absolute(oracleRuntimeLedger);
+            this.candidateCollisionPolicy = absolute(
+                    candidateCollisionPolicy);
             this.output = absolute(output);
             this.requireProductionShape = requireProductionShape;
         }
@@ -265,14 +279,18 @@ public final class VerifyExactAotRuntime {
         final String role;
         final Path element;
         final String entry;
+        final int release;
+        final String sha;
         final String codeSource;
 
         RuntimeClassOrigin(int position, String role, Path element,
-                String entry) throws IOException {
+                String entry, int release, String sha) throws IOException {
             this.position = position;
             this.role = role;
             this.element = element;
             this.entry = entry;
+            this.release = release;
+            this.sha = sha;
             this.codeSource = element.toUri().toURL().toExternalForm();
         }
 
@@ -287,6 +305,8 @@ public final class VerifyExactAotRuntime {
         final String internalName;
         final RuntimeClassOrigin first;
         final RuntimeClassOrigin later;
+        final String byteRelation;
+        boolean policyMatched;
         String status = "FAIL";
         String detail = "not examined";
 
@@ -296,6 +316,65 @@ public final class VerifyExactAotRuntime {
             this.internalName = internalName;
             this.first = first;
             this.later = later;
+            this.byteRelation = first.sha.equals(later.sha)
+                    ? "BYTE_IDENTICAL" : "BYTE_DIFFERENT";
+        }
+    }
+
+    private static final class CollisionPolicyRow {
+        final String lane;
+        final String internalName;
+        final int firstPosition;
+        final String firstRole;
+        final String firstEntry;
+        final int firstRelease;
+        final String firstSha;
+        final int laterPosition;
+        final String laterRole;
+        final String laterEntry;
+        final int laterRelease;
+        final String laterSha;
+        final String byteRelation;
+        boolean seen;
+
+        CollisionPolicyRow(String lane, String internalName,
+                int firstPosition, String firstRole, String firstEntry,
+                int firstRelease, String firstSha, int laterPosition,
+                String laterRole, String laterEntry, int laterRelease,
+                String laterSha, String byteRelation) {
+            this.lane = lane;
+            this.internalName = internalName;
+            this.firstPosition = firstPosition;
+            this.firstRole = firstRole;
+            this.firstEntry = firstEntry;
+            this.firstRelease = firstRelease;
+            this.firstSha = firstSha;
+            this.laterPosition = laterPosition;
+            this.laterRole = laterRole;
+            this.laterEntry = laterEntry;
+            this.laterRelease = laterRelease;
+            this.laterSha = laterSha;
+            this.byteRelation = byteRelation;
+        }
+
+        String key() {
+            return internalName + "\u0000" + laterPosition;
+        }
+
+        boolean matches(RuntimeCollision collision) {
+            return lane.equals(collision.lane)
+                    && internalName.equals(collision.internalName)
+                    && firstPosition == collision.first.position
+                    && firstRole.equals(collision.first.role)
+                    && firstEntry.equals(collision.first.entry)
+                    && firstRelease == collision.first.release
+                    && firstSha.equals(collision.first.sha)
+                    && laterPosition == collision.later.position
+                    && laterRole.equals(collision.later.role)
+                    && laterEntry.equals(collision.later.entry)
+                    && laterRelease == collision.later.release
+                    && laterSha.equals(collision.later.sha)
+                    && byteRelation.equals(collision.byteRelation);
         }
     }
 
@@ -435,6 +514,8 @@ public final class VerifyExactAotRuntime {
         final Map<String, ClassBytes> original = new TreeMap<>();
         final List<RuntimeElement> runtime = new ArrayList<>();
         final Map<String, ArtifactPolicy> runtimePolicy = new TreeMap<>();
+        final Map<String, CollisionPolicyRow> candidateCollisionPolicy =
+                new LinkedHashMap<>();
         final List<RuntimeShadow> runtimeShadows = new ArrayList<>();
         final List<AliasBlockResult> aliasBlocks = new ArrayList<>();
         final Map<String, RuntimeClassOrigin> oracleRootClasses = new TreeMap<>();
@@ -721,6 +802,79 @@ public final class VerifyExactAotRuntime {
                 lane + " runtime dependency ledger is empty");
     }
 
+    private static void readCandidateCollisionPolicy(Path path, State state)
+            throws IOException {
+        try (BufferedReader reader = Files.newBufferedReader(path,
+                StandardCharsets.UTF_8)) {
+            require(CANDIDATE_COLLISION_HEADER.equals(reader.readLine()),
+                    "unexpected candidate collision policy header");
+            int number = 1;
+            for (String line; (line = reader.readLine()) != null;) {
+                number++;
+                String[] fields = row(line, 13,
+                        "candidate-collision-policy", number);
+                require(fields[0].equals("candidate"),
+                        "collision policy may describe only candidate lane rows");
+                require(!fields[1].endsWith(".class")
+                                && safeRelative(fields[1] + ".class"),
+                        "unsafe collision internal name in row " + number);
+                require(!fields[3].isEmpty() && !fields[8].isEmpty()
+                                && fields[3].indexOf('\0') < 0
+                                && fields[8].indexOf('\0') < 0,
+                        "unsafe collision role in row " + number);
+                require(safeRelative(fields[4])
+                                && fields[4].endsWith(".class")
+                                && safeRelative(fields[9])
+                                && fields[9].endsWith(".class"),
+                        "unsafe collision entry in row " + number);
+                int firstPosition;
+                int firstRelease;
+                int laterPosition;
+                int laterRelease;
+                try {
+                    firstPosition = Integer.parseInt(fields[2]);
+                    firstRelease = Integer.parseInt(fields[5]);
+                    laterPosition = Integer.parseInt(fields[7]);
+                    laterRelease = Integer.parseInt(fields[10]);
+                } catch (NumberFormatException bad) {
+                    throw new Failure("invalid collision integer in row "
+                            + number);
+                }
+                require(firstPosition > 0 && firstPosition < laterPosition
+                                && firstRelease >= 0
+                                && firstRelease <= JAVA_FEATURE
+                                && laterRelease >= 0
+                                && laterRelease <= JAVA_FEATURE,
+                        "invalid collision order/release in row " + number);
+                ClassPathIdentity firstPath = archiveClassPath(fields[4]);
+                ClassPathIdentity laterPath = archiveClassPath(fields[9]);
+                require(firstPath.internalPath.equals(fields[1] + ".class")
+                                && laterPath.internalPath.equals(
+                                        fields[1] + ".class")
+                                && firstPath.release == firstRelease
+                                && laterPath.release == laterRelease,
+                        "collision entry/internal/release mismatch in row "
+                                + number);
+                require(SHA256.matcher(fields[6]).matches()
+                                && SHA256.matcher(fields[11]).matches(),
+                        "invalid collision class SHA-256 in row " + number);
+                require(Set.of("BYTE_IDENTICAL", "BYTE_DIFFERENT")
+                                .contains(fields[12])
+                                && fields[12].equals(fields[6].equals(fields[11])
+                                        ? "BYTE_IDENTICAL" : "BYTE_DIFFERENT"),
+                        "collision byte relation disagrees with hashes in row "
+                                + number);
+                CollisionPolicyRow policy = new CollisionPolicyRow(fields[0],
+                        fields[1], firstPosition, fields[3], fields[4],
+                        firstRelease, fields[6], laterPosition, fields[8],
+                        fields[9], laterRelease, fields[11], fields[12]);
+                require(state.candidateCollisionPolicy.put(policy.key(),
+                                policy) == null,
+                        "duplicate candidate collision policy row " + number);
+            }
+        }
+    }
+
     private static void readRuntimePolicy(Path path, State state)
             throws IOException {
         Set<String> requiredIds = Set.of("transactor-original",
@@ -928,7 +1082,9 @@ public final class VerifyExactAotRuntime {
                 if (!internal.equals("module-info")) {
                     state.oracleRootClasses.putIfAbsent(internal,
                             new RuntimeClassOrigin(0, "owned-transactor-root",
-                                    jarPath, entry.getName()));
+                                    jarPath, entry.getName(),
+                                    archiveClassPath(entry.getName()).release,
+                                    sha256(bytes)));
                 }
                 if (!entry.getName().equals(logical)) continue;
                 String namespace = state.originalNamespace.get(internal);
@@ -966,6 +1122,46 @@ public final class VerifyExactAotRuntime {
         return rest.substring(slash + 1);
     }
 
+    private static final class ClassPathIdentity {
+        final String internalPath;
+        final int release;
+        ClassPathIdentity(String internalPath, int release) {
+            this.internalPath = internalPath;
+            this.release = release;
+        }
+    }
+
+    private static ClassPathIdentity archiveClassPath(String name) {
+        String prefix = "META-INF/versions/";
+        if (!name.startsWith(prefix)) return new ClassPathIdentity(name, 0);
+        String rest = name.substring(prefix.length());
+        int slash = rest.indexOf('/');
+        require(slash > 0 && rest.substring(0, slash).matches("[0-9]+"),
+                "malformed multi-release class path: " + name);
+        int release;
+        try { release = Integer.parseInt(rest.substring(0, slash)); }
+        catch (NumberFormatException bad) {
+            throw new Failure("oversized multi-release class version: "
+                    + name);
+        }
+        require(release >= 9,
+                "multi-release class version is below 9: " + name);
+        String internalPath = rest.substring(slash + 1);
+        require(safeRelative(internalPath),
+                "unsafe multi-release class path: " + name);
+        return new ClassPathIdentity(internalPath, release);
+    }
+
+    private static boolean multiRelease(ZipFile zip) throws IOException {
+        ZipEntry manifest = zip.getEntry("META-INF/MANIFEST.MF");
+        if (manifest == null) return false;
+        try (InputStream input = zip.getInputStream(manifest)) {
+            java.util.jar.Manifest value = new java.util.jar.Manifest(input);
+            return "true".equalsIgnoreCase(value.getMainAttributes()
+                    .getValue("Multi-Release"));
+        }
+    }
+
     private static void indexRuntimeClasses(RuntimeElement element,
             State state, Map<String, RuntimeClassOrigin> runtimeOwners,
             Set<String> ownedNames, Map<String, OverlapProof> overlapProofs)
@@ -1001,18 +1197,21 @@ public final class VerifyExactAotRuntime {
                 String expected = relative.substring(0, relative.length() - 6);
                 require(reader.getClassName().equals(expected),
                         "runtime path/internal mismatch: " + relative);
+                String classSha = sha256(bytes);
                 registerRuntimeClass(element, state, runtimeOwners, expected,
-                        relative);
+                        new RuntimeClassOrigin(element.position, element.role,
+                                element.path, relative, 0, classSha));
                 recordRuntimeShadow(element, state, expected, relative,
-                        path.toString(), sha256(bytes), ownedNames,
+                        path.toString(), classSha, ownedNames,
                         overlapProofs);
                 element.classes++;
             }
         } else {
             Set<String> entryNames = new HashSet<>();
             Set<String> releaseClasses = new HashSet<>();
-            Map<String, String> elementClasses = new TreeMap<>();
+            Map<String, RuntimeClassOrigin> effectiveClasses = new TreeMap<>();
             try (ZipFile zip = new ZipFile(element.path.toFile())) {
+                boolean multiRelease = multiRelease(zip);
                 Enumeration<? extends ZipEntry> entries = zip.entries();
                 while (entries.hasMoreElements()) {
                     ZipEntry entry = entries.nextElement();
@@ -1020,7 +1219,9 @@ public final class VerifyExactAotRuntime {
                             "runtime JAR duplicate entry " + entry.getName());
                     if (entry.isDirectory() || !entry.getName().endsWith(".class"))
                         continue;
-                    String logical = multiReleaseClassPath(entry.getName());
+                    ClassPathIdentity identity = archiveClassPath(
+                            entry.getName());
+                    String logical = identity.internalPath;
                     require(logical.endsWith(".class") && safeRelative(logical),
                             "unsafe runtime class path " + entry.getName());
                     byte[] bytes;
@@ -1032,23 +1233,35 @@ public final class VerifyExactAotRuntime {
                     String expected = logical.substring(0, logical.length() - 6);
                     require(reader.getClassName().equals(expected),
                             "runtime path/internal mismatch: " + entry.getName());
-                    String collisionKey = expected + "@"
-                            + (entry.getName().startsWith("META-INF/versions/")
-                               ? entry.getName().split("/", 4)[2] : "0");
+                    String collisionKey = expected + "@" + identity.release;
                     require(releaseClasses.add(collisionKey),
                             "duplicate runtime class/release " + collisionKey
                                     + " in " + element.path);
-                    elementClasses.putIfAbsent(expected, entry.getName());
-                    recordRuntimeShadow(element, state, expected,
-                            entry.getName(), element.path + "!/"
-                                    + entry.getName(), sha256(bytes), ownedNames,
-                            overlapProofs);
+                    if (identity.release == 0
+                            || (multiRelease
+                                    && identity.release <= JAVA_FEATURE)) {
+                        RuntimeClassOrigin current = effectiveClasses.get(
+                                expected);
+                        if (current == null
+                                || identity.release > current.release) {
+                            effectiveClasses.put(expected,
+                                    new RuntimeClassOrigin(element.position,
+                                            element.role, element.path,
+                                            entry.getName(), identity.release,
+                                            sha256(bytes)));
+                        }
+                    }
                     element.classes++;
                 }
             }
-            for (Map.Entry<String, String> value : elementClasses.entrySet()) {
+            for (Map.Entry<String, RuntimeClassOrigin> value
+                    : effectiveClasses.entrySet()) {
+                RuntimeClassOrigin origin = value.getValue();
                 registerRuntimeClass(element, state, runtimeOwners,
-                        value.getKey(), value.getValue());
+                        value.getKey(), origin);
+                recordRuntimeShadow(element, state, value.getKey(),
+                        origin.entry, element.path + "!/" + origin.entry,
+                        origin.sha, ownedNames, overlapProofs);
             }
         }
         element.scanned = true;
@@ -1056,20 +1269,32 @@ public final class VerifyExactAotRuntime {
 
     private static void registerRuntimeClass(RuntimeElement element,
             State state, Map<String, RuntimeClassOrigin> runtimeOwners,
-            String internalName, String entry) throws IOException {
+            String internalName, RuntimeClassOrigin origin) {
         if (internalName.equals("module-info")) return;
-        RuntimeClassOrigin origin = new RuntimeClassOrigin(element.position,
-                element.role, element.path, entry);
         RuntimeClassOrigin first = runtimeOwners.putIfAbsent(internalName,
                 origin);
         if (first == null) return;
-        require(element.lane.equals("oracle"),
-                "candidate runtime has an unproved duplicate effective class "
-                        + internalName + " at " + first.render() + " and "
-                        + origin.render());
         element.collisions++;
-        state.runtimeCollisions.add(new RuntimeCollision(element.lane,
-                internalName, first, origin));
+        RuntimeCollision collision = new RuntimeCollision(element.lane,
+                internalName, first, origin);
+        state.runtimeCollisions.add(collision);
+        if (element.lane.equals("candidate")) {
+            CollisionPolicyRow policy = state.candidateCollisionPolicy.get(
+                    internalName + "\u0000" + element.position);
+            if (policy != null && policy.matches(collision)) {
+                policy.seen = true;
+                collision.policyMatched = true;
+            } else {
+                state.violation("runtime-collision-policy", "candidate",
+                        internalName,
+                        policy == null
+                                ? "missing-candidate-collision-policy"
+                                : "candidate-collision-policy-mismatch",
+                        policy == null
+                                ? "candidate collision has no exact policy row"
+                                : "candidate collision differs from its policy row");
+            }
+        }
     }
 
     private static void recordRuntimeShadow(RuntimeElement element,
@@ -1737,9 +1962,17 @@ public final class VerifyExactAotRuntime {
             for (RuntimeCollision collision : collisions) {
                 state.collisionRecorded++;
                 try {
+                    require(!collision.lane.equals("candidate")
+                                    || collision.policyMatched,
+                            "candidate collision is not policy-bound");
                     Class<?> selected = loader.loadAndResolve(
                             collision.internalName.replace('/', '.'));
+                    selected.getDeclaredConstructors();
+                    selected.getDeclaredMethods();
+                    selected.getDeclaredFields();
                     String actual = actualOrigin(selected);
+                    require(actualLoader(selected).equals(expectedLoader),
+                            "ordered collision escaped its isolated loader");
                     require(actual.equals(collision.first.codeSource),
                             "ordered collision selected " + actual
                                     + " instead of "
@@ -1792,15 +2025,21 @@ public final class VerifyExactAotRuntime {
                 .map(value -> value.internalName).collect(Collectors.toSet());
         state.aliasBlockExpected = (long) presentBlockedA.size()
                 + presentBlockedB.size();
+        List<RuntimeCollision> candidateCollisions = state.runtimeCollisions
+                .stream().filter(value -> value.lane.equals("candidate"))
+                .collect(Collectors.toList());
+        List<RuntimeCollision> oracleCollisions = state.runtimeCollisions
+                .stream().filter(value -> value.lane.equals("oracle"))
+                .collect(Collectors.toList());
         verifyUniverse("candidate-a", state.candidateA, candidateRuntime,
                 config.candidateA.toUri().toURL(), blockedA, presentBlockedA,
-                Collections.emptyList(), state);
+                candidateCollisions, state);
         verifyUniverse("candidate-b", state.candidateB, candidateRuntime,
                 config.candidateB.toUri().toURL(), blockedB, presentBlockedB,
                 Collections.emptyList(), state);
         verifyUniverse("original", state.original, oracleRuntime,
                 config.originalJar.toUri().toURL(), Collections.emptySet(),
-                Collections.emptySet(), state.runtimeCollisions, state);
+                Collections.emptySet(), oracleCollisions, state);
     }
 
     private static boolean ownedSelectionProved(String universe,
@@ -1896,7 +2135,8 @@ public final class VerifyExactAotRuntime {
         List<Path> inputs = new ArrayList<>(List.of(config.candidateA,
                 config.candidateB, config.originalJar, config.cohort,
                 config.ownership, config.classMappings, config.runtimePolicy,
-                config.candidateRuntimeLedger, config.oracleRuntimeLedger));
+                config.candidateRuntimeLedger, config.oracleRuntimeLedger,
+                config.candidateCollisionPolicy));
         for (RuntimeElement element : state.runtime) inputs.add(element.path);
         for (Path input : inputs) {
             Path lexical = absolute(input);
@@ -1934,6 +2174,9 @@ public final class VerifyExactAotRuntime {
                 sha256(config.candidateRuntimeLedger));
         bindInput(state, "policy:oracle-runtime-ledger",
                 config.oracleRuntimeLedger, sha256(config.oracleRuntimeLedger));
+        bindInput(state, "policy:candidate-collision-policy",
+                config.candidateCollisionPolicy,
+                sha256(config.candidateCollisionPolicy));
         bindInput(state, "owned:candidate-a", config.candidateA,
                 directoryManifest(config.candidateA));
         bindInput(state, "owned:candidate-b", config.candidateB,
@@ -1993,6 +2236,7 @@ public final class VerifyExactAotRuntime {
         canonicalFile(config.runtimePolicy);
         canonicalFile(config.candidateRuntimeLedger);
         canonicalFile(config.oracleRuntimeLedger);
+        canonicalFile(config.candidateCollisionPolicy);
         require(!config.candidateRuntimeLedger.equals(config.oracleRuntimeLedger),
                 "candidate and oracle runtime ledgers must be distinct inputs");
         require(!overlaps(config.candidateA, config.candidateB),
@@ -2108,6 +2352,59 @@ public final class VerifyExactAotRuntime {
                         "unexpected oracle OWNED policy " + policy.ruleId);
             }
         }
+        for (CollisionPolicyRow collision
+                : state.candidateCollisionPolicy.values()) {
+            RuntimeElement first = state.runtime.stream()
+                    .filter(value -> value.lane.equals("candidate")
+                            && value.position == collision.firstPosition)
+                    .findFirst().orElse(null);
+            RuntimeElement later = state.runtime.stream()
+                    .filter(value -> value.lane.equals("candidate")
+                            && value.position == collision.laterPosition)
+                    .findFirst().orElse(null);
+            require(first != null && later != null
+                            && first.role.equals(collision.firstRole)
+                            && later.role.equals(collision.laterRole),
+                    "collision role/position policy spoof for "
+                            + collision.internalName);
+        }
+        if (config.requireProductionShape) {
+            long identical = state.candidateCollisionPolicy.values().stream()
+                    .filter(value -> value.byteRelation.equals(
+                            "BYTE_IDENTICAL")).count();
+            long different = state.candidateCollisionPolicy.values().stream()
+                    .filter(value -> value.byteRelation.equals(
+                            "BYTE_DIFFERENT")).count();
+            require(state.candidateCollisionPolicy.size() == 33
+                            && identical == 14 && different == 19
+                            && state.candidateCollisionPolicy.values().stream()
+                                    .allMatch(value -> value.internalName
+                                            .startsWith("jline/")),
+                    "normal mode requires 33 jline collision rows: 14 byte-identical and 19 byte-different");
+        }
+    }
+
+    private static void reconcileCandidateCollisionPolicy(State state) {
+        long actual = state.runtimeCollisions.stream()
+                .filter(value -> value.lane.equals("candidate")).count();
+        for (CollisionPolicyRow policy
+                : state.candidateCollisionPolicy.values()) {
+            if (!policy.seen) {
+                state.violation("runtime-collision-policy", "candidate",
+                        policy.internalName,
+                        "extra-or-unobserved-candidate-collision-policy",
+                        "policy row did not match an observed candidate collision");
+            }
+        }
+        long seen = state.candidateCollisionPolicy.values().stream()
+                .filter(value -> value.seen).count();
+        if (actual != seen || seen != state.candidateCollisionPolicy.size()) {
+            state.violation("runtime-collision-policy", "candidate",
+                    "<ledger>", "incomplete-candidate-collision-ledger",
+                    "observed=" + actual + " matched=" + seen
+                            + " policy="
+                            + state.candidateCollisionPolicy.size());
+        }
     }
 
     private static void setupAndRun(Config config, State state)
@@ -2116,6 +2413,7 @@ public final class VerifyExactAotRuntime {
         readCohort(config.cohort, state);
         readOwnership(config.ownership, state);
         readMappings(config.classMappings, state);
+        readCandidateCollisionPolicy(config.candidateCollisionPolicy, state);
         readRuntimePolicy(config.runtimePolicy, state);
         validateOrigins(config, state);
         validateRuntimePolicy(config, state);
@@ -2138,6 +2436,7 @@ public final class VerifyExactAotRuntime {
             indexRuntimeClasses(element, state, owners, forbiddenOwned,
                     overlapProofs);
         }
+        reconcileCandidateCollisionPolicy(state);
         parseClasses(state.candidateA, state);
         parseClasses(state.candidateB, state);
         parseClasses(state.original, state);
@@ -2269,18 +2568,31 @@ public final class VerifyExactAotRuntime {
                 .thenComparing(value -> value.later.entry));
         List<String> collisionRows = new ArrayList<>();
         collisionRows.add("lane\tinternal_name\tfirst_position\tfirst_role"
-                + "\tfirst_origin\tfirst_code_source\tlater_position"
-                + "\tlater_role\tlater_origin\tstatus\tdetail");
+                + "\tfirst_origin\tfirst_entry\tfirst_release\tfirst_sha256"
+                + "\tfirst_code_source\tlater_position\tlater_role"
+                + "\tlater_origin\tlater_entry\tlater_release"
+                + "\tlater_sha256\tbyte_relation\tcandidate_policy\tstatus"
+                + "\tdetail");
         for (RuntimeCollision collision : collisionResults) {
             collisionRows.add(collision.lane + "\t"
                     + clean(collision.internalName) + "\t"
                     + collision.first.position + "\t"
                     + clean(collision.first.role) + "\t"
                     + clean(collision.first.render()) + "\t"
+                    + clean(collision.first.entry) + "\t"
+                    + collision.first.release + "\t"
+                    + collision.first.sha + "\t"
                     + clean(collision.first.codeSource) + "\t"
                     + collision.later.position + "\t"
                     + clean(collision.later.role) + "\t"
                     + clean(collision.later.render()) + "\t"
+                    + clean(collision.later.entry) + "\t"
+                    + collision.later.release + "\t"
+                    + collision.later.sha + "\t"
+                    + collision.byteRelation + "\t"
+                    + (collision.lane.equals("candidate")
+                            ? Boolean.toString(collision.policyMatched)
+                            : "NOT_APPLICABLE") + "\t"
                     + collision.status + "\t" + clean(collision.detail));
         }
         writeLines(output.resolve("runtime-collisions.tsv"), collisionRows);
@@ -2440,6 +2752,22 @@ public final class VerifyExactAotRuntime {
                 "blocked.aliases.recorded\t" + state.aliasBlockRecorded,
                 "runtime.collisions.expected\t" + state.collisionExpected,
                 "runtime.collisions.recorded\t" + state.collisionRecorded,
+                "runtime.candidate.collisions\t"
+                        + state.runtimeCollisions.stream().filter(value ->
+                                value.lane.equals("candidate")).count(),
+                "runtime.candidate.collisions.byte-identical\t"
+                        + state.runtimeCollisions.stream().filter(value ->
+                                value.lane.equals("candidate")
+                                && value.byteRelation.equals(
+                                        "BYTE_IDENTICAL")).count(),
+                "runtime.candidate.collisions.byte-different\t"
+                        + state.runtimeCollisions.stream().filter(value ->
+                                value.lane.equals("candidate")
+                                && value.byteRelation.equals(
+                                        "BYTE_DIFFERENT")).count(),
+                "runtime.candidate.collision.policy.rows\t"
+                        + state.candidateCollisionPolicy.size(),
+                "runtime.candidate.collision.policy\tPOLICY_BOUND_ORDERED_FIRST_ORIGIN_WINS",
                 "methods.expected\t" + state.methodsExpected,
                 "methods.recorded\t" + state.methodsRecorded,
                 "frames.expected\t" + state.framesExpected,
@@ -2588,6 +2916,33 @@ public final class VerifyExactAotRuntime {
         }
     }
 
+    private static byte[] renameZipEntry(byte[] archive, String from,
+            String to) {
+        byte[] source = from.getBytes(StandardCharsets.UTF_8);
+        byte[] target = to.getBytes(StandardCharsets.UTF_8);
+        require(source.length == target.length,
+                "ZIP entry rename must preserve byte length");
+        byte[] result = archive.clone();
+        int replacements = 0;
+        for (int offset = 0; offset <= result.length - source.length;
+                offset++) {
+            boolean match = true;
+            for (int index = 0; index < source.length; index++) {
+                if (result[offset + index] != source[index]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (!match) continue;
+            System.arraycopy(target, 0, result, offset, target.length);
+            replacements++;
+            offset += source.length - 1;
+        }
+        require(replacements == 2,
+                "expected one local and one central ZIP entry name");
+        return result;
+    }
+
     private static void writeRuntimeLedger(Path ledger,
             List<String[]> rows) throws IOException {
         List<String> lines = new ArrayList<>();
@@ -2612,6 +2967,7 @@ public final class VerifyExactAotRuntime {
         final Path runtimePolicy;
         final Path candidateLedger;
         final Path oracleLedger;
+        final Path candidateCollisions;
         final Path candidateDeps;
         final Path sanitizedNano;
         final Path peerOriginal;
@@ -2621,8 +2977,9 @@ public final class VerifyExactAotRuntime {
         Fixture(Path root, Path candidateA, Path candidateB, Path original,
                 Path cohort, Path ownership, Path mappings,
                 Path runtimePolicy, Path candidateLedger, Path oracleLedger,
-                Path candidateDeps, Path sanitizedNano, Path peerOriginal,
-                Path core2Original, Path nanoOriginal) {
+                Path candidateCollisions, Path candidateDeps,
+                Path sanitizedNano, Path peerOriginal, Path core2Original,
+                Path nanoOriginal) {
             this.root = root;
             this.candidateA = candidateA;
             this.candidateB = candidateB;
@@ -2633,6 +2990,7 @@ public final class VerifyExactAotRuntime {
             this.runtimePolicy = runtimePolicy;
             this.candidateLedger = candidateLedger;
             this.oracleLedger = oracleLedger;
+            this.candidateCollisions = candidateCollisions;
             this.candidateDeps = candidateDeps;
             this.sanitizedNano = sanitizedNano;
             this.peerOriginal = peerOriginal;
@@ -2643,7 +3001,24 @@ public final class VerifyExactAotRuntime {
         Config config(Path output) {
             return new Config(candidateA, candidateB, original, cohort,
                     ownership, mappings, runtimePolicy, candidateLedger,
-                    oracleLedger, output, false);
+                    oracleLedger, candidateCollisions, output, false);
+        }
+
+        void writeCandidateCollision(String internalName,
+                int firstPosition, String firstRole, String firstEntry,
+                int firstRelease, String firstSha, int laterPosition,
+                String laterRole, String laterEntry, int laterRelease,
+                String laterSha) throws IOException {
+            String relation = firstSha.equals(laterSha)
+                    ? "BYTE_IDENTICAL" : "BYTE_DIFFERENT";
+            writeLines(candidateCollisions, List.of(
+                    CANDIDATE_COLLISION_HEADER,
+                    "candidate\t" + internalName + "\t" + firstPosition
+                            + "\t" + firstRole + "\t" + firstEntry + "\t"
+                            + firstRelease + "\t" + firstSha + "\t"
+                            + laterPosition + "\t" + laterRole + "\t"
+                            + laterEntry + "\t" + laterRelease + "\t"
+                            + laterSha + "\t" + relation));
         }
     }
 
@@ -2707,11 +3082,13 @@ public final class VerifyExactAotRuntime {
                         core2Original.toString(), sha256(core2Original)},
                 new String[] {"original-nano", "jar",
                         nanoOriginal.toString(), sha256(nanoOriginal)}));
+        Path candidateCollisions = root.resolve("candidate-collisions.tsv");
+        writeLines(candidateCollisions, List.of(CANDIDATE_COLLISION_HEADER));
         Fixture result = new Fixture(root, candidateA, candidateB, original,
                 cohort,
                 ownership, mappings, runtimePolicy, candidateLedger,
-                oracleLedger, candidateDeps, sanitizedNano, peerOriginal,
-                core2Original, nanoOriginal);
+                oracleLedger, candidateCollisions, candidateDeps,
+                sanitizedNano, peerOriginal, core2Original, nanoOriginal);
         writeFixturePolicy(result);
         return result;
     }
@@ -2798,6 +3175,334 @@ public final class VerifyExactAotRuntime {
             expectGate(value, value.root.resolve("out"), true, null);
             require(System.getProperty("verify.exact.aot.initialized") == null,
                     "Class.forName(false)/resolution initialized fixture");
+        });
+
+        selfTest(rows, "policy-bound-candidate-collision-first-wins", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("candidate-collision"),
+                    owned, owned, owned);
+            String internal = "jline/console/Fixture";
+            String entry = internal + ".class";
+            byte[] first = fixtureClass(internal, 1, 1, 1, false, false,
+                    false, false);
+            byte[] later = fixtureClass(internal, 1, 1, 1, false, false,
+                    true, false);
+            Path firstJar = value.root.resolve("jline-first.jar");
+            Path laterJar = value.root.resolve("jline-later.jar");
+            writeJar(firstJar, Map.of(entry, first));
+            writeJar(laterJar, Map.of(entry, later));
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"jline-first", "jar", firstJar.toString(),
+                            sha256(firstJar)},
+                    new String[] {"jline-later", "jar", laterJar.toString(),
+                            sha256(laterJar)}));
+            writeFixturePolicy(value);
+            value.writeCandidateCollision(internal, 3, "jline-first", entry,
+                    0, sha256(first), 4, "jline-later", entry, 0,
+                    sha256(later));
+            Path out = value.root.resolve("out");
+            expectGate(value, out, true, null);
+            String collisions = evidence(out, "runtime-collisions.tsv");
+            require(collisions.contains(sha256(first))
+                            && collisions.contains(sha256(later))
+                            && collisions.contains("BYTE_DIFFERENT\ttrue\tPASS")
+                            && collisions.contains(firstJar.toUri().toURL()
+                                    .toExternalForm()),
+                    "candidate first-wins evidence is incomplete");
+        });
+
+        selfTest(rows, "policy-bound-identical-candidate-collision", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("identical-collision"),
+                    owned, owned, owned);
+            String internal = "jline/console/Identical";
+            String entry = internal + ".class";
+            byte[] bytes = fixtureClass(internal, 1, 1, 1, false, false,
+                    false, false);
+            Path firstJar = value.root.resolve("identical-first.jar");
+            Path laterJar = value.root.resolve("identical-later.jar");
+            writeJar(firstJar, Map.of(entry, bytes));
+            writeJar(laterJar, Map.of(entry, bytes));
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"identical-first", "jar",
+                            firstJar.toString(), sha256(firstJar)},
+                    new String[] {"identical-later", "jar",
+                            laterJar.toString(), sha256(laterJar)}));
+            writeFixturePolicy(value);
+            value.writeCandidateCollision(internal, 3, "identical-first",
+                    entry, 0, sha256(bytes), 4, "identical-later", entry, 0,
+                    sha256(bytes));
+            Path out = value.root.resolve("out");
+            expectGate(value, out, true, null);
+            require(evidence(out, "runtime-collisions.tsv").contains(
+                            "BYTE_IDENTICAL\ttrue\tPASS"),
+                    "byte-identical collision relation was not proved");
+        });
+
+        selfTest(rows, "missing-candidate-collision-policy-rejected", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("missing-collision-row"),
+                    owned, owned, owned);
+            String internal = "jline/MissingPolicy";
+            String entry = internal + ".class";
+            byte[] bytes = fixtureClass(internal, 1, 1, 1, false, false,
+                    false, false);
+            Path firstJar = value.root.resolve("missing-first.jar");
+            Path laterJar = value.root.resolve("missing-later.jar");
+            writeJar(firstJar, Map.of(entry, bytes));
+            writeJar(laterJar, Map.of(entry, bytes));
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"missing-first", "jar", firstJar.toString(),
+                            sha256(firstJar)},
+                    new String[] {"missing-later", "jar", laterJar.toString(),
+                            sha256(laterJar)}));
+            writeFixturePolicy(value);
+            expectGate(value, value.root.resolve("out"), false,
+                    "missing-candidate-collision-policy");
+        });
+
+        selfTest(rows, "extra-candidate-collision-policy-rejected", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("extra-collision-row"),
+                    owned, owned, owned);
+            String internal = "jline/Ghost";
+            String entry = internal + ".class";
+            String zero = "0000000000000000000000000000000000000000000000000000000000000000";
+            value.writeCandidateCollision(internal, 1, "candidate-deps",
+                    entry, 0, zero, 2, "sanitized-datomic-dependency", entry,
+                    0, zero);
+            expectGate(value, value.root.resolve("out"), false,
+                    "extra-or-unobserved-candidate-collision-policy");
+        });
+
+        selfTest(rows, "candidate-collision-order-reversal-rejected", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("collision-reorder"),
+                    owned, owned, owned);
+            String internal = "jline/Reordered";
+            String entry = internal + ".class";
+            byte[] first = fixtureClass(internal, 1, 1, 1, false, false,
+                    false, false);
+            byte[] later = fixtureClass(internal, 1, 1, 1, false, false,
+                    true, false);
+            Path firstJar = value.root.resolve("reorder-first.jar");
+            Path laterJar = value.root.resolve("reorder-later.jar");
+            writeJar(firstJar, Map.of(entry, first));
+            writeJar(laterJar, Map.of(entry, later));
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"reorder-later", "jar", laterJar.toString(),
+                            sha256(laterJar)},
+                    new String[] {"reorder-first", "jar", firstJar.toString(),
+                            sha256(firstJar)}));
+            writeFixturePolicy(value);
+            value.writeCandidateCollision(internal, 3, "reorder-first", entry,
+                    0, sha256(first), 4, "reorder-later", entry, 0,
+                    sha256(later));
+            expectGate(value, value.root.resolve("out"), false,
+                    "collision role/position policy spoof");
+        });
+
+        selfTest(rows, "candidate-collision-lane-spoof-rejected", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("collision-lane-spoof"),
+                    owned, owned, owned);
+            String zero = "0000000000000000000000000000000000000000000000000000000000000000";
+            writeLines(value.candidateCollisions, List.of(
+                    CANDIDATE_COLLISION_HEADER,
+                    "oracle\tjline/Spoof\t1\tcandidate-deps"
+                            + "\tjline/Spoof.class\t0\t" + zero
+                            + "\t2\tsanitized-datomic-dependency"
+                            + "\tjline/Spoof.class\t0\t" + zero
+                            + "\tBYTE_IDENTICAL"));
+            expectGate(value, value.root.resolve("out"), false,
+                    "collision policy may describe only candidate lane");
+        });
+
+        selfTest(rows, "candidate-collision-unresolved-class-rejected", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("collision-unresolved"),
+                    owned, owned, owned);
+            String internal = "jline/Unresolved";
+            String entry = internal + ".class";
+            byte[] bytes = fixtureClass(internal, 1, 1, 1, false, false,
+                    false, true);
+            Path firstJar = value.root.resolve("unresolved-first.jar");
+            Path laterJar = value.root.resolve("unresolved-later.jar");
+            writeJar(firstJar, Map.of(entry, bytes));
+            writeJar(laterJar, Map.of(entry, bytes));
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"unresolved-first", "jar",
+                            firstJar.toString(), sha256(firstJar)},
+                    new String[] {"unresolved-later", "jar",
+                            laterJar.toString(), sha256(laterJar)}));
+            writeFixturePolicy(value);
+            value.writeCandidateCollision(internal, 3, "unresolved-first",
+                    entry, 0, sha256(bytes), 4, "unresolved-later", entry, 0,
+                    sha256(bytes));
+            expectGate(value, value.root.resolve("out"), false,
+                    "first-wins-unproved");
+        });
+
+        selfTest(rows, "candidate-collision-wrong-code-source-rejected", () -> {
+            Path root = scratch.resolve("wrong-collision-origin");
+            Files.createDirectories(root);
+            String internal = "jline/WrongOrigin";
+            String entry = internal + ".class";
+            byte[] firstBytes = fixtureClass(internal, 1, 1, 1, false,
+                    false, false, false);
+            byte[] laterBytes = fixtureClass(internal, 1, 1, 1, false,
+                    false, true, false);
+            Path firstJar = root.resolve("first.jar");
+            Path laterJar = root.resolve("later.jar");
+            writeJar(firstJar, Map.of(entry, firstBytes));
+            writeJar(laterJar, Map.of(entry, laterBytes));
+            RuntimeClassOrigin declaredFirst = new RuntimeClassOrigin(1,
+                    "declared-first", firstJar, entry, 0,
+                    sha256(firstBytes));
+            RuntimeClassOrigin declaredLater = new RuntimeClassOrigin(2,
+                    "declared-later", laterJar, entry, 0,
+                    sha256(laterBytes));
+            RuntimeCollision collision = new RuntimeCollision("candidate",
+                    internal, declaredFirst, declaredLater);
+            collision.policyMatched = true;
+            State state = new State();
+            verifyUniverse("candidate-a", Collections.emptyMap(),
+                    new URL[] {laterJar.toUri().toURL(),
+                            firstJar.toUri().toURL()}, root.toUri().toURL(),
+                    Collections.emptySet(), Collections.emptySet(),
+                    List.of(collision), state);
+            String laterUrl = laterJar.toUri().toURL().toExternalForm();
+            require(state.violations.stream().anyMatch(value ->
+                            value.rule.equals("first-wins-unproved")
+                            && value.detail.contains(laterUrl)),
+                    "wrong collision code source was not rejected");
+        });
+
+        selfTest(rows, "candidate-collision-effective-release-spoof-rejected",
+                () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("collision-release"),
+                    owned, owned, owned);
+            String internal = "jline/Versioned";
+            String baseEntry = internal + ".class";
+            String versionedEntry = "META-INF/versions/11/" + baseEntry;
+            byte[] base = fixtureClass(internal, 1, 1, 1, false, false,
+                    false, false);
+            byte[] versioned = fixtureClass(internal, 1, 1, 1, false, false,
+                    true, false);
+            byte[] later = fixtureClass(internal, 1, 1, 2, false, false,
+                    false, false);
+            Path firstJar = value.root.resolve("release-first.jar");
+            Path laterJar = value.root.resolve("release-later.jar");
+            writeJar(firstJar, Map.of("META-INF/MANIFEST.MF",
+                    "Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"
+                            .getBytes(StandardCharsets.UTF_8),
+                    baseEntry, base, versionedEntry, versioned));
+            writeJar(laterJar, Map.of(baseEntry, later));
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"release-first", "jar", firstJar.toString(),
+                            sha256(firstJar)},
+                    new String[] {"release-later", "jar", laterJar.toString(),
+                            sha256(laterJar)}));
+            writeFixturePolicy(value);
+            value.writeCandidateCollision(internal, 3, "release-first",
+                    baseEntry, 0, sha256(base), 4, "release-later", baseEntry,
+                    0, sha256(later));
+            expectGate(value, value.root.resolve("out"), false,
+                    "candidate-collision-policy-mismatch");
+        });
+
+        selfTest(rows, "candidate-runtime-duplicate-release-rejected", () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("duplicate-release"),
+                    owned, owned, owned);
+            String internal = "jline/DuplicateRelease";
+            byte[] bytes = fixtureClass(internal, 1, 1, 1, false, false,
+                    false, false);
+            Path duplicate = value.root.resolve("duplicate-release.jar");
+            writeJar(duplicate, Map.of(
+                    "META-INF/MANIFEST.MF",
+                    "Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"
+                            .getBytes(StandardCharsets.UTF_8),
+                    "META-INF/versions/11/" + internal + ".class", bytes,
+                    "META-INF/versions/011/" + internal + ".class", bytes));
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"duplicate-release", "jar",
+                            duplicate.toString(), sha256(duplicate)}));
+            writeFixturePolicy(value);
+            expectGate(value, value.root.resolve("out"), false,
+                    "duplicate runtime class/release");
+        });
+
+        selfTest(rows, "candidate-runtime-duplicate-entry-path-rejected",
+                () -> {
+            byte[] owned = normalFixtureClass();
+            Fixture value = fixture(scratch.resolve("duplicate-entry-path"),
+                    owned, owned, owned);
+            Path normal = value.root.resolve("normal-path.jar");
+            writeJar(normal, Map.of(
+                    "jline/A.class", fixtureClass("jline/A", 1, 1, 1,
+                            false, false, false, false),
+                    "jline/B.class", fixtureClass("jline/B", 1, 1, 1,
+                            false, false, false, false)));
+            byte[] duplicateBytes = renameZipEntry(Files.readAllBytes(normal),
+                    "jline/B.class", "jline/A.class");
+            Path duplicate = value.root.resolve("duplicate-path.jar");
+            Files.write(duplicate, duplicateBytes);
+            writeRuntimeLedger(value.candidateLedger, List.of(
+                    new String[] {"candidate-deps", "directory",
+                            value.candidateDeps.toString(),
+                            directoryManifest(value.candidateDeps)},
+                    new String[] {"sanitized-datomic-dependency", "jar",
+                            value.sanitizedNano.toString(),
+                            sha256(value.sanitizedNano)},
+                    new String[] {"duplicate-path", "jar",
+                            duplicate.toString(), sha256(duplicate)}));
+            writeFixturePolicy(value);
+            expectGate(value, value.root.resolve("out"), false,
+                    "runtime JAR duplicate entry");
         });
 
         selfTest(rows, "too-small-max-stack-rejected-by-jvm", () -> {
@@ -3116,7 +3821,7 @@ public final class VerifyExactAotRuntime {
                     value.original, value.cohort, value.ownership,
                     value.mappings, value.runtimePolicy,
                     value.candidateLedger, value.oracleLedger,
-                    value.root.resolve("out"));
+                    value.candidateCollisions, value.root.resolve("out"));
             require(runGate(production) == 2,
                     "small fixture passed normal production mode");
             require(evidence(value.root.resolve("out"), "violations.tsv")
@@ -3293,7 +3998,7 @@ public final class VerifyExactAotRuntime {
                 + "  VerifyExactAotRuntime --verify CANDIDATE_A CANDIDATE_B"
                 + " ORIGINAL_JAR COHORT_TSV OWNERSHIP_TSV CLASS_MAPPINGS_TSV"
                 + " RUNTIME_POLICY_TSV CANDIDATE_RUNTIME_TSV"
-                + " ORACLE_RUNTIME_TSV OUTPUT\n"
+                + " ORACLE_RUNTIME_TSV CANDIDATE_COLLISIONS_TSV OUTPUT\n"
                 + "  VerifyExactAotRuntime --self-test OUTPUT\n"
                 + "  VerifyExactAotRuntime --require-verify-all-probe");
     }
@@ -3308,14 +4013,14 @@ public final class VerifyExactAotRuntime {
             } else if (arguments.length == 2
                     && arguments[0].equals("--self-test")) {
                 status = runSelfTests(absolute(Path.of(arguments[1])));
-            } else if (arguments.length == 11
+            } else if (arguments.length == 12
                     && arguments[0].equals("--verify")) {
                 status = runGate(new Config(Path.of(arguments[1]),
                         Path.of(arguments[2]), Path.of(arguments[3]),
                         Path.of(arguments[4]), Path.of(arguments[5]),
                         Path.of(arguments[6]), Path.of(arguments[7]),
                         Path.of(arguments[8]), Path.of(arguments[9]),
-                        Path.of(arguments[10])));
+                        Path.of(arguments[10]), Path.of(arguments[11])));
             } else {
                 usage();
             }

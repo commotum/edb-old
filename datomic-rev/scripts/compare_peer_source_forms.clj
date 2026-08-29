@@ -208,6 +208,31 @@
                (map #(alpha-value-equivalent? %1 %2 environment)
                     left-values right-values))))
 
+(defn semantic-map-index [value]
+  (reduce (fn [index [key item]]
+            (let [encoded-key (encode-form key :semantic)]
+              (if (contains? index encoded-key)
+                (reduced nil)
+                (assoc index encoded-key item))))
+          {}
+          value))
+
+(defn alpha-map-equivalent? [left right environment]
+  ;; Pair unordered entries only through exact semantic keys.  This permits a
+  ;; binding-aware comparison inside the corresponding values without ever
+  ;; guessing which entry on one side belongs to an entry on the other.
+  (let [left-index (semantic-map-index left)
+        right-index (semantic-map-index right)]
+    (and left-index right-index
+         (= (count left) (count right))
+         (semantic-metadata-equal? left right)
+         (= (set (keys left-index)) (set (keys right-index)))
+         (every? (fn [[key left-item]]
+                   (alpha-value-equivalent? left-item
+                                            (get right-index key)
+                                            environment))
+                 left-index))))
+
 (defn add-alpha-binding-pattern [environment left right]
   (cond
     (and (symbol? left) (symbol? right))
@@ -315,6 +340,9 @@
 (def alpha-fn-heads
   #{"fn" "clojure.core/fn" "fn*"})
 
+(def alpha-defmethod-heads
+  #{"defmethod" "clojure.core/defmethod"})
+
 (def alpha-sequential-binding-heads
   #{"let" "clojure.core/let" "let*"
     "loop" "clojure.core/loop" "loop*"
@@ -411,6 +439,20 @@
           (encode-form (second right) :semantic))
        (alpha-values-equivalent? (nnext left) (nnext right) environment)))
 
+(defn alpha-defmethod-equivalent? [left right environment]
+  ;; defmethod's tail is a fn-tail and can carry the compiler-generated
+  ;; optional function name.  The multifn Var and dispatch value remain exact
+  ;; literal selectors.
+  (and (= (count left) (count right))
+       (<= 5 (count left))
+       (semantic-metadata-equal? left right)
+       (= (encode-form (take 3 left) :semantic)
+          (encode-form (take 3 right) :semantic))
+       (boolean
+         (alpha-fn-equivalent? (cons 'fn (drop 3 left))
+                               (cons 'fn (drop 3 right))
+                               environment))))
+
 (defn alpha-value-equivalent? [left right environment]
   (cond
     (and (symbol? left) (symbol? right))
@@ -444,6 +486,12 @@
            (exact-call? right alpha-def-heads)
            (boolean (alpha-def-equivalent? left right environment)))
 
+      (or (exact-call? left alpha-defmethod-heads)
+          (exact-call? right alpha-defmethod-heads))
+      (and (exact-call? left alpha-defmethod-heads)
+           (exact-call? right alpha-defmethod-heads)
+           (boolean (alpha-defmethod-equivalent? left right environment)))
+
       (or (interop-shorthand-call? left)
           (interop-shorthand-call? right))
       (and (interop-shorthand-call? left)
@@ -465,10 +513,8 @@
     (and (semantic-metadata-equal? left right)
          (alpha-values-equivalent? left right environment))
 
-    ;; A mapping inside unordered data would need a separately proved pairing
-    ;; relation.  Exact semantic encoding is the safe boundary for now.
     (and (map? left) (map? right))
-    (= (encode-form left :semantic) (encode-form right :semantic))
+    (alpha-map-equivalent? left right environment)
 
     (and (set? left) (set? right))
     (= (encode-form left :semantic) (encode-form right :semantic))
@@ -497,7 +543,13 @@
                     {:declaration declaration})))
   (let [method-name (first declaration)
         tail (rest declaration)
-        tail (if (string? (first tail)) (rest tail) tail)]
+        leading-doc? (string? (first tail))
+        tail (if leading-doc? (rest tail) tail)
+        trailing-doc? (and (seq tail) (string? (last tail)))
+        tail (if trailing-doc? (butlast tail) tail)]
+    (when (and leading-doc? trailing-doc?)
+      (throw (ex-info "defprotocol method has multiple doc strings"
+                      {:method method-name :declaration declaration})))
     (when-not (and (seq tail) (every? vector? tail))
       (throw (ex-info "defprotocol method lacks literal argument vectors"
                       {:method method-name :declaration declaration})))
@@ -700,7 +752,7 @@
 
           :else
           (recur (subvec remaining 1)
-                 (conj events [:form (encode-form form :semantic)])
+                 (conj events [:form form])
                  legacy-count expanded-count))))))
 
 (defn read-one-form [source]
@@ -820,6 +872,27 @@
         [(with-meta (read-one-form "(fn [p__1] p__1)") {:tag 'long})]
         semantic-metadata-right
         [(with-meta (read-one-form "(fn [p__2] p__2)") {:tag 'double})]
+        keyed-map-alpha-left
+        [(read-one-form
+           "{:method (fn fn__101 ([x] x)), :fixed 7}")]
+        keyed-map-alpha-right
+        [(read-one-form
+           "{:fixed 7, :method (fn fn__901 ([x] x))}")]
+        keyed-map-cross-left
+        [(read-one-form
+           "{:a (fn fn__101 ([x] [:a x])), :b (fn fn__102 ([x] [:b x]))}")]
+        keyed-map-cross-right
+        [(read-one-form
+           "{:a (fn fn__901 ([x] [:b x])), :b (fn fn__902 ([x] [:a x]))}")]
+        defmethod-left
+        [(read-one-form
+           "(defmethod get-from-put :default fn__101 ([_] nil))")]
+        defmethod-right
+        [(read-one-form
+           "(defmethod get-from-put :default fn__901 ([_] nil))")]
+        defmethod-dispatch-right
+        [(read-one-form
+           "(defmethod get-from-put :other fn__901 ([_] nil))")]
         unordered-left [(array-map :a 1 :b 2) #{:a :b}]
         unordered-right [(array-map :b 2 :a 1) #{:b :a}]]
     (require-alpha-result! :nested-positive true
@@ -866,6 +939,14 @@
                            conservative-shadow-right)
     (require-alpha-result! :semantic-metadata-preserved false
                            semantic-metadata-left semantic-metadata-right)
+    (require-alpha-result! :exact-keyed-map-alpha true
+                           keyed-map-alpha-left keyed-map-alpha-right)
+    (require-alpha-result! :map-values-not-repaired-across-keys false
+                           keyed-map-cross-left keyed-map-cross-right)
+    (require-alpha-result! :defmethod-optional-name true
+                           defmethod-left defmethod-right)
+    (require-alpha-result! :defmethod-dispatch-is-literal false
+                           defmethod-left defmethod-dispatch-right)
     (require-alpha-result! :unordered-data-order true
                            unordered-left unordered-right)
     ;; The new relation must not redefine either existing output lane.
@@ -881,12 +962,47 @@
       (throw (ex-info "exact metadata lane erased source locations" {})))
     (when announce?
       (println "PEER_SOURCE_ALPHA_SELF_TEST_PASS"
-               "positive=6" "collision_negative=2"
+               "positive=8" "collision_negative=2"
                "cross_use_negative=1" "scope_negative=1"
-               "literal_or_unmodeled_negative=10"
+               "literal_or_unmodeled_negative=12"
                "shadowing_conservative_negative=1"
                "metadata_negative=1"
                "exact_and_semantic_lanes_preserved=true"))))
+
+(defn run-protocol-normalization-self-test! [announce?]
+  (let [leading (split-protocol-declaration
+                  '(fetch "documentation" [this key]))
+        trailing (split-protocol-declaration
+                   '(fetch [this key] "documentation"))
+        overloaded (split-protocol-declaration
+                     '(fetch [this] [this key] "documentation"))
+        duplicate-doc-rejected?
+        (try
+          (split-protocol-declaration
+            '(fetch "first" [this key] "second"))
+          false
+          (catch clojure.lang.ExceptionInfo _ true))
+        interleaved-doc-rejected?
+        (try
+          (split-protocol-declaration
+            '(fetch [this] "middle" [this key]))
+          false
+          (catch clojure.lang.ExceptionInfo _ true))]
+    (when-not (and (= leading trailing)
+                   (= "fetch" (:name leading))
+                   (= 1 (count (:arglists leading)))
+                   (= 2 (count (:arglists overloaded)))
+                   duplicate-doc-rejected?
+                   interleaved-doc-rejected?)
+      (throw (ex-info "protocol declaration normalization regression failed"
+                      {:leading leading :trailing trailing
+                       :overloaded overloaded
+                       :duplicate-doc-rejected duplicate-doc-rejected?
+                       :interleaved-doc-rejected interleaved-doc-rejected?})))
+    (when announce?
+      (println "PEER_PROTOCOL_NORMALIZATION_SELF_TEST_PASS"
+               "leading_doc=true" "trailing_doc=true"
+               "overloaded=true" "malformed_negative=2"))))
 
 (defn split-tsv [line]
   (str/split line #"\t" -1))
@@ -932,8 +1048,9 @@
 (when (= ["--self-test"] *command-line-args*)
   (try
     (run-compiler-alpha-self-test! true)
+    (run-protocol-normalization-self-test! true)
     (catch Throwable failure
-      (fail! "compiler-generated alpha self-test failed"
+      (fail! "source-form relation self-test failed"
              (merge {:cause (ex-message failure)} (ex-data failure)))))
   (shutdown-agents)
   (System/exit 0))
@@ -941,6 +1058,7 @@
 ;; Every ordinary comparison carries the focused collision/cross-use/scope
 ;; controls; they are not an optional test that can drift away from the gate.
 (run-compiler-alpha-self-test! false)
+(run-protocol-normalization-self-test! false)
 
 (let [[reference-root regenerated-root namespace-index output-file
        surface-result-root original-surface-root recovered-surface-root]
@@ -985,23 +1103,21 @@
                                          (encode-form regenerated-forms :all))
                       semantic-exact? (= (encode-form reference-forms :semantic)
                                          (encode-form regenerated-forms :semantic))
-                      compiler-alpha-equivalent?
+                      direct-compiler-alpha-equivalent?
                       (and (not semantic-exact?)
                            (compiler-alpha-equivalent?
                              reference-forms regenerated-forms))
                       reference-events (when-not (or semantic-exact?
-                                                     compiler-alpha-equivalent?)
+                                                     direct-compiler-alpha-equivalent?)
                                          (normalize-protocol-events
                                            reference-forms namespace-name))
                       regenerated-events (when-not (or semantic-exact?
-                                                       compiler-alpha-equivalent?)
+                                                       direct-compiler-alpha-equivalent?)
                                          (normalize-protocol-events
                                            regenerated-forms namespace-name))
-                      scaffold-transition?
+                      scaffold-shape?
                       (and (not semantic-exact?)
-                           (not compiler-alpha-equivalent?)
-                           (= (:events reference-events)
-                              (:events regenerated-events))
+                           (not direct-compiler-alpha-equivalent?)
                            (pos? (+ (:expanded reference-events)
                                     (:expanded regenerated-events)))
                            (pos? (+ (:legacy reference-events)
@@ -1010,20 +1126,36 @@
                                  (:expanded reference-events))
                               (+ (:legacy regenerated-events)
                                  (:expanded regenerated-events))))
+                      scaffold-semantic-exact?
+                      (and scaffold-shape?
+                           (= (encode-form (:events reference-events) :semantic)
+                              (encode-form (:events regenerated-events) :semantic)))
+                      scaffold-compiler-alpha-equivalent?
+                      (and scaffold-shape?
+                           (not scaffold-semantic-exact?)
+                           (compiler-alpha-equivalent?
+                             (:events reference-events)
+                             (:events regenerated-events)))
+                      scaffold-transition?
+                      (or scaffold-semantic-exact?
+                          scaffold-compiler-alpha-equivalent?)
                       _runtime-proof
                       (when scaffold-transition?
                         (require-runtime-surface-proof!
                           namespace-name surface-result-root
                           original-surface-root recovered-surface-root))
-                      accepted? (or semantic-exact? compiler-alpha-equivalent?
+                      accepted? (or semantic-exact?
+                                    direct-compiler-alpha-equivalent?
                                     scaffold-transition?)
                       classification
                       (cond
                         byte-exact? "byte-exact"
                         metadata-exact? "format-only"
                         semantic-exact? "location-metadata-or-format-only"
-                        compiler-alpha-equivalent?
+                        direct-compiler-alpha-equivalent?
                         "compiler-generated-alpha-equivalent"
+                        scaffold-compiler-alpha-equivalent?
+                        "oracle-proved-protocol-scaffold-with-compiler-alpha"
                         scaffold-transition? "oracle-proved-protocol-scaffold"
                         :else "semantic-body-or-structure")]
                   {:namespace namespace-name
@@ -1034,10 +1166,13 @@
                    :regenerated-form-count (count regenerated-forms)
                    :metadata-exact metadata-exact?
                    :semantic-exact semantic-exact?
-                   :compiler-alpha-equivalent compiler-alpha-equivalent?
+                   :compiler-alpha-equivalent
+                   direct-compiler-alpha-equivalent?
                    :accepted accepted?
                    :classification classification
-                   :protocol-scaffold-transition scaffold-transition?})))
+                   :protocol-scaffold-transition scaffold-transition?
+                   :protocol-scaffold-compiler-alpha-equivalent
+                   scaffold-compiler-alpha-equivalent?})))
             rows)
           rejected (count (remove :accepted comparisons))
           location-deltas (count (filter #(= "location-metadata-or-format-only"
@@ -1045,18 +1180,22 @@
                                          comparisons))
           scaffold-deltas (count (filter :protocol-scaffold-transition
                                          comparisons))
+          scaffold-alpha-deltas
+          (count (filter :protocol-scaffold-compiler-alpha-equivalent
+                         comparisons))
           compiler-alpha-deltas (count (filter :compiler-alpha-equivalent
                                                comparisons))
           format-deltas (count (filter #(= "format-only" (:classification %))
                                        comparisons))]
       (with-open [writer (io/writer output-file :encoding "UTF-8")]
         (.write writer
-                "namespace\tpath\treference_sha256\tregenerated_sha256\treference_forms\tregenerated_forms\tmetadata_exact\tsemantic_exact\tclassification\tprotocol_scaffold_transition\tcompiler_generated_alpha_equivalent\n")
+                "namespace\tpath\treference_sha256\tregenerated_sha256\treference_forms\tregenerated_forms\tmetadata_exact\tsemantic_exact\tclassification\tprotocol_scaffold_transition\tcompiler_generated_alpha_equivalent\tprotocol_scaffold_compiler_generated_alpha_equivalent\n")
         (doseq [{:keys [namespace path reference-sha regenerated-sha
                         reference-form-count regenerated-form-count
                         metadata-exact semantic-exact classification
                         protocol-scaffold-transition
-                        compiler-alpha-equivalent]}
+                        compiler-alpha-equivalent
+                        protocol-scaffold-compiler-alpha-equivalent]}
                 comparisons]
           (.write writer
                   (str/join "\t"
@@ -1064,12 +1203,15 @@
                              reference-form-count regenerated-form-count
                              metadata-exact semantic-exact classification
                              protocol-scaffold-transition
-                             compiler-alpha-equivalent]))
+                             compiler-alpha-equivalent
+                             protocol-scaffold-compiler-alpha-equivalent]))
           (.write writer "\n")))
       (println "PEER_SOURCE_FORM_RESULT"
                (str "namespaces=" (count comparisons))
                (str "semantic_body_or_structure=" rejected)
                (str "protocol_scaffold=" scaffold-deltas)
+               (str "protocol_scaffold_compiler_generated_alpha="
+                    scaffold-alpha-deltas)
                (str "compiler_generated_alpha=" compiler-alpha-deltas)
                (str "location_metadata_or_format=" location-deltas)
                (str "format_only=" format-deltas))

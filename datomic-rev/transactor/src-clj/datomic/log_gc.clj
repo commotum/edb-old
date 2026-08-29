@@ -30,7 +30,7 @@
   (reset-meta!
     #'gc-pause?
     (assoc
-      {:private true, :arglists (clojure.core/list ['data]), :column 1}
+      {:private true, :arglists (clojure.core/list ['data]), :column (int 1)}
       :name
       'gc-pause?
       :ns
@@ -39,7 +39,7 @@
   (reset-meta!
     #'zgc-cycle?
     (assoc
-      {:private true, :arglists (clojure.core/list ['data]), :column 1}
+      {:private true, :arglists (clojure.core/list ['data]), :column (int 1)}
       :name
       'zgc-cycle?
       :ns
@@ -48,34 +48,35 @@
   (reset-meta!
     #'zgc-alloc-stall?
     (assoc
-      {:private true, :arglists (clojure.core/list ['data]), :column 1}
+      {:private true, :arglists (clojure.core/list ['data]), :column (int 1)}
       :name
       'zgc-alloc-stall?
       :ns
       *ns*))
-  (def listener
-   (reify
-     javax.management.NotificationListener
-     (^void handleNotification
-       [this ^javax.management.Notification n _h]
-       (do
-         (let [data (.getUserData ^javax.management.Notification n)
-               data (jmx/objects->data data)
-               duration (get-in data [:gcInfo :duration])
-               k (select-keys data [:gcName :gcAction :gcCause])]
-           (when (gc-pause? data) (monitor/add-stat :GcPauseMsec duration))
-           (when (and (zgc-cycle? data) (zgc-alloc-stall? data))
-             (monitor/add-stat :ZgcAllocationStallMsec duration))
-           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log-gc")]
-             (when (.isInfoEnabled ^org.slf4j.Logger logger)
-               (.info
-                 ^org.slf4j.Logger logger
-                 (logger/process (assoc k :event :gc :duration duration))))
-             nil))
-         nil))))
-  (reset-meta!
-    #'listener
-    (assoc {:tag javax.management.NotificationListener, :column 1} :name 'listener :ns *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.log-gc" "listener")
+    {:tag javax.management.NotificationListener, :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.log-gc" "listener")
+    (reify
+      javax.management.NotificationListener
+      (^void handleNotification
+        [this ^javax.management.Notification n _h]
+        (do
+          (let [data (.getUserData ^javax.management.Notification n)
+                data (jmx/objects->data data)
+                duration (get-in data [:gcInfo :duration])
+                k (select-keys data [:gcName :gcAction :gcCause])]
+            (when (gc-pause? data) (monitor/add-stat :GcPauseMsec duration))
+            (when (and (zgc-cycle? data) (zgc-alloc-stall? data))
+              (monitor/add-stat :ZgcAllocationStallMsec duration))
+            (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log-gc")]
+              (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                (.info
+                  ^org.slf4j.Logger logger
+                  (logger/process (assoc k :event :gc :duration duration))))
+              nil))
+          nil))))
   (defn log-gc-events
     ([]
       (loop [seq_25740 (seq (ManagementFactory/getGarbageCollectorMXBeans))
@@ -108,4 +109,7 @@
                       listener
                       nil
                       :datomic.log-gc/events)
-                    (recur (next seq_25740) nil 0 0)))))))))))
+                    (recur (next seq_25740) nil 0 0))))))))))
+  (reset-meta!
+    #'log-gc-events
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'log-gc-events :ns *ns*)))

@@ -66,8 +66,14 @@ import org.objectweb.asm.signature.SignatureVisitor;
  * callback, and closes those references independently for candidate A and B.
  * Candidate resources require an exact allow-list row.  Runtime resources are
  * owned by their ordered runtime element.  Unknown, unreadable, aliased,
- * duplicate, nested-archive, keystore, original-artifact, or unaccounted data
- * is a violation.</p>
+ * duplicate, or unaccounted data is a violation.  Generated candidate output
+ * may not contain nested archives, and candidate-lane content may not contain
+ * keystores or pinned original payloads.  Hash-ledgered runtime archives are
+ * recursively inventoried in either lane.  Oracle content is admitted according
+ * to its separately hash-anchored runtime ledger and role/identity policy.
+ * Candidate effective-class collisions require an exact ordered position,
+ * role, entry, release, and class-hash policy row; runtime elements are never
+ * deduplicated.</p>
  *
  * <p>The scanner is deliberately separate from {@code
  * ScanCandidateClasspath}.  It is not a JVM verifier and does not claim AOT
@@ -81,6 +87,10 @@ public final class ScanExactAotBoundary {
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern FORBIDDEN_ORIGINAL_ARCHIVE = Pattern.compile(
             "(?i)(^|/)(datomic-transactor-pro|peer|core2|nano-impl)(-[^/]*)?\\.(jar|zip)$");
+    private static final String CANDIDATE_COLLISION_HEADER =
+            "lane\tinternal_name\tfirst_position\tfirst_role\tfirst_entry"
+            + "\tfirst_release\tfirst_sha256\tlater_position\tlater_role"
+            + "\tlater_entry\tlater_release\tlater_sha256\tbyte_relation";
     private static final List<String> RELATIONS = List.of(
             "candidate-a--candidate-b", "candidate-a--original",
             "candidate-b--original");
@@ -102,6 +112,7 @@ public final class ScanExactAotBoundary {
         final Path runtimePolicy;
         final Path candidateRuntime;
         final Path oracleRuntime;
+        final Path candidateCollisions;
         final Path allowedResources;
         final Path forbiddenPayloads;
         final Path output;
@@ -110,17 +121,19 @@ public final class ScanExactAotBoundary {
         Config(Path candidateA, Path candidateB, Path originalJar,
                Path peerJar, Path cohort, Path ownership, Path classMappings,
                Path runtimePolicy, Path candidateRuntime, Path oracleRuntime,
-               Path allowedResources, Path forbiddenPayloads, Path output) {
+               Path candidateCollisions, Path allowedResources,
+               Path forbiddenPayloads, Path output) {
             this(candidateA, candidateB, originalJar, peerJar, cohort,
                     ownership, classMappings, runtimePolicy, candidateRuntime,
-                    oracleRuntime, allowedResources, forbiddenPayloads, output,
-                    true);
+                    oracleRuntime, candidateCollisions, allowedResources,
+                    forbiddenPayloads, output, true);
         }
 
         Config(Path candidateA, Path candidateB, Path originalJar,
                Path peerJar, Path cohort, Path ownership, Path classMappings,
                Path runtimePolicy, Path candidateRuntime, Path oracleRuntime,
-               Path allowedResources, Path forbiddenPayloads, Path output,
+               Path candidateCollisions, Path allowedResources,
+               Path forbiddenPayloads, Path output,
                boolean requireProductionShape) {
             this.candidateA = absolute(candidateA);
             this.candidateB = absolute(candidateB);
@@ -132,6 +145,7 @@ public final class ScanExactAotBoundary {
             this.runtimePolicy = absolute(runtimePolicy);
             this.candidateRuntime = absolute(candidateRuntime);
             this.oracleRuntime = absolute(oracleRuntime);
+            this.candidateCollisions = absolute(candidateCollisions);
             this.allowedResources = absolute(allowedResources);
             this.forbiddenPayloads = absolute(forbiddenPayloads);
             this.output = absolute(output);
@@ -429,39 +443,122 @@ public final class ScanExactAotBoundary {
         final String kind;
         final String logicalName;
         final int firstPosition;
+        final String firstRole;
         final String firstOwner;
         final String firstOrigin;
+        final String firstEntry;
+        final int firstRelease;
+        final String firstSha;
         final int laterPosition;
+        final String laterRole;
         final String laterOwner;
         final String laterOrigin;
+        final String laterEntry;
+        final int laterRelease;
+        final String laterSha;
+        final String byteRelation;
         final String disposition;
 
         Collision(String lane, String kind, String logicalName,
-                  int firstPosition, String firstOwner, String firstOrigin,
-                  int laterPosition, String laterOwner, String laterOrigin,
-                  String disposition) {
+                  Claim first, Claim later, String disposition) {
             this.lane = lane;
             this.kind = kind;
             this.logicalName = logicalName;
-            this.firstPosition = firstPosition;
-            this.firstOwner = firstOwner;
-            this.firstOrigin = firstOrigin;
-            this.laterPosition = laterPosition;
-            this.laterOwner = laterOwner;
-            this.laterOrigin = laterOrigin;
+            this.firstPosition = first.position;
+            this.firstRole = first.role;
+            this.firstOwner = first.owner;
+            this.firstOrigin = first.origin;
+            this.firstEntry = first.entry;
+            this.firstRelease = first.release;
+            this.firstSha = first.sha;
+            this.laterPosition = later.position;
+            this.laterRole = later.role;
+            this.laterOwner = later.owner;
+            this.laterOrigin = later.origin;
+            this.laterEntry = later.entry;
+            this.laterRelease = later.release;
+            this.laterSha = later.sha;
+            this.byteRelation = first.sha.equals(later.sha)
+                    ? "BYTE_IDENTICAL" : "BYTE_DIFFERENT";
             this.disposition = disposition;
+        }
+    }
+
+    private static final class CollisionPolicyRow {
+        final String lane;
+        final String internalName;
+        final int firstPosition;
+        final String firstRole;
+        final String firstEntry;
+        final int firstRelease;
+        final String firstSha;
+        final int laterPosition;
+        final String laterRole;
+        final String laterEntry;
+        final int laterRelease;
+        final String laterSha;
+        final String byteRelation;
+        boolean seen;
+
+        CollisionPolicyRow(String lane, String internalName,
+                int firstPosition, String firstRole, String firstEntry,
+                int firstRelease, String firstSha, int laterPosition,
+                String laterRole, String laterEntry, int laterRelease,
+                String laterSha, String byteRelation) {
+            this.lane = lane;
+            this.internalName = internalName;
+            this.firstPosition = firstPosition;
+            this.firstRole = firstRole;
+            this.firstEntry = firstEntry;
+            this.firstRelease = firstRelease;
+            this.firstSha = firstSha;
+            this.laterPosition = laterPosition;
+            this.laterRole = laterRole;
+            this.laterEntry = laterEntry;
+            this.laterRelease = laterRelease;
+            this.laterSha = laterSha;
+            this.byteRelation = byteRelation;
+        }
+
+        String key() {
+            return internalName + "\u0000" + laterPosition;
+        }
+
+        boolean matches(Collision collision) {
+            return lane.equals(collision.lane)
+                    && internalName.equals(collision.logicalName)
+                    && firstPosition == collision.firstPosition
+                    && firstRole.equals(collision.firstRole)
+                    && firstEntry.equals(collision.firstEntry)
+                    && firstRelease == collision.firstRelease
+                    && firstSha.equals(collision.firstSha)
+                    && laterPosition == collision.laterPosition
+                    && laterRole.equals(collision.laterRole)
+                    && laterEntry.equals(collision.laterEntry)
+                    && laterRelease == collision.laterRelease
+                    && laterSha.equals(collision.laterSha)
+                    && byteRelation.equals(collision.byteRelation);
         }
     }
 
     private static final class Claim {
         final int position;
+        final String role;
         final String owner;
         final String origin;
+        final String entry;
+        final int release;
+        final String sha;
 
-        Claim(int position, String owner, String origin) {
+        Claim(int position, String role, String owner, String origin,
+              String entry, int release, String sha) {
             this.position = position;
+            this.role = role;
             this.owner = owner;
             this.origin = origin;
+            this.entry = entry;
+            this.release = release;
+            this.sha = sha;
         }
     }
 
@@ -474,6 +571,8 @@ public final class ScanExactAotBoundary {
         final Map<String, String> expectedCandidateB = new TreeMap<>();
         final Map<String, OverlapProof> overlapProofs = new TreeMap<>();
         final Map<String, ArtifactPolicy> runtimePolicy = new LinkedHashMap<>();
+        final Map<String, CollisionPolicyRow> candidateCollisionPolicy =
+                new LinkedHashMap<>();
         final Map<String, AllowedResource> allowed = new TreeMap<>();
         final Map<String, List<ForbiddenPayload>> forbiddenBySha = new HashMap<>();
         final List<RuntimeElement> runtimeElements = new ArrayList<>();
@@ -544,18 +643,42 @@ public final class ScanExactAotBoundary {
         }
 
         void claim(String lane, String kind, String logicalName, int position,
-                   String owner, String origin, RuntimeElement element) {
+                   String role, String owner, String origin, String entry,
+                   int release, String sha, RuntimeElement element) {
             String key = lane + "\u0000" + kind + "\u0000" + logicalName;
-            Claim current = new Claim(position, owner, origin);
+            Claim current = new Claim(position, role, owner, origin, entry,
+                    release, sha);
             Claim previous = claims.putIfAbsent(key, current);
             if (previous != null) {
-                String disposition = lane.equals("oracle")
-                        ? "ORDERED_FIRST_ORIGIN_WINS" : "FORBIDDEN_DUPLICATE";
-                collisions.add(new Collision(lane, kind, logicalName,
-                        previous.position, previous.owner, previous.origin,
-                        position, owner, origin, disposition));
+                Collision collision = new Collision(lane, kind, logicalName,
+                        previous, current, "UNCLASSIFIED");
+                String disposition = "FORBIDDEN_DUPLICATE";
+                if (lane.equals("oracle")) {
+                    disposition = "ORDERED_FIRST_ORIGIN_WINS";
+                } else if (lane.equals("candidate")
+                        && kind.equals("class")) {
+                    CollisionPolicyRow policy = candidateCollisionPolicy.get(
+                            logicalName + "\u0000" + position);
+                    if (policy != null && policy.matches(collision)) {
+                        policy.seen = true;
+                        disposition = "POLICY_BOUND_ORDERED_FIRST_ORIGIN_WINS";
+                    } else {
+                        violation(element, "collision", logicalName,
+                                policy == null
+                                        ? "missing-candidate-collision-policy"
+                                        : "candidate-collision-policy-mismatch",
+                                policy == null
+                                        ? "candidate runtime class collision has no exact policy row"
+                                        : "candidate runtime class collision differs from its policy row");
+                    }
+                }
+                collision = new Collision(lane, kind, logicalName, previous,
+                        current, disposition);
+                collisions.add(collision);
                 if (element != null) element.collisions++;
-                if (!lane.equals("oracle")) {
+                if (!lane.equals("oracle")
+                        && !disposition.equals(
+                                "POLICY_BOUND_ORDERED_FIRST_ORIGIN_WINS")) {
                     if (element == null) {
                         violation(lane, "collision", logicalName,
                                 "duplicate-logical-entry",
@@ -572,8 +695,9 @@ public final class ScanExactAotBoundary {
         }
 
         void claimCandidate(String boundary, String kind, String logicalName,
-                            String owner, String origin) {
-            claim(boundary, kind, logicalName, 0, owner, origin, null);
+                            String owner, String origin, String sha) {
+            claim(boundary, kind, logicalName, 0, "generated-output", owner,
+                    origin, logicalName, 0, sha, null);
         }
 
         RuntimeElement element(String lane, int position) {
@@ -1015,6 +1139,77 @@ public final class ScanExactAotBoundary {
                 lane + " runtime boundary is empty");
     }
 
+    private static void readCandidateCollisionPolicy(Path path,
+            ScanState state) throws IOException {
+        try (BufferedReader reader = Files.newBufferedReader(path,
+                StandardCharsets.UTF_8)) {
+            require(CANDIDATE_COLLISION_HEADER.equals(reader.readLine()),
+                    "unexpected candidate-collision-policy header");
+            int number = 1;
+            for (String line; (line = reader.readLine()) != null;) {
+                number++;
+                String[] fields = row(line, 13, "candidate-collision-policy",
+                        number);
+                require(fields[0].equals("candidate"),
+                        "collision policy may describe only candidate lane rows");
+                require(!fields[1].endsWith(".class")
+                                && safeRelative(fields[1] + ".class"),
+                        "unsafe collision internal name in row " + number);
+                safeField("collision first role", fields[3]);
+                safeField("collision later role", fields[8]);
+                require(safeRelative(fields[4])
+                                && fields[4].endsWith(".class")
+                                && safeRelative(fields[9])
+                                && fields[9].endsWith(".class"),
+                        "unsafe collision entry in row " + number);
+                int firstPosition;
+                int firstRelease;
+                int laterPosition;
+                int laterRelease;
+                try {
+                    firstPosition = Integer.parseInt(fields[2]);
+                    firstRelease = Integer.parseInt(fields[5]);
+                    laterPosition = Integer.parseInt(fields[7]);
+                    laterRelease = Integer.parseInt(fields[10]);
+                } catch (NumberFormatException bad) {
+                    throw new Failure("invalid collision integer in row "
+                            + number);
+                }
+                require(firstPosition > 0 && firstPosition < laterPosition
+                                && firstRelease >= 0
+                                && firstRelease <= JAVA_FEATURE
+                                && laterRelease >= 0
+                                && laterRelease <= JAVA_FEATURE,
+                        "invalid collision order/release in row " + number);
+                ClassPathIdentity firstPath = archiveClassPath(fields[4]);
+                ClassPathIdentity laterPath = archiveClassPath(fields[9]);
+                require(firstPath.internalPath.equals(fields[1] + ".class")
+                                && laterPath.internalPath.equals(
+                                        fields[1] + ".class")
+                                && firstPath.release == firstRelease
+                                && laterPath.release == laterRelease,
+                        "collision entry/internal/release mismatch in row "
+                                + number);
+                require(SHA256.matcher(fields[6]).matches()
+                                && SHA256.matcher(fields[11]).matches(),
+                        "invalid collision class SHA-256 in row " + number);
+                require(Set.of("BYTE_IDENTICAL", "BYTE_DIFFERENT")
+                                .contains(fields[12])
+                                && fields[12].equals(fields[6].equals(fields[11])
+                                        ? "BYTE_IDENTICAL" : "BYTE_DIFFERENT"),
+                        "collision byte relation disagrees with hashes in row "
+                                + number);
+                CollisionPolicyRow policy = new CollisionPolicyRow(fields[0],
+                        fields[1], firstPosition, fields[3], fields[4],
+                        firstRelease, fields[6], laterPosition, fields[8],
+                        fields[9], laterRelease, fields[11], fields[12]);
+                require(state.candidateCollisionPolicy.put(policy.key(),
+                                policy) == null,
+                        "duplicate candidate collision policy row " + number);
+            }
+        }
+    }
+
     private static void readRuntimePolicy(Path path, ScanState state)
             throws IOException {
         Set<String> requiredIds = Set.of("transactor-original",
@@ -1209,28 +1404,41 @@ public final class ScanExactAotBoundary {
                                      RuntimeElement element) {
         int violationsBefore = state.violations.size();
         int forbiddenBefore = 0;
-        for (ForbiddenPayload rule : state.forbiddenBySha.getOrDefault(
-                entry.sha, Collections.emptyList())) {
-            forbiddenBefore++;
-            entry.status = "FAIL";
-            state.violation(entry.boundary, "payload", entry.logicalPath,
-                    rule.rule, "forbidden SHA-256 payload: " + rule.reason);
-        }
-        checkLogicalName(state, entry.boundary, "entry-name",
-                entry.logicalPath);
+        boolean candidateContent = element == null
+                || element.lane.equals("candidate");
         boolean archive = archiveMagic(bytes);
-        if (!topLevelJar && (archive || archiveName(entry.logicalPath))) {
+        boolean archiveNamed = archiveName(entry.logicalPath);
+        if (!topLevelJar && element != null && archiveNamed && !archive) {
             entry.status = "FAIL";
             state.violation(entry.boundary, "payload", entry.logicalPath,
-                    "raw-nested-archive",
-                    archive ? "resource payload has ZIP magic"
-                            : "archive-named resource lacks ZIP magic");
+                    "archive-named-non-zip",
+                    "runtime resource has an archive name without ZIP magic");
         }
-        if (keystoreName(entry.logicalPath) || keystoreMagic(bytes)) {
-            entry.status = "FAIL";
-            state.violation(entry.boundary, "payload", entry.logicalPath,
-                    "raw-keystore-resource",
-                    "keystore name or magic is forbidden at the candidate boundary");
+        if (candidateContent) {
+            for (ForbiddenPayload rule : state.forbiddenBySha.getOrDefault(
+                    entry.sha, Collections.emptyList())) {
+                forbiddenBefore++;
+                entry.status = "FAIL";
+                state.violation(entry.boundary, "payload", entry.logicalPath,
+                        rule.rule,
+                        "forbidden SHA-256 payload: " + rule.reason);
+            }
+            checkLogicalName(state, entry.boundary, "entry-name",
+                    entry.logicalPath);
+            if (!topLevelJar && element == null
+                    && (archive || archiveNamed)) {
+                entry.status = "FAIL";
+                state.violation(entry.boundary, "payload", entry.logicalPath,
+                        "raw-nested-archive",
+                        archive ? "resource payload has ZIP magic"
+                                : "archive-named resource lacks ZIP magic");
+            }
+            if (keystoreName(entry.logicalPath) || keystoreMagic(bytes)) {
+                entry.status = "FAIL";
+                state.violation(entry.boundary, "payload", entry.logicalPath,
+                        "raw-keystore-resource",
+                        "keystore name or magic is forbidden at the candidate boundary");
+            }
         }
         if (element != null) {
             element.errors += state.violations.size() - violationsBefore;
@@ -1333,7 +1541,8 @@ public final class ScanExactAotBoundary {
                                 : state.actualCandidateB).add(entry.internalName);
                         state.claimCandidate(boundary, "class",
                                 entry.internalName,
-                                namespace + ":" + relative, path.toString());
+                                namespace + ":" + relative, path.toString(),
+                                entry.sha);
                     } else {
                         entry.kind = "resource";
                         AllowedResource allowed = state.allowed.get(boundary
@@ -1355,7 +1564,7 @@ public final class ScanExactAotBoundary {
                                     allowed.owner, relative, bytes, 1);
                         }
                         state.claimCandidate(boundary, "resource", relative,
-                                allowed.owner, path.toString());
+                                allowed.owner, path.toString(), entry.sha);
                     }
                 }
             } catch (Throwable failure) {
@@ -1451,7 +1660,9 @@ public final class ScanExactAotBoundary {
             element.classes++;
             if (active && !entry.internalName.equals("module-info")) {
                 state.claim(element.lane, "class", entry.internalName,
-                        element.position, entry.owner, entry.origin, element);
+                        element.position, element.role, entry.owner,
+                        entry.origin, logicalPath, actualRelease, entry.sha,
+                        element);
                 recordRuntimeShadow(state, element, entry);
             }
         } else {
@@ -1687,8 +1898,8 @@ public final class ScanExactAotBoundary {
         }
     }
 
-    /* Candidate nested archives are forbidden, but every reachable entry is
-     * still inventoried so the failing ledger is complete. */
+    /* Generated candidate-output nested archives are forbidden, but every
+     * reachable entry is still inventoried so the failing ledger is complete. */
     private static void scanNestedArchive(ScanState state, String boundary,
                                           int elementPosition, String owner,
                                           String parent, byte[] archive,
@@ -2742,11 +2953,67 @@ public final class ScanExactAotBoundary {
                         "owned Transactor is separate position zero, not a fallback element");
             }
         }
+        for (CollisionPolicyRow collision
+                : state.candidateCollisionPolicy.values()) {
+            RuntimeElement first = state.element("candidate",
+                    collision.firstPosition);
+            RuntimeElement later = state.element("candidate",
+                    collision.laterPosition);
+            if (first == null || later == null
+                    || !first.role.equals(collision.firstRole)
+                    || !later.role.equals(collision.laterRole)) {
+                state.violation("candidate-collision-policy", "runtime-order",
+                        collision.internalName, "collision-role-position-spoof",
+                        "collision row does not bind existing ordered candidate roles");
+            }
+        }
+        if (config.requireProductionShape) {
+            long identical = state.candidateCollisionPolicy.values().stream()
+                    .filter(value -> value.byteRelation.equals(
+                            "BYTE_IDENTICAL")).count();
+            long different = state.candidateCollisionPolicy.values().stream()
+                    .filter(value -> value.byteRelation.equals(
+                            "BYTE_DIFFERENT")).count();
+            boolean allJline = state.candidateCollisionPolicy.values().stream()
+                    .allMatch(value -> value.internalName.startsWith("jline/"));
+            if (state.candidateCollisionPolicy.size() != 33
+                    || identical != 14 || different != 19 || !allJline) {
+                state.violation("candidate-collision-policy",
+                        "production-shape", "<policy>",
+                        "production-candidate-collision-shape",
+                        "normal mode requires 33 jline rows: 14 byte-identical and 19 byte-different");
+            }
+        }
+    }
+
+    private static void reconcileCandidateCollisionPolicy(ScanState state) {
+        long actual = state.collisions.stream()
+                .filter(value -> value.lane.equals("candidate")
+                        && value.kind.equals("class"))
+                .count();
+        for (CollisionPolicyRow policy
+                : state.candidateCollisionPolicy.values()) {
+            if (!policy.seen) {
+                state.violation("candidate-collision-policy", "reconciliation",
+                        policy.internalName,
+                        "extra-or-unobserved-candidate-collision-policy",
+                        "policy row did not match an observed candidate collision");
+            }
+        }
+        long seen = state.candidateCollisionPolicy.values().stream()
+                .filter(value -> value.seen).count();
+        if (actual != seen || seen != state.candidateCollisionPolicy.size()) {
+            state.violation("candidate-collision-policy", "reconciliation",
+                    "<ledger>", "incomplete-candidate-collision-ledger",
+                    "observed=" + actual + " matched=" + seen
+                            + " policy="
+                            + state.candidateCollisionPolicy.size());
+        }
     }
 
     private static void checkTopLevelPayload(ScanState state,
                                              RuntimeElement element) {
-        if (element.position == 0 || element.lane.equals("inventory")
+        if (!element.lane.equals("candidate")
                 || element.kind.equals("directory")) return;
         for (ForbiddenPayload rule : state.forbiddenBySha.getOrDefault(
                 element.actualSha, Collections.emptyList())) {
@@ -3109,6 +3376,8 @@ public final class ScanExactAotBoundary {
                 config.candidateRuntime, false);
         bindInput(state, "policy:oracle-runtime-ledger",
                 config.oracleRuntime, false);
+        bindInput(state, "policy:candidate-collisions",
+                config.candidateCollisions, false);
         bindInput(state, "policy:allowed-resources", config.allowedResources,
                 false);
         bindInput(state, "policy:forbidden-payloads",
@@ -3118,6 +3387,7 @@ public final class ScanExactAotBoundary {
         readMappings(config.classMappings, state);
         readAllowedResources(config.allowedResources, state);
         readForbiddenPayloads(config.forbiddenPayloads, state);
+        readCandidateCollisionPolicy(config.candidateCollisions, state);
         readRuntimePolicy(config.runtimePolicy, state);
         readRuntime(config.candidateRuntime, "candidate", state);
         readRuntime(config.oracleRuntime, "oracle", state);
@@ -3158,6 +3428,7 @@ public final class ScanExactAotBoundary {
                     .collect(Collectors.toList())) {
                 scanRuntimeElement(element, state);
             }
+            reconcileCandidateCollisionPolicy(state);
             scanRuntimeElement(state.peerElement, state);
             checkCandidateMembership(state);
             resolveReferences(state);
@@ -3302,18 +3573,29 @@ public final class ScanExactAotBoundary {
                 .thenComparing(row -> row.laterOwner));
         List<String> collisionRows = new ArrayList<>();
         collisionRows.add("lane\tkind\tlogical_name\tfirst_position"
-                + "\tfirst_owner\tfirst_origin\tlater_position\tlater_owner"
-                + "\tlater_origin\tdisposition");
+                + "\tfirst_role\tfirst_owner\tfirst_origin\tfirst_entry"
+                + "\tfirst_release\tfirst_sha256\tlater_position\tlater_role"
+                + "\tlater_owner\tlater_origin\tlater_entry\tlater_release"
+                + "\tlater_sha256\tbyte_relation\tdisposition");
         for (Collision collision : collisions) {
             collisionRows.add(clean(collision.lane) + "\t"
                     + clean(collision.kind) + "\t"
                     + clean(collision.logicalName) + "\t"
                     + collision.firstPosition + "\t"
+                    + clean(collision.firstRole) + "\t"
                     + clean(collision.firstOwner) + "\t"
                     + clean(collision.firstOrigin) + "\t"
+                    + clean(collision.firstEntry) + "\t"
+                    + collision.firstRelease + "\t"
+                    + collision.firstSha + "\t"
                     + collision.laterPosition + "\t"
+                    + clean(collision.laterRole) + "\t"
                     + clean(collision.laterOwner) + "\t"
                     + clean(collision.laterOrigin) + "\t"
+                    + clean(collision.laterEntry) + "\t"
+                    + collision.laterRelease + "\t"
+                    + collision.laterSha + "\t"
+                    + collision.byteRelation + "\t"
                     + collision.disposition);
         }
         writeLines(output.resolve("collisions.tsv"), collisionRows);
@@ -3366,6 +3648,14 @@ public final class ScanExactAotBoundary {
                 .filter(ScanExactAotBoundary::typedMemberReference).count();
         long oracleCollisions = state.collisions.stream()
                 .filter(collision -> collision.lane.equals("oracle")).count();
+        long candidateCollisions = state.collisions.stream()
+                .filter(collision -> collision.lane.equals("candidate")
+                        && collision.kind.equals("class")).count();
+        long candidateIdentical = state.collisions.stream()
+                .filter(collision -> collision.lane.equals("candidate")
+                        && collision.kind.equals("class")
+                        && collision.byteRelation.equals("BYTE_IDENTICAL"))
+                .count();
         List<String> summary = List.of(
                 "metric\tvalue",
                 "status\t" + (state.violations.isEmpty()
@@ -3397,12 +3687,22 @@ public final class ScanExactAotBoundary {
                 "member.resolution.policy\tEXACT_DECLARATION_OR_INHERITED_TYPED_MEMBER",
                 "references.unresolved\t" + unresolved,
                 "collisions\t" + state.collisions.size(),
+                "candidate.ordered.class.collisions\t"
+                        + candidateCollisions,
+                "candidate.ordered.class.collisions.byte-identical\t"
+                        + candidateIdentical,
+                "candidate.ordered.class.collisions.byte-different\t"
+                        + (candidateCollisions - candidateIdentical),
+                "candidate.collision.policy.rows\t"
+                        + state.candidateCollisionPolicy.size(),
+                "candidate.collision.policy\tPOLICY_BOUND_ORDERED_FIRST_ORIGIN_WINS",
                 "oracle.ordered.collisions\t" + oracleCollisions,
                 "oracle.collision.policy\tORDERED_FIRST_ORIGIN_WINS",
                 "violations\t" + state.violations.size(),
                 "entry.ledger.complete\t" + state.ledgerComplete,
                 "unknown.attribute.policy\tFAIL",
-                "nested.archive.policy\tFAIL_AND_INVENTORY",
+                "generated.output.nested.archive.policy\tFAIL_AND_INVENTORY",
+                "runtime.nested.archive.policy\tBOUNDED_RECURSIVE_INVENTORY",
                 "keystore.policy\tFAIL",
                 "licensed.artifact.policy\tFIVE_EXACT_ROLE_SHA_IDENTITIES",
                 "original.nano.candidate.policy\tFORBID",
@@ -3462,12 +3762,14 @@ public final class ScanExactAotBoundary {
         final Path core2Jar;
         final Path nanoOriginalJar;
         final Path nanoSanitizedJar;
+        final byte[] originalNanoJks;
         final Path cohort;
         final Path ownership;
         final Path mappings;
         final Path runtimePolicy;
         final Path candidateLedger;
         final Path oracleLedger;
+        final Path candidateCollisions;
         final Path allowed;
         final Path forbidden;
         final List<RuntimeFixture> candidateRuntime = new ArrayList<>();
@@ -3498,8 +3800,10 @@ public final class ScanExactAotBoundary {
             runtimePolicy = root.resolve("runtime-policy.tsv");
             candidateLedger = root.resolve("candidate-runtime.tsv");
             oracleLedger = root.resolve("oracle-runtime.tsv");
+            candidateCollisions = root.resolve("candidate-collisions.tsv");
             allowed = root.resolve("allowed.tsv");
             forbidden = root.resolve("forbidden.tsv");
+            writeText(candidateCollisions, CANDIDATE_COLLISION_HEADER + "\n");
             writeText(cohort, "namespace\texpected_classes\nfixture.core\t1\n");
             writeText(ownership,
                     "entry\towner_id\nfixture/core.class\tfixture.core\n");
@@ -3513,8 +3817,12 @@ public final class ScanExactAotBoundary {
                     "peer\n".getBytes(StandardCharsets.UTF_8)));
             writeJar(core2Jar, Map.of("core2.edn",
                     "core2\n".getBytes(StandardCharsets.UTF_8)));
-            writeJar(nanoOriginalJar, Map.of("nano.edn",
-                    "nano-original\n".getBytes(StandardCharsets.UTF_8)));
+            originalNanoJks = new byte[] {(byte) 0xfe, (byte) 0xed,
+                    (byte) 0xfe, (byte) 0xed, 0, 0, 0, 2};
+            writeJar(nanoOriginalJar, Map.of(
+                    "nano.edn", "nano-original\n".getBytes(
+                            StandardCharsets.UTF_8),
+                    "nano_impl/transactor-key.jks", originalNanoJks));
             writeJar(nanoSanitizedJar, Map.of("nano.edn",
                     "nano-sanitized\n".getBytes(StandardCharsets.UTF_8)));
             candidateRuntime.add(new RuntimeFixture("nano-sanitized", "jar",
@@ -3527,6 +3835,13 @@ public final class ScanExactAotBoundary {
                     nanoOriginalJar));
             oracleRuntime.add(new RuntimeFixture("oracle-dependency",
                     "directory", oracleDependency));
+            forbiddenRows.add("core2-original-content\t" + sha256(core2Jar)
+                    + "\toriginal core2 fixture");
+            forbiddenRows.add("nano-original-content\t"
+                    + sha256(nanoOriginalJar) + "\toriginal Nano fixture");
+            forbiddenRows.add("nano-original-jks-content\t"
+                    + sha256(originalNanoJks)
+                    + "\toriginal Nano keystore fixture");
             forbiddenRows.add("never-match\t"
                     + "0000000000000000000000000000000000000000000000000000000000000000"
                     + "\tsynthetic nonmatching control");
@@ -3538,6 +3853,23 @@ public final class ScanExactAotBoundary {
 
         void addOracleRuntime(String role, String kind, Path path) {
             oracleRuntime.add(new RuntimeFixture(role, kind, path));
+        }
+
+        void setCandidateCollisionPolicy(String internalName,
+                int firstIndex, String firstEntry, int firstRelease,
+                String firstSha, int laterIndex, String laterEntry,
+                int laterRelease, String laterSha) throws IOException {
+            RuntimeFixture first = candidateRuntime.get(firstIndex);
+            RuntimeFixture later = candidateRuntime.get(laterIndex);
+            String relation = firstSha.equals(laterSha)
+                    ? "BYTE_IDENTICAL" : "BYTE_DIFFERENT";
+            writeText(candidateCollisions, CANDIDATE_COLLISION_HEADER + "\n"
+                    + "candidate\t" + internalName + "\t"
+                    + (firstIndex + 1) + "\t" + first.role + "\t"
+                    + firstEntry + "\t" + firstRelease + "\t" + firstSha
+                    + "\t" + (laterIndex + 1) + "\t" + later.role + "\t"
+                    + laterEntry + "\t" + laterRelease + "\t" + laterSha
+                    + "\t" + relation + "\n");
         }
 
         void renameCandidates(String candidateAInternal,
@@ -3616,8 +3948,8 @@ public final class ScanExactAotBoundary {
             writeText(forbidden, forbiddenText.toString());
             return new Config(candidateA, candidateB, originalJar, peerJar,
                     cohort, ownership, mappings, runtimePolicy,
-                    candidateLedger, oracleLedger, allowed, forbidden, output,
-                    false);
+                    candidateLedger, oracleLedger, candidateCollisions,
+                    allowed, forbidden, output, false);
         }
     }
 
@@ -3719,13 +4051,70 @@ public final class ScanExactAotBoundary {
 
     private static byte[] zipPayload(String name, byte[] payload)
             throws IOException {
+        return zipPayload(Map.of(name, payload));
+    }
+
+    private static byte[] zipPayload(Map<String, byte[]> values)
+            throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry(name));
-            zip.write(payload);
-            zip.closeEntry();
+            List<String> names = new ArrayList<>(values.keySet());
+            Collections.sort(names);
+            for (String name : names) {
+                ZipEntry entry = new ZipEntry(name);
+                entry.setTime(0L);
+                zip.putNextEntry(entry);
+                zip.write(values.get(name));
+                zip.closeEntry();
+            }
         }
         return bytes.toByteArray();
+    }
+
+    private static byte[] renameZipEntry(byte[] archive, String from,
+                                         String to) {
+        byte[] source = from.getBytes(StandardCharsets.UTF_8);
+        byte[] target = to.getBytes(StandardCharsets.UTF_8);
+        require(source.length == target.length,
+                "ZIP entry rename must preserve byte length");
+        byte[] result = archive.clone();
+        int replacements = 0;
+        for (int offset = 0; offset <= result.length - source.length;
+                offset++) {
+            boolean match = true;
+            for (int index = 0; index < source.length; index++) {
+                if (result[offset + index] != source[index]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (!match) continue;
+            System.arraycopy(target, 0, result, offset, target.length);
+            replacements++;
+            offset += source.length - 1;
+        }
+        require(replacements == 2,
+                "expected one local and one central ZIP entry name");
+        return result;
+    }
+
+    private static byte[] corruptZipEntryCount(byte[] archive) {
+        byte[] result = archive.clone();
+        int eocd = result.length - 22;
+        require(eocd >= 0 && result[eocd] == 0x50
+                        && result[eocd + 1] == 0x4b
+                        && result[eocd + 2] == 0x05
+                        && result[eocd + 3] == 0x06
+                        && u2le(result, eocd + 20) == 0,
+                "fixture ZIP lacks an un-commented end record");
+        int corrupted = u2le(result, eocd + 10) + 1;
+        require(corrupted <= 0xffff,
+                "fixture ZIP entry count cannot be incremented");
+        result[eocd + 8] = (byte) corrupted;
+        result[eocd + 9] = (byte) (corrupted >>> 8);
+        result[eocd + 10] = (byte) corrupted;
+        result[eocd + 11] = (byte) (corrupted >>> 8);
+        return result;
     }
 
     private static void requireStatus(int actual, int expected, String label) {
@@ -3739,6 +4128,14 @@ public final class ScanExactAotBoundary {
                 StandardCharsets.UTF_8);
         require(text.contains(fragment),
                 "expected violation fragment absent: " + fragment);
+    }
+
+    private static void requireNoViolation(Path output, String fragment)
+            throws IOException {
+        String text = Files.readString(output.resolve("violations.tsv"),
+                StandardCharsets.UTF_8);
+        require(!text.contains(fragment),
+                "unexpected violation fragment present: " + fragment);
     }
 
     private static void requireEvidence(Path output, String file,
@@ -3772,6 +4169,12 @@ public final class ScanExactAotBoundary {
                     "oracle\t0\towned-transactor-root");
             requireEvidence(config.output, "runtime-elements.tsv",
                     "inventory\t0\tpeer-inventory-only");
+            requireEvidence(config.output, "runtime-elements.tsv",
+                    "oracle\t1\tcore2-original\tjar");
+            requireEvidence(config.output, "runtime-elements.tsv",
+                    "oracle\t2\tnano-original\tjar");
+            requireEvidence(config.output, "entries.tsv",
+                    "nano_impl/transactor-key.jks");
             requireEvidence(config.output, "summary.tsv",
                     "member.resolution.policy\tEXACT_DECLARATION_OR_INHERITED_TYPED_MEMBER");
         });
@@ -3817,6 +4220,80 @@ public final class ScanExactAotBoundary {
             requireViolation(config.output, "licensed-original-content");
             requireEvidence(config.output, "runtime-elements.tsv",
                     "renamed-forbidden\tjar");
+        });
+
+        selfTest(rows, "original-core2-renamed-candidate-rejected", () -> {
+            Fixture fixture = new Fixture();
+            Path renamed = fixture.root.resolve("harmless-core-library.jar");
+            Files.copy(fixture.core2Jar, renamed);
+            fixture.addCandidateRuntime("harmless-core-library", "jar",
+                    renamed);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "renamed original core2 candidate");
+            requireViolation(config.output, "core2-original");
+            requireViolation(config.output, "core2-original-content");
+        });
+
+        selfTest(rows, "original-jks-content-rejected-in-candidate", () -> {
+            Fixture fixture = new Fixture();
+            Path renamed = fixture.candidateDependency.resolve(
+                    "harmless-resource.bin");
+            Files.write(renamed, fixture.originalNanoJks);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "renamed original JKS candidate content");
+            requireViolation(config.output, "nano-original-jks-content");
+            requireViolation(config.output, "raw-keystore-resource");
+        });
+
+        selfTest(rows, "oracle-original-core2-wrong-role-rejected", () -> {
+            Fixture fixture = new Fixture();
+            fixture.oracleRuntime.set(0, new RuntimeFixture(
+                    "core2-role-spoof", "jar", fixture.core2Jar));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "oracle core2 role spoof");
+            requireViolation(config.output, "required-role-hash");
+        });
+
+        selfTest(rows, "oracle-original-core2-hash-spoof-rejected", () -> {
+            Fixture fixture = new Fixture();
+            Path impostor = fixture.root.resolve("core2-impostor.jar");
+            writeJar(impostor, Map.of("core2.edn",
+                    "impostor\n".getBytes(StandardCharsets.UTF_8)));
+            fixture.oracleRuntime.set(0, new RuntimeFixture(
+                    "core2-original", "jar", impostor));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "oracle core2 hash spoof");
+            requireViolation(config.output, "required-role-hash");
+        });
+
+        selfTest(rows, "oracle-original-core2-path-tamper-rejected", () -> {
+            Fixture fixture = new Fixture();
+            Path rebound = fixture.root.resolve("core2-rebound.jar");
+            Files.copy(fixture.core2Jar, rebound);
+            Config config = fixture.config();
+            String ledger = Files.readString(fixture.oracleLedger,
+                    StandardCharsets.UTF_8);
+            require(ledger.contains(fixture.core2Jar.toString()),
+                    "oracle fixture ledger lacks core2 path");
+            writeText(fixture.oracleLedger, ledger.replace(
+                    fixture.core2Jar.toString(), rebound.toString()));
+            requireStatus(runScan(config), 2,
+                    "post-binding oracle core2 path tamper");
+            requireViolation(config.output, "runtime-ledger-anchor");
+        });
+
+        selfTest(rows, "original-and-sanitized-nano-lane-swap-rejected", () -> {
+            Fixture fixture = new Fixture();
+            fixture.candidateRuntime.set(0, new RuntimeFixture(
+                    "nano-original", "jar", fixture.nanoOriginalJar));
+            fixture.oracleRuntime.set(1, new RuntimeFixture(
+                    "nano-sanitized", "jar", fixture.nanoSanitizedJar));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "Nano lane swap");
+            requireViolation(config.output, "nano-original");
+            requireViolation(config.output, "nano-sanitized");
         });
 
         selfTest(rows, "sanitized-nano-name-allowed-only-by-role-sha", () -> {
@@ -3902,7 +4379,170 @@ public final class ScanExactAotBoundary {
             fixture.addCandidateRuntime("dep-two", "jar", two);
             Config config = fixture.config();
             requireStatus(runScan(config), 2, "candidate duplicate class");
+            requireViolation(config.output,
+                    "missing-candidate-collision-policy");
             requireViolation(config.output, "duplicate-logical-entry");
+        });
+
+        selfTest(rows, "candidate-runtime-policy-bound-collision-passes",
+                () -> {
+            Fixture fixture = new Fixture();
+            String internal = "jline/console/Fixture";
+            String entry = internal + ".class";
+            byte[] first = fixtureClass(internal, null, false, false);
+            byte[] later = fixtureClass(internal, "java/lang/Object", false,
+                    false);
+            Path firstJar = fixture.root.resolve("jline-first.jar");
+            Path laterJar = fixture.root.resolve("jline-later.jar");
+            writeJar(firstJar, Map.of(entry, first));
+            writeJar(laterJar, Map.of(entry, later));
+            fixture.addCandidateRuntime("jline-first", "jar", firstJar);
+            fixture.addCandidateRuntime("jline-later", "jar", laterJar);
+            fixture.setCandidateCollisionPolicy(internal, 2, entry, 0,
+                    sha256(first), 3, entry, 0, sha256(later));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 0,
+                    "policy-bound candidate collision");
+            requireEvidence(config.output, "collisions.tsv",
+                    sha256(first) + "\t4\tjline-later");
+            requireEvidence(config.output, "collisions.tsv",
+                    sha256(later) + "\tBYTE_DIFFERENT"
+                            + "\tPOLICY_BOUND_ORDERED_FIRST_ORIGIN_WINS");
+        });
+
+        selfTest(rows, "candidate-runtime-identical-collision-recorded",
+                () -> {
+            Fixture fixture = new Fixture();
+            String internal = "jline/console/Identical";
+            String entry = internal + ".class";
+            byte[] bytes = fixtureClass(internal, null, false, false);
+            Path firstJar = fixture.root.resolve("identical-first.jar");
+            Path laterJar = fixture.root.resolve("identical-later.jar");
+            writeJar(firstJar, Map.of(entry, bytes));
+            writeJar(laterJar, Map.of(entry, bytes));
+            fixture.addCandidateRuntime("identical-first", "jar", firstJar);
+            fixture.addCandidateRuntime("identical-later", "jar", laterJar);
+            fixture.setCandidateCollisionPolicy(internal, 2, entry, 0,
+                    sha256(bytes), 3, entry, 0, sha256(bytes));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 0,
+                    "byte-identical candidate collision");
+            requireEvidence(config.output, "collisions.tsv",
+                    "BYTE_IDENTICAL\tPOLICY_BOUND_ORDERED_FIRST_ORIGIN_WINS");
+        });
+
+        selfTest(rows, "candidate-collision-order-reversal-rejected", () -> {
+            Fixture fixture = new Fixture();
+            String internal = "jline/console/Reordered";
+            String entry = internal + ".class";
+            byte[] first = fixtureClass(internal, null, false, false);
+            byte[] later = fixtureClass(internal, "java/lang/Object", false,
+                    false);
+            Path firstJar = fixture.root.resolve("order-first.jar");
+            Path laterJar = fixture.root.resolve("order-later.jar");
+            writeJar(firstJar, Map.of(entry, first));
+            writeJar(laterJar, Map.of(entry, later));
+            fixture.addCandidateRuntime("order-first", "jar", firstJar);
+            fixture.addCandidateRuntime("order-later", "jar", laterJar);
+            fixture.setCandidateCollisionPolicy(internal, 2, entry, 0,
+                    sha256(first), 3, entry, 0, sha256(later));
+            Collections.swap(fixture.candidateRuntime, 2, 3);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "candidate collision order reversal");
+            requireViolation(config.output, "collision-role-position-spoof");
+            requireViolation(config.output,
+                    "candidate-collision-policy-mismatch");
+        });
+
+        selfTest(rows, "extra-candidate-collision-policy-row-rejected", () -> {
+            Fixture fixture = new Fixture();
+            String internal = "jline/console/Ghost";
+            String entry = internal + ".class";
+            byte[] bytes = fixtureClass(internal, null, false, false);
+            Path firstJar = fixture.root.resolve("ghost-first.jar");
+            Path laterJar = fixture.root.resolve("ghost-later.jar");
+            writeJar(firstJar, Map.of("jline/console/First.class",
+                    fixtureClass("jline/console/First", null, false, false)));
+            writeJar(laterJar, Map.of("jline/console/Later.class",
+                    fixtureClass("jline/console/Later", null, false, false)));
+            fixture.addCandidateRuntime("ghost-first", "jar", firstJar);
+            fixture.addCandidateRuntime("ghost-later", "jar", laterJar);
+            fixture.setCandidateCollisionPolicy(internal, 2, entry, 0,
+                    sha256(bytes), 3, entry, 0, sha256(bytes));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "extra candidate collision policy row");
+            requireViolation(config.output,
+                    "extra-or-unobserved-candidate-collision-policy");
+            requireViolation(config.output,
+                    "incomplete-candidate-collision-ledger");
+        });
+
+        selfTest(rows, "candidate-collision-lane-spoof-rejected", () -> {
+            Fixture fixture = new Fixture();
+            Config config = fixture.config();
+            writeText(fixture.candidateCollisions,
+                    CANDIDATE_COLLISION_HEADER + "\n"
+                    + "oracle\tjline/Spoof\t1\tnano-sanitized"
+                    + "\tjline/Spoof.class\t0\t"
+                    + "0000000000000000000000000000000000000000000000000000000000000000"
+                    + "\t2\tcandidate-dependency\tjline/Spoof.class\t0\t"
+                    + "0000000000000000000000000000000000000000000000000000000000000000"
+                    + "\tBYTE_IDENTICAL\n");
+            boolean rejected = false;
+            try { runScan(config); }
+            catch (Failure expected) { rejected = true; }
+            require(rejected, "oracle lane spoof entered candidate policy");
+        });
+
+        selfTest(rows, "candidate-collision-effective-release-spoof-rejected",
+                () -> {
+            Fixture fixture = new Fixture();
+            String internal = "jline/console/Versioned";
+            String baseEntry = internal + ".class";
+            String versionedEntry = "META-INF/versions/11/" + baseEntry;
+            byte[] base = fixtureClass(internal, null, false, false);
+            byte[] versioned = fixtureClass(internal, "java/lang/Object",
+                    false, false);
+            byte[] later = fixtureClass(internal, "java/lang/Number", false,
+                    false);
+            Path firstJar = fixture.root.resolve("versioned-first.jar");
+            Path laterJar = fixture.root.resolve("versioned-later.jar");
+            writeJar(firstJar, Map.of(
+                    "META-INF/MANIFEST.MF",
+                    "Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"
+                            .getBytes(StandardCharsets.UTF_8),
+                    baseEntry, base, versionedEntry, versioned));
+            writeJar(laterJar, Map.of(baseEntry, later));
+            fixture.addCandidateRuntime("versioned-first", "jar", firstJar);
+            fixture.addCandidateRuntime("versioned-later", "jar", laterJar);
+            fixture.setCandidateCollisionPolicy(internal, 2, baseEntry, 0,
+                    sha256(base), 3, baseEntry, 0, sha256(later));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "candidate collision effective-release spoof");
+            requireViolation(config.output,
+                    "candidate-collision-policy-mismatch");
+        });
+
+        selfTest(rows, "candidate-runtime-duplicate-release-path-rejected",
+                () -> {
+            Fixture fixture = new Fixture();
+            byte[] archive = zipPayload(Map.of(
+                    "jline/A.class", fixtureClass("jline/A", null, false,
+                            false),
+                    "jline/B.class", fixtureClass("jline/B", null, false,
+                            false)));
+            archive = renameZipEntry(archive, "jline/B.class",
+                    "jline/A.class");
+            Path duplicate = fixture.root.resolve("duplicate-path.jar");
+            Files.write(duplicate, archive);
+            fixture.addCandidateRuntime("duplicate-path", "jar", duplicate);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "candidate runtime duplicate release/path");
+            requireViolation(config.output, "duplicate-archive-entry");
         });
 
         selfTest(rows, "oracle-transactor-position-zero-first-origin", () -> {
@@ -3931,7 +4571,8 @@ public final class ScanExactAotBoundary {
             Config config = fixture.config();
             requireStatus(runScan(config), 0, "oracle fallback collision");
             requireEvidence(config.output, "collisions.tsv",
-                    "dep/Ordered\t4\truntime:oracle:4:oracle-one");
+                    "dep/Ordered\t4\toracle-one"
+                            + "\truntime:oracle:4:oracle-one");
         });
 
         selfTest(rows, "mapping-derived-identity-shadow", () -> {
@@ -3996,16 +4637,203 @@ public final class ScanExactAotBoundary {
             requireViolation(config.output, "missing/Bootstrap");
         });
 
-        selfTest(rows, "nested-archive-rejected-and-inventoried", () -> {
+        selfTest(rows, "candidate-runtime-h2-data-zip-inventoried", () -> {
             Fixture fixture = new Fixture();
-            Files.write(fixture.candidateDependency.resolve(
-                            "renamed-payload.bin"),
-                    zipPayload("inside.txt", "inside".getBytes(
-                            StandardCharsets.UTF_8)));
+            byte[] dataZip = zipPayload(Map.of(
+                    "org/h2/util/messages.properties",
+                    "message=value\n".getBytes(StandardCharsets.UTF_8),
+                    "nested/Retained.class",
+                    fixtureClass("nested/Retained", null, false, false)));
+            Path h2 = fixture.root.resolve("h2-retained.jar");
+            writeJar(h2, Map.of("org/h2/util/data.zip", dataZip));
+            fixture.addCandidateRuntime("h2-retained", "jar", h2);
             Config config = fixture.config();
-            requireStatus(runScan(config), 2, "nested archive");
+            requireStatus(runScan(config), 0,
+                    "candidate runtime H2 data.zip");
+            requireEvidence(config.output, "entries.tsv",
+                    "runtime-candidate");
+            requireEvidence(config.output, "entries.tsv",
+                    "org/h2/util/data.zip!/org/h2/util/messages.properties");
+            requireEvidence(config.output, "entries.tsv",
+                    "org/h2/util/data.zip!/nested/Retained.class");
+        });
+
+        selfTest(rows, "oracle-runtime-nested-archive-inventoried", () -> {
+            Fixture fixture = new Fixture();
+            byte[] dataZip = zipPayload(Map.of("oracle/data.txt",
+                    "oracle nested data\n".getBytes(StandardCharsets.UTF_8)));
+            Path dependency = fixture.root.resolve("oracle-nested.jar");
+            writeJar(dependency, Map.of("oracle/data.zip", dataZip));
+            fixture.addOracleRuntime("oracle-nested", "jar", dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 0, "oracle runtime nested ZIP");
+            requireEvidence(config.output, "entries.tsv",
+                    "runtime-oracle");
+            requireEvidence(config.output, "entries.tsv",
+                    "oracle/data.zip!/oracle/data.txt");
+        });
+
+        selfTest(rows, "candidate-output-nested-archive-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] nested = zipPayload("inside.txt", "inside".getBytes(
+                    StandardCharsets.UTF_8));
+            String relative = "fixture.core/fixture/generated-data.bin";
+            Path candidateAResource = fixture.candidateA.resolve(relative);
+            Path candidateBResource = fixture.candidateB.resolve(relative);
+            Files.createDirectories(candidateAResource.getParent());
+            Files.createDirectories(candidateBResource.getParent());
+            Files.write(candidateAResource, nested);
+            Files.write(candidateBResource, nested);
+            fixture.allowedRows.add("both\t" + relative
+                    + "\tfixture.core.generated\t" + sha256(nested));
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "generated candidate output nested archive");
             requireViolation(config.output, "raw-nested-archive");
             requireEvidence(config.output, "entries.tsv", "inside.txt");
+        });
+
+        selfTest(rows, "candidate-runtime-nested-forbidden-jks-rejected",
+                () -> {
+            Fixture fixture = new Fixture();
+            byte[] nested = zipPayload("safe-resource.bin",
+                    fixture.originalNanoJks);
+            Path dependency = fixture.root.resolve("nested-jks.jar");
+            writeJar(dependency, Map.of("retained/data.zip", nested));
+            fixture.addCandidateRuntime("nested-jks", "jar", dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2,
+                    "candidate runtime nested forbidden JKS");
+            requireViolation(config.output, "nano-original-jks-content");
+            requireViolation(config.output, "raw-keystore-resource");
+            requireNoViolation(config.output, "raw-nested-archive");
+            requireEvidence(config.output, "entries.tsv",
+                    "retained/data.zip!/safe-resource.bin");
+        });
+
+        selfTest(rows, "runtime-archive-named-non-zip-rejected", () -> {
+            for (String lane : List.of("candidate", "oracle")) {
+                Fixture fixture = new Fixture();
+                Path dependency = fixture.root.resolve(lane
+                        + "-archive-name.jar");
+                writeJar(dependency, Map.of("retained/data.zip",
+                        "not a ZIP\n".getBytes(StandardCharsets.UTF_8)));
+                if (lane.equals("candidate")) {
+                    fixture.addCandidateRuntime("archive-name", "jar",
+                            dependency);
+                } else {
+                    fixture.addOracleRuntime("archive-name", "jar",
+                            dependency);
+                }
+                Config config = fixture.config();
+                requireStatus(runScan(config), 2,
+                        lane + " archive-named non-ZIP");
+                requireViolation(config.output, "archive-named-non-zip");
+            }
+        });
+
+        selfTest(rows, "runtime-nested-depth-overflow-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] nested = zipPayload("leaf.txt", "leaf\n".getBytes(
+                    StandardCharsets.UTF_8));
+            for (int depth = 0; depth < MAX_NESTED_DEPTH; depth++) {
+                nested = zipPayload("level-" + depth + ".zip", nested);
+            }
+            Path dependency = fixture.root.resolve("too-deep.jar");
+            writeJar(dependency, Map.of("retained/data.zip", nested));
+            fixture.addCandidateRuntime("too-deep", "jar", dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "nested ZIP depth overflow");
+            requireViolation(config.output, "nested-archive-depth");
+        });
+
+        selfTest(rows, "runtime-nested-duplicate-entry-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] nested = zipPayload(Map.of(
+                    "same-a.txt", "first\n".getBytes(StandardCharsets.UTF_8),
+                    "same-b.txt", "second\n".getBytes(StandardCharsets.UTF_8)));
+            nested = renameZipEntry(nested, "same-b.txt", "same-a.txt");
+            Path dependency = fixture.root.resolve("duplicate-nested.jar");
+            writeJar(dependency, Map.of("retained/data.zip", nested));
+            fixture.addCandidateRuntime("duplicate-nested", "jar",
+                    dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "nested duplicate entry");
+            requireViolation(config.output, "duplicate-archive-entry");
+        });
+
+        selfTest(rows, "runtime-nested-unsafe-path-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] nested = zipPayload("../escape.txt", "escape\n".getBytes(
+                    StandardCharsets.UTF_8));
+            Path dependency = fixture.root.resolve("unsafe-nested.jar");
+            writeJar(dependency, Map.of("retained/data.zip", nested));
+            fixture.addCandidateRuntime("unsafe-nested", "jar", dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "nested unsafe path");
+            requireViolation(config.output,
+                    "unsafe nested archive entry name");
+        });
+
+        selfTest(rows, "runtime-nested-truncated-zip-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] complete = zipPayload("inside.txt", "inside\n".getBytes(
+                    StandardCharsets.UTF_8));
+            byte[] truncated = Arrays.copyOf(complete, complete.length - 5);
+            Path dependency = fixture.root.resolve("truncated-nested.jar");
+            writeJar(dependency, Map.of("retained/data.zip", truncated));
+            fixture.addCandidateRuntime("truncated-nested", "jar",
+                    dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "truncated nested ZIP");
+            requireViolation(config.output, "archive-envelope");
+            requireViolation(config.output, "ZIP end record is missing");
+        });
+
+        selfTest(rows, "runtime-nested-trailing-bytes-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] complete = zipPayload("inside.txt", "inside\n".getBytes(
+                    StandardCharsets.UTF_8));
+            byte[] trailing = Arrays.copyOf(complete, complete.length + 4);
+            Arrays.fill(trailing, complete.length, trailing.length,
+                    (byte) 0x7f);
+            Path dependency = fixture.root.resolve("trailing-nested.jar");
+            writeJar(dependency, Map.of("retained/data.zip", trailing));
+            fixture.addCandidateRuntime("trailing-nested", "jar",
+                    dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "nested ZIP trailing bytes");
+            requireViolation(config.output, "archive-envelope");
+            requireViolation(config.output, "trailing bytes");
+        });
+
+        selfTest(rows, "runtime-nested-envelope-count-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] nested = corruptZipEntryCount(zipPayload("inside.txt",
+                    "inside\n".getBytes(StandardCharsets.UTF_8)));
+            Path dependency = fixture.root.resolve("bad-envelope-nested.jar");
+            writeJar(dependency, Map.of("retained/data.zip", nested));
+            fixture.addCandidateRuntime("bad-envelope-nested", "jar",
+                    dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "nested ZIP envelope count");
+            requireViolation(config.output,
+                    "central-directory count differs from streamed entries");
+        });
+
+        selfTest(rows, "runtime-nested-malformed-class-rejected", () -> {
+            Fixture fixture = new Fixture();
+            byte[] nested = zipPayload("nested/Bad.class",
+                    new byte[] {0, 1, 2, 3});
+            Path dependency = fixture.root.resolve("bad-class-nested.jar");
+            writeJar(dependency, Map.of("retained/data.zip", nested));
+            fixture.addCandidateRuntime("bad-class-nested", "jar",
+                    dependency);
+            Config config = fixture.config();
+            requireStatus(runScan(config), 2, "nested malformed class");
+            requireViolation(config.output, "scan-failure");
+            requireEvidence(config.output, "entries.tsv",
+                    "retained/data.zip!/nested/Bad.class");
         });
 
         selfTest(rows, "symbolic-link-rejected", () -> {
@@ -4187,7 +5015,8 @@ public final class ScanExactAotBoundary {
                 + "CANDIDATE_B TRANSactor_ORIGINAL_JAR PEER_INVENTORY_JAR "
                 + "COHORT_TSV OWNERSHIP_TSV CLASS_MAPPINGS_TSV "
                 + "RUNTIME_POLICY_TSV CANDIDATE_RUNTIME_TSV "
-                + "ORACLE_RUNTIME_TSV ALLOWED_RESOURCES_TSV "
+                + "ORACLE_RUNTIME_TSV CANDIDATE_COLLISIONS_TSV "
+                + "ALLOWED_RESOURCES_TSV "
                 + "FORBIDDEN_PAYLOADS_TSV OUTPUT_DIR");
         System.err.println("  ScanExactAotBoundary --self-test OUTPUT_DIR");
     }
@@ -4198,12 +5027,12 @@ public final class ScanExactAotBoundary {
             if (status != 0) System.exit(status);
             return;
         }
-        if (args.length == 14 && args[0].equals("--scan")) {
+        if (args.length == 15 && args[0].equals("--scan")) {
             Config config = new Config(Path.of(args[1]), Path.of(args[2]),
                     Path.of(args[3]), Path.of(args[4]), Path.of(args[5]),
                     Path.of(args[6]), Path.of(args[7]), Path.of(args[8]),
                     Path.of(args[9]), Path.of(args[10]), Path.of(args[11]),
-                    Path.of(args[12]), Path.of(args[13]));
+                    Path.of(args[12]), Path.of(args[13]), Path.of(args[14]));
             int status = runScan(config);
             System.out.println("status=" + (status == 0 ? "PASS" : "FAIL"));
             System.out.println("evidence="

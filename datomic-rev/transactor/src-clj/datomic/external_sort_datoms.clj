@@ -43,77 +43,103 @@
     ([os handlers]
       (let [writer (fress/create-writer os handlers)]
         (fn fn__12442 ([o] (.writeObject ^org.fressian.Writer writer o))))))
-  (def datom-write-handlers
-   (merge
-     fress/user-write-handlers
-     {datomic.db.Datum
+  (reset-meta!
+    #'create-file-writer
+    (assoc
+      {:arglists (clojure.core/list ['os 'handlers]), :column (int 1)}
+      :name
+      'create-file-writer
+      :ns
+      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.external-sort-datoms" "datom-write-handlers")
+    {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.external-sort-datoms" "datom-write-handlers")
+    (merge
+      fress/user-write-handlers
+      {datomic.db.Datum
+       {"datum"
+        (reify
+          org.fressian.handlers.WriteHandler
+          (^void write
+            [this ^org.fressian.Writer w o]
+            (do
+              (let [datum o]
+                (.writeTag ^org.fressian.Writer w "datum" (int 6))
+                (.writeBoolean
+                  ^org.fressian.Writer w
+                  (boolean (.isAssertion ^datomic.impl.db.IDatum datum)))
+                (.writeObject
+                  ^org.fressian.Writer w
+                  (java.lang.Integer/valueOf (int (.getP ^datomic.impl.db.IDatum datum)))
+                  (boolean (.booleanValue false)))
+                (.writeObject
+                  ^org.fressian.Writer w
+                  (long (.eidx ^datomic.db.IDatumImpl datum))
+                  (boolean (.booleanValue false)))
+                (.writeInt ^org.fressian.Writer w (long (.getA ^datomic.impl.db.IDatum datum)))
+                (.writeObject ^org.fressian.Writer w (.getV ^datomic.impl.db.IDatum datum))
+                (.writeObject
+                  ^org.fressian.Writer w
+                  (long (.getT ^datomic.impl.db.IDatum datum))
+                  (boolean (.booleanValue false))))
+              nil)))}}))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.external-sort-datoms" "datom-read-handlers")
+    {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.external-sort-datoms" "datom-read-handlers")
+    (merge
+      fress/user-read-handlers
       {"datum"
        (reify
-         org.fressian.handlers.WriteHandler
-         (^void write
-           [this ^org.fressian.Writer w o]
-           (do
-             (let [datum o]
-               (.writeTag ^org.fressian.Writer w "datum" (int 6))
-               (.writeBoolean
-                 ^org.fressian.Writer w
-                 (boolean (.isAssertion ^datomic.impl.db.IDatum datum)))
-               (.writeObject
-                 ^org.fressian.Writer w
-                 (java.lang.Integer/valueOf (int (.getP ^datomic.impl.db.IDatum datum)))
-                 (boolean (.booleanValue false)))
-               (.writeObject
-                 ^org.fressian.Writer w
-                 (long (.eidx ^datomic.db.IDatumImpl datum))
-                 (boolean (.booleanValue false)))
-               (.writeInt ^org.fressian.Writer w (long (.getA ^datomic.impl.db.IDatum datum)))
-               (.writeObject ^org.fressian.Writer w (.getV ^datomic.impl.db.IDatum datum))
-               (.writeObject
-                 ^org.fressian.Writer w
-                 (long (.getT ^datomic.impl.db.IDatum datum))
-                 (boolean (.booleanValue false))))
-             nil)))}}))
-  (def datom-read-handlers
-   (merge
-     fress/user-read-handlers
-     {"datum"
-      (reify
-        org.fressian.handlers.ReadHandler
-        (read
-          [this ^org.fressian.Reader rdr tag ^int component_count]
-          (let [assert? (.readBoolean ^org.fressian.Reader rdr)
-                part (.readInt ^org.fressian.Reader rdr)
-                eidx (.readInt ^org.fressian.Reader rdr)
-                eid (db/make-eid part eidx)
-                attrid (.readInt ^org.fressian.Reader rdr)
-                v (.readObject ^org.fressian.Reader rdr)
-                t (.readInt ^org.fressian.Reader rdr)]
-            (if assert?
-              (db/asserting-datum eid attrid v t)
-              (db/retracting-datum eid attrid v t)))))}))
-  (defn consume-sorted-datoms
-    ([iter p__12451 handler]
-      (let [map__12452 p__12451
-            map__12452 (if (seq? map__12452)
-                         (if (next map__12452)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__12452))
-                           (if (seq map__12452) (first map__12452) {}))
-                         map__12452)
-            cmp (get map__12452 :cmp)
-            dir (get map__12452 :dir)
-            max_chunk_size (get map__12452 :max-chunk-size)
-            prog_fn (get map__12452 :prog-fn)]
-        (es/consume-iter
-          (es/file-system-sorter
-            {:max-chunk-size max_chunk_size,
-             :item-sizer ms/memory-size,
-             :io (es/temp-file-io dir),
-             :prog-fn prog_fn,
-             :cmp cmp,
-             :file-iter-fn
-             (fn fn__12453 ([p1__12449#] (fress/reader-iter p1__12449# datom-read-handlers))),
-             :create-file-writer-fn
-             (fn fn__12455 ([p1__12450#] (create-file-writer p1__12450# datom-write-handlers)))}
-            iter)
-          handler)))))
+         org.fressian.handlers.ReadHandler
+         (read
+           [this ^org.fressian.Reader rdr tag ^int component_count]
+           (let [assert? (.readBoolean ^org.fressian.Reader rdr)
+                 part (.readInt ^org.fressian.Reader rdr)
+                 eidx (.readInt ^org.fressian.Reader rdr)
+                 eid (db/make-eid part eidx)
+                 attrid (.readInt ^org.fressian.Reader rdr)
+                 v (.readObject ^org.fressian.Reader rdr)
+                 t (.readInt ^org.fressian.Reader rdr)]
+             (if assert?
+               (db/asserting-datum eid attrid v t)
+               (db/retracting-datum eid attrid v t)))))}))
+  (def consume-sorted-datoms
+   (fn consume_sorted_datoms
+     ([iter p__12451 handler]
+       (let [map__12452 p__12451
+             map__12452 (if (seq? map__12452)
+                          (if (next map__12452)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__12452))
+                            (if (seq map__12452) (first map__12452) {}))
+                          map__12452)
+             cmp (get map__12452 :cmp)
+             dir (get map__12452 :dir)
+             max_chunk_size (get map__12452 :max-chunk-size)
+             prog_fn (get map__12452 :prog-fn)]
+         (es/consume-iter
+           (es/file-system-sorter
+             {:max-chunk-size max_chunk_size,
+              :item-sizer ms/memory-size,
+              :io (es/temp-file-io dir),
+              :prog-fn prog_fn,
+              :cmp cmp,
+              :file-iter-fn
+              (fn fn__12453 ([p1__12449#] (fress/reader-iter p1__12449# datom-read-handlers))),
+              :create-file-writer-fn
+              (fn fn__12455 ([p1__12450#] (create-file-writer p1__12450# datom-write-handlers)))}
+             iter)
+           handler)))))
+  (reset-meta!
+    #'consume-sorted-datoms
+    (assoc
+      {:arglists (clojure.core/list ['iter {:keys ['cmp 'dir 'max-chunk-size 'prog-fn]} 'handler]),
+       :column (int 1)}
+      :name
+      'consume-sorted-datoms
+      :ns
+      *ns*)))

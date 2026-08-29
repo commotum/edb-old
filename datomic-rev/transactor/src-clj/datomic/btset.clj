@@ -18,9 +18,10 @@
         (clojure.core/import 'datomic.iter.Iter))))
   (set! *warn-on-reflection* true)
   (set! *unchecked-math* true)
-  (defn comp
-    (^long [cmp x y]
-      (if cmp (.compare ^java.util.Comparator cmp x y) (.compareTo ^java.lang.Comparable x y))))
+  (def comp
+   (fn comp
+     (^long [cmp x y]
+       (if cmp (.compare ^java.util.Comparator cmp x y) (.compareTo ^java.lang.Comparable x y)))))
   (reset-meta!
     #'comp
     (assoc
@@ -28,7 +29,7 @@
        :arglists
        (clojure.core/list
          (.withMeta [(.withMeta 'cmp {:tag 'java.util.Comparator}) 'x 'y] {:tag 'long})),
-       :column 1}
+       :column (int 1)}
       :name
       'comp
       :ns
@@ -52,6 +53,14 @@
   (defn ->BTSetIterLink
     ([branch offset parent]
       (datomic.btset.BTSetIterLink. branch (unchecked-long ^java.lang.Number offset) parent)))
+  (reset-meta!
+    #'->BTSetIterLink
+    (assoc
+      {:arglists (clojure.core/list ['branch 'offset 'parent]), :column (int 1)}
+      :name
+      '->BTSetIterLink
+      :ns
+      *ns*))
   (definterface
     IBTSetNode
     (^datomic.iter.Iter seek [^datomic.btset.IBTSetIterLink arg0])
@@ -63,6 +72,14 @@
   (deftype BTSetSplit [left k right])
   (clojure.core/import 'datomic.btset.BTSetSplit)
   (defn ->BTSetSplit ([left k right] (datomic.btset.BTSetSplit. left k right)))
+  (reset-meta!
+    #'->BTSetSplit
+    (assoc
+      {:arglists (clojure.core/list ['left 'k 'right]), :column (int 1)}
+      :name
+      '->BTSetSplit
+      :ns
+      *ns*))
   (definterface IBTSetLeaf (^long count []) (^java.lang.Object keyAt [^long arg0]))
   (clojure.core/import 'datomic.btset.IBTSetLeaf)
   (deftype
@@ -126,10 +143,20 @@
   (defn ->BTSetIter
     ([branches leaf offset]
       (datomic.btset.BTSetIter. branches leaf (unchecked-long ^java.lang.Number offset))))
+  (reset-meta!
+    #'->BTSetIter
+    (assoc
+      {:arglists (clojure.core/list ['branches 'leaf 'offset]), :column (int 1)}
+      :name
+      '->BTSetIter
+      :ns
+      *ns*))
   (def BT_BRANCH_SIZE 16)
-  (reset-meta! #'BT_BRANCH_SIZE (assoc {:const true, :column 1} :name 'BT_BRANCH_SIZE :ns *ns*))
+  (reset-meta!
+    #'BT_BRANCH_SIZE
+    (assoc {:const true, :column (int 1)} :name 'BT_BRANCH_SIZE :ns *ns*))
   (def BT_LEAF_SIZE 16)
-  (reset-meta! #'BT_LEAF_SIZE (assoc {:const true, :column 1} :name 'BT_LEAF_SIZE :ns *ns*))
+  (reset-meta! #'BT_LEAF_SIZE (assoc {:const true, :column (int 1)} :name 'BT_LEAF_SIZE :ns *ns*))
   (deftype
     BTSetBranch
     [cmp nks]
@@ -245,6 +272,14 @@
     (^long count [this] (inc (quot (alength ^"[Ljava.lang.Object;" nks) 2))))
   (clojure.core/import 'datomic.btset.BTSetBranch)
   (defn ->BTSetBranch ([cmp nks] (datomic.btset.BTSetBranch. cmp nks)))
+  (reset-meta!
+    #'->BTSetBranch
+    (assoc
+      {:arglists (clojure.core/list ['cmp 'nks]), :column (int 1)}
+      :name
+      '->BTSetBranch
+      :ns
+      *ns*))
   (deftype
     BTSetLeaf
     [^long cnt cmp ks]
@@ -388,6 +423,14 @@
   (clojure.core/import 'datomic.btset.BTSetLeaf)
   (defn ->BTSetLeaf
     ([cnt cmp ks] (datomic.btset.BTSetLeaf. (unchecked-long ^java.lang.Number cnt) cmp ks)))
+  (reset-meta!
+    #'->BTSetLeaf
+    (assoc
+      {:arglists (clojure.core/list ['cnt 'cmp 'ks]), :column (int 1)}
+      :name
+      '->BTSetLeaf
+      :ns
+      *ns*))
   (definterface
     IDataSet
     (^long longCount [])
@@ -466,54 +509,48 @@
   (clojure.core/import 'datomic.btset.BTSet)
   (defn ->BTSet
     ([cmp cnt root] (datomic.btset.BTSet. cmp (unchecked-long ^java.lang.Number cnt) root)))
-  (defn btset ([cmp] (datomic.btset.BTSet. cmp 0 nil)) ([] (btset nil)))
   (reset-meta!
-    #'btset
+    #'->BTSet
     (assoc
-      {:tag datomic.btset.BTSet, :arglists (clojure.core/list [] ['cmp]), :column 1}
+      {:arglists (clojure.core/list ['cmp 'cnt 'root]), :column (int 1)}
       :name
-      'btset
+      '->BTSet
       :ns
       *ns*))
-  (defn seek
-    ([ds k] (and ds (.seek ^datomic.btset.IDataSet ds k)))
-    ([ds] (and ds (.seek ^datomic.btset.IDataSet ds))))
-  (reset-meta!
-    #'seek
-    (assoc
-      {:tag datomic.iter.Iter,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'ds {:tag 'IDataSet})]
-         [(.withMeta 'ds {:tag 'IDataSet}) 'k]),
-       :column 1}
-      :name
-      'seek
-      :ns
-      *ns*))
-  (defn seek-last ([ds] (and ds (.seekLast ^datomic.btset.IDataSet ds))))
-  (reset-meta!
-    #'seek-last
-    (assoc
-      {:tag datomic.iter.Iter,
-       :arglists (clojure.core/list [(.withMeta 'ds {:tag 'IDataSet})]),
-       :column 1}
-      :name
-      'seek-last
-      :ns
-      *ns*))
-  (defn rseek ([bt k] (.rseek ^datomic.btset.BTSet bt k)) ([bt] (.rseek ^datomic.btset.BTSet bt)))
-  (reset-meta!
-    #'rseek
-    (assoc
-      {:tag datomic.iter.Iter,
-       :arglists
-       (clojure.core/list [(.withMeta 'bt {:tag 'BTSet})] [(.withMeta 'bt {:tag 'BTSet}) 'k]),
-       :column 1}
-      :name
-      'rseek
-      :ns
-      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.btset" "btset")
+    {:tag datomic.btset.BTSet, :arglists (clojure.core/list [] ['cmp]), :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.btset" "btset")
+    (fn btset ([cmp] (datomic.btset.BTSet. cmp 0 nil)) ([] (btset nil))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.btset" "seek")
+    {:tag datomic.iter.Iter,
+     :arglists
+     (clojure.core/list [(.withMeta 'ds {:tag 'IDataSet})] [(.withMeta 'ds {:tag 'IDataSet}) 'k]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.btset" "seek")
+    (fn seek
+      ([ds k] (and ds (.seek ^datomic.btset.IDataSet ds k)))
+      ([ds] (and ds (.seek ^datomic.btset.IDataSet ds)))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.btset" "seek-last")
+    {:tag datomic.iter.Iter,
+     :arglists (clojure.core/list [(.withMeta 'ds {:tag 'IDataSet})]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.btset" "seek-last")
+    (fn seek_last ([ds] (and ds (.seekLast ^datomic.btset.IDataSet ds)))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.btset" "rseek")
+    {:tag datomic.iter.Iter,
+     :arglists
+     (clojure.core/list [(.withMeta 'bt {:tag 'BTSet})] [(.withMeta 'bt {:tag 'BTSet}) 'k]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.btset" "rseek")
+    (fn rseek ([bt k] (.rseek ^datomic.btset.BTSet bt k)) ([bt] (.rseek ^datomic.btset.BTSet bt))))
   (defn bench
     ([x]
       (let [_ (println "sorted-set")
@@ -733,4 +770,9 @@
         (java.lang.Integer/valueOf (int (count ss))))))
   (reset-meta!
     #'bench
-    (assoc {:private true, :arglists (clojure.core/list ['x]), :column 1} :name 'bench :ns *ns*)))
+    (assoc
+      {:private true, :arglists (clojure.core/list ['x]), :column (int 1)}
+      :name
+      'bench
+      :ns
+      *ns*)))

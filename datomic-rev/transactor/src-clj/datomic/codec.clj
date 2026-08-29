@@ -10,8 +10,49 @@
       (do
         (clojure.core/refer 'clojure.core)
         (clojure.core/import 'org.apache.commons.codec.binary.Base64))))
-  (defn string->bytes ([s] (.getBytes ^java.lang.String s "UTF-8")))
-  (defn bytes->string ([b] (java.lang.String. ^bytes b "UTF-8")))
-  (defn encode-64 ([raw] (Base64/encodeBase64 ^bytes raw (boolean (.booleanValue false)))))
-  (defn decode-64 ([coded] (Base64/decodeBase64 ^bytes coded)))
-  (defn base-64-literal ([literal] (decode-64 (string->bytes literal)))))
+  (def string->bytes (fn string__GT_bytes ([s] (.getBytes ^java.lang.String s "UTF-8"))))
+  (reset-meta!
+    #'string->bytes
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 's {:tag 'String})]), :column (int 1)}
+      :name
+      'string->bytes
+      :ns
+      *ns*))
+  (def bytes->string (fn bytes__GT_string ([b] (java.lang.String. ^bytes b "UTF-8"))))
+  (reset-meta!
+    #'bytes->string
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'b {:tag 'bytes})]), :column (int 1)}
+      :name
+      'bytes->string
+      :ns
+      *ns*))
+  (def encode-64
+   (fn encode_64 ([raw] (Base64/encodeBase64 ^bytes raw (boolean (.booleanValue false))))))
+  (reset-meta!
+    #'encode-64
+    (assoc
+      {:arglists (clojure.core/list (.withMeta ['raw] {:tag 'bytes})), :column (int 1)}
+      :name
+      'encode-64
+      :ns
+      *ns*))
+  (def decode-64 (fn decode_64 ([coded] (Base64/decodeBase64 ^bytes coded))))
+  (reset-meta!
+    #'decode-64
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'coded {:tag 'bytes})]), :column (int 1)}
+      :name
+      'decode-64
+      :ns
+      *ns*))
+  (defn base-64-literal ([literal] (decode-64 (string->bytes literal))))
+  (reset-meta!
+    #'base-64-literal
+    (assoc
+      {:arglists (clojure.core/list ['literal]), :column (int 1)}
+      :name
+      'base-64-literal
+      :ns
+      *ns*)))

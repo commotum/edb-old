@@ -21,8 +21,11 @@ class_baseline="$transactor_dir/baseline/transactor-classes.tsv"
 distribution_baseline="$transactor_dir/baseline/distribution-jars.tsv"
 archive_inputs="$transactor_dir/baseline/archive-inputs.tsv"
 peer_namespace_index="$project_dir/reports/source-index/namespaces.tsv"
-transactor_source_root="$transactor_dir/src-clj"
-transactor_source_manifest="$transactor_dir/reports/stage-1-clojure-source-manifest.sha256"
+default_transactor_source_root="$transactor_dir/src-clj"
+default_transactor_source_manifest="$transactor_dir/reports/stage-1-clojure-source-manifest.sha256"
+transactor_source_root="$default_transactor_source_root"
+transactor_source_manifest="$default_transactor_source_manifest"
+transactor_source_mode=checked-in
 peer_source_root="$project_dir/src-clj"
 java_source_root="$transactor_dir/src-java"
 java_source_manifest="$transactor_dir/reports/stage-1-java-source-manifest.sha256"
@@ -36,6 +39,7 @@ origin_verifier="$script_dir/verify_structural_origins.clj"
 namespace_runner="$script_dir/run_structural_namespace.sh"
 peer_surface_emitter="$project_dir/scripts/emit_namespace_surface.clj"
 surface_protocol_validator="$script_dir/validate-structural-surface-protocol.sh"
+surface_classifier="$script_dir/classify_structural_surface.clj"
 runtime_seal_validator="$script_dir/validate-structural-runtime-seal-fixtures.sh"
 surface_valid_fixture="$transactor_dir/fixtures/surface-valid-with-process-log.clj"
 surface_trailing_fixture="$transactor_dir/fixtures/surface-trailing-form.clj"
@@ -54,7 +58,7 @@ expected_transactor_sha=d90819b57e2138085ddc26c93314f953c2cd776d1d1aa8b43a6bec1e
 expected_peer_sha=cb55c9d01e155f9965e3332cd8ef70be42cdefacb50c072076e9ecf22b9a23ba
 expected_core2_sha=81fdf81586c7be1a4b61655b568348d12db7892cb4562d0db7529bbc7af8a94b
 expected_sanitized_nano_sha=08f9699d6e35b9e052ec85ee15e0896b3a685c74e6e226d8cd89d9c61dbf8d5f
-expected_transactor_source_manifest_sha=48389f0d223a789e5abebdc8d6b4466848062642ed9473c63453323f1671f106
+expected_transactor_source_manifest_sha=bc44fdc277a5452b8fa950eaa390b595f5d93b5705cfb1b2ab4689d07656b69f
 expected_namespace_baseline_sha=f57dfc78dbe5556e45b7a1fc02d7d6c3c1c0f9565754f38ab92305010e329cf7
 expected_class_baseline_sha=6e044398c4a9cab91873a08f7404f0acb4b9d5f6e91c5329e36d01ffeacc4c76
 expected_distribution_baseline_sha=db25519069bfd327c161220264b89fb011f2d9a3e42e4857e5233d4b61811860
@@ -64,10 +68,40 @@ expected_java_source_manifest_sha=f48edbd567b53316b6e20cd1b2bc889f71a9c45eee3a65
 expected_java_class_list_sha=c5fe736882eed01ca09dfc9e7d7de6eb7999ae2cfa1431ff0e39f716702a8c2b
 expected_resource_classification_sha=a0005b405646621cb102af214b907d737b412458358875fd7fcd5e10d63e2d35
 expected_clojure_compiler_vmarg="-Dclojure.compiler.elide-meta='[:doc :file :line]'"
+source_input_preflight_only=${STRUCTURAL_SOURCE_INPUT_PREFLIGHT_ONLY:-0}
 
 die() {
   echo "structural-load validation: $*" >&2
   exit 1
+}
+
+configure_transactor_source_input() {
+  local override_requested=0
+  if [[ -v STRUCTURAL_TRANSACTOR_SOURCE_ROOT ||
+        -v STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST ||
+        -v STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST_SHA256 ]]; then
+    override_requested=1
+  fi
+  if [[ "$override_requested" == 0 ]]; then
+    return
+  fi
+
+  [[ -n ${STRUCTURAL_TRANSACTOR_SOURCE_ROOT:-} &&
+     -n ${STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST:-} &&
+     -n ${STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST_SHA256:-} ]] || \
+    die "external Transactor source validation requires STRUCTURAL_TRANSACTOR_SOURCE_ROOT, STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST, and STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST_SHA256 together"
+  transactor_source_root=$STRUCTURAL_TRANSACTOR_SOURCE_ROOT
+  transactor_source_manifest=$STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST
+  expected_transactor_source_manifest_sha=$STRUCTURAL_TRANSACTOR_SOURCE_MANIFEST_SHA256
+  transactor_source_mode=external
+}
+
+configure_transactor_source_input
+
+paths_overlap() {
+  local left=$1
+  local right=$2
+  [[ "$left" == "$right" || "$left" == "$right/"* || "$right" == "$left/"* ]]
 }
 
 for command_name in awk cmp cp date diff find grep head mkdir realpath sha256sum sort tail timeout unzip xargs; do
@@ -80,6 +114,12 @@ done
   die "STRUCTURAL_DISCOVERY_ONLY must be 0 or 1"
 [[ "$run_surfaces" == 0 || "$run_surfaces" == 1 ]] || \
   die "STRUCTURAL_RUN_SURFACES must be 0 or 1"
+[[ "$source_input_preflight_only" == 0 || "$source_input_preflight_only" == 1 ]] || \
+  die "STRUCTURAL_SOURCE_INPUT_PREFLIGHT_ONLY must be 0 or 1"
+if [[ "$source_input_preflight_only" == 1 &&
+      ("$discovery_only" != 0 || "$run_surfaces" != 1) ]]; then
+  die "STRUCTURAL_SOURCE_INPUT_PREFLIGHT_ONLY=1 cannot be combined with discovery/load-only modes"
+fi
 
 for required_file in \
   "$scanner_source" "$namespace_baseline" "$class_baseline" \
@@ -89,6 +129,7 @@ for required_file in \
   "$java_validation_relation" "$java_validation_summary" \
   "$java_validator" "$origin_verifier" \
   "$namespace_runner" "$peer_surface_emitter" "$surface_protocol_validator" \
+  "$surface_classifier" \
   "$runtime_seal_validator" \
   "$surface_valid_fixture" "$surface_trailing_fixture" "$decompiler_runtime_jar" \
   "$stub_builder" "$nano_sanitizer" \
@@ -106,10 +147,35 @@ done
 project_abs=$(realpath "$project_dir")
 datomic_home_abs=$(realpath "$datomic_home")
 output_abs=$(realpath -m "$output_dir")
+[[ "$expected_transactor_source_manifest_sha" =~ ^[0-9a-f]{64}$ ]] || \
+  die "Transactor source manifest SHA-256 must be exactly 64 lowercase hexadecimal characters"
+if [[ "$transactor_source_mode" == external ]]; then
+  [[ "$transactor_source_root" == /* &&
+     "$transactor_source_root" != *$'\n'* &&
+     "$transactor_source_root" != *$'\t'* &&
+     -d "$transactor_source_root" && ! -L "$transactor_source_root" ]] || \
+    die "external Transactor source root must be an absolute, non-symlink directory: $transactor_source_root"
+  [[ "$transactor_source_manifest" == /* &&
+     "$transactor_source_manifest" != *$'\n'* &&
+     "$transactor_source_manifest" != *$'\t'* &&
+     -f "$transactor_source_manifest" && ! -L "$transactor_source_manifest" ]] || \
+    die "external Transactor source manifest must be an absolute, non-symlink regular file: $transactor_source_manifest"
+  transactor_source_root=$(realpath "$transactor_source_root")
+  transactor_source_manifest=$(realpath "$transactor_source_manifest")
+  paths_overlap "$transactor_source_root" "$project_abs" && \
+    die "external Transactor source root must be disjoint from the repository: $transactor_source_root"
+  paths_overlap "$transactor_source_root" "$datomic_home_abs" && \
+    die "external Transactor source root must be disjoint from the licensed distribution: $transactor_source_root"
+fi
 [[ "$datomic_home_abs" != "$project_abs" && "$datomic_home_abs" != "$project_abs"/* ]] || \
   die "licensed distribution must remain outside the repository: $datomic_home_abs"
 [[ "$output_abs" != "$project_abs" && "$output_abs" != "$project_abs"/* ]] || \
   die "runtime build and detailed evidence must remain outside the repository: $output_abs"
+paths_overlap "$transactor_source_root" "$output_abs" && \
+  die "runtime output and Transactor source root must be disjoint: $output_abs / $transactor_source_root"
+[[ "$transactor_source_manifest" != "$output_abs" &&
+   "$transactor_source_manifest" != "$output_abs/"* ]] || \
+  die "runtime output may not contain the Transactor source manifest: $transactor_source_manifest"
 if [[ -e "$output_abs" ]] && [[ -n $(find "$output_abs" -mindepth 1 -print -quit) ]]; then
   die "refusing to overwrite non-empty output directory: $output_abs"
 fi
@@ -124,6 +190,92 @@ verify_hash() {
   actual=$(sha256sum "$path" | awk '{print $1}')
   [[ "$actual" == "$expected" ]] || \
     die "$label hash mismatch: expected $expected, found $actual"
+}
+
+validate_transactor_source_membership() {
+  local declared_unsorted="$output_abs/evidence/transactor-source-declared-paths.unsorted.txt"
+  local declared_paths="$output_abs/evidence/transactor-source-declared-paths.txt"
+  local actual_paths="$output_abs/evidence/transactor-source-actual-paths.txt"
+  local verification_log="$output_abs/evidence/transactor-source-verification.log"
+  local manifest_line relative_path
+  local row_count=0
+  local unique_count actual_count
+
+  if [[ -n $(find "$transactor_source_root" -mindepth 1 \
+      ! -type f ! -type d -print -quit) ]]; then
+    die "Transactor source root contains a symlink or special entry: $transactor_source_root"
+  fi
+
+  : >"$declared_unsorted"
+  while IFS= read -r manifest_line || [[ -n "$manifest_line" ]]; do
+    row_count=$((row_count + 1))
+    if [[ ! "$manifest_line" =~ ^([0-9a-f]{64})\ \ (.+)$ ]]; then
+      die "Transactor source manifest row $row_count is not canonical sha256sum text"
+    fi
+    relative_path=${BASH_REMATCH[2]}
+    [[ "$relative_path" =~ ^[A-Za-z0-9._/-]+$ &&
+       "$relative_path" != /* &&
+       "/$relative_path/" != *"/./"* &&
+       "/$relative_path/" != *"/../"* &&
+       "$relative_path" != *"//"* &&
+       ( "$relative_path" == *.clj || "$relative_path" == *.cljc ) ]] || \
+      die "Transactor source manifest row $row_count has an unsafe or non-source path: $relative_path"
+    [[ -f "$transactor_source_root/$relative_path" &&
+       ! -L "$transactor_source_root/$relative_path" ]] || \
+      die "Transactor source manifest member is missing, non-regular, or symbolic: $relative_path"
+    printf '%s\n' "$relative_path" >>"$declared_unsorted"
+  done <"$transactor_source_manifest"
+
+  [[ "$row_count" == 247 ]] || \
+    die "Transactor source manifest is not exactly 247 rows: $row_count"
+  sort "$declared_unsorted" >"$declared_paths"
+  unique_count=$(sort -u "$declared_unsorted" | awk 'END {print NR + 0}')
+  [[ "$unique_count" == 247 ]] || \
+    die "Transactor source manifest does not name 247 unique paths: $unique_count"
+
+  find "$transactor_source_root" -type f -printf '%P\n' | sort >"$actual_paths"
+  actual_count=$(awk 'END {print NR + 0}' "$actual_paths")
+  [[ "$actual_count" == 247 ]] || \
+    die "Transactor source root does not contain exactly 247 regular files: $actual_count"
+  while IFS= read -r relative_path; do
+    [[ "$relative_path" =~ ^[A-Za-z0-9._/-]+$ &&
+       ( "$relative_path" == *.clj || "$relative_path" == *.cljc ) ]] || \
+      die "Transactor source root contains an unsafe or non-source file path: $relative_path"
+  done <"$actual_paths"
+  cmp -s "$declared_paths" "$actual_paths" || {
+    diff -u "$declared_paths" "$actual_paths" \
+      >"$output_abs/evidence/transactor-source-membership.diff" || true
+    die "Transactor source manifest membership differs from the 247-file source root"
+  }
+  (cd "$transactor_source_root" && \
+    sha256sum -c "$transactor_source_manifest") >"$verification_log" || \
+    die "Transactor sources do not match their bound manifest"
+
+  transactor_source_row_count=$row_count
+  transactor_source_file_count=$actual_count
+  {
+    printf 'mode=%s\n' "$transactor_source_mode"
+    printf 'root=%s\n' "$transactor_source_root"
+    printf 'manifest=%s\n' "$transactor_source_manifest"
+    printf 'manifest.sha256=%s\n' "$expected_transactor_source_manifest_sha"
+    printf 'manifest.rows=%s\n' "$row_count"
+    printf 'manifest.unique-paths=%s\n' "$unique_count"
+    printf 'source.files=%s\n' "$actual_count"
+    printf 'source.membership=PASS\n'
+    printf 'source.hashes=PASS\n'
+  } >"$output_abs/evidence/transactor-source-input.properties"
+}
+
+write_transactor_source_summary_properties() {
+  printf 'transactor.source.mode=%s\n' "$transactor_source_mode"
+  printf 'transactor.source.root=%s\n' "$transactor_source_root"
+  printf 'transactor.source.manifest=%s\n' "$transactor_source_manifest"
+  printf 'transactor.source.manifest.sha256=%s\n' \
+    "$expected_transactor_source_manifest_sha"
+  printf 'transactor.source.manifest.rows=%s\n' "$transactor_source_row_count"
+  printf 'transactor.source.files=%s\n' "$transactor_source_file_count"
+  printf 'transactor.source.membership=PASS\n'
+  printf 'transactor.source.hashes=PASS\n'
 }
 
 write_top_evidence_manifest() {
@@ -162,11 +314,7 @@ verify_hash "$java_class_list" "$expected_java_class_list_sha" \
   "canonical Transactor Java class list"
 verify_hash "$resource_classification" "$expected_resource_classification_sha" \
   "Stage 1 resource classification"
-[[ $(awk 'NF {count++} END {print count + 0}' "$transactor_source_manifest") == 247 ]] || \
-  die "canonical Transactor source manifest is not exactly 247 rows"
-(cd "$transactor_source_root" && \
-  sha256sum -c "$transactor_source_manifest") >/dev/null || \
-  die "canonical Transactor sources do not match their checked-in manifest"
+validate_transactor_source_membership
 
 {
   printf 'role\tpath\texpected_sha256\tactual_sha256\tstatus\n'
@@ -217,6 +365,22 @@ awk -F '\t' -v transactor_sha="$expected_transactor_sha" -v peer_sha="$expected_
   $1 == "peer" && $3 == peer_sha {peer = 1}
   END {exit !(transactor && peer)}
 ' "$archive_inputs" || die "archive input baseline does not bind the expected originals"
+
+if [[ "$source_input_preflight_only" == 1 ]]; then
+  {
+    printf 'status=PASS\n'
+    printf 'completion=transactor-source-input-preflight-only\n'
+    printf 'discovery.executed=false\n'
+    printf 'loads.executed=false\n'
+    printf 'surfaces.executed=false\n'
+    write_transactor_source_summary_properties
+    printf 'licensed.reference.bytes.copied=false\n'
+  } >"$output_abs/evidence/summary.properties"
+  write_top_evidence_manifest
+  echo "Transactor source input preflight passed: $output_abs"
+  echo "No classpath discovery, namespace load, or surface comparison was requested."
+  exit 0
+fi
 
 corretto_root=/tmp/amazon-corretto-11.0.22.7.1
 javac_bin=${DATOMIC_JAVA_JAVAC:-"$corretto_root/bin/javac"}
@@ -290,7 +454,8 @@ grep -qx 'status=PASS' "$output_abs/discovery/summary.properties" || \
     "$scanner_source" "$origin_verifier" "$namespace_runner" \
     "$script_dir/require_structural_namespace.clj" \
     "$script_dir/emit_structural_surface.clj" "$peer_surface_emitter" \
-    "$surface_protocol_validator" "$surface_valid_fixture" \
+    "$surface_protocol_validator" "$surface_classifier" \
+    "$surface_valid_fixture" \
     "$surface_trailing_fixture" "$runtime_seal_validator" \
     "$decompiler_runtime_jar" \
     "$stub_builder" "$nano_sanitizer" "$java_validator" "$resource_stager" \
@@ -310,6 +475,7 @@ if [[ "$discovery_only" == 1 ]]; then
   {
     printf 'status=PASS\n'
     printf 'completion=discovery-only\n'
+    write_transactor_source_summary_properties
     printf 'loads.executed=false\n'
     printf 'surfaces.executed=false\n'
     printf 'candidate.runtime.resource.count=4\n'
@@ -436,7 +602,8 @@ runtime_input_manifest="$output_abs/evidence/runtime-inputs.sha256"
     "$javac_bin" "$java_bin" "$scanner_source" "$origin_verifier" \
     "$namespace_runner" "$script_dir/require_structural_namespace.clj" \
     "$script_dir/emit_structural_surface.clj" "$peer_surface_emitter" \
-    "$surface_protocol_validator" "$surface_valid_fixture" \
+    "$surface_protocol_validator" "$surface_classifier" \
+    "$surface_valid_fixture" \
     "$surface_trailing_fixture" "$decompiler_runtime_jar" \
     "$stub_builder" "$nano_sanitizer" "$java_validator" "$resource_stager" \
     "$namespace_baseline" "$class_baseline" "$distribution_baseline" \
@@ -707,6 +874,7 @@ if [[ "$run_surfaces" == 0 ]]; then
   {
     printf 'status=%s\n' "$load_status"
     printf 'completion=structural-load-only\n'
+    write_transactor_source_summary_properties
     printf 'surfaces.executed=false\n'
     printf 'transactor.namespace.expected=247\n'
     printf 'peer.core2.support.namespace.expected=25\n'
@@ -798,6 +966,24 @@ surface_not_comparable=$(awk -F '\t' 'NR > 1 && $6 == "NOT_COMPARABLE" {count++}
   "$surface_relation")
 verify_runtime_inputs_unchanged post-surfaces
 
+surface_classification="$output_abs/evidence/typed-surface-classification.tsv"
+surface_classification_stderr="$output_abs/evidence/typed-surface-classification.stderr"
+if ! "$java_bin" -Xms64m -Xmx2g -cp "$decompiler_runtime_jar" \
+  clojure.main "$surface_classifier" "$output_abs" \
+  >"$surface_classification" 2>"$surface_classification_stderr"; then
+  {
+    printf 'status=FAIL\n'
+    printf 'phase=typed-surface-classification\n'
+    write_transactor_source_summary_properties
+  } >"$output_abs/evidence/summary.properties"
+  write_top_evidence_manifest
+  die "typed surface classification failed; see $surface_classification_stderr"
+fi
+awk -F '\t' '
+  $1 == "summary" && $2 == "status" && $3 == "PASS" {pass++}
+  END {exit pass != 1}
+' "$surface_classification" || die "typed surface classification did not emit one PASS row"
+
 {
   printf 'gate\tnamespace\tstatus\n'
   awk -F '\t' 'NR > 1 && $5 != "PASS" && $5 != "ORDER_DEPENDENT_PASS" {print "load\t" $1 "\t" $5}' \
@@ -813,6 +999,7 @@ fi
 {
   printf 'status=%s\n' "$overall_status"
   printf 'completion=full-structural-load-and-surface\n'
+  write_transactor_source_summary_properties
   printf 'transactor.namespace.expected=247\n'
   printf 'peer.core2.support.namespace.expected=25\n'
   printf 'candidate.namespace.cold-load.pass=%s\n' "$cold_load_passes"

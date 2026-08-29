@@ -29,24 +29,58 @@
         (clojure.core/import 'datomic.impl.db.IDatum)
         (clojure.core/import 'java.util.Comparator)
         (clojure.core/import 'java.util.ArrayList))))
-  (defn datum->doc
-    ([datum]
-      (lucene/document
-        (lucene/long-field "e" (.getE ^datomic.impl.db.IDatum datum))
-        (lucene/long-field "t" (.getT ^datomic.impl.db.IDatum datum))
-        (lucene/string-field
-          "v"
-          (.getV ^datomic.impl.db.IDatum datum)
-          :store
-          true
-          :index
-          true
-          :analyze
-          true))))
-  (defonce LuceneProvider {})
-  (defprotocol LuceneProvider (fulltext-attr-reader [this attr]))
-  (declare datomic.fulltext-index/->PersistentFulltext)
-  (declare datomic.fulltext-index/map->PersistentFulltext)
+  (def datum->doc
+   (fn datum__GT_doc
+     ([datum]
+       (lucene/document
+         (lucene/long-field "e" (.getE ^datomic.impl.db.IDatum datum))
+         (lucene/long-field "t" (.getT ^datomic.impl.db.IDatum datum))
+         (lucene/string-field
+           "v"
+           (.getV ^datomic.impl.db.IDatum datum)
+           :store
+           true
+           :index
+           true
+           :analyze
+           true)))))
+  (reset-meta!
+    #'datum->doc
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'datum {:tag 'IDatum})]), :column (int 1)}
+      :name
+      'datum->doc
+      :ns
+      *ns*))
+  (let [protocol_metadata__7420 {:column (int 1)}]
+    (defprotocol LuceneProvider (fulltext-attr-reader [this attr]))
+    (reset-meta!
+      (clojure.lang.RT/var "datomic.fulltext-index" "LuceneProvider")
+      (assoc (assoc protocol_metadata__7420 :doc nil) :name 'LuceneProvider :ns *ns*))
+    (let [protocol_signature__7421 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta
+                                        'fulltext-attr-reader
+                                        {:arglists (clojure.core/list ['this 'attr])}),
+                                      :arglists (clojure.core/list ['this 'attr]),
+                                      :doc nil}
+                                     :protocol
+                                     (clojure.lang.RT/var
+                                       "datomic.fulltext-index"
+                                       "LuceneProvider"))
+          protocol_method_name__7422 (with-meta
+                                       (:name protocol_signature__7421)
+                                       protocol_signature__7421)]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.fulltext-index" "fulltext-attr-reader")
+        (assoc protocol_signature__7421 :name protocol_method_name__7422 :ns *ns*))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.fulltext-index" "->PersistentFulltext")
+    {:declared true, :column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.fulltext-index" "map->PersistentFulltext")
+    {:declared true, :column (int 1)})
   (defrecord
     PersistentFulltext
     []
@@ -58,12 +92,28 @@
           (let [m temp__5804__auto__] (lucene/index-reader (lucene/persistent-directory m)))))))
   (clojure.core/import 'datomic.fulltext_index.PersistentFulltext)
   (defn ->PersistentFulltext ([] (datomic.fulltext_index.PersistentFulltext.)))
+  (reset-meta!
+    #'->PersistentFulltext
+    (assoc
+      {:arglists (clojure.core/list []), :column (int 1)}
+      :name
+      '->PersistentFulltext
+      :ns
+      *ns*))
   (defn map->PersistentFulltext
     ([m__7972__auto__]
       (PersistentFulltext/create
         (if (instance? clojure.lang.MapEquivalence m__7972__auto__)
           m__7972__auto__
           (into {} m__7972__auto__)))))
+  (reset-meta!
+    #'map->PersistentFulltext
+    (assoc
+      {:arglists (clojure.core/list ['m__7972__auto__]), :column (int 1)}
+      :name
+      'map->PersistentFulltext
+      :ns
+      *ns*))
   (defn update-fulltext
     ([pft data]
       (let [pft (or pft (datomic.fulltext_index.PersistentFulltext.))
@@ -116,4 +166,12 @@
                       (.close ^java.io.Closeable writer)
                       (assoc pft k (deref directory)))))
                 pft
-                tmap))))))))
+                tmap)))))))
+  (reset-meta!
+    #'update-fulltext
+    (assoc
+      {:arglists (clojure.core/list ['pft 'data]), :column (int 1)}
+      :name
+      'update-fulltext
+      :ns
+      *ns*)))

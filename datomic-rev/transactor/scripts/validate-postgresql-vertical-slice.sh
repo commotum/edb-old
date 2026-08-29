@@ -18,6 +18,12 @@ project_dir=$(cd -- "$transactor_dir/.." && pwd)
 shared_scripts_dir="$project_dir/scripts"
 peer_workload_source="$shared_scripts_dir/stage2/peer_workload.clj"
 peer_logback_source="$shared_scripts_dir/stage2/logback-stage2.xml"
+transport_probe_source="$shared_scripts_dir/stage3/transport_probe.clj"
+storage_cas_probe_source="$shared_scripts_dir/stage4/storage_cas_probe.clj"
+transaction_probe_source="$shared_scripts_dir/stage5/transaction_probe.clj"
+ack_fault_probe_source="$shared_scripts_dir/stage5/ack_fault_probe.clj"
+ha_probe_source="$shared_scripts_dir/stage7/ha_probe.clj"
+ha_logback_source="$shared_scripts_dir/stage7/logback-stage7.xml"
 peer_builder="$shared_scripts_dir/build-source-artifact.sh"
 transactor_origin_source="$script_dir/verify_structural_origins.clj"
 transactor_resource_builder="$script_dir/stage-structural-resources.sh"
@@ -79,6 +85,22 @@ Runtime and evidence:
   --pgdata DIR           New descendant of work-root.
   --pg-socket-dir DIR    New descendant of work-root.
   --transactor-port PORT Dedicated transport port (default: 54339).
+  --startup-failure-only Create only the PostgreSQL role/catalog, then prove
+                          one missing-schema fatal startup and cleanup boundary.
+  --storage-cas-only     Create the SQL table, then prove ref and log-root CAS
+                          acceptance/rejection against the recovered Peer
+                          reference and recovered Transactor sources.
+  --transaction-boundaries-only
+                         Prove transaction rejection, normal accepted-return
+                         durability, concurrent arbitration, and commit ordering
+                         through the recovered Peer and recovered Transactor.
+  --transaction-ack-fault-only
+                         Block authoritative PostgreSQL log-root publication,
+                         crash the exact owned Transactor before acknowledgement,
+                         then prove nonpublication and fresh-process recovery.
+  --with-ha               After transport recovery, run one bounded recovered
+                          active/standby takeover and self-fencing cycle.
+  --standby-port PORT     Dedicated standby transport port (default: 54340).
   --startup-timeout SEC  Transactor readiness deadline (default: 180).
   --probe-timeout SEC    Peer/origin JVM deadline (default: 300).
   --confirm-disposable $confirmation_token
@@ -87,10 +109,29 @@ Runtime and evidence:
                          classpaths/origins without starting services.
   -h, --help             Show this help.
 
-Executing order:
-  seed -> graceful stop -> restart -> equal snapshot -> augment -> graceful
+Failure-only order:
+  role/catalog without datomic_kvs -> recovered startup failure -> bounded
+  candidate cleanup -> PostgreSQL shutdown.
+
+Storage-CAS-only order:
+  empty datomic_kvs -> Peer-reference CAS probe -> truncate disposable table ->
+  recovered-Transactor CAS probe -> exact semantic equality -> shutdown.
+
+Transaction-boundaries-only order:
+  recovered Transactor -> rejected/accepted/concurrent transactions -> graceful
+  stop -> restart/log adoption -> fresh-Peer audit -> clean shutdown.
+
+Transaction-ack-fault-only order:
+  recovered Transactor -> seed -> lock authoritative log root -> submit async tx ->
+  prove PostgreSQL lock wait and no Peer result -> exact-process SIGKILL -> abort
+  its exact blocked SQL session -> prove nonpublication -> restart/recover ->
+  restart/fresh-Peer audit -> clean shutdown.
+
+Main executing order:
+  seed -> graceful stop -> restart -> equal snapshot -> augment -> graceful ->
   persistent-index publication -> stop -> restart/index adoption -> equal
-  snapshot -> final service shutdown.
+  snapshot -> bounded transport interruption/reconnection -> optional bounded
+  active/standby takeover and fencing -> final service shutdown.
 EOF
 }
 
@@ -235,8 +276,22 @@ work_root_input=
 pgdata_input=
 pg_socket_dir_input=
 transactor_port=54339
+standby_port=54340
 startup_timeout=180
 probe_timeout=300
+ack_fault_timeout=90
+transport_timeout=150
+transport_watchdog_seconds=45
+transport_peer_ttl_msec=10000
+transport_tx_timeout_msec=10000
+ha_timeout=180
+ha_watchdog_seconds=150
+startup_failure_timeout=60
+startup_failure_only=false
+storage_cas_only=false
+transaction_boundaries_only=false
+transaction_ack_fault_only=false
+with_ha=false
 confirmation=${RECOVERED_PAIR_CONFIRM_DISPOSABLE:-}
 dry_run=false
 
@@ -266,6 +321,12 @@ while (($#)); do
     --pgdata) pgdata_input=${2:?missing value for --pgdata}; shift 2 ;;
     --pg-socket-dir) pg_socket_dir_input=${2:?missing value for --pg-socket-dir}; shift 2 ;;
     --transactor-port) transactor_port=${2:?missing value for --transactor-port}; shift 2 ;;
+    --startup-failure-only) startup_failure_only=true; shift ;;
+    --storage-cas-only) storage_cas_only=true; shift ;;
+    --transaction-boundaries-only) transaction_boundaries_only=true; shift ;;
+    --transaction-ack-fault-only) transaction_ack_fault_only=true; shift ;;
+    --with-ha) with_ha=true; shift ;;
+    --standby-port) standby_port=${2:?missing value for --standby-port}; shift 2 ;;
     --startup-timeout) startup_timeout=${2:?missing value for --startup-timeout}; shift 2 ;;
     --probe-timeout) probe_timeout=${2:?missing value for --probe-timeout}; shift 2 ;;
     --confirm-disposable) confirmation=${2:?missing value for --confirm-disposable}; shift 2 ;;
@@ -279,7 +340,7 @@ for ambient_name in CLASSPATH JAVA_TOOL_OPTIONS _JAVA_OPTIONS JDK_JAVA_OPTIONS; 
   [[ -z "${!ambient_name-}" ]] || die "ambient $ambient_name must be unset or empty"
 done
 
-for command_name in awk chmod cmp cp dirname env find grep java kill mkdir mktemp \
+for command_name in awk chmod cmp cp dirname env find grep java kill mkdir mkfifo mktemp \
   mv readlink rm sed sha256sum sleep sort stat tail timeout tr uname unzip uniq wc xargs; do
   need_command "$command_name"
 done
@@ -290,10 +351,35 @@ env --help 2>&1 | grep -q -- '--default-signal' ||
 [[ "$pg_major" =~ ^[0-9]+$ ]] || die "pg-major is not numeric: $pg_major"
 require_positive_integer startup-timeout "$startup_timeout"
 require_positive_integer probe-timeout "$probe_timeout"
+[[ "$startup_failure_only" != true || "$with_ha" != true ]] ||
+  die "--startup-failure-only and --with-ha are mutually exclusive"
+[[ "$storage_cas_only" != true || "$startup_failure_only" != true ]] ||
+  die "--storage-cas-only and --startup-failure-only are mutually exclusive"
+[[ "$storage_cas_only" != true || "$with_ha" != true ]] ||
+  die "--storage-cas-only and --with-ha are mutually exclusive"
+[[ "$transaction_boundaries_only" != true || "$startup_failure_only" != true ]] ||
+  die "--transaction-boundaries-only and --startup-failure-only are mutually exclusive"
+[[ "$transaction_boundaries_only" != true || "$storage_cas_only" != true ]] ||
+  die "--transaction-boundaries-only and --storage-cas-only are mutually exclusive"
+[[ "$transaction_boundaries_only" != true || "$with_ha" != true ]] ||
+  die "--transaction-boundaries-only and --with-ha are mutually exclusive"
+[[ "$transaction_ack_fault_only" != true || "$startup_failure_only" != true ]] ||
+  die "--transaction-ack-fault-only and --startup-failure-only are mutually exclusive"
+[[ "$transaction_ack_fault_only" != true || "$storage_cas_only" != true ]] ||
+  die "--transaction-ack-fault-only and --storage-cas-only are mutually exclusive"
+[[ "$transaction_ack_fault_only" != true || "$transaction_boundaries_only" != true ]] ||
+  die "--transaction-ack-fault-only and --transaction-boundaries-only are mutually exclusive"
+[[ "$transaction_ack_fault_only" != true || "$with_ha" != true ]] ||
+  die "--transaction-ack-fault-only and --with-ha are mutually exclusive"
 [[ "$pg_host" == 127.0.0.1 ]] || die "PostgreSQL must bind only to 127.0.0.1"
 require_port pg-port "$pg_port"
 require_port transactor-port "$transactor_port"
 [[ "$pg_port" != "$transactor_port" ]] || die "PostgreSQL and Transactor ports must differ"
+if [[ "$with_ha" == true ]]; then
+  require_port standby-port "$standby_port"
+  [[ "$standby_port" != "$pg_port" && "$standby_port" != "$transactor_port" ]] ||
+    die "PostgreSQL, active Transactor, and standby ports must be distinct"
+fi
 require_identifier pg-superuser "$pg_superuser"
 require_identifier pg-user "$pg_user"
 [[ "$pg_superuser" != "$pg_user" ]] || die "PostgreSQL roles must differ"
@@ -429,6 +515,10 @@ done
 
 port_is_open "$pg_host" "$pg_port" && die "PostgreSQL port is occupied: $pg_port"
 port_is_open "$pg_host" "$transactor_port" && die "Transactor port is occupied: $transactor_port"
+if [[ "$with_ha" == true ]]; then
+  port_is_open "$pg_host" "$standby_port" &&
+    die "standby Transactor port is occupied: $standby_port"
+fi
 
 snapshot_directory() {
   local label=$1
@@ -602,9 +692,15 @@ require_clean_directory peer-runtime "$peer_runtime_root"
 chmod -R a-w -- "$peer_runtime_root"
 
 peer_harness_root="$staging_dir/peer-harness"
-mkdir -p -- "$peer_harness_root/stage2"
+mkdir -p -- "$peer_harness_root/stage2" "$peer_harness_root/stage3" \
+  "$peer_harness_root/stage5" "$peer_harness_root/stage7"
 cp -- "$peer_workload_source" "$peer_harness_root/stage2/peer_workload.clj"
 cp -- "$peer_logback_source" "$peer_harness_root/logback-stage2.xml"
+cp -- "$transport_probe_source" "$peer_harness_root/stage3/transport_probe.clj"
+cp -- "$transaction_probe_source" "$peer_harness_root/stage5/transaction_probe.clj"
+cp -- "$ack_fault_probe_source" "$peer_harness_root/stage5/ack_fault_probe.clj"
+cp -- "$ha_probe_source" "$peer_harness_root/stage7/ha_probe.clj"
+cp -- "$ha_logback_source" "$peer_harness_root/logback-stage7.xml"
 chmod -R a-w -- "$peer_harness_root"
 peer_stub_root="$staging_dir/peer-stubs"
 snapshot_directory peer-stubs "$peer_stub_source" "$peer_stub_root"
@@ -767,6 +863,8 @@ transactor_origin_probe="$runtime_preparation_dir/verify-structural-origins.clj"
 cp -- "$transactor_origin_source" "$transactor_origin_probe"
 transactor_runtime_regression_probe="$runtime_preparation_dir/validate-runtime-regressions.clj"
 cp -- "$transactor_runtime_regression_source" "$transactor_runtime_regression_probe"
+transactor_storage_cas_probe="$runtime_preparation_dir/storage-cas-probe.clj"
+cp -- "$storage_cas_probe_source" "$transactor_storage_cas_probe"
 
 # Repository-owned Peer origin verifier for the unpacked, JKS-free derivative.
 peer_origin_probe="$inputs_dir/verify-peer-runtime-origins.clj"
@@ -925,7 +1023,8 @@ runtime_seal="$inputs_dir/candidate-runtime-inputs.sha256"
     "$transactor_resource_root" "$transactor_stub_root" -type f -print
   printf '%s\n' "${peer_resolved_dependencies[@]}"
   printf '%s\n' "$java_bin" "$peer_origin_probe" "$transactor_origin_probe" \
-    "$transactor_runtime_regression_probe" "$transactor_logback_config" \
+    "$transactor_runtime_regression_probe" "$transactor_storage_cas_probe" \
+    "$transactor_logback_config" \
     "$fresh_candidate_sources" "$fresh_java_classes" "$fresh_ordered_dependencies" \
     "$fresh_duplicates" "$peer_namespace_index" "$peer_resource_list" "$peer_java_class_list"
 } | sort -u | while IFS= read -r runtime_input; do
@@ -1024,6 +1123,12 @@ config_record="$work_root/config.properties"
   printf 'candidate.transactor.classpath.entries=%s\n' "${#transactor_entries[@]}"
   printf 'candidate.transactor.focused-runtime-regression.sha256=%s\n' \
     "$(sha256_file "$transactor_runtime_regression_probe")"
+  printf 'candidate.transactor.storage-cas-probe.sha256=%s\n' \
+    "$(sha256_file "$transactor_storage_cas_probe")"
+  printf 'candidate.peer.transaction-probe.sha256=%s\n' \
+    "$(sha256_file "$peer_harness_root/stage5/transaction_probe.clj")"
+  printf 'candidate.peer.ack-fault-probe.sha256=%s\n' \
+    "$(sha256_file "$peer_harness_root/stage5/ack_fault_probe.clj")"
   printf 'candidate.runtime.seal.sha256=%s\n' "$runtime_seal_sha"
   printf 'candidate.runtime.membership.sha256=%s\n' "$runtime_membership_sha"
   printf 'candidate.original.peer=false\n'
@@ -1044,6 +1149,20 @@ config_record="$work_root/config.properties"
   printf 'postgres.password.sha256=%s\n' "$(sha256_text "$pg_password")"
   printf 'datomic.database.name=%s\n' "$database_name"
   printf 'transactor.port=%s\n' "$transactor_port"
+  printf 'startup.failure.only=%s\n' "$startup_failure_only"
+  printf 'startup.failure.timeout.seconds=%s\n' "$startup_failure_timeout"
+  printf 'storage.cas.only=%s\n' "$storage_cas_only"
+  printf 'transaction.boundaries.only=%s\n' "$transaction_boundaries_only"
+  printf 'transaction.ack.fault.only=%s\n' "$transaction_ack_fault_only"
+  printf 'transaction.ack.fault.timeout.seconds=%s\n' "$ack_fault_timeout"
+  printf 'ha.enabled=%s\n' "$with_ha"
+  printf 'ha.standby.port=%s\n' "$standby_port"
+  printf 'ha.timeout.seconds=%s\n' "$ha_timeout"
+  printf 'ha.watchdog.seconds=%s\n' "$ha_watchdog_seconds"
+  printf 'transport.peer-connection-ttl-msec=%s\n' "$transport_peer_ttl_msec"
+  printf 'transport.tx-timeout-msec=%s\n' "$transport_tx_timeout_msec"
+  printf 'transport.timeout.seconds=%s\n' "$transport_timeout"
+  printf 'transport.watchdog.seconds=%s\n' "$transport_watchdog_seconds"
   printf 'work.root=%s\n' "$work_root"
 } >"$config_record"
 
@@ -1074,6 +1193,8 @@ if [[ "$dry_run" == true ]]; then
     printf 'transactor.fresh-runtime-preparation=PASS\n'
     printf 'transactor.272-origin-proof=PASS\n'
     printf 'transactor.focused-runtime-regressions=PASS\n'
+    printf 'startup.failure=NOT_RUN\n'
+    printf 'storage.cas=NOT_RUN\n'
     printf 'recovery.common.compare-byte-arrays=PASS\n'
     printf 'candidate.runtime.seal=PASS\n'
   } >"$work_root/summary.properties"
@@ -1102,6 +1223,21 @@ transactor_starttime=
 transactor_properties=
 transactor_label=
 transactor_expected_argv=()
+transactor_paused=false
+transport_probe_pid=
+transport_watchdog_pid=
+transport_fd=
+ack_fault_probe_pid=
+ack_fault_fd=
+ha_probe_pid=
+ha_watchdog_pid=
+ha_fd=
+ha_standby_pid=
+ha_standby_starttime=
+ha_standby_properties=
+ha_standby_label=
+ha_standby_expected_argv=()
+pause_state_file="$runtime_dir/transactor-pause.state"
 run_succeeded=false
 
 process_state() {
@@ -1155,6 +1291,167 @@ verify_transactor_identity() {
   done
 }
 
+verify_ha_standby_identity() {
+  local pid=$1
+  local exe
+  local -a actual_argv=()
+  local index
+  process_running "$pid" || return 1
+  [[ "$(process_starttime "$pid")" == "$ha_standby_starttime" ]] || return 1
+  exe=$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)
+  [[ "$exe" == "$java_bin" ]] || return 1
+  mapfile -d '' -t actual_argv <"/proc/$pid/cmdline"
+  [[ "${#actual_argv[@]}" -eq "${#ha_standby_expected_argv[@]}" ]] || return 1
+  for ((index = 0; index < ${#actual_argv[@]}; index += 1)); do
+    [[ "${actual_argv[$index]}" == "${ha_standby_expected_argv[$index]}" ]] || return 1
+  done
+}
+
+marker_count() {
+  local file=$1
+  local prefix=$2
+  awk -v prefix="$prefix" \
+    'substr($0, 1, length(prefix)) == prefix {count += 1} END {print count + 0}' \
+    "$file"
+}
+
+wait_for_marker() {
+  local file=$1
+  local prefix=$2
+  local max_seconds=$3
+  local process_pid=$4
+  local marker_wait
+  for ((marker_wait = 0; marker_wait < max_seconds; marker_wait += 1)); do
+    if [[ -f "$file" && "$(marker_count "$file" "$prefix")" -eq 1 ]]; then
+      return 0
+    fi
+    process_running "$process_pid" || return 1
+    sleep 1
+  done
+  return 1
+}
+
+resume_transactor_owned() {
+  [[ -n "$transactor_pid" ]] || return 0
+  process_running "$transactor_pid" || {
+    transactor_paused=false
+    return 0
+  }
+  [[ "$transactor_paused" == true ]] || return 0
+  verify_transactor_identity "$transactor_pid" || {
+    echo "refusing to SIGCONT unverified Transactor PID $transactor_pid" >&2
+    return 1
+  }
+  kill -CONT "$transactor_pid" || return 1
+  transactor_paused=false
+  printf 'resumed\n' >"$pause_state_file"
+  local resume_attempt
+  for ((resume_attempt = 0; resume_attempt < 5; resume_attempt += 1)); do
+    [[ "$(process_state "$transactor_pid")" != T &&
+       "$(process_state "$transactor_pid")" != t ]] && return 0
+    sleep 1
+  done
+  echo "Transactor remained stopped after SIGCONT: $transactor_pid" >&2
+  return 1
+}
+
+start_transport_watchdog() {
+  local owned_pid=$transactor_pid
+  local watchdog_log="$logs_dir/transport-watchdog.out"
+  (
+    local watchdog_tick
+    for ((watchdog_tick = 0; watchdog_tick < transport_watchdog_seconds; watchdog_tick += 1)); do
+      sleep 1
+      [[ "$(sed -n '1p' "$pause_state_file" 2>/dev/null || true)" == paused ]] || exit 0
+    done
+    if [[ "$transactor_pid" == "$owned_pid" ]] &&
+       verify_transactor_identity "$owned_pid"; then
+      kill -CONT "$owned_pid"
+      printf 'watchdog-resumed\n' >"$pause_state_file"
+      echo "watchdog issued SIGCONT to verified Transactor PID $owned_pid"
+    else
+      echo "watchdog refused to signal unverified Transactor PID $owned_pid" >&2
+      exit 1
+    fi
+  ) >"$watchdog_log" 2>&1 &
+  transport_watchdog_pid=$!
+}
+
+stop_transport_watchdog() {
+  [[ -n "$transport_watchdog_pid" ]] || return 0
+  [[ -f "$pause_state_file" ]] && printf 'resumed\n' >"$pause_state_file"
+  wait "$transport_watchdog_pid" 2>/dev/null || true
+  transport_watchdog_pid=
+}
+
+stop_transport_probe() {
+  if [[ -n "$transport_fd" ]]; then
+    exec {transport_fd}>&- || true
+    transport_fd=
+  fi
+  [[ -n "$transport_probe_pid" ]] || return 0
+  if process_running "$transport_probe_pid"; then
+    kill -TERM "$transport_probe_pid" 2>/dev/null || true
+  fi
+  wait "$transport_probe_pid" 2>/dev/null || true
+  transport_probe_pid=
+}
+
+stop_ack_fault_probe() {
+  if [[ -n "$ack_fault_fd" ]]; then
+    exec {ack_fault_fd}>&- || true
+    ack_fault_fd=
+  fi
+  [[ -n "$ack_fault_probe_pid" ]] || return 0
+  if process_running "$ack_fault_probe_pid"; then
+    kill -TERM "$ack_fault_probe_pid" 2>/dev/null || true
+  fi
+  wait "$ack_fault_probe_pid" 2>/dev/null || true
+  ack_fault_probe_pid=
+}
+
+start_ha_watchdog() {
+  local owned_pid=$transactor_pid
+  local watchdog_log="$logs_dir/ha-watchdog.out"
+  (
+    local watchdog_tick
+    for ((watchdog_tick = 0; watchdog_tick < ha_watchdog_seconds; watchdog_tick += 1)); do
+      sleep 1
+      [[ "$(sed -n '1p' "$pause_state_file" 2>/dev/null || true)" == paused ]] || exit 0
+    done
+    if [[ "$transactor_pid" == "$owned_pid" ]] &&
+       verify_transactor_identity "$owned_pid"; then
+      kill -CONT "$owned_pid"
+      printf 'ha-watchdog-resumed\n' >"$pause_state_file"
+      echo "HA watchdog issued SIGCONT to verified active Transactor PID $owned_pid"
+    else
+      echo "HA watchdog refused to signal unverified active PID $owned_pid" >&2
+      exit 1
+    fi
+  ) >"$watchdog_log" 2>&1 &
+  ha_watchdog_pid=$!
+}
+
+stop_ha_watchdog() {
+  [[ -n "$ha_watchdog_pid" ]] || return 0
+  [[ -f "$pause_state_file" ]] && printf 'resumed\n' >"$pause_state_file"
+  wait "$ha_watchdog_pid" 2>/dev/null || true
+  ha_watchdog_pid=
+}
+
+stop_ha_probe() {
+  if [[ -n "$ha_fd" ]]; then
+    exec {ha_fd}>&- || true
+    ha_fd=
+  fi
+  [[ -n "$ha_probe_pid" ]] || return 0
+  if process_running "$ha_probe_pid"; then
+    kill -TERM "$ha_probe_pid" 2>/dev/null || true
+  fi
+  wait "$ha_probe_pid" 2>/dev/null || true
+  ha_probe_pid=
+}
+
 stop_postgres() {
   [[ "$pg_cleanup_armed" == true ]] || return 0
   local candidate_pid=$pg_pid
@@ -1200,6 +1497,7 @@ stop_transactor() {
   local kill_used=false
   local wait_status=0
   if process_running "$owned_pid"; then
+    resume_transactor_owned || return 1
     verify_transactor_identity "$owned_pid" || {
       echo "refusing to signal unverified Transactor PID $owned_pid" >&2
       return 1
@@ -1231,10 +1529,95 @@ stop_transactor() {
   transactor_starttime=
   transactor_properties=
   transactor_expected_argv=()
+  transactor_paused=false
   wait_for_closed_port Transactor "$pg_host" "$transactor_port" || return 1
   verify_runtime_seal "after-transactor-$transactor_label-stop"
   if [[ "$require_graceful" == true && "$graceful" != true ]]; then
     echo "Transactor $transactor_label required TERM/KILL instead of bounded SIGINT shutdown" >&2
+    return 1
+  fi
+}
+
+crash_transactor_for_ack_fault() {
+  [[ -n "$transactor_pid" ]] || return 1
+  local owned_pid=$transactor_pid
+  local owned_label=$transactor_label
+  local wait_status=0
+  process_running "$owned_pid" || return 1
+  verify_transactor_identity "$owned_pid" || {
+    echo "refusing to SIGKILL unverified Transactor PID $owned_pid" >&2
+    return 1
+  }
+  kill -KILL "$owned_pid" || return 1
+  wait_for_process_exit "$owned_pid" 5 || return 1
+  set +e
+  wait "$owned_pid"
+  wait_status=$?
+  set -e
+  [[ "$wait_status" -eq 137 ]] || {
+    echo "SIGKILLed Transactor returned unexpected wait status $wait_status" >&2
+    return 1
+  }
+  {
+    printf 'pid=%s\n' "$owned_pid"
+    printf 'starttime=%s\n' "$transactor_starttime"
+    printf 'identity.verified-before-sigkill=true\n'
+    printf 'signal=SIGKILL\n'
+    printf 'wait.status=%s\n' "$wait_status"
+  } >"$results_dir/transactor-$owned_label-fault-kill.properties"
+  transactor_pid=
+  transactor_starttime=
+  transactor_properties=
+  transactor_expected_argv=()
+  transactor_paused=false
+  wait_for_closed_port "faulted Transactor" "$pg_host" "$transactor_port" || return 1
+  verify_runtime_seal "after-transactor-$owned_label-fault-kill"
+}
+
+stop_ha_standby() {
+  local require_graceful=${1:-false}
+  [[ -n "$ha_standby_pid" ]] || return 0
+  local owned_pid=$ha_standby_pid
+  local graceful=false
+  local term_used=false
+  local kill_used=false
+  local wait_status=0
+  if process_running "$owned_pid"; then
+    verify_ha_standby_identity "$owned_pid" || {
+      echo "refusing to signal unverified HA standby PID $owned_pid" >&2
+      return 1
+    }
+    kill -INT "$owned_pid"
+    if wait_for_process_exit "$owned_pid" 20; then
+      graceful=true
+    else
+      verify_ha_standby_identity "$owned_pid" || return 1
+      kill -TERM "$owned_pid"
+      term_used=true
+      if ! wait_for_process_exit "$owned_pid" 10; then
+        verify_ha_standby_identity "$owned_pid" || return 1
+        kill -KILL "$owned_pid"
+        kill_used=true
+        wait_for_process_exit "$owned_pid" 5 || return 1
+      fi
+    fi
+  fi
+  if wait "$owned_pid"; then wait_status=0; else wait_status=$?; fi
+  {
+    printf 'pid=%s\n' "$owned_pid"
+    printf 'sigint.graceful=%s\n' "$graceful"
+    printf 'sigterm.used=%s\n' "$term_used"
+    printf 'sigkill.used=%s\n' "$kill_used"
+    printf 'wait.status=%s\n' "$wait_status"
+  } >"$results_dir/transactor-$ha_standby_label-stop.properties"
+  ha_standby_pid=
+  ha_standby_starttime=
+  ha_standby_properties=
+  ha_standby_expected_argv=()
+  wait_for_closed_port "HA standby Transactor" "$pg_host" "$standby_port" || return 1
+  verify_runtime_seal "after-transactor-$ha_standby_label-stop"
+  if [[ "$require_graceful" == true && "$graceful" != true ]]; then
+    echo "Transactor $ha_standby_label required TERM/KILL instead of bounded SIGINT shutdown" >&2
     return 1
   fi
 }
@@ -1244,6 +1627,13 @@ cleanup() {
   local cleanup_status=0
   trap - EXIT
   set +e
+  stop_ha_probe || cleanup_status=1
+  stop_ha_watchdog || cleanup_status=1
+  stop_ha_standby false || cleanup_status=1
+  resume_transactor_owned || cleanup_status=1
+  stop_transport_watchdog || cleanup_status=1
+  stop_transport_probe || cleanup_status=1
+  stop_ack_fault_probe || cleanup_status=1
   stop_transactor false || cleanup_status=1
   stop_postgres || cleanup_status=1
   if ((status != 0 || cleanup_status != 0)); then
@@ -1262,6 +1652,7 @@ trap cleanup EXIT
 
 write_transactor_properties() {
   local label=$1
+  local service_port=${2:-$transactor_port}
   local properties="$runtime_dir/transactor-$label.properties"
   local data_dir="$runtime_dir/transactor-$label-data"
   local pid_file="$runtime_dir/transactor-$label.pid"
@@ -1269,7 +1660,7 @@ write_transactor_properties() {
   {
     printf 'protocol=sql\n'
     printf 'host=%s\n' "$pg_host"
-    printf 'port=%s\n' "$transactor_port"
+    printf 'port=%s\n' "$service_port"
     printf 'sql-url=jdbc:postgresql://%s:%s/%s\n' "$pg_host" "$pg_port" "$catalog"
     printf 'sql-user=%s\n' "$pg_user"
     printf 'sql-password=%s\n' "$pg_password"
@@ -1286,13 +1677,109 @@ write_transactor_properties() {
   printf '%s' "$properties"
 }
 
+start_ha_standby() {
+  local label=$1
+  local stdout_log="$logs_dir/transactor-$label.out"
+  local stderr_log="$logs_dir/transactor-$label.err"
+  local internal_dir="$logs_dir/transactor-$label-internal"
+  local pid_file="$runtime_dir/transactor-$label.pid"
+  local standby_rev_before=$2
+  local standby_events
+  local standby_state
+  local standby_rev
+  local attempt
+  [[ -z "$ha_standby_pid" ]] || die "attempted to overlap HA standby processes"
+  port_is_open "$pg_host" "$standby_port" &&
+    die "HA standby port became occupied before $label"
+  verify_transactor_identity "$transactor_pid" ||
+    die "active Transactor ownership changed before standby launch"
+  verify_runtime_seal "before-transactor-$label-start"
+  ha_standby_label=$label
+  ha_standby_properties=$(write_transactor_properties "$label" "$standby_port")
+  mkdir -p -- "$internal_dir"
+  ha_standby_expected_argv=(
+    "$java_bin"
+    -Xms128m
+    -Xmx512m
+    -XX:-UsePerfData
+    -Djava.awt.headless=true
+    -Duser.timezone=UTC
+    -Dcom.amazonaws.sdk.disableEc2Metadata=true
+    "-Dclojure.compiler.elide-meta=[:doc :file :line]"
+    "-Dlogback.configurationFile=$transactor_logback_config"
+    -cp "$transactor_classpath"
+    clojure.main
+    -m datomic.launcher
+    "$ha_standby_properties"
+  )
+  {
+    printf 'ordinal\targv\n'
+    for ((attempt = 0; attempt < ${#ha_standby_expected_argv[@]}; attempt += 1)); do
+      printf '%s\t%s\n' "$((attempt + 1))" "${ha_standby_expected_argv[$attempt]}"
+    done
+  } >"$results_dir/transactor-$label-argv.tsv"
+  (
+    cd -- "$internal_dir"
+    exec env --default-signal=INT,QUIT,TERM "${ha_standby_expected_argv[@]}"
+  ) >"$stdout_log" 2>"$stderr_log" &
+  ha_standby_pid=$!
+  ha_standby_starttime=$(process_starttime "$ha_standby_pid")
+  [[ -n "$ha_standby_starttime" ]] || die "could not capture HA standby starttime"
+  for ((attempt = 0; attempt < startup_timeout; attempt += 1)); do
+    standby_events=$(awk 'index($0, ":event :transactor/standby") {n++} END {print n + 0}' \
+      "$stdout_log" "$stderr_log" 2>/dev/null || true)
+    standby_state=$("$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*), COALESCE(max(rev), -1) FROM public.datomic_kvs WHERE id='pod-standby';" \
+      2>>"$logs_dir/sql-ha-standby-readiness.err" || true)
+    standby_rev=${standby_state#*$'\t'}
+    if grep -Fq 'System started' "$stdout_log" &&
+       [[ "$standby_events" =~ ^[0-9]+$ && "$standby_events" -ge 2 ]] &&
+       [[ "$standby_state" =~ ^1$'\t'[0-9]+$ ]] &&
+       ((standby_rev > standby_rev_before)) &&
+       ! port_is_open "$pg_host" "$standby_port" &&
+       port_is_open "$pg_host" "$transactor_port" &&
+       verify_transactor_identity "$transactor_pid" &&
+       verify_ha_standby_identity "$ha_standby_pid" &&
+       [[ -f "$pid_file" ]]; then
+      [[ "$(sed -n '1p' "$pid_file")" == "$ha_standby_pid" &&
+         "$(stat -c '%s' -- "$pid_file")" -eq "${#ha_standby_pid}" ]] ||
+        die "HA standby pid-file does not exactly name the owned PID"
+      printf 'label=%s\npid=%s\nstarttime=%s\nproperties=%s\nstandby.events=%s\nstandby.rev=%s\n' \
+        "$label" "$ha_standby_pid" "$ha_standby_starttime" \
+        "$ha_standby_properties" "$standby_events" "$standby_rev" \
+        >"$results_dir/transactor-$label-start.properties"
+      return 0
+    fi
+    process_running "$ha_standby_pid" || {
+      tail -n 100 "$stdout_log" >&2 || true
+      tail -n 100 "$stderr_log" >&2 || true
+      die "HA standby exited before standby readiness"
+    }
+    port_is_open "$pg_host" "$standby_port" &&
+      die "HA standby began serving before active Transactor failure"
+    sleep 1
+  done
+  tail -n 100 "$stdout_log" >&2 || true
+  tail -n 100 "$stderr_log" >&2 || true
+  die "HA standby did not prove standby state within $startup_timeout seconds"
+}
+
 start_transactor() {
   local label=$1
+  local expectation=${2:-ready}
   local stdout_log="$logs_dir/transactor-$label.out"
   local stderr_log="$logs_dir/transactor-$label.err"
   local internal_dir="$logs_dir/transactor-$label-internal"
   local pid_file
   local attempt
+  local failure_observed=false
+  local failure_pid
+  local schema_state
+  local service_port_observed=false
+  local system_started_marker=false
+  [[ "$expectation" == ready || "$expectation" == missing-schema-failure ]] ||
+    die "unknown Transactor startup expectation: $expectation"
   [[ -z "$transactor_pid" ]] || die "attempted to overlap Transactor processes"
   port_is_open "$pg_host" "$transactor_port" &&
     die "Transactor port became occupied before $label"
@@ -1329,6 +1816,78 @@ start_transactor() {
   transactor_pid=$!
   transactor_starttime=$(process_starttime "$transactor_pid")
   [[ -n "$transactor_starttime" ]] || die "could not capture Transactor starttime: $label"
+  verify_transactor_identity "$transactor_pid" ||
+    die "could not verify Transactor identity immediately after launch: $label"
+  if [[ "$expectation" == missing-schema-failure ]]; then
+    for ((attempt = 0; attempt < startup_failure_timeout; attempt += 1)); do
+      if port_is_open "$pg_host" "$transactor_port"; then
+        service_port_observed=true
+        break
+      fi
+      if grep -Fq ':event :kv-cluster/retry' "$stdout_log" "$stderr_log" &&
+         grep -Fq ':cause "org.postgresql.util.PSQLException"' \
+           "$stdout_log" "$stderr_log" &&
+         grep -Fq 'Terminating process - Lifecycle thread failed' \
+           "$stdout_log" "$stderr_log"; then
+        failure_observed=true
+        break
+      fi
+      process_running "$transactor_pid" ||
+        die "missing-schema Transactor exited before controlled cleanup"
+      sleep 1
+    done
+    [[ "$service_port_observed" == false ]] ||
+      die "missing-schema Transactor exposed its service port"
+    [[ "$failure_observed" == true ]] ||
+      die "missing-schema lifecycle failure was not observed within $startup_failure_timeout seconds"
+    verify_transactor_identity "$transactor_pid" ||
+      die "missing-schema Transactor ownership changed before cleanup"
+    [[ -f "$pid_file" && "$(sed -n '1p' "$pid_file")" == "$transactor_pid" &&
+       "$(stat -c '%s' -- "$pid_file")" -eq "${#transactor_pid}" ]] ||
+      die "missing-schema Transactor pid-file did not exactly name the owned PID"
+    grep -Eq 'relation "(public[.])?datomic_kvs" does not exist' \
+      "$logs_dir/postgres-server.log" ||
+      die "PostgreSQL did not record the expected missing datomic_kvs failure"
+    grep -Fq 'select id, rev, map, val from datomic_kvs where id = $1' \
+      "$logs_dir/postgres-server.log" ||
+      die "PostgreSQL did not record the expected missing-table lookup"
+    ! grep -Fq 'NullPointerException' "$stdout_log" "$stderr_log" ||
+      die "missing-schema startup regressed to a secondary NullPointerException"
+    if grep -Fq 'System started' "$stdout_log" "$stderr_log"; then
+      system_started_marker=true
+    fi
+    failure_pid=$transactor_pid
+    stop_transactor true ||
+      die "missing-schema Transactor did not stop through bounded SIGINT cleanup"
+    grep -Fq 'sigint.graceful=true' \
+      "$results_dir/transactor-$label-stop.properties" &&
+      grep -Fq 'sigterm.used=false' \
+        "$results_dir/transactor-$label-stop.properties" &&
+      grep -Fq 'sigkill.used=false' \
+        "$results_dir/transactor-$label-stop.properties" ||
+      die "missing-schema Transactor cleanup escalated beyond SIGINT"
+    ! grep -Fq 'NullPointerException' "$stdout_log" "$stderr_log" ||
+      die "missing-schema cleanup emitted a secondary NullPointerException"
+    schema_state=$("$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT COALESCE(to_regclass('public.datomic_kvs')::text, 'missing');" \
+      2>>"$logs_dir/sql-startup-failure-cleanup.err")
+    [[ "$schema_state" == missing ]] ||
+      die "missing-schema startup unexpectedly created datomic_kvs"
+    {
+      printf 'pid=%s\n' "$failure_pid"
+      printf 'service.port.open.observed=false\n'
+      printf 'system.started.marker=%s\n' "$system_started_marker"
+      printf 'readiness.proven=false\n'
+      printf 'retry.cause=org.postgresql.util.PSQLException\n'
+      printf 'failure.message=lifecycle-thread-failed\n'
+      printf 'secondary.null-pointer=false\n'
+      printf 'schema.state=missing\n'
+      printf 'postgresql.responsive=true\n'
+      printf 'cleanup.sigint-only=true\n'
+    } >"$results_dir/transactor-$label-failure.properties"
+    return 0
+  fi
   for ((attempt = 0; attempt < startup_timeout; attempt += 1)); do
     if grep -Fq 'System started' "$stdout_log" &&
        port_is_open "$pg_host" "$transactor_port" &&
@@ -1369,6 +1928,111 @@ run_peer_workload() {
     die "Peer workload $label did not emit exactly one result marker"
   grep -Fq ":mode \"$mode\"" "$marker_file" || die "Peer workload mode mismatch: $label"
   last_marker_file=$marker_file
+}
+
+run_transaction_probe() {
+  local label=$1
+  local mode=$2
+  local marker_prefix
+  shift 2
+  case "$mode" in
+    exercise) marker_prefix=STAGE5-TRANSACTION-RESULT ;;
+    audit) marker_prefix=STAGE5-TRANSACTION-AUDIT ;;
+    *) die "unknown transaction probe mode: $mode" ;;
+  esac
+  run_candidate_probe "$label" \
+    "$java_bin" -XX:-UsePerfData -Djava.awt.headless=true -Duser.timezone=UTC \
+    -Dcom.amazonaws.sdk.disableEc2Metadata=true \
+    -Ddatomic.peerConnectionTTLMsec=10000 -Ddatomic.txTimeoutMsec=10000 \
+    -Ddatomic.queryPool=2 \
+    "-Dlogback.configurationFile=$peer_harness_root/logback-stage2.xml" \
+    -cp "$peer_classpath" clojure.main -m stage5.transaction-probe "$mode" "$@"
+  local marker_file="$results_dir/$label.result"
+  awk -v prefix="$marker_prefix " \
+    'substr($0, 1, length(prefix)) == prefix {print}' \
+    "$logs_dir/$label.out" >"$marker_file"
+  [[ "$(wc -l <"$marker_file")" -eq 1 ]] ||
+    die "transaction probe $label did not emit exactly one $marker_prefix marker"
+  grep -Fq ':status :passed' "$marker_file" ||
+    die "transaction probe $label did not report :status :passed"
+  if [[ "$mode" == exercise ]]; then
+    grep -Fq ':stale-cas :rejected' "$marker_file" &&
+      grep -Fq ':db-errors [:db.error/cas-failed]' "$marker_file" &&
+      grep -Fq ':cancelled-values [true]' "$marker_file" &&
+      grep -Fq ':unique-conflict :rejected' "$marker_file" &&
+      grep -Fq ':db-errors [:db.error/unique-conflict]' "$marker_file" &&
+      grep -Fq ':serial-rejections-basis-and-log-root :unchanged' "$marker_file" &&
+      grep -Fq ':accepted-return-with-advanced-log-root true' "$marker_file" &&
+      grep -Fq ':cas-conflict-count 6' "$marker_file" &&
+      grep -Fq ':cas-success-count 2' "$marker_file" &&
+      grep -Fq ':concurrent-cas-single-root-publication-per-round true' \
+        "$marker_file" &&
+      grep -Fq ':concurrent-cas-winner-event-identity :exact' \
+        "$marker_file" &&
+      grep -Fq ':ordered-success-count 4' "$marker_file" &&
+      grep -Fq ':ordered-worker-transaction-identity :exact' "$marker_file" &&
+      grep -Fq ':transaction-t-order :strict-monotonic-gaps-permitted' \
+        "$marker_file" ||
+      die "transaction exercise marker omitted a required rejection/order invariant"
+  else
+    grep -Fq ':sql-log-root :present' "$marker_file" ||
+      die "transaction audit marker omitted its PostgreSQL log-root evidence"
+  fi
+  last_marker_file=$marker_file
+}
+
+run_ack_fault_probe() {
+  local label=$1
+  local mode=$2
+  local marker_prefix
+  shift 2
+  case "$mode" in
+    recover) marker_prefix=STAGE5-ACK-RECOVER ;;
+    audit) marker_prefix=STAGE5-ACK-AUDIT ;;
+    *) die "unknown acknowledgement-fault probe mode: $mode" ;;
+  esac
+  run_candidate_probe "$label" \
+    "$java_bin" -XX:-UsePerfData -Djava.awt.headless=true -Duser.timezone=UTC \
+    -Dcom.amazonaws.sdk.disableEc2Metadata=true \
+    -Ddatomic.peerConnectionTTLMsec=10000 -Ddatomic.txTimeoutMsec=30000 \
+    -Ddatomic.queryPool=2 \
+    "-Dlogback.configurationFile=$peer_harness_root/logback-stage2.xml" \
+    -cp "$peer_classpath" clojure.main -m stage5.ack-fault-probe "$mode" "$@"
+  local marker_file="$results_dir/$label.result"
+  awk -v prefix="$marker_prefix " \
+    'substr($0, 1, length(prefix)) == prefix {print}' \
+    "$logs_dir/$label.out" >"$marker_file"
+  [[ "$(wc -l <"$marker_file")" -eq 1 ]] ||
+    die "acknowledgement-fault probe $label did not emit exactly one $marker_prefix marker"
+  grep -Fq ':status :passed' "$marker_file" ||
+    die "acknowledgement-fault probe $label did not report :status :passed"
+  last_marker_file=$marker_file
+}
+
+run_storage_cas_probe() {
+  local label=$1
+  local candidate_classpath=$2
+  local jdbc_url=$3
+  run_candidate_probe "$label" \
+    "$java_bin" -XX:-UsePerfData -Djava.awt.headless=true -Duser.timezone=UTC \
+    -Dcom.amazonaws.sdk.disableEc2Metadata=true \
+    "-Dlogback.configurationFile=$transactor_logback_config" \
+    -cp "$candidate_classpath" clojure.main "$transactor_storage_cas_probe" \
+    "$jdbc_url" "$pg_user" "$pg_password" 0
+  local marker_file="$results_dir/$label.result"
+  awk '/^STAGE4-STORAGE-CAS-RESULT / {print}' "$logs_dir/$label.out" >"$marker_file"
+  [[ "$(wc -l <"$marker_file")" -eq 1 ]] ||
+    die "storage CAS probe $label did not emit exactly one result marker"
+  grep -Fq ':status :passed' "$marker_file" &&
+    grep -Fq ':idempotent-ref-replay :ok' "$marker_file" &&
+    grep -Fq ':ref-conflicting-create :rejected' "$marker_file" &&
+    grep -Fq ':ref-stale-revision :rejected' "$marker_file" &&
+    grep -Fq ':log-root-conflict :rejected' "$marker_file" &&
+    grep -Fq ':log-root-winner :unchanged' "$marker_file" &&
+    grep -Fq ':sql-authoritative-rows :unchanged' "$marker_file" &&
+    grep -Fq ':revisioned-rows 2' "$marker_file" &&
+    grep -Fq ':rows-added 8' "$marker_file" ||
+    die "storage CAS probe $label omitted required acceptance/rejection evidence"
 }
 
 extract_marker_number() {
@@ -1463,6 +2127,118 @@ require_log_catchup() {
     >"$results_dir/transactor-$label-log-catchup.tsv"
 }
 
+coordination_rev_maybe() {
+  local key=$1
+  "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT COALESCE((SELECT rev FROM public.datomic_kvs WHERE id='$key'), -1);" \
+    2>>"$logs_dir/sql-ha-coordination.err" || true
+}
+
+peer_connect_line_for_port() {
+  local file=$1
+  local port=$2
+  awk -v port="$port" \
+    'index($0, ":event :peer/connect-transactor") && index($0, ":port " port) {print NR; exit}' \
+    "$file"
+}
+
+ha_promoted_rev=
+ha_promotion_heartbeat_count=
+wait_for_ha_promotion() {
+  local active_rev_before=$1
+  local standby_log="$logs_dir/transactor-$ha_standby_label.err"
+  local attempt
+  local active_rev
+  local heartbeat_count
+  for ((attempt = 0; attempt < ha_timeout; attempt += 1)); do
+    process_running "$transactor_pid" || return 1
+    [[ "$(process_state "$transactor_pid")" == T ||
+       "$(process_state "$transactor_pid")" == t ]] || return 1
+    verify_transactor_identity "$transactor_pid" || return 1
+    verify_ha_standby_identity "$ha_standby_pid" || return 1
+    active_rev=$(coordination_rev_maybe pod-coord)
+    heartbeat_count=$(awk -v port="$standby_port" \
+      'index($0, ":event :transactor/heartbeat,") && index($0, ":port " port) {n++} END {print n + 0}' \
+      "$standby_log" 2>/dev/null || true)
+    if [[ "$active_rev" =~ ^[0-9]+$ && "$heartbeat_count" =~ ^[0-9]+$ ]] &&
+       ((active_rev > active_rev_before && heartbeat_count >= 1)) &&
+       port_is_open "$pg_host" "$standby_port"; then
+      ha_promoted_rev=$active_rev
+      ha_promotion_heartbeat_count=$heartbeat_count
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+ha_final_rev=
+ha_final_heartbeat_count=
+wait_for_ha_standby_continuity() {
+  local standby_log="$logs_dir/transactor-$ha_standby_label.err"
+  local attempt
+  local active_rev
+  local heartbeat_count
+  for ((attempt = 0; attempt < 30; attempt += 1)); do
+    verify_ha_standby_identity "$ha_standby_pid" || return 1
+    active_rev=$(coordination_rev_maybe pod-coord)
+    heartbeat_count=$(awk -v port="$standby_port" \
+      'index($0, ":event :transactor/heartbeat,") && index($0, ":port " port) {n++} END {print n + 0}' \
+      "$standby_log" 2>/dev/null || true)
+    if [[ "$active_rev" =~ ^[0-9]+$ && "$heartbeat_count" =~ ^[0-9]+$ ]] &&
+       ((active_rev > ha_promoted_rev && heartbeat_count > ha_promotion_heartbeat_count)) &&
+       port_is_open "$pg_host" "$standby_port"; then
+      ha_final_rev=$active_rev
+      ha_final_heartbeat_count=$heartbeat_count
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+ha_stale_active_wait_status=
+reap_stale_active_after_fence() {
+  local owned_pid=$transactor_pid
+  local stdout_log="$logs_dir/transactor-$transactor_label.out"
+  local stderr_log="$logs_dir/transactor-$transactor_label.err"
+  local attempt
+  for ((attempt = 0; attempt < 65; attempt += 1)); do
+    if grep -Fq ':event :transactor/heartbeat-failed, :cause :conflict' \
+         "$stdout_log" "$stderr_log" &&
+       grep -Fq 'Terminating process - Heartbeat failed' \
+         "$stdout_log" "$stderr_log" &&
+       ! process_running "$owned_pid"; then
+      break
+    fi
+    sleep 1
+  done
+  grep -Fq ':event :transactor/heartbeat-failed, :cause :conflict' \
+    "$stdout_log" "$stderr_log" || return 1
+  grep -Fq 'Terminating process - Heartbeat failed' \
+    "$stdout_log" "$stderr_log" || return 1
+  process_running "$owned_pid" && return 1
+  set +e
+  wait "$owned_pid"
+  ha_stale_active_wait_status=$?
+  set -e
+  ((ha_stale_active_wait_status != 0)) || return 1
+  {
+    printf 'pid=%s\n' "$owned_pid"
+    printf 'heartbeat.conflict=true\n'
+    printf 'process.failure-message=true\n'
+    printf 'wait.status=%s\n' "$ha_stale_active_wait_status"
+  } >"$results_dir/transactor-$transactor_label-self-fence.properties"
+  transactor_pid=
+  transactor_starttime=
+  transactor_properties=
+  transactor_expected_argv=()
+  transactor_paused=false
+  wait_for_closed_port "stale active Transactor" "$pg_host" "$transactor_port" || return 1
+  verify_runtime_seal "after-transactor-$transactor_label-self-fence"
+}
+
 sql_uri=$(printf 'datomic:sql://%s?jdbc:postgresql://%s:%s/%s?user=%s&password=%s' \
   "$database_name" "$pg_host" "$pg_port" "$catalog" "$pg_user" "$pg_password")
 
@@ -1504,6 +2280,51 @@ SQL
 "$pg_bin_dir/createdb" -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" \
   --owner="$pg_user" "$catalog" >"$logs_dir/postgres-createdb.out" \
   2>"$logs_dir/postgres-createdb.err"
+if [[ "$startup_failure_only" == true ]]; then
+  current_step=transactor-startup-failure-missing-schema
+  start_transactor startup-failure-missing-schema missing-schema-failure
+  current_step=postgres-stop-after-startup-failure
+  stop_postgres || die "PostgreSQL did not stop after startup-failure probe"
+  verify_runtime_seal final-after-startup-failure
+  port_is_open "$pg_host" "$pg_port" &&
+    die "PostgreSQL port remains occupied after startup-failure probe"
+  port_is_open "$pg_host" "$transactor_port" &&
+    die "Transactor port remains occupied after startup-failure probe"
+  {
+    printf 'status=PASS\n'
+    printf 'mode=startup-failure-only\n'
+    printf 'peer.current-repo-build=PASS\n'
+    printf 'peer.jks-free-runtime=PASS\n'
+    printf 'peer.origin=PASS\n'
+    printf 'transactor.fresh-runtime-preparation=PASS\n'
+    printf 'transactor.272-origin-proof=PASS\n'
+    printf 'transactor.focused-runtime-regressions=PASS\n'
+    printf 'candidate.runtime.seal=PASS\n'
+    printf 'postgresql.fresh-catalog-without-datomic-schema=PASS\n'
+    printf 'startup.missing-schema-failure=PASS\n'
+    printf 'startup.failure-secondary-npe=false\n'
+    printf 'startup.failure-cleanup=PASS\n'
+    printf 'transactor.startup-failed.count=1\n'
+    printf 'main.path=NOT_RUN\n'
+    printf 'transport=NOT_RUN\n'
+    printf 'ha.fencing=NOT_RUN\n'
+    printf 'services.finally-stopped=PASS\n'
+    printf 'recovery.common.compare-byte-arrays=PASS\n'
+  } >"$work_root/summary.properties"
+  {
+    printf 'status=passed\n'
+    printf 'last.step=complete\n'
+    printf 'services.running=false\n'
+  } >"$work_root/run-status.properties"
+  write_evidence_hashes
+  run_succeeded=true
+  echo "Recovered Transactor missing-schema startup-failure gate passed"
+  echo "candidate stopped by bounded SIGINT; PostgreSQL remained usable and is shut down"
+  echo "main transaction/transport/HA path was intentionally not repeated"
+  echo "evidence: $work_root"
+  exit 0
+fi
+current_step=postgres-schema
 "$pg_bin_dir/psql" -X -v ON_ERROR_STOP=1 \
   -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
   --set=gate_owner="$pg_user" >"$logs_dir/postgres-schema.out" \
@@ -1519,6 +2340,529 @@ SQL
 capture_sql_metrics initial
 [[ "$last_sql_rows" -eq 0 && "$last_sql_bytes" -eq 0 && "$last_sql_revisioned" -eq 0 ]] ||
   die "fresh datomic_kvs table is unexpectedly nonempty"
+
+if [[ "$storage_cas_only" == true ]]; then
+  storage_jdbc_url="jdbc:postgresql://$pg_host:$pg_port/$catalog"
+  current_step=storage-cas-peer-reference
+  run_storage_cas_probe storage-cas-peer-reference "$peer_classpath" "$storage_jdbc_url"
+  capture_sql_metrics after-peer-storage-cas
+  [[ "$last_sql_rows" -eq 8 && "$last_sql_bytes" -gt 0 &&
+     "$last_sql_revisioned" -eq 2 ]] ||
+    die "Peer-reference storage CAS probe left unexpected PostgreSQL metrics"
+
+  current_step=storage-cas-reset-disposable-table
+  "$pg_bin_dir/psql" -X -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c 'TRUNCATE TABLE public.datomic_kvs;' \
+    >"$logs_dir/postgres-storage-cas-truncate.out" \
+    2>"$logs_dir/postgres-storage-cas-truncate.err"
+  capture_sql_metrics after-storage-cas-truncate
+  [[ "$last_sql_rows" -eq 0 && "$last_sql_bytes" -eq 0 &&
+     "$last_sql_revisioned" -eq 0 ]] ||
+    die "disposable table was not empty before the recovered Transactor probe"
+
+  current_step=storage-cas-recovered-transactor
+  run_storage_cas_probe storage-cas-recovered-transactor \
+    "$transactor_classpath" "$storage_jdbc_url"
+  cmp -s "$results_dir/storage-cas-peer-reference.result" \
+    "$results_dir/storage-cas-recovered-transactor.result" ||
+    die "recovered Transactor storage CAS semantics differ from the Peer reference"
+  capture_sql_metrics after-transactor-storage-cas
+  [[ "$last_sql_rows" -eq 8 && "$last_sql_bytes" -gt 0 &&
+     "$last_sql_revisioned" -eq 2 ]] ||
+    die "recovered Transactor storage CAS probe left unexpected PostgreSQL metrics"
+  storage_sessions=$("$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT count(*) FROM pg_stat_activity WHERE datname='$catalog' AND usename='$pg_user';" \
+    2>"$logs_dir/postgres-storage-cas-sessions.err")
+  [[ "$storage_sessions" == 0 ]] ||
+    die "storage CAS probes left $storage_sessions Datomic PostgreSQL sessions"
+  printf 'datomic-user-sessions=%s\n' "$storage_sessions" \
+    >"$results_dir/storage-cas-cleanup.properties"
+
+  current_step=postgres-stop-after-storage-cas
+  stop_postgres || die "PostgreSQL did not stop after storage CAS probe"
+  verify_runtime_seal final-after-storage-cas
+  port_is_open "$pg_host" "$pg_port" &&
+    die "PostgreSQL port remains occupied after storage CAS probe"
+  port_is_open "$pg_host" "$transactor_port" &&
+    die "Transactor port became occupied during storage CAS probe"
+  {
+    printf 'status=PASS\n'
+    printf 'mode=storage-cas-only\n'
+    printf 'peer.current-repo-build=PASS\n'
+    printf 'peer.jks-free-runtime=PASS\n'
+    printf 'peer.origin=PASS\n'
+    printf 'transactor.fresh-runtime-preparation=PASS\n'
+    printf 'transactor.272-origin-proof=PASS\n'
+    printf 'transactor.focused-runtime-regressions=PASS\n'
+    printf 'candidate.runtime.seal=PASS\n'
+    printf 'postgresql.fresh-catalog=PASS\n'
+    printf 'postgresql.ref-cas-rejection=PASS\n'
+    printf 'postgresql.log-root-cas-rejection=PASS\n'
+    printf 'postgresql.winning-root-unchanged=PASS\n'
+    printf 'peer-reference.semantic-equality=PASS\n'
+    printf 'postgresql.datomic-user-sessions-after-probes=0\n'
+    printf 'transactor.process=NOT_RUN\n'
+    printf 'startup.failure=NOT_RUN\n'
+    printf 'main.path=NOT_RUN\n'
+    printf 'transport=NOT_RUN\n'
+    printf 'ha.fencing=NOT_RUN\n'
+    printf 'services.finally-stopped=PASS\n'
+    printf 'recovery.common.compare-byte-arrays=PASS\n'
+  } >"$work_root/summary.properties"
+  {
+    printf 'status=passed\n'
+    printf 'last.step=complete\n'
+    printf 'services.running=false\n'
+  } >"$work_root/run-status.properties"
+  write_evidence_hashes
+  run_succeeded=true
+  echo "Recovered Transactor PostgreSQL storage CAS/root rejection gate passed"
+  echo "Peer-reference semantics matched; no Transactor service or main path was started"
+  echo "PostgreSQL is shut down; evidence: $work_root"
+  exit 0
+fi
+
+if [[ "$transaction_boundaries_only" == true ]]; then
+  transaction_jdbc_url="jdbc:postgresql://$pg_host:$pg_port/$catalog"
+  current_step=transaction-boundaries-transactor-boot-1
+  start_transactor transaction-boundaries-1
+  current_step=transaction-boundaries-exercise
+  run_transaction_probe transaction-boundaries-exercise exercise \
+    "$sql_uri" "$transaction_jdbc_url" "$pg_user" "$pg_password" true file
+  transaction_exercise_marker=$last_marker_file
+  transaction_database_id=$(extract_marker_string \
+    "$transaction_exercise_marker" database-id)
+  transaction_canonical_sha=$(extract_marker_hash \
+    "$transaction_exercise_marker" canonical-sha256)
+  transaction_final_basis=$(extract_marker_number \
+    "$transaction_exercise_marker" final-basis-t)
+  [[ "$transaction_database_id" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "transaction probe database-id has an unsafe shape"
+  ((transaction_final_basis > 0)) ||
+    die "transaction probe did not reach a positive final basis"
+  capture_sql_metrics after-transaction-exercise
+  transaction_sql_rows=$last_sql_rows
+  transaction_sql_bytes=$last_sql_bytes
+  transaction_sql_revisioned=$last_sql_revisioned
+  ((transaction_sql_rows > 0 && transaction_sql_bytes > 0 &&
+    transaction_sql_revisioned > 0)) ||
+    die "transaction boundary exercise produced no durable PostgreSQL state"
+
+  current_step=transaction-boundaries-transactor-stop-1
+  stop_transactor true ||
+    die "first transaction-boundaries Transactor did not stop gracefully"
+  current_step=transaction-boundaries-transactor-boot-2
+  start_transactor transaction-boundaries-2
+  current_step=transaction-boundaries-fresh-peer-audit
+  run_transaction_probe transaction-boundaries-audit audit \
+    "$sql_uri" "$transaction_jdbc_url" "$pg_user" "$pg_password" file \
+    "$transaction_database_id" "$transaction_canonical_sha" \
+    "$transaction_final_basis"
+  transaction_audit_marker=$last_marker_file
+  [[ "$(extract_marker_string "$transaction_audit_marker" database-id)" == \
+     "$transaction_database_id" ]] ||
+    die "fresh transaction audit changed database identity"
+  [[ "$(extract_marker_hash "$transaction_audit_marker" canonical-sha256)" == \
+     "$transaction_canonical_sha" ]] ||
+    die "fresh transaction audit changed canonical state"
+  [[ "$(extract_marker_number "$transaction_audit_marker" final-basis-t)" == \
+     "$transaction_final_basis" ]] ||
+    die "fresh transaction audit changed final basis"
+  require_log_catchup transaction-boundaries-2 "$transaction_final_basis"
+  capture_sql_metrics after-transaction-restart-audit
+  ((last_sql_rows >= transaction_sql_rows &&
+    last_sql_bytes >= transaction_sql_bytes &&
+    last_sql_revisioned >= transaction_sql_revisioned)) ||
+    die "transaction boundary SQL state regressed across restart and fresh audit"
+
+  current_step=transaction-boundaries-transactor-stop-2
+  stop_transactor true ||
+    die "second transaction-boundaries Transactor did not stop gracefully"
+  transaction_sessions=$("$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT count(*) FROM pg_stat_activity WHERE datname='$catalog' AND usename='$pg_user';" \
+    2>"$logs_dir/postgres-transaction-boundaries-sessions.err")
+  [[ "$transaction_sessions" == 0 ]] ||
+    die "transaction boundary run left $transaction_sessions Datomic PostgreSQL sessions"
+  printf 'datomic-user-sessions=%s\n' "$transaction_sessions" \
+    >"$results_dir/transaction-boundaries-cleanup.properties"
+
+  current_step=postgres-stop-after-transaction-boundaries
+  stop_postgres || die "PostgreSQL did not stop after transaction boundary run"
+  verify_runtime_seal final-after-transaction-boundaries
+  port_is_open "$pg_host" "$pg_port" &&
+    die "PostgreSQL port remains occupied after transaction boundary run"
+  port_is_open "$pg_host" "$transactor_port" &&
+    die "Transactor port remains occupied after transaction boundary run"
+  {
+    printf 'status=PASS\n'
+    printf 'mode=transaction-boundaries-only\n'
+    printf 'peer.current-repo-build=PASS\n'
+    printf 'peer.jks-free-runtime=PASS\n'
+    printf 'peer.origin=PASS\n'
+    printf 'transactor.fresh-runtime-preparation=PASS\n'
+    printf 'transactor.272-origin-proof=PASS\n'
+    printf 'transactor.focused-runtime-regressions=PASS\n'
+    printf 'candidate.runtime.seal=PASS\n'
+    printf 'postgresql.fresh-catalog=PASS\n'
+    printf 'transaction.atomic-cas-rejection=PASS\n'
+    printf 'transaction.cas-and-unique-error-reconstruction=PASS\n'
+    printf 'transaction.unique-conflict-rejection=PASS\n'
+    printf 'transaction.accepted-return-with-advanced-log-root=PASS\n'
+    printf 'transaction.concurrent-cas-arbitration=PASS\n'
+    printf 'transaction.concurrent-success-order=PASS\n'
+    printf 'transaction.t-order=strict-monotonic-gaps-permitted\n'
+    printf 'transaction.restart-log-adoption=PASS\n'
+    printf 'transaction.fresh-peer-audit=PASS\n'
+    printf 'transaction.fault-injected-ack-boundary=NOT_RUN\n'
+    printf 'transaction.full-licensed-oracle-equality=NOT_RUN\n'
+    printf 'transaction.database.id=%s\n' "$transaction_database_id"
+    printf 'transaction.final.basis-t=%s\n' "$transaction_final_basis"
+    printf 'transaction.canonical.sha256=%s\n' "$transaction_canonical_sha"
+    printf 'transaction.exercise.result.sha256=%s\n' \
+      "$(sha256_file "$transaction_exercise_marker")"
+    printf 'transaction.audit.result.sha256=%s\n' \
+      "$(sha256_file "$transaction_audit_marker")"
+    printf 'postgresql.rows.after-exercise=%s\n' "$transaction_sql_rows"
+    printf 'postgresql.val-bytes.after-exercise=%s\n' "$transaction_sql_bytes"
+    printf 'postgresql.revisioned-rows.after-exercise=%s\n' \
+      "$transaction_sql_revisioned"
+    printf 'postgresql.datomic-user-sessions-after-stop=0\n'
+    printf 'transactor.graceful-stop.count=2\n'
+    printf 'startup.failure=NOT_RUN\n'
+    printf 'stage2.main-path=NOT_RUN\n'
+    printf 'persistent-index=NOT_RUN\n'
+    printf 'transport=NOT_RUN\n'
+    printf 'ha.fencing=NOT_RUN\n'
+    printf 'services.finally-stopped=PASS\n'
+    printf 'recovery.common.compare-byte-arrays=PASS\n'
+  } >"$work_root/summary.properties"
+  {
+    printf 'status=passed\n'
+    printf 'last.step=complete\n'
+    printf 'services.running=false\n'
+  } >"$work_root/run-status.properties"
+  write_evidence_hashes
+  run_succeeded=true
+  echo "Recovered transaction rejection/concurrency/normal-return gate passed"
+  echo "fresh Transactor and Peer replay matched; PostgreSQL is shut down"
+  echo "evidence: $work_root"
+  exit 0
+fi
+
+if [[ "$transaction_ack_fault_only" == true ]]; then
+  ack_jdbc_url="jdbc:postgresql://$pg_host:$pg_port/$catalog"
+  ack_fifo="$runtime_dir/ack-fault-control.fifo"
+  ack_stdout="$logs_dir/ack-fault-crash-window.out"
+  ack_stderr="$logs_dir/ack-fault-crash-window.err"
+  [[ ! -e "$ack_fifo" ]] || die "acknowledgement crash-control FIFO already exists"
+
+  current_step=ack-crash-consistency-transactor-boot-1
+  start_transactor ack-fault-1
+  mkfifo -m 600 "$ack_fifo"
+  exec {ack_fault_fd}<>"$ack_fifo"
+  current_step=ack-crash-consistency-submit-and-block
+  verify_runtime_seal before-ack-fault-probe
+  (
+    exec {ack_fault_fd}>&-
+    exec timeout --foreground --signal=TERM --kill-after=15s \
+      "${ack_fault_timeout}s" \
+      "$java_bin" -XX:-UsePerfData -Djava.awt.headless=true -Duser.timezone=UTC \
+      -Dcom.amazonaws.sdk.disableEc2Metadata=true \
+      -Ddatomic.peerConnectionTTLMsec=10000 -Ddatomic.txTimeoutMsec=30000 \
+      -Ddatomic.queryPool=2 \
+      "-Dlogback.configurationFile=$peer_harness_root/logback-stage2.xml" \
+      -cp "$peer_classpath" clojure.main -m stage5.ack-fault-probe \
+      crash-window "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" \
+      true file "$ack_fifo"
+  ) >"$ack_stdout" 2>"$ack_stderr" &
+  ack_fault_probe_pid=$!
+
+  if ! wait_for_marker "$ack_stdout" 'STAGE5-ACK-BLOCKED ' 60 \
+    "$ack_fault_probe_pid"; then
+    tail -n 100 "$ack_stdout" >&2 || true
+    tail -n 100 "$ack_stderr" >&2 || true
+    die "crash-consistency probe did not reach its PostgreSQL publication block"
+  fi
+  ack_blocked_marker="$results_dir/ack-fault-blocked.result"
+  awk '/^STAGE5-ACK-BLOCKED / {print}' "$ack_stdout" >"$ack_blocked_marker"
+  [[ "$(wc -l <"$ack_blocked_marker")" -eq 1 ]] ||
+    die "crash-consistency probe emitted a non-unique blocked marker"
+  grep -Fq ':created? true' "$ack_blocked_marker" &&
+    grep -Fq ':future-done-while-blocked? false' "$ack_blocked_marker" &&
+    grep -Fq ':future-incomplete? true' "$ack_blocked_marker" &&
+    grep -Fq ':peer-state-unchanged? true' "$ack_blocked_marker" &&
+    grep -Fq ':root-row-byte-identical? true' "$ack_blocked_marker" &&
+    grep -Fq ':fault-sentinel-present? false' "$ack_blocked_marker" &&
+    grep -Fq ':orphan-candidate-count 1' "$ack_blocked_marker" &&
+    grep -Fq ':append-prev-matches-baseline-tail? true' "$ack_blocked_marker" &&
+    grep -Fq ':metadata {:prev ' "$ack_blocked_marker" &&
+    grep -Fq ':rev nil' "$ack_blocked_marker" &&
+    grep -Fq ':transactor-wait-event-type "Lock"' "$ack_blocked_marker" &&
+    grep -Fq ':api-source-protocol "file"' "$ack_blocked_marker" &&
+    grep -Fq ':peer-source-protocol "file"' "$ack_blocked_marker" &&
+    grep -Fq ':core2-source-protocol "file"' "$ack_blocked_marker" ||
+    die "blocked crash-consistency marker omitted a required invariant"
+
+  ack_database_id=$(extract_marker_string "$ack_blocked_marker" database-id)
+  ack_baseline_basis=$(extract_marker_number "$ack_blocked_marker" baseline-basis-t)
+  ack_baseline_sha=$(extract_marker_hash \
+    "$ack_blocked_marker" baseline-canonical-sha256)
+  ack_precrash_root_sha=$(extract_marker_hash \
+    "$ack_blocked_marker" baseline-root-sha256)
+  ack_holder_backend_pid=$(extract_marker_number \
+    "$ack_blocked_marker" holder-backend-pid)
+  ack_writer_backend_pid=$(extract_marker_number \
+    "$ack_blocked_marker" blocked-backend-pid)
+  ack_orphan_value_bytes=$(extract_marker_number \
+    "$ack_blocked_marker" value-bytes)
+  [[ "$ack_database_id" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "crash-consistency database-id has an unsafe shape"
+  ((ack_baseline_basis > 0 && ack_orphan_value_bytes > 0 &&
+    ack_holder_backend_pid > 0 &&
+    ack_writer_backend_pid > 0 &&
+    ack_holder_backend_pid != ack_writer_backend_pid)) ||
+    die "crash-consistency marker has invalid basis or PostgreSQL backend identities"
+
+  current_step=ack-crash-consistency-independent-lock-proof
+  "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT pid, usename, state, COALESCE(wait_event_type, ''), COALESCE(wait_event, ''), array_to_string(pg_blocking_pids(pid), ','), regexp_replace(query, E'[\\n\\r\\t]+', ' ', 'g') FROM pg_stat_activity WHERE pid IN ($ack_holder_backend_pid, $ack_writer_backend_pid) ORDER BY pid;" \
+    >"$results_dir/ack-fault-postgresql-activity.tsv" \
+    2>"$logs_dir/ack-fault-postgresql-activity.err"
+  ack_lock_counts=$("$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT count(*) FILTER (WHERE pid=$ack_holder_backend_pid AND usename='$pg_user' AND state='idle in transaction' AND lower(query) LIKE '%for update%'), count(*) FILTER (WHERE pid=$ack_writer_backend_pid AND usename='$pg_user' AND state='active' AND wait_event_type='Lock' AND $ack_holder_backend_pid=ANY(pg_blocking_pids(pid)) AND lower(query) LIKE '%update%datomic_kvs%') FROM pg_stat_activity WHERE pid IN ($ack_holder_backend_pid, $ack_writer_backend_pid);" \
+    2>"$logs_dir/ack-fault-postgresql-lock-proof.err")
+  [[ "$ack_lock_counts" == $'1\t1' ]] ||
+    die "independent PostgreSQL lock proof differs: $ack_lock_counts"
+  printf 'holder-row-count\tblocked-writer-row-count\n%s\n' "$ack_lock_counts" \
+    >"$results_dir/ack-fault-postgresql-lock-proof.tsv"
+
+  current_step=ack-crash-consistency-exact-transactor-and-sql-session-abort
+  verify_transactor_identity "$transactor_pid" ||
+    die "Transactor identity changed before the controlled crash"
+  crash_transactor_for_ack_fault ||
+    die "could not crash the exact owned Transactor at the publication boundary"
+  ack_backend_terminated=$("$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid=$ack_writer_backend_pid AND datname=current_database() AND usename='$pg_user' AND state='active' AND wait_event_type='Lock' AND $ack_holder_backend_pid=ANY(pg_blocking_pids(pid)) AND lower(query) LIKE '%update%datomic_kvs%';" \
+    2>"$logs_dir/ack-fault-postgresql-backend-terminate.err")
+  [[ "$ack_backend_terminated" == t ]] ||
+    die "exact blocked PostgreSQL writer session was not terminated: $ack_backend_terminated"
+  for ((ack_backend_wait = 0; ack_backend_wait < 10; ack_backend_wait += 1)); do
+    ack_backend_count=$("$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*) FROM pg_stat_activity WHERE pid=$ack_writer_backend_pid;" \
+      2>>"$logs_dir/ack-fault-postgresql-backend-exit.err")
+    [[ "$ack_backend_count" == 0 ]] && break
+    sleep 1
+  done
+  [[ "$ack_backend_count" == 0 ]] ||
+    die "killed Transactor's PostgreSQL writer backend remained present"
+  printf 'blocked-writer-backend-exited=true\ntermination.request.result=true\nholder.pid=%s\nwriter.pid=%s\n' \
+    "$ack_holder_backend_pid" "$ack_writer_backend_pid" \
+    >"$results_dir/ack-fault-postgresql-backend-exit.properties"
+  printf 'TRANSACTOR_KILLED\n' >&"$ack_fault_fd"
+
+  current_step=ack-crash-consistency-probe-result
+  set +e
+  wait "$ack_fault_probe_pid"
+  ack_probe_status=$?
+  set -e
+  ack_fault_probe_pid=
+  exec {ack_fault_fd}>&-
+  ack_fault_fd=
+  [[ "$ack_probe_status" -eq 0 ]] || {
+    tail -n 100 "$ack_stdout" >&2 || true
+    tail -n 100 "$ack_stderr" >&2 || true
+    die "crash-consistency probe failed with status $ack_probe_status"
+  }
+  verify_runtime_seal after-ack-fault-probe
+  [[ "$(marker_count "$ack_stdout" 'STAGE5-ACK-BLOCKED ')" -eq 1 &&
+     "$(marker_count "$ack_stdout" 'STAGE5-ACK-FAULT-RESULT ')" -eq 1 &&
+     "$(marker_count "$ack_stderr" 'STAGE5-ACK-ERROR ')" -eq 0 ]] ||
+    die "crash-consistency marker cardinality differs"
+  ack_fault_marker="$results_dir/ack-fault-result.result"
+  awk '/^STAGE5-ACK-FAULT-RESULT / {print}' "$ack_stdout" >"$ack_fault_marker"
+  grep -Fq ':status :passed' "$ack_fault_marker" &&
+    grep -Fq ':authoritative-publication :not-committed' "$ack_fault_marker" &&
+    grep -Fq ':fault-sentinel-absent? true' "$ack_fault_marker" &&
+    grep -Fq ':fault-sentinel-present? false' "$ack_fault_marker" &&
+    grep -Fq ':no-success-before-authoritative-publication true' "$ack_fault_marker" &&
+    grep -Fq ':orphan-candidate-count 1' "$ack_fault_marker" &&
+    grep -Fq ':peer-basis-unchanged? true' "$ack_fault_marker" &&
+    grep -Fq ':root-row-byte-identical? true' "$ack_fault_marker" &&
+    grep -Fq ':transactor-backend-exited? true' "$ack_fault_marker" ||
+    die "crash-consistency result omitted a required nonpublication invariant"
+  if ! grep -Fq ':state :failed' "$ack_fault_marker" &&
+     ! grep -Fq ':state :pending-then-cancelled' "$ack_fault_marker"; then
+    die "interrupted transaction Future has an unsupported terminal observation"
+  fi
+  [[ "$(extract_marker_string "$ack_fault_marker" database-id)" == \
+     "$ack_database_id" &&
+     "$(extract_marker_number "$ack_fault_marker" baseline-basis-t)" == \
+     "$ack_baseline_basis" &&
+     "$(extract_marker_hash "$ack_fault_marker" baseline-canonical-sha256)" == \
+     "$ack_baseline_sha" &&
+     "$(extract_marker_hash "$ack_fault_marker" precrash-root-sha256)" == \
+     "$ack_precrash_root_sha" ]] ||
+    die "crash-consistency result identifiers differ from the blocked window"
+  capture_sql_metrics after-ack-fault-crash
+  ack_crash_sql_rows=$last_sql_rows
+  ack_crash_sql_bytes=$last_sql_bytes
+  ack_crash_sql_revisioned=$last_sql_revisioned
+
+  current_step=ack-crash-consistency-transactor-boot-2
+  start_transactor ack-fault-2
+  current_step=ack-crash-consistency-recovery-transaction
+  run_ack_fault_probe ack-fault-recover recover \
+    "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" file \
+    "$ack_database_id" "$ack_baseline_sha" "$ack_baseline_basis" \
+    "$ack_precrash_root_sha"
+  ack_recover_marker=$last_marker_file
+  require_log_catchup ack-fault-2 "$ack_baseline_basis"
+  grep -Fq ':fault-sentinel-absent? true' "$ack_recover_marker" &&
+    grep -Fq ':fault-sentinel-present? false' "$ack_recover_marker" &&
+    grep -Fq ':recovery-sentinel-present? true' "$ack_recover_marker" &&
+    grep -Fq ':post-return-root-observed-advanced? true' "$ack_recover_marker" ||
+    die "post-crash recovery marker omitted a required invariant"
+  [[ "$(extract_marker_string "$ack_recover_marker" database-id)" == \
+     "$ack_database_id" &&
+     "$(extract_marker_hash "$ack_recover_marker" baseline-canonical-sha256)" == \
+     "$ack_baseline_sha" ]] ||
+    die "post-crash recovery did not begin from the exact baseline"
+  ack_final_basis=$(extract_marker_number "$ack_recover_marker" final-basis-t)
+  ack_final_sha=$(extract_marker_hash \
+    "$ack_recover_marker" final-canonical-sha256)
+  ack_recovery_event_t=$(extract_marker_number \
+    "$ack_recover_marker" recovery-event-t)
+  ((ack_final_basis > ack_baseline_basis)) ||
+    die "post-crash recovery transaction did not advance basis"
+  [[ "$ack_recovery_event_t" == "$ack_final_basis" ]] ||
+    die "post-crash recovery event t differs from the final basis"
+  capture_sql_metrics after-ack-fault-recovery
+  ack_recovery_sql_rows=$last_sql_rows
+  ack_recovery_sql_bytes=$last_sql_bytes
+  ack_recovery_sql_revisioned=$last_sql_revisioned
+  current_step=ack-crash-consistency-transactor-stop-2
+  stop_transactor true ||
+    die "post-crash recovery Transactor did not stop gracefully"
+
+  current_step=ack-crash-consistency-transactor-boot-3
+  start_transactor ack-fault-3
+  current_step=ack-crash-consistency-fresh-peer-audit
+  run_ack_fault_probe ack-fault-audit audit \
+    "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" file \
+    "$ack_database_id" "$ack_final_sha" "$ack_final_basis"
+  ack_audit_marker=$last_marker_file
+  require_log_catchup ack-fault-3 "$ack_final_basis"
+  grep -Fq ':fault-sentinel-absent? true' "$ack_audit_marker" &&
+    grep -Fq ':fault-sentinel-present? false' "$ack_audit_marker" &&
+    grep -Fq ':recovery-sentinel-present? true' "$ack_audit_marker" &&
+    grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
+    die "fresh post-crash audit omitted a required invariant"
+  [[ "$(extract_marker_string "$ack_audit_marker" database-id)" == \
+     "$ack_database_id" &&
+     "$(extract_marker_number "$ack_audit_marker" final-basis-t)" == \
+     "$ack_final_basis" &&
+     "$(extract_marker_hash "$ack_audit_marker" canonical-sha256)" == \
+     "$ack_final_sha" ]] ||
+    die "fresh post-crash audit differs from the recovered canonical state"
+  capture_sql_metrics after-ack-fault-audit
+  ((last_sql_rows >= ack_recovery_sql_rows &&
+    last_sql_bytes >= ack_recovery_sql_bytes &&
+    last_sql_revisioned >= ack_recovery_sql_revisioned)) ||
+    die "PostgreSQL state regressed during fresh post-crash adoption"
+  current_step=ack-crash-consistency-transactor-stop-3
+  stop_transactor true ||
+    die "fresh post-crash audit Transactor did not stop gracefully"
+
+  ack_sessions=$("$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+    -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+    -c "SELECT count(*) FROM pg_stat_activity WHERE datname='$catalog' AND usename='$pg_user';" \
+    2>"$logs_dir/postgres-ack-fault-sessions.err")
+  [[ "$ack_sessions" == 0 ]] ||
+    die "crash-consistency run left $ack_sessions Datomic PostgreSQL sessions"
+  printf 'datomic-user-sessions=%s\n' "$ack_sessions" \
+    >"$results_dir/ack-fault-cleanup.properties"
+
+  current_step=postgres-stop-after-ack-crash-consistency
+  stop_postgres || die "PostgreSQL did not stop after crash-consistency run"
+  verify_runtime_seal final-after-ack-crash-consistency
+  port_is_open "$pg_host" "$pg_port" &&
+    die "PostgreSQL port remains occupied after crash-consistency run"
+  port_is_open "$pg_host" "$transactor_port" &&
+    die "Transactor port remains occupied after crash-consistency run"
+  {
+    printf 'status=PASS\n'
+    printf 'mode=transaction-ack-fault-only\n'
+    printf 'peer.current-repo-build=PASS\n'
+    printf 'peer.jks-free-runtime=PASS\n'
+    printf 'peer.origin=PASS\n'
+    printf 'transactor.fresh-runtime-preparation=PASS\n'
+    printf 'transactor.272-origin-proof=PASS\n'
+    printf 'transactor.focused-runtime-regressions=PASS\n'
+    printf 'candidate.runtime.seal=PASS\n'
+    printf 'postgresql.fresh-catalog=PASS\n'
+    printf 'transaction.prepublication-root-lock-observed=PASS\n'
+    printf 'transaction.peer-result-incomplete-while-root-blocked=PASS\n'
+    printf 'transaction.owned-process-crash=PASS\n'
+    printf 'transaction.exact-blocked-sql-session-abort=PASS\n'
+    printf 'transaction.no-success-before-authoritative-publication=PASS\n'
+    printf 'transaction.interrupted-write-absent-after-restart=PASS\n'
+    printf 'transaction.post-crash-recovery-write=PASS\n'
+    printf 'transaction.fresh-peer-audit=PASS\n'
+    printf 'transaction.orphan-immutable-tail.allowed-and-recorded=true\n'
+    printf 'transaction.post-publication-pre-result-cut=NOT_RUN\n'
+    printf 'transaction.full-licensed-oracle-equality=NOT_RUN\n'
+    printf 'transaction.database.id=%s\n' "$ack_database_id"
+    printf 'transaction.baseline.basis-t=%s\n' "$ack_baseline_basis"
+    printf 'transaction.final.basis-t=%s\n' "$ack_final_basis"
+    printf 'transaction.baseline.canonical.sha256=%s\n' "$ack_baseline_sha"
+    printf 'transaction.final.canonical.sha256=%s\n' "$ack_final_sha"
+    printf 'transaction.precrash.root.sha256=%s\n' "$ack_precrash_root_sha"
+    printf 'transaction.blocked.result.sha256=%s\n' \
+      "$(sha256_file "$ack_blocked_marker")"
+    printf 'transaction.crash.result.sha256=%s\n' \
+      "$(sha256_file "$ack_fault_marker")"
+    printf 'transaction.recover.result.sha256=%s\n' \
+      "$(sha256_file "$ack_recover_marker")"
+    printf 'transaction.audit.result.sha256=%s\n' \
+      "$(sha256_file "$ack_audit_marker")"
+    printf 'postgresql.rows.after-crash=%s\n' "$ack_crash_sql_rows"
+    printf 'postgresql.val-bytes.after-crash=%s\n' "$ack_crash_sql_bytes"
+    printf 'postgresql.revisioned-rows.after-crash=%s\n' \
+      "$ack_crash_sql_revisioned"
+    printf 'postgresql.rows.after-recovery=%s\n' "$ack_recovery_sql_rows"
+    printf 'postgresql.val-bytes.after-recovery=%s\n' "$ack_recovery_sql_bytes"
+    printf 'postgresql.revisioned-rows.after-recovery=%s\n' \
+      "$ack_recovery_sql_revisioned"
+    printf 'postgresql.datomic-user-sessions-after-stop=0\n'
+    printf 'transactor.intentional-sigkill.count=1\n'
+    printf 'transactor.graceful-stop.count=2\n'
+    printf 'startup.failure=NOT_RUN\n'
+    printf 'stage2.main-path=NOT_RUN\n'
+    printf 'persistent-index=NOT_RUN\n'
+    printf 'transport=NOT_RUN\n'
+    printf 'ha.fencing=NOT_RUN\n'
+    printf 'services.finally-stopped=PASS\n'
+    printf 'recovery.common.compare-byte-arrays=PASS\n'
+  } >"$work_root/summary.properties"
+  {
+    printf 'status=passed\n'
+    printf 'last.step=complete\n'
+    printf 'services.running=false\n'
+  } >"$work_root/run-status.properties"
+  write_evidence_hashes
+  run_succeeded=true
+  echo "Recovered transaction prepublication crash-consistency gate passed"
+  echo "one exact owned Transactor was deliberately killed; two restarts stopped gracefully"
+  echo "PostgreSQL is shut down; evidence: $work_root"
+  exit 0
+fi
 
 # A: seed and durable SQL state.
 current_step=transactor-boot-1
@@ -1626,14 +2970,335 @@ capture_sql_metrics after-augment-restart
    "$last_sql_bytes" == "$index_sql_bytes" &&
    "$last_sql_revisioned" == "$index_sql_revisioned" ]] ||
   die "published PostgreSQL index state changed during fresh-process adoption"
-current_step=transactor-stop-3
-stop_transactor true || die "boot-3 did not stop gracefully"
+
+# Exercise the already-proven bounded Stage 3 interruption protocol against
+# the recovered Transactor. The same recovered Peer connection must observe a
+# real transport failure, reconnect after the owned process resumes, and
+# commit/read one sentinel without changing the Stage 2 logical workload.
+current_step=transport-interruption
+transport_fifo="$runtime_dir/transport-control.fifo"
+[[ ! -e "$transport_fifo" ]] || die "transport FIFO path already exists"
+mkfifo -m 600 "$transport_fifo"
+exec {transport_fd}<>"$transport_fifo"
+transport_stdout="$logs_dir/transport.out"
+transport_stderr="$logs_dir/transport.err"
+verify_runtime_seal before-transport-probe
+timeout --foreground --signal=TERM --kill-after=15s "${transport_timeout}s" \
+  "$java_bin" -XX:-UsePerfData -Djava.awt.headless=true -Duser.timezone=UTC \
+  "-Ddatomic.peerConnectionTTLMsec=$transport_peer_ttl_msec" \
+  "-Ddatomic.txTimeoutMsec=$transport_tx_timeout_msec" \
+  "-Dlogback.configurationFile=$peer_harness_root/logback-stage2.xml" \
+  -cp "$peer_classpath" clojure.main -m stage3.transport-probe "$sql_uri" file \
+  <"$transport_fifo" >"$transport_stdout" 2>"$transport_stderr" &
+transport_probe_pid=$!
+
+if ! wait_for_marker "$transport_stdout" 'STAGE3-FAULT-READY ' \
+  "$startup_timeout" "$transport_probe_pid"; then
+  tail -n 100 "$transport_stdout" >&2 || true
+  tail -n 100 "$transport_stderr" >&2 || true
+  die "recovered Peer transport probe did not become fault-ready"
+fi
+transport_ready_result="$results_dir/transport-ready.result"
+awk '/^STAGE3-FAULT-READY / {print}' "$transport_stdout" >"$transport_ready_result"
+transport_initial_basis=$(extract_marker_number "$transport_ready_result" basis-t)
+[[ "$transport_initial_basis" == "$augment_basis" ]] ||
+  die "transport probe began at basis $transport_initial_basis, expected $augment_basis"
+
+verify_transactor_identity "$transactor_pid" ||
+  die "Transactor ownership changed before transport SIGSTOP"
+kill -STOP "$transactor_pid"
+transactor_paused=true
+printf 'paused\n' >"$pause_state_file"
+pause_started_seconds=$SECONDS
+for ((stop_attempt = 0; stop_attempt < 5; stop_attempt += 1)); do
+  stopped_state=$(process_state "$transactor_pid")
+  [[ "$stopped_state" == T || "$stopped_state" == t ]] && break
+  sleep 1
+done
+[[ "$stopped_state" == T || "$stopped_state" == t ]] ||
+  die "verified recovered Transactor did not enter stopped state"
+start_transport_watchdog
+printf 'FAULT\n' >&"$transport_fd"
+
+if ! wait_for_marker "$transport_stdout" 'STAGE3-FAULT-UNAVAILABLE ' 35 \
+  "$transport_probe_pid"; then
+  tail -n 100 "$transport_stdout" >&2 || true
+  tail -n 100 "$transport_stderr" >&2 || true
+  die "recovered Peer did not report transport unavailable within its bound"
+fi
+wait_for_marker "$transport_stdout" 'STAGE3-RESUME-READY ' 5 \
+  "$transport_probe_pid" || die "transport probe did not request Transactor resume"
+pause_elapsed=$((SECONDS - pause_started_seconds))
+if ((pause_elapsed < 11)); then
+  sleep $((11 - pause_elapsed))
+fi
+pause_elapsed=$((SECONDS - pause_started_seconds))
+[[ "$(sed -n '1p' "$pause_state_file")" == paused ]] ||
+  die "transport SIGCONT watchdog fired before normal recovery orchestration"
+resume_transactor_owned || die "could not SIGCONT the verified recovered Transactor"
+stop_transport_watchdog
+verify_transactor_identity "$transactor_pid" ||
+  die "Transactor ownership changed after transport SIGCONT"
+port_is_open "$pg_host" "$transactor_port" ||
+  die "Transactor port was not ready after transport SIGCONT"
+printf 'RESUME\n' >&"$transport_fd"
+
+set +e
+wait "$transport_probe_pid"
+transport_status=$?
+set -e
+transport_probe_pid=
+exec {transport_fd}>&-
+transport_fd=
+[[ "$transport_status" -eq 0 ]] || {
+  tail -n 100 "$transport_stdout" >&2 || true
+  tail -n 100 "$transport_stderr" >&2 || true
+  die "recovered-pair transport probe failed with status $transport_status"
+}
+verify_runtime_seal after-transport-probe
+
+for marker_prefix in \
+  'STAGE3-FAULT-READY ' \
+  'STAGE3-FAULT-SYNC-START ' \
+  'STAGE3-FAULT-UNAVAILABLE ' \
+  'STAGE3-RESUME-READY ' \
+  'STAGE3-RECOVERY-SYNC-START ' \
+  'STAGE3-SENTINEL-START ' \
+  'STAGE3-RESULT '; do
+  [[ "$(marker_count "$transport_stdout" "$marker_prefix")" -eq 1 ]] ||
+    die "transport output did not contain exactly one $marker_prefix marker"
+done
+previous_marker_line=0
+for marker_prefix in \
+  'STAGE3-FAULT-READY ' \
+  'STAGE3-FAULT-SYNC-START ' \
+  'STAGE3-FAULT-UNAVAILABLE ' \
+  'STAGE3-RESUME-READY ' \
+  'STAGE3-RECOVERY-SYNC-START ' \
+  'STAGE3-SENTINEL-START ' \
+  'STAGE3-RESULT '; do
+  marker_line=$(awk -v prefix="$marker_prefix" \
+    'substr($0, 1, length(prefix)) == prefix {print NR}' "$transport_stdout")
+  [[ "$marker_line" =~ ^[0-9]+$ && "$marker_line" -gt "$previous_marker_line" ]] ||
+    die "transport markers were emitted out of order at $marker_prefix"
+  previous_marker_line=$marker_line
+done
+[[ "$(marker_count "$transport_stderr" 'STAGE3-ERROR ')" -eq 0 ]] ||
+  die "recovered Peer transport probe emitted STAGE3-ERROR"
+awk '/^STAGE3-/ {print}' "$transport_stdout" >"$results_dir/transport-markers.result"
+awk '/^STAGE3-RESULT / {print}' "$transport_stdout" >"$results_dir/transport.result"
+transport_result="$results_dir/transport.result"
+grep -Fq ':category :cognitect.anomalies/unavailable' "$transport_result" &&
+  grep -Fq ':status :succeeded' "$transport_result" &&
+  grep -Fq ':read-count 1' "$transport_result" &&
+  grep -Fq ':transaction-sentinel-datom-count 1' "$transport_result" &&
+  grep -Fq ':peer-source-protocol "file"' "$transport_result" &&
+  grep -Fq ':core2-source-protocol "file"' "$transport_result" ||
+  die "transport result omitted unavailable, recovery, source, or sentinel evidence"
+transport_result_initial_basis=$(extract_marker_number "$transport_result" initial-basis-t)
+transport_before_basis=$(extract_marker_number "$transport_result" before-basis-t)
+transport_after_basis=$(extract_marker_number "$transport_result" after-basis-t)
+[[ "$transport_result_initial_basis" == "$augment_basis" &&
+   "$transport_before_basis" == "$augment_basis" ]] ||
+  die "transport recovery did not preserve basis $augment_basis before its sentinel"
+((transport_after_basis > transport_before_basis)) ||
+  die "transport sentinel did not advance the recovered database basis"
+
+# The sentinel uses only :db/doc, outside the deterministic Stage 2 attribute
+# set. A fresh recovered-Peer JVM must therefore see the new basis while
+# reproducing the pre-fault workload's database identity and semantic hashes.
+current_step=peer-post-transport-snapshot
+run_peer_workload peer-post-transport-snapshot snapshot "$sql_uri"
+post_transport_marker=$last_marker_file
+post_transport_fingerprint="$results_dir/peer-post-transport-snapshot.fingerprint"
+write_marker_fingerprint "$post_transport_marker" "$post_transport_fingerprint"
+[[ "$(extract_marker_string "$post_transport_marker" database-id)" == "$database_id" ]] ||
+  die "transport recovery changed Datomic database identity"
+[[ "$(extract_marker_number "$post_transport_marker" basis-t)" == "$transport_after_basis" ]] ||
+  die "fresh Peer did not observe the exact post-transport sentinel basis"
+[[ "$(extract_marker_number "$post_transport_marker" row-count)" == "$augment_rows" ]] ||
+  die "transport recovery changed the deterministic Stage 2 row count"
+for hash_key in datoms-sha256 history-sha256 logical-sha256 rows-sha256; do
+  [[ "$(extract_marker_hash "$post_transport_marker" "$hash_key")" == \
+     "$(extract_marker_hash "$augment_marker" "$hash_key")" ]] ||
+    die "transport recovery changed Stage 2 semantic hash $hash_key"
+done
+
+if [[ "$with_ha" == true ]]; then
+  # Run one deliberately narrow active/standby cycle. A remains frozen until
+  # B has won the SQL heartbeat CAS and the same recovered Peer has committed
+  # its sentinel. Resuming A must then make its stale heartbeat CAS conflict
+  # and drive the recovered process-failure shutdown path.
+  current_step=ha-standby-start
+  standby_rev_before=$(coordination_rev_maybe pod-standby)
+  [[ "$standby_rev_before" =~ ^-?[0-9]+$ ]] ||
+    die "could not read the redacted standby coordination revision"
+  start_ha_standby ha-standby "$standby_rev_before"
+
+  current_step=ha-peer-ready
+  ha_fifo="$runtime_dir/ha-control.fifo"
+  [[ ! -e "$ha_fifo" ]] || die "HA FIFO path already exists"
+  mkfifo -m 600 "$ha_fifo"
+  exec {ha_fd}<>"$ha_fifo"
+  ha_stdout="$logs_dir/ha.out"
+  ha_stderr="$logs_dir/ha.err"
+  verify_runtime_seal before-ha-probe
+  timeout --foreground --signal=TERM --kill-after=15s "${ha_timeout}s" \
+    "$java_bin" -XX:-UsePerfData -Djava.awt.headless=true -Duser.timezone=UTC \
+    "-Ddatomic.peerConnectionTTLMsec=$transport_peer_ttl_msec" \
+    "-Ddatomic.txTimeoutMsec=$transport_tx_timeout_msec" \
+    "-Dlogback.configurationFile=$peer_harness_root/logback-stage7.xml" \
+    -cp "$peer_classpath" clojure.main -m stage7.ha-probe "$sql_uri" file \
+    <"$ha_fifo" >"$ha_stdout" 2>"$ha_stderr" &
+  ha_probe_pid=$!
+  if ! wait_for_marker "$ha_stdout" 'STAGE7-HA-READY ' \
+    "$startup_timeout" "$ha_probe_pid"; then
+    tail -n 100 "$ha_stdout" >&2 || true
+    tail -n 100 "$ha_stderr" >&2 || true
+    die "recovered Peer HA probe did not become ready"
+  fi
+  ha_ready_result="$results_dir/ha-ready.result"
+  awk '/^STAGE7-HA-READY / {print}' "$ha_stdout" >"$ha_ready_result"
+  [[ "$(extract_marker_number "$ha_ready_result" basis-t)" == "$transport_after_basis" ]] ||
+    die "HA probe did not begin at the exact post-transport basis"
+  ha_active_connect_line=$(peer_connect_line_for_port "$ha_stderr" "$transactor_port")
+  [[ "$ha_active_connect_line" =~ ^[0-9]+$ ]] ||
+    die "HA Peer did not record its initial active endpoint"
+  active_rev_before=$(coordination_rev_maybe pod-coord)
+  [[ "$active_rev_before" =~ ^[0-9]+$ ]] ||
+    die "could not read the active coordination revision immediately before SIGSTOP"
+
+  current_step=ha-active-stop
+  verify_transactor_identity "$transactor_pid" ||
+    die "active Transactor ownership changed before HA SIGSTOP"
+  kill -STOP "$transactor_pid"
+  transactor_paused=true
+  printf 'paused\n' >"$pause_state_file"
+  for ((stop_attempt = 0; stop_attempt < 5; stop_attempt += 1)); do
+    stopped_state=$(process_state "$transactor_pid")
+    [[ "$stopped_state" == T || "$stopped_state" == t ]] && break
+    sleep 1
+  done
+  [[ "$stopped_state" == T || "$stopped_state" == t ]] ||
+    die "verified HA active Transactor did not enter stopped state"
+  start_ha_watchdog
+  printf 'TAKEOVER\n' >&"$ha_fd"
+
+  current_step=ha-standby-promotion
+  if ! wait_for_ha_promotion "$active_rev_before"; then
+    tail -n 120 "$logs_dir/transactor-$ha_standby_label.out" >&2 || true
+    tail -n 120 "$logs_dir/transactor-$ha_standby_label.err" >&2 || true
+    die "HA standby did not win the PostgreSQL heartbeat CAS and serve"
+  fi
+
+  current_step=ha-peer-takeover-commit
+  set +e
+  wait "$ha_probe_pid"
+  ha_probe_status=$?
+  set -e
+  ha_probe_pid=
+  exec {ha_fd}>&-
+  ha_fd=
+  [[ "$ha_probe_status" -eq 0 ]] || {
+    tail -n 120 "$ha_stdout" >&2 || true
+    tail -n 120 "$ha_stderr" >&2 || true
+    die "recovered Peer HA probe failed with status $ha_probe_status"
+  }
+  verify_runtime_seal after-ha-probe
+
+  for marker_prefix in \
+    'STAGE7-HA-READY ' \
+    'STAGE7-TAKEOVER-SYNC-START ' \
+    'STAGE7-SENTINEL-START ' \
+    'STAGE7-RESULT '; do
+    [[ "$(marker_count "$ha_stdout" "$marker_prefix")" -eq 1 ]] ||
+      die "HA output did not contain exactly one $marker_prefix marker"
+  done
+  previous_marker_line=0
+  for marker_prefix in \
+    'STAGE7-HA-READY ' \
+    'STAGE7-TAKEOVER-SYNC-START ' \
+    'STAGE7-SENTINEL-START ' \
+    'STAGE7-RESULT '; do
+    marker_line=$(awk -v prefix="$marker_prefix" \
+      'substr($0, 1, length(prefix)) == prefix {print NR}' "$ha_stdout")
+    [[ "$marker_line" =~ ^[0-9]+$ && "$marker_line" -gt "$previous_marker_line" ]] ||
+      die "HA markers were emitted out of order at $marker_prefix"
+    previous_marker_line=$marker_line
+  done
+  [[ "$(marker_count "$ha_stderr" 'STAGE7-ERROR ')" -eq 0 ]] ||
+    die "recovered Peer HA probe emitted STAGE7-ERROR"
+  awk '/^STAGE7-/ {print}' "$ha_stdout" >"$results_dir/ha-markers.result"
+  awk '/^STAGE7-RESULT / {print}' "$ha_stdout" >"$results_dir/ha.result"
+  ha_result="$results_dir/ha.result"
+  grep -Fq ':status :succeeded' "$ha_result" &&
+    grep -Fq ':read-count 1' "$ha_result" &&
+    grep -Fq ':transaction-sentinel-datom-count 1' "$ha_result" &&
+    grep -Fq ':peer-source-protocol "file"' "$ha_result" &&
+    grep -Fq ':core2-source-protocol "file"' "$ha_result" ||
+    die "HA result omitted recovery, source, or sentinel evidence"
+  ha_initial_basis=$(extract_marker_number "$ha_result" initial-basis-t)
+  ha_before_basis=$(extract_marker_number "$ha_result" before-basis-t)
+  ha_after_basis=$(extract_marker_number "$ha_result" after-basis-t)
+  [[ "$ha_initial_basis" == "$transport_after_basis" &&
+     "$ha_before_basis" == "$transport_after_basis" ]] ||
+    die "HA takeover did not preserve the exact pre-sentinel basis"
+  ((ha_after_basis > ha_before_basis)) ||
+    die "HA sentinel did not advance the recovered database basis"
+  ha_standby_connect_line=$(peer_connect_line_for_port "$ha_stderr" "$standby_port")
+  [[ "$ha_standby_connect_line" =~ ^[0-9]+$ &&
+     "$ha_standby_connect_line" -gt "$ha_active_connect_line" ]] ||
+    die "same recovered Peer did not reconnect from active A to promoted B"
+
+  current_step=ha-stale-active-resume
+  resume_transactor_owned || die "could not resume stale HA active Transactor"
+  stop_ha_watchdog
+  current_step=ha-stale-active-fence
+  reap_stale_active_after_fence || {
+    tail -n 160 "$logs_dir/transactor-boot-3.out" >&2 || true
+    tail -n 160 "$logs_dir/transactor-boot-3.err" >&2 || true
+    die "stale HA active did not self-fence after heartbeat conflict"
+  }
+  wait_for_ha_standby_continuity ||
+    die "promoted HA standby did not continue heartbeating after stale-active fencing"
+
+  current_step=peer-post-ha-snapshot
+  run_peer_workload peer-post-ha-snapshot snapshot "$sql_uri"
+  post_ha_marker=$last_marker_file
+  [[ "$(extract_marker_string "$post_ha_marker" database-id)" == "$database_id" ]] ||
+    die "HA takeover changed Datomic database identity"
+  [[ "$(extract_marker_number "$post_ha_marker" basis-t)" == "$ha_after_basis" ]] ||
+    die "fresh Peer did not observe the exact post-HA sentinel basis"
+  [[ "$(extract_marker_number "$post_ha_marker" row-count)" == "$augment_rows" ]] ||
+    die "HA takeover changed the deterministic Stage 2 row count"
+  for hash_key in datoms-sha256 history-sha256 logical-sha256 rows-sha256; do
+    [[ "$(extract_marker_hash "$post_ha_marker" "$hash_key")" == \
+       "$(extract_marker_hash "$augment_marker" "$hash_key")" ]] ||
+      die "HA takeover changed Stage 2 semantic hash $hash_key"
+  done
+  {
+    printf 'active.rev.before=%s\n' "$active_rev_before"
+    printf 'promoted.rev=%s\n' "$ha_promoted_rev"
+    printf 'continued.rev=%s\n' "$ha_final_rev"
+    printf 'promoted.heartbeat.count=%s\n' "$ha_promotion_heartbeat_count"
+    printf 'continued.heartbeat.count=%s\n' "$ha_final_heartbeat_count"
+  } >"$results_dir/ha-redacted-coordination.properties"
+  current_step=ha-standby-stop
+  stop_ha_standby true || die "promoted HA standby did not stop gracefully"
+else
+  current_step=transactor-stop-3
+  stop_transactor true || die "boot-3 did not stop gracefully"
+fi
 
 current_step=postgres-stop
 stop_postgres || die "PostgreSQL did not stop cleanly"
 verify_runtime_seal final-after-all-writers-stopped
 port_is_open "$pg_host" "$pg_port" && die "PostgreSQL port remains occupied after final stop"
 port_is_open "$pg_host" "$transactor_port" && die "Transactor port remains occupied after final stop"
+if [[ "$with_ha" == true ]]; then
+  port_is_open "$pg_host" "$standby_port" &&
+    die "standby Transactor port remains occupied after final stop"
+fi
 
 {
   printf 'status=PASS\n'
@@ -1646,6 +3311,7 @@ port_is_open "$pg_host" "$transactor_port" && die "Transactor port remains occup
   printf 'transactor.focused-runtime-regressions=PASS\n'
   printf 'candidate.runtime.seal=PASS\n'
   printf 'postgresql.fresh-catalog=PASS\n'
+  printf 'startup.failure=NOT_RUN\n'
   printf 'seed.basis-t=%s\n' "$seed_basis"
   printf 'augment.basis-t=%s\n' "$augment_basis"
   printf 'requested.index-t=%s\n' "$requested_index_t"
@@ -1656,10 +3322,31 @@ port_is_open "$pg_host" "$transactor_port" && die "Transactor port remains occup
   printf 'persistent-index.publication=PASS\n'
   printf 'persistent-index.fresh-process-adoption=PASS\n'
   printf 'restart.log-index-adoption=PASS\n'
-  printf 'transactor.graceful-stop.count=3\n'
+  printf 'transport.interruption-unavailable=PASS\n'
+  printf 'transport.reconnection=PASS\n'
+  printf 'transport.sentinel-exact=PASS\n'
+  printf 'transport.post-recovery-semantic-equality=PASS\n'
+  printf 'transport.pause.seconds=%s\n' "$pause_elapsed"
+  printf 'transport.sentinel.basis-t=%s\n' "$transport_after_basis"
+  if [[ "$with_ha" == true ]]; then
+    printf 'ha.standby-state=PASS\n'
+    printf 'ha.takeover=PASS\n'
+    printf 'ha.same-peer-reconnection=PASS\n'
+    printf 'ha.sentinel-exact=PASS\n'
+    printf 'ha.stale-active-self-fencing=PASS\n'
+    printf 'ha.post-takeover-semantic-equality=PASS\n'
+    printf 'ha.sentinel.basis-t=%s\n' "$ha_after_basis"
+    printf 'ha.active.rev.before=%s\n' "$active_rev_before"
+    printf 'ha.promoted.rev=%s\n' "$ha_promoted_rev"
+    printf 'ha.continued.rev=%s\n' "$ha_final_rev"
+    printf 'transactor.graceful-stop.count=3\n'
+    printf 'transactor.self-fenced.count=1\n'
+  else
+    printf 'ha.fencing=NOT_RUN\n'
+    printf 'transactor.graceful-stop.count=3\n'
+  fi
   printf 'services.finally-stopped=PASS\n'
   printf 'recovery.common.compare-byte-arrays=PASS\n'
-  printf 'ha.fencing=NOT_RUN\n'
 } >"$work_root/summary.properties"
 {
   printf 'status=passed\n'
@@ -1669,6 +3356,11 @@ port_is_open "$pg_host" "$transactor_port" && die "Transactor port remains occup
 write_evidence_hashes
 run_succeeded=true
 echo "Recovered Peer + recovered Transactor PostgreSQL vertical slice passed"
-echo "seed $seed_basis -> restart -> augment $augment_basis -> request-index -> restart/adopt"
-echo "all three Transactors stopped by bounded SIGINT; PostgreSQL is shut down"
+if [[ "$with_ha" == true ]]; then
+  echo "seed $seed_basis -> restart -> augment $augment_basis -> index/adopt -> transport -> HA $ha_after_basis"
+  echo "stale active self-fenced; promoted standby stopped by bounded SIGINT; PostgreSQL is shut down"
+else
+  echo "seed $seed_basis -> restart -> augment $augment_basis -> request-index -> restart/adopt -> interrupt/reconnect"
+  echo "all three Transactors stopped by bounded SIGINT; PostgreSQL is shut down"
+fi
 echo "evidence: $work_root"

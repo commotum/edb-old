@@ -40,63 +40,77 @@
           'com.amazonaws.services.s3.model.MultiObjectDeleteException$DeleteError)
         (clojure.core/import 'com.amazonaws.services.s3.model.PutObjectResult))))
   (set! *warn-on-reflection* true)
-  (defn client
-    ([creds config]
-      (if config
-        (let [region (get config :region)
-              override_endpoint (get config :override-endpoint)
-              conf (d/data-to-object
-                     (dissoc config :region :override-endpoint)
-                     com.amazonaws.ClientConfiguration)
-              conn (if creds
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (aws/credentials creds))
-                       (com.amazonaws.services.s3.AmazonS3Client.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.s3.AmazonS3Client.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf))
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-                       (com.amazonaws.services.s3.AmazonS3Client.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.s3.AmazonS3Client.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)))]
-          (cond
-            override_endpoint (.setEndpoint
-                                ^com.amazonaws.services.s3.AmazonS3Client conn
-                                (str "http://" override_endpoint))
-            region (do
-                     (.setEndpoint
-                       ^com.amazonaws.services.s3.AmazonS3Client conn
-                       (aws/endpoint-for :s3 region))))
-          conn)
-        (client creds)))
-    ([creds]
-      (if creds
-        (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
-          (com.amazonaws.services.s3.AmazonS3Client. (aws/credentials creds))
-          (com.amazonaws.services.s3.AmazonS3Client. (aws/credentials creds)))
-        (if (instance?
-              com.amazonaws.auth.AWSCredentialsProvider
-              (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.s3.AmazonS3Client.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.s3.AmazonS3Client.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-    ([]
-      (if (instance?
-            com.amazonaws.auth.AWSCredentialsProvider
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.s3.AmazonS3Client.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.s3.AmazonS3Client.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+  (def client
+   (fn client
+     ([creds config]
+       (if config
+         (let [region (get config :region)
+               override_endpoint (get config :override-endpoint)
+               conf (d/data-to-object
+                      (dissoc config :region :override-endpoint)
+                      com.amazonaws.ClientConfiguration)
+               conn (if creds
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (aws/credentials creds))
+                        (com.amazonaws.services.s3.AmazonS3Client.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.s3.AmazonS3Client.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf))
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+                        (com.amazonaws.services.s3.AmazonS3Client.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.s3.AmazonS3Client.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)))]
+           (cond
+             override_endpoint (.setEndpoint
+                                 ^com.amazonaws.services.s3.AmazonS3Client conn
+                                 (str "http://" override_endpoint))
+             region (do
+                      (.setEndpoint
+                        ^com.amazonaws.services.s3.AmazonS3Client conn
+                        (aws/endpoint-for :s3 region))))
+           conn)
+         (client creds)))
+     ([creds]
+       (if creds
+         (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
+           (com.amazonaws.services.s3.AmazonS3Client. (aws/credentials creds))
+           (com.amazonaws.services.s3.AmazonS3Client. (aws/credentials creds)))
+         (if (instance?
+               com.amazonaws.auth.AWSCredentialsProvider
+               (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.s3.AmazonS3Client.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.s3.AmazonS3Client.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+     ([]
+       (if (instance?
+             com.amazonaws.auth.AWSCredentialsProvider
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.s3.AmazonS3Client.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.s3.AmazonS3Client.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))
+  (reset-meta!
+    #'client
+    (assoc
+      {:arglists
+       (clojure.core/list
+         (.withMeta [] {:tag 'com.amazonaws.services.s3.AmazonS3Client})
+         (.withMeta ['creds] {:tag 'com.amazonaws.services.s3.AmazonS3Client})
+         (.withMeta ['creds 'config] {:tag 'com.amazonaws.services.s3.AmazonS3Client})),
+       :column (int 1)}
+      :name
+      'client
+      :ns
+      *ns*))
   (extend
     com.amazonaws.services.s3.model.Bucket
     d/ObjectToData
@@ -1161,309 +1175,253 @@
       (mapv
         (fn fn__26304 ([item] (d/data-to-object item com.amazonaws.services.s3.model.Bucket)))
         val)))
-  (defn list-buckets
-    ([o] (d/object-to-data (.listBuckets ^com.amazonaws.services.s3.AmazonS3Client o))))
-  (reset-meta!
-    #'list-buckets
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client})]),
-       :column 1}
-      :name
-      'list-buckets
-      :ns
-      *ns*))
-  (defn list-objects
-    ([o x1]
-      (d/object-to-data
-        (.listObjects
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "list-buckets")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client})]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "list-buckets")
+    (fn list_buckets
+      ([o] (d/object-to-data (.listBuckets ^com.amazonaws.services.s3.AmazonS3Client o)))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "list-objects")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "list-objects")
+    (fn list_objects
+      ([o x1]
+        (d/object-to-data
+          (.listObjects
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "list-next-batch-of-objects")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "list-next-batch-of-objects")
+    (fn list_next_batch_of_objects
+      ([o x1]
+        (d/object-to-data
+          (.listNextBatchOfObjects
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 com.amazonaws.services.s3.model.ObjectListing))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "list-objects-from-request")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "list-objects-from-request")
+    (fn list_objects_from_request
+      ([o x1]
+        (d/object-to-data
+          (.listObjects
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 com.amazonaws.services.s3.model.ListObjectsRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "create-bucket")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "create-bucket")
+    (fn create_bucket
+      ([o x1]
+        (d/object-to-data
+          (.createBucket
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "create-bucket-in-region")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "create-bucket-in-region")
+    (fn create_bucket_in_region
+      ([o x1 x2]
+        (d/object-to-data
+          (.createBucket
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String)
+            (d/data-to-object x2 java.lang.String))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "delete-bucket")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "delete-bucket")
+    (fn delete_bucket
+      ([o x1]
+        (.deleteBucket
           ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 java.lang.String)))))
-  (reset-meta!
-    #'list-objects
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'list-objects
-      :ns
-      *ns*))
-  (defn list-next-batch-of-objects
-    ([o x1]
-      (d/object-to-data
-        (.listNextBatchOfObjects
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 com.amazonaws.services.s3.model.ObjectListing)))))
-  (reset-meta!
-    #'list-next-batch-of-objects
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'list-next-batch-of-objects
-      :ns
-      *ns*))
-  (defn list-objects-from-request
-    ([o x1]
-      (d/object-to-data
-        (.listObjects
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 com.amazonaws.services.s3.model.ListObjectsRequest)))))
-  (reset-meta!
-    #'list-objects-from-request
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'list-objects-from-request
-      :ns
-      *ns*))
-  (defn create-bucket
-    ([o x1]
-      (d/object-to-data
-        (.createBucket
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 java.lang.String)))))
-  (reset-meta!
-    #'create-bucket
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'create-bucket
-      :ns
-      *ns*))
-  (defn create-bucket-in-region
-    ([o x1 x2]
-      (d/object-to-data
-        (.createBucket
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 java.lang.String)
-          (d/data-to-object x2 java.lang.String)))))
-  (reset-meta!
-    #'create-bucket-in-region
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
-       :column 1}
-      :name
-      'create-bucket-in-region
-      :ns
-      *ns*))
-  (defn delete-bucket
-    ([o x1]
-      (.deleteBucket
-        ^com.amazonaws.services.s3.AmazonS3Client o
-        (d/data-to-object x1 java.lang.String))
-      :ok))
-  (reset-meta!
-    #'delete-bucket
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'delete-bucket
-      :ns
-      *ns*))
-  (defn put-file
-    ([o x1 x2 x3]
-      (d/object-to-data
-        (.putObject
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 java.lang.String)
-          (d/data-to-object x2 java.lang.String)
-          (d/data-to-object x3 java.io.File)))))
-  (reset-meta!
-    #'put-file
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2 'x3]),
-       :column 1}
-      :name
-      'put-file
-      :ns
-      *ns*))
-  (defn put-object-with-canned-acl
-    ([o x1]
-      (d/object-to-data
-        (.putObject
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 com.amazonaws.services.s3.model.PutObjectRequest)))))
-  (reset-meta!
-    #'put-object-with-canned-acl
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'put-object-with-canned-acl
-      :ns
-      *ns*))
-  (defn put-object
-    ([o x1 x2 x3 x4]
-      (d/object-to-data
-        (.putObject
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 java.lang.String)
-          (d/data-to-object x2 java.lang.String)
-          (d/data-to-object x3 java.io.InputStream)
-          (d/data-to-object x4 com.amazonaws.services.s3.model.ObjectMetadata)))))
-  (reset-meta!
-    #'put-object
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2 'x3 'x4]),
-       :column 1}
-      :name
-      'put-object
-      :ns
-      *ns*))
-  (defn get-object
-    ([o x1 x2]
-      (d/object-to-data
-        (.getObject
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 java.lang.String)
-          (d/data-to-object x2 java.lang.String)))))
-  (reset-meta!
-    #'get-object
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
-       :column 1}
-      :name
-      'get-object
-      :ns
-      *ns*))
-  (defn get-object-metadata
-    ([o x1 x2]
-      (d/object-to-data
-        (.getObjectMetadata
+          (d/data-to-object x1 java.lang.String))
+        :ok)))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "put-file")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2 'x3]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "put-file")
+    (fn put_file
+      ([o x1 x2 x3]
+        (d/object-to-data
+          (.putObject
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String)
+            (d/data-to-object x2 java.lang.String)
+            (d/data-to-object x3 java.io.File))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "put-object-with-canned-acl")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "put-object-with-canned-acl")
+    (fn put_object_with_canned_acl
+      ([o x1]
+        (d/object-to-data
+          (.putObject
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 com.amazonaws.services.s3.model.PutObjectRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "put-object")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2 'x3 'x4]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "put-object")
+    (fn put_object
+      ([o x1 x2 x3 x4]
+        (d/object-to-data
+          (.putObject
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String)
+            (d/data-to-object x2 java.lang.String)
+            (d/data-to-object x3 java.io.InputStream)
+            (d/data-to-object x4 com.amazonaws.services.s3.model.ObjectMetadata))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "get-object")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "get-object")
+    (fn get_object
+      ([o x1 x2]
+        (d/object-to-data
+          (.getObject
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String)
+            (d/data-to-object x2 java.lang.String))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "get-object-metadata")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "get-object-metadata")
+    (fn get_object_metadata
+      ([o x1 x2]
+        (d/object-to-data
+          (.getObjectMetadata
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String)
+            (d/data-to-object x2 java.lang.String))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "set-bucket-policy")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "set-bucket-policy")
+    (fn set_bucket_policy
+      ([o x1 x2]
+        (.setBucketPolicy
           ^com.amazonaws.services.s3.AmazonS3Client o
           (d/data-to-object x1 java.lang.String)
-          (d/data-to-object x2 java.lang.String)))))
-  (reset-meta!
-    #'get-object-metadata
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
-       :column 1}
-      :name
-      'get-object-metadata
-      :ns
-      *ns*))
-  (defn set-bucket-policy
-    ([o x1 x2]
-      (.setBucketPolicy
-        ^com.amazonaws.services.s3.AmazonS3Client o
-        (d/data-to-object x1 java.lang.String)
-        (d/data-to-object x2 java.lang.String))
-      :ok))
-  (reset-meta!
-    #'set-bucket-policy
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
-       :column 1}
-      :name
-      'set-bucket-policy
-      :ns
-      *ns*))
-  (defn get-bucket-policy
-    ([o x1]
-      (d/object-to-data
-        (.getBucketPolicy
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 java.lang.String)))))
-  (reset-meta!
-    #'get-bucket-policy
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'get-bucket-policy
-      :ns
-      *ns*))
-  (defn delete-object
-    ([o x1 x2]
-      (.deleteObject
-        ^com.amazonaws.services.s3.AmazonS3Client o
-        (d/data-to-object x1 java.lang.String)
-        (d/data-to-object x2 java.lang.String))
-      :ok))
-  (reset-meta!
-    #'delete-object
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
-       :column 1}
-      :name
-      'delete-object
-      :ns
-      *ns*))
-  (defn delete-objects
-    ([o x1]
-      (d/object-to-data
-        (.deleteObjects
-          ^com.amazonaws.services.s3.AmazonS3Client o
-          (d/data-to-object x1 com.amazonaws.services.s3.model.DeleteObjectsRequest)))))
-  (reset-meta!
-    #'delete-objects
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
-       :column 1}
-      :name
-      'delete-objects
-      :ns
-      *ns*))
-  (defn generate-presigned-url
-    ([o x1 x2 x3 x4]
-      (d/object-to-data
-        (.generatePresignedUrl
+          (d/data-to-object x2 java.lang.String))
+        :ok)))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "get-bucket-policy")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "get-bucket-policy")
+    (fn get_bucket_policy
+      ([o x1]
+        (d/object-to-data
+          (.getBucketPolicy
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "delete-object")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "delete-object")
+    (fn delete_object
+      ([o x1 x2]
+        (.deleteObject
           ^com.amazonaws.services.s3.AmazonS3Client o
           (d/data-to-object x1 java.lang.String)
-          (d/data-to-object x2 java.lang.String)
-          (d/data-to-object x3 java.util.Date)
-          (d/data-to-object x4 com.amazonaws.HttpMethod)))))
-  (reset-meta!
-    #'generate-presigned-url
-    (assoc
-      {:related-class com.amazonaws.services.s3.AmazonS3Client,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2 'x3 'x4]),
-       :column 1}
-      :name
-      'generate-presigned-url
-      :ns
-      *ns*)))
+          (d/data-to-object x2 java.lang.String))
+        :ok)))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "delete-objects")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "delete-objects")
+    (fn delete_objects
+      ([o x1]
+        (d/object-to-data
+          (.deleteObjects
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 com.amazonaws.services.s3.model.DeleteObjectsRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.s3-api" "generate-presigned-url")
+    {:related-class com.amazonaws.services.s3.AmazonS3Client,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.s3.AmazonS3Client}) 'x1 'x2 'x3 'x4]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-api" "generate-presigned-url")
+    (fn generate_presigned_url
+      ([o x1 x2 x3 x4]
+        (d/object-to-data
+          (.generatePresignedUrl
+            ^com.amazonaws.services.s3.AmazonS3Client o
+            (d/data-to-object x1 java.lang.String)
+            (d/data-to-object x2 java.lang.String)
+            (d/data-to-object x3 java.util.Date)
+            (d/data-to-object x4 com.amazonaws.HttpMethod)))))))

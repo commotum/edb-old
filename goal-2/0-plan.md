@@ -112,15 +112,16 @@ manifest-file SHA-256
 
 The checked-in `datomic-rev/transactor/src-clj` tree accounts for all 247
 namespace initializers as 160 strict Datomic decompiles, two exact Datomic
-dependency sources, and 85 exact bundled sources. Two independent canonical
-runs produced byte-identical trees with 247 passes, zero failures, and zero
-`BROKEN DECOMP` sentinels. That pre-repair source-manifest-file SHA-256 is
-`2774eb1cffcbdf2e5d98b71a0d9633650c50a11c39bd0f43fc0d2d340495a55a`.
-That manifest is no longer promotable as the final Stage 1 source boundary: a
-later exact Var-surface comparison found one bytecode-significant metadata
-defect in `datomic.rest`, described below. It remains reproducible evidence for
-the pre-repair state while a new canonical twin recovery and manifest are
-required.
+dependency sources, and 85 exact bundled sources. Fresh integrated v3 twins
+produced byte-identical trees with 247 passes, zero failures, and zero
+`BROKEN DECOMP` sentinels. The checked-in tree is byte-identical to Twin A and
+its current source-manifest-file SHA-256 is
+`bc44fdc277a5452b8fa950eaa390b595f5d93b5705cfb1b2ab4689d07656b69f`.
+The complete promoted-tree structural gate proves 272/272 effective loads,
+232/247 raw exact surfaces, 243/247 location-stripped exact surfaces, and
+247/247 callable/root/class agreement; all fifteen raw residual namespaces are
+hash-bound shipped sources rather than decompiled Datomic code. The normalized
+exact-AOT gate remains separately open.
 The exhaustive 533-JAR ownership scan found exact, unambiguous source only for
 `datomic.query.support` in `query-support-0.8.28.jar` and `datomic.specs` in
 `datomic.specs-0.1.3.jar`; recompiling those two sources twice under the pinned
@@ -1039,10 +1040,27 @@ a dedicated EDN channel: a logging-heavy `datomic.cloudwatch` smoke proves that
 raw logs remain preserved while the canonical payload compares cleanly, and a
 `datomic.rest` smoke correctly reports the genuine difference. After the source
 repair, both the exact-source and fully sealed structural runs must start from
-new roots; this diagnostic run will not be promoted. Stage 1 remains open until
-the fully bound
-resource/load/surface gate and the normalized exact-source AOT relation close
-without original implementation fallback.
+new roots; this diagnostic run will not be promoted.
+
+The first bounded metadata family is now closed at its fresh-output boundary.
+The generic multi-`classForName` protocol-preintern analysis has a focused
+persistence regression, and the complete decompiler regression passes. A fresh
+recovery of all 32 affected Datomic protocol namespaces passes 32/32 and
+matches the original raw surface in all 32; all 130 protocol-family Vars match,
+closing 127 `:name`, 129 `:doc`, ten `:arglists`, and one `:tag` differences
+with no unresolved family row. The evidence root is
+`/tmp/datomic-protocol-surface-current-v1`; its self-excluding evidence-manifest
+SHA-256 is
+`00beca24fd3242315b80712d30e9d3617cdda273bdaecc0e18623cae8763d31e`.
+At that checkpoint the regenerated 32 files were deliberately not promoted
+alone because doing so would have mixed a whole-file compiler-ID rewrite with
+the then-current `datomic.index` repair. This paragraph is historical: the
+fresh integrated v3 twins subsequently promoted the complete 247-source tree
+and the current structural relation below supersedes the 928-row remainder.
+
+Stage 1 now remains open only until the normalized exact-source AOT relation
+closes without original implementation fallback; the integrated
+resource/load/surface boundary is banked.
 
 ### Stage 2 — Reconcile the shared semantic kernel
 
@@ -1062,9 +1080,132 @@ Transactor shared kernel builds and loads without original Peer/Transactor AOT
 fallback; surface and focused behavior comparisons have no unexplained
 differences.
 
+**Current evidence:** The first promoted-tree classification cohort is now
+closed: `datomic.cache.impl`, `datomic.kv-store`,
+`datomic.valcache.puts-pool`, and `datomic.simple-kv` are resolved as
+compiler-provenance-equivalent, with the exact residual form/bytecode family
+recorded per row in
+`transactor/reports/stage-2-overlap-classification.tsv`. A repository-owned
+four-lane regression runs the original Peer, recovered Peer, original
+Transactor, and recovered Transactor separately and produces one byte-identical
+behavior payload across all four while the recovered lanes exclude Peer,
+Transactor, and core2 implementation JARs. The gate bounds each JVM and
+rechecks its selected source/runtime inputs after execution. Its evidence root
+is `/tmp/datomic-stage2-trivial-overlaps-v2`, result SHA-256 is
+`50bbd483b95347215e7cd37efb475a731c56a3000f95413cc975b8d877e4c60f`,
+and evidence-manifest SHA-256 is
+`aede25fe1c59a58ec5381b4b3490a26664fcc1e4ff348461d129486f7b62decc`.
+
+The refreshed whole-cohort diagnostic at
+`/tmp/datomic-stage2-overlap-current-full-v1` contains exactly 117 rows against
+the promoted source tree. The strict source-notation relation accepts one row
+and deliberately leaves 116 as `semantic-body-or-structure`; its expected
+status-2 result is not treated as a semantic failure because fresh Transactor
+initializer recovery exposes compiled `defn`/`defmulti`/`defprotocol` and Var
+metadata scaffolds that the authored Peer source does not. The nine-row
+behavior/ABI/bytecode ledger resolves eight of those strict residuals, leaving
+108 Stage 2 rows genuinely open. The full diagnostic evidence-manifest
+SHA-256 is
+`dcd2b099e2fb669430926da2bc294e9658e010b325cf2e4729e92fcadaa32207`;
+the relation SHA-256 is
+`dac7313c9db45680c41fac8a194e6dfdc58086d01b31d93434ce7b4e1684310c`.
+Do not improve this count by erasing compiler scaffolds indiscriminately;
+classify rows through exact guarded normalization or executable/bytecode
+evidence.
+
+The bounded central PostgreSQL cohort audit now covers `datomic.kv-sql`,
+`datomic.kv-sql-ext`, `datomic.kv-cluster`, `datomic.cluster`,
+`datomic.catalog`, `datomic.coordination`, `datomic.log`, and `datomic.index`.
+Its guarded source-delta diagnostic at
+`/tmp/datomic-stage2-central-source-delta-v1` accepts 322 exact compiler
+transition events but deliberately remains FAIL with 400 residual source-form
+issues; verified evidence-manifest SHA-256 is
+`bf0adf1f2dcec5067a5cca208843fc52157f9a8581761fa3f2cd85a28ded33cd`.
+The already-sealed CAS, transaction, crash/ack, persistent-index, and HA gates
+strongly cover the shared PostgreSQL write/publication spine. They do not close
+dormant cluster cleanup/retry, catalog lifecycle, negative coordination,
+log conversion/excision/range, or index repair/AVET/fulltext/excision branches,
+so those six rows remain partial.
+
+The focused SQL gate now resolves `datomic.kv-sql`, `datomic.kv-sql-ext`, and
+`datomic.sql` without erasing real compiler-provenance differences. At
+`/tmp/datomic-stage2-sql-overlaps-v8`, all four original/recovered lanes emit
+the same supported map/JDBC payload, SHA-256
+`2440c471a4251a36cb10d71d7d07e1c67707745ee01543014a1c14f010351392`.
+Original/recovered Peer separately agree on compiler-edge payload SHA-256
+`a98a8c2732b0086d5bbbeae6966ab5d246936ffcc175eb426497bb4875ef6681`,
+and original/recovered Transactor agree on
+`05b68dcd26cbf0cc8812643dd846b02f74c99527b598f98e93269fd293c46d71`.
+The expected cross-artifact differences are confined to unsupported
+singleton-sequence inputs at the six Clojure 1.9/1.11 map-destructuring sites;
+the documented map/JDBC domain and live PostgreSQL path agree. Direct
+`datomic.sql` coverage includes every Var, exact SQL/binding effects,
+select/delete/multi-command behavior, and prepare/execute failure cleanup. The
+gate also preserves the shared Callable factory arity mismatch rather than
+silently repairing product behavior. Its recovered lanes exclude Peer,
+Transactor, core2, Nano, and PostgreSQL implementation archives, and it fully
+reverifies and hash-binds the CAS, transaction, crash/ack, index, and HA
+evidence. Its self-verifying evidence-manifest SHA-256 is
+`46d5027cf9d517a546a02f8a57a16197367a1ada48613b97fed3dd635e6011aa`.
+
+The next ranked row, `datomic.transaction`, is now resolved by the four-lane
+gate at `/tmp/datomic-stage2-transaction-overlap-v6`. Its supported routing,
+address, DbId/Datum Fressian, read-message/error, procargs, log-cache,
+completion, monitoring, and enabled/disabled logging payload is byte-identical
+across original Peer, recovered Peer, original Transactor, and recovered
+Transactor at SHA-256
+`e859ba6f306b827962afc4c6b7900b4f596a7b6eca7490a050ad9db48fdd5eba`.
+The malformed singleton-sequence log-event edge remains intentionally
+different across Clojure compiler lineages—Peer rejects it while Transactor
+unwraps it—but original/recovered pairs agree exactly at SHA-256 values
+`f3ef575865f167857c86e2c3062c925b7fde8d262d26743d7cda385c16bfcd47`
+and
+`fddf312a7a12405fdc68eddec613165c9628a842e14b319388a771b3ad065fbc`.
+The recovered lanes freshly build all recovered Java and resources, exclude
+Peer/Transactor/core2/Nano implementation archives, and fully reverify the
+transaction, crash/ack, index, transport, and HA evidence. The gate's
+self-verifying evidence-manifest SHA-256 is
+`7dc62498833b65f915f5a56d4c16bbff67b581193c94b281e4afe0be7cc79230`.
+Artifact audit bounds the remaining 3/17 normalized class-body differences to
+that map-destructuring provenance, harmless nil placement, one unreachable
+Datum-reader slot, and initializer metadata scaffolding.
+
+The next row, `datomic.cache`, is resolved by the corrected four-lane gate at
+`/tmp/datomic-stage2-cache-overlap-v3`. Its exact supported payload SHA-256 is
+`17b1982ee501d705c5ec6d518d2f76f80419768652eb97e8b58d0b397afb7a50`.
+It covers all 11 forwarded roots and arities plus every local lookup,
+transformation, read-ahead, mutation, in-flight, repair, close, and error
+branch. The corrected probe derives the disabled/cache-hit read-ahead calls
+from the complete observed call ledger rather than using a constant. The
+three singleton map/sequence compiler edges remain pairwise exact within the
+Peer and Transactor lineages at SHA-256 values
+`5a96ca2b2247d4c31cd9dfda08ab9667afee784df3f4619d88157ce28146f1d9`
+and
+`2af487805102fb2967cf2ef87b236597e62418990c3ae99854479ac7f733b9a2`.
+The 214-file self-excluding evidence manifest independently verifies at
+`aa61b91b9ef75427cf887a674058ca6b4adb23dded576246837e7085f6318385`.
+Artifact audit binds all 25 Vars, `ICachedLookup`, and 32 class roles; its
+19/32 normalized residual bodies are explained by map destructuring, closure
+capture/GC-clearing order, unreachable verifier scaffolding, and one redundant
+void/null sequence. This does not resolve the separate
+`datomic.cache.caffeine` row.
+
+The next runtime-pulled cohort is now bounded rather than inferred broadly.
+The proven chain runs transaction submission through `datomic.transaction`,
+queueing, connector/Artemis transport, Transactor processing, database/CAS,
+log append, `:logged` acknowledgement, Peer notification, and reconnect state
+replacement. `datomic.transaction` and `datomic.cache` are now resolved. In priority order the
+remaining shared rows are `datomic.promise`, `datomic.queue`, `datomic.builtins`,
+`datomic.reconnector2`, `datomic.connector`, and `datomic.artemis-client`.
+Every remaining row is still `semantic-body-or-structure` in the refreshed
+117-row source relation: the green runtime evidence prioritizes them and
+supplies regression coverage but does not by itself resolve them. Broad `datomic.db`,
+`datomic.peer`, `datomic.fressian`, and `datomic.error` rows remain partial
+because substantial dormant behavior is outside the current gates.
+
 ### Stage 3 — Establish a recovered Transactor process
 
-**Status:** In progress
+**Status:** Complete
 
 **Outcome:** A bounded recovered process that owns its launch, configuration,
 lifecycle, and shutdown without yet claiming transaction correctness.
@@ -1078,9 +1219,32 @@ candidate classpath, reaches a deterministic ready boundary, and stops cleanly
 under success and injected startup failure without loading the original
 Transactor implementation.
 
+**Current evidence:** The ordinary recovered-pair gates already prove the
+recorded candidate starts only when both the launcher marker and owned service
+port are present, and stops through bounded SIGINT. The dedicated failure-only
+run at `/tmp/datomic-recovered-pair-startup-failure-v1` now closes the injected
+startup row without repeating the green transaction path. It created a fresh
+PostgreSQL role/catalog but deliberately omitted `datomic_kvs`. The exact
+candidate PID, start time, executable, argv, and pid file remained owned while
+the recovered SQL path emitted all 20 bounded `:kv-cluster/retry` events with
+root cause `org.postgresql.util.PSQLException`, then exact
+`Terminating process - Lifecycle thread failed`. No secondary
+`NullPointerException` occurred. The launcher printed `System started`, but the
+service port never opened; this proves that marker alone is not readiness. The
+harness stopped the still-owned failing JVM with SIGINT only (status 130),
+proved the schema remained absent and PostgreSQL responsive, then shut
+PostgreSQL down. Both host ports are closed and no task process remains. All 69
+evidence entries verify; manifest SHA-256 is
+`40a45828557f88f9677f0926b992d639461c01f8f5a322344190d57fc7ac573b`.
+The repository runner SHA-256 is
+`35876097349d13215dd4d8e2cb50fdd339ea78b6770bb67424b5b627cb112bc8`.
+This closes Stage 3's bounded success and injected-failure process boundary;
+later post-coordination or partial-master failures remain useful matrix
+extensions, not prerequisites for the Stage 3 signal.
+
 ### Stage 4 — Make PostgreSQL the proven durable substrate
 
-**Status:** In progress
+**Status:** Complete
 
 **Outcome:** A recovered Transactor foundation that can safely create, locate,
 read, and update Datomic storage state through disposable PostgreSQL.
@@ -1093,6 +1257,34 @@ references, active endpoint coordination, and failure-safe root publication.
 revision behavior, catalog/coordination semantics, database identity, and root
 publication/rejection while all candidate and service boundaries remain
 auditable and cleanup-complete.
+
+**Current evidence:** The successful main, persistent-index, and HA gates prove
+fresh catalog/database identity, immutable value durability, successful log
+and index-root publication/adoption, and coordination CAS through takeover and
+stale-writer rejection. The focused no-service gate at
+`/tmp/datomic-recovered-pair-storage-cas-v2` closes the remaining storage-root
+rejection row through the real PostgreSQL adapter. It first runs the same
+sealed probe through the recovered Peer reference, truncates only its fresh
+disposable table, and then runs it through the recovered Transactor sources.
+Both paths use the production `ref-index-root/<db-id>` and
+`pod-log-tail/<db-id>` keys, create and byte-round-trip three immutable root
+targets, prove ref create and idempotent replay, accept revision 1, reject a
+conflicting create and differing stale revision, and reject a stale
+`log/write-tail-descriptor` publication. The winning authoritative ref and pod
+SQL rows are byte-identical before and after rejection; the losing pod attempt
+may leave its expected unreferenced immutable tail but cannot replace the
+winner. Both exact result markers have SHA-256
+`1a706a2617fc903dd0c4f90c6888ea11dc7d13065c7c07a32982f0a739de4021`.
+Each phase ends at 8 rows, 43 value bytes, and 2 revisioned rows; the reset
+between them proves 0/0/0. No Datomic-user PostgreSQL session remains, no
+Transactor service was launched, PostgreSQL reports `shut down`, and both host
+ports are closed. All 84 evidence entries verify; manifest SHA-256 is
+`98c39f04a7536e51e218fb4d28a38b080ee15fa8d22bb0a8dadfc1fe46f5d7f4`.
+The repository runner and focused probe SHA-256 values are
+`85819e557c2ae70d112e4a1bf8ab32d281c19cfcd5ba32fedbaddac6fdc7aa6a`
+and `31ba167f26caf7f0e453a5128912de9a0fa6ba1549f17f78c24d640019f5f080`.
+This closes Stage 4's durable-substrate boundary; transaction ordering and
+acknowledgement failures remain Stage 5 work.
 
 ### Stage 5 — Recover transactions and the durable log
 
@@ -1112,9 +1304,87 @@ licensed oracle for accepted and rejected transactions; concurrent submissions
 produce one monotonic order; injected failures demonstrate that success is
 never acknowledged before the exact durable commit boundary.
 
+**Current evidence:** The focused recovered-pair run at
+`/tmp/datomic-recovered-pair-transaction-boundaries-v5` closes the bounded
+stale-CAS, uniqueness-conflict, concurrent-arbitration, and normal-return
+restart rows. A stale CAS returns exact `:db.error/cas-failed`, conflict and
+cancelled data while its same-transaction sentinel, basis, history, and direct
+PostgreSQL log-root row remain unchanged. A distinct-entity uniqueness
+collision returns exact `:db.error/unique-conflict` while ownership, basis,
+companion entity, and root remain unchanged. Across two four-way CAS rounds,
+exactly one worker wins and three return exact CAS conflicts per round; each
+winner's worker, report `t`, persisted event `t`, post-round basis, and single
+log-root revision agree, and every loser-specific companion is absent. Four
+simultaneous accepted submissions form one strict report-basis chain with
+exact worker-to-persisted-`t` identity, no duplicate or lost event, and ordered
+`t` values `[1011 1013 1015 1017]`. This proves monotonic order, not contiguous
+allocation: rejected attempts may consume or reserve `t` values without
+advancing the published database basis or log root.
+
+The normal accepted CAS returns at basis `1005`; a direct SQL read performed
+after return observes the log-root revision advanced from 3 to 4. After a
+graceful Transactor restart, a fresh recovered Peer reproduces database id,
+basis `1017`, and canonical transaction-projection SHA-256
+`f5d50940a93d012606e45a840ddf1104d7c05f0be373d082822f07515f9194b9`;
+the restarted Transactor adopts 8,044 log bytes through `tail-t 1017`, and the
+SQL footprint remains 48 rows, 12,133 value bytes, and 5 revisioned rows. Both
+Transactors stop through `SIGINT` only with status 130, zero Datomic SQL
+sessions remain, PostgreSQL is shut down, and both ports are closed. All 91
+evidence entries verify; manifest SHA-256 is
+`8efea20819c62f167d774d29d7a330f6ef1e018884c50f16a533376d667a3bdd`.
+Runner and probe SHA-256 values are
+`96cc9051e848b6dff811f0e0c22dccb71370eea510fdf17614c77b3c3d5d00dd`
+and `d2dad703ab7532bf95f1972ac767cdf5490e56a178dd34c3c3ac7309fc826e41`.
+
+The bounded prepublication crash-consistency row now also passes at
+`/tmp/datomic-recovered-pair-ack-crash-v2`. The probe locked the exact
+`pod-log-tail/<database-id>` PostgreSQL row at baseline basis `1001` and root
+revision `3`, submitted one asynchronous transaction, and observed one writer
+backend waiting on that holder with `wait_event_type=Lock`. The Peer Future was
+still incomplete, its basis/projection and the byte-exact authoritative root
+were unchanged, and the fault sentinel was absent. The one newly committed
+151-byte immutable row was nonrevisioned and its exact metadata
+`{:prev <baseline-tail>}` made it a strongly attributable transaction-append
+candidate rather than the separate log-tree adoption path; its Fressian payload
+was not decoded. The harness then verified and
+`SIGKILL`ed only its owned Transactor (status `137`) and, while retaining the
+root lock, terminated only the exact independently identified blocked SQL
+session so that PostgreSQL rolled back that root update before the lock was
+released. The Future completed unavailable rather than successful; root SHA-256
+`86a140d0753dbdfc4401b348aa9ff7e76b6a6213b49fe8ed00f9f4ecb20e9980`,
+basis `1001`, and canonical SHA-256
+`5097b63403add0ea605721300fed58d3f2afa85d14acba9adc0c2bbba8d4e81c`
+remained exact, and the fault sentinel stayed absent. The immutable append
+candidate remained unreachable, which is permitted and explicitly recorded
+rather than misreported as authoritative publication.
+
+The first fresh Transactor replayed 1,456 bytes through `tail-t 1001`; its
+startup claim legitimately changed the raw root revision without changing the
+semantic baseline. A normal recovery transaction then returned at basis
+`1003`, with its persisted event at `t 1003` and root revision `4` advancing to
+`5`. A second fresh Transactor replayed 1,824 bytes through `tail-t 1003`, and a
+fresh Peer reproduced final canonical SHA-256
+`49494672a9c0f6a0860a4a74c5756ed40ae45f7634b962f9a922e440219f249b`,
+the same database id, the recovery sentinel, and continued fault-sentinel
+absence. PostgreSQL moved from 42 rows/10,901 value bytes after the crash to 43
+rows/11,032 bytes after recovery; both fresh Transactors stopped by bounded
+`SIGINT`, zero Datomic-user sessions remained, PostgreSQL reports `shut down`,
+and host-visible ports and all three owned PIDs are gone. All 110 evidence
+entries verify; evidence-manifest SHA-256 is
+`6f3a5ab8d6c877d7a9f2f8e2e23c4670b9a2228995dd290f854426a5a20fd0c5`.
+Runner and probe SHA-256 values are
+`200049fcc793579a32d5b4e283ef716b7ecb39448a3ffd69c070461cd574030d`
+and `2aa34216585da3c996d81e886b9d01784200f99fb268068a988d5f4bf8c3faad`.
+The failed predecessor `-v1` is diagnostic only: it exposed that a PostgreSQL
+backend asleep in the lock manager can outlive its dead JVM client until the
+lock is released, so the corrected gate aborts that exact session while the
+root remains locked. This row proves one precisely observed prepublication
+cut. The post-publication/pre-result ambiguity and full licensed-oracle
+transaction equivalence remain `NOT_RUN`, so Stage 5 remains in progress.
+
 ### Stage 6 — Produce indexes and complete the Peer round trip
 
-**Status:** In progress
+**Status:** Complete
 
 **Outcome:** Committed transactions become persistent indexes and flow through
 the real Peer–Transactor protocol into correct immutable Peer database values.
@@ -1129,9 +1399,17 @@ full submit–commit–notify–query cycle on PostgreSQL without original AOT
 implementations; index lag/adoption and transport interruption tests preserve
 the exact logical database state.
 
+**Current evidence:** The v5 recovered-pair gate proves explicit durable
+publication of EAVT, AVET, AEVT, and RAET plus fresh-process root adoption at
+`index-t 1066`, with an exactly unchanged Peer snapshot. The transport-v2 gate
+then proves the same recovered Peer connection observes exact unavailable
+during a verified Transactor pause, reconnects after resume, syncs, commits and
+reads one sentinel, and preserves the workload under a fresh Peer snapshot.
+Together these close the Stage 6 completion signal.
+
 ### Stage 7 — Prove active/standby correctness
 
-**Status:** Pending
+**Status:** In progress
 
 **Outcome:** The recovered lifecycle and storage coordination enforce one
 authoritative writer across standby, failure, and takeover transitions.
@@ -1143,6 +1421,28 @@ split-brain prevention.
 **Completion signal:** Bounded failover matrices show one active writer,
 monotonic committed history, deterministic client recovery, no duplicate or
 lost acknowledged transaction, and no writable split-brain interval.
+
+**Current evidence:** The first recovered-pair HA slice passes at
+`/tmp/datomic-recovered-pair-ha-v1`. A recovered Transactor on port 54365 was
+the active writer while a separately owned recovered Transactor on port 54366
+proved repeated standby events, an advancing redacted `pod-standby` revision,
+and a closed service port. After the exact active PID entered `SIGSTOP`, the
+standby won the PostgreSQL coordination CAS (`pod-coord` revision 25 to 26),
+opened its transport, and the same recovered Peer connection recovered after
+one bounded timeout and four exact unavailable outcomes. It committed and
+uniquely read one sentinel, advancing basis 1099 to 1101. Resuming the stale
+active produced exact `:transactor/heartbeat-failed, :cause :conflict`, the
+process failure message, and nonzero exit 255. The promoted writer then
+continued from coordination revision 26 through 34, and a fresh recovered Peer
+observed basis 1101, the same database id, 96-row logical view, and all four
+pre-failover semantic hashes. The promoted standby stopped by bounded SIGINT,
+PostgreSQL reports `shut down`, all three host ports are closed, and no run
+process remains. The 140-entry evidence manifest verifies in full; its SHA-256
+is `62859ef9ec8e66c43743434ea35974dde6dfd8362ff23cc6226d86721f2edf88`.
+This proves one deliberately narrow takeover, same-Peer recovery, durable
+post-takeover write, stale-primary self-fence, and fresh-Peer adoption path. It
+does not yet prove the remaining partition, in-flight acknowledgement,
+concurrent submission, or split-brain race matrix, so Stage 7 remains open.
 
 ### Stage 8 — Complete data lifecycle, features, and operations
 
@@ -1182,11 +1482,209 @@ green; and no known gap is mislabeled as a recovered component.
 
 ## Current continuation
 
-**Active workstream:** The repository-owned PostgreSQL main path is green from
-the corrected current sources. Close the exhaustive Stage 1 exact-source and
-surface boundary, then classify all 117 Stage 2 overlaps before advancing the
-concrete failure, transport, and HA gates. Do not reopen an unconstrained
-residual-by-residual loop.
+**Active workstream:** The repository-owned PostgreSQL main path is green
+through transaction rejection/concurrent ordering, one exact prepublication
+crash-consistency cut, persistent-index adoption, transport recovery, and one
+recovered active/standby takeover with stale-writer self-fencing; the bounded
+missing-schema startup cleanup and PostgreSQL CAS/root-rejection rows are also
+closed. The runtime-pulled Stage 1 stabilization pass is now banked: fresh
+integrated 247-source twins are deterministic, the protocol family is
+promoted, all 272 effective loads and all 247 callable/root/class surfaces
+pass, and the focused runtime suite passes against the promoted corpus. Stage
+1 remains open only at the bounded 87-source/3,431-class normalized exact-AOT
+wrapper. Stage 2 is banked at 9/117 resolved: the bounded eight-namespace
+PostgreSQL cohort is mapped, its two SQL adapters and the underlying
+`datomic.sql` namespace are resolved with supported-domain and compiler-
+provenance evidence, its other six rows remain explicitly partial, and
+`datomic.transaction` is resolved across the complete focused codec/cache/log
+surface, and `datomic.cache` is resolved across its complete local combinator
+surface. The next executable boundary is `datomic.promise`, still pulled by the
+already-green transaction/transport runtime gates. Do not reopen an
+unconstrained residual-by-residual loop.
+
+**Persistent-index checkpoint (2026-08-28):** The fresh recovered-pair run at
+`/tmp/datomic-recovered-pair-index-v5` passed the complete primary sequence:
+seed basis `1001`, restart, augment basis `1066`, explicit index request at
+`1066`, durable publication, and a third fresh Transactor that loaded
+`tail-t 1066, index-t 1066` with zero replay bytes. PostgreSQL grew from
+42 rows/18,993 value bytes after the augment commit to 86 rows/34,597 value
+bytes after index publication. The final recovered-Peer snapshot is byte-for-
+byte equal to the pre-publication logical snapshot (96 rows and all four
+semantic hashes), proving adoption did not change database meaning. The run
+reports `status=passed`, all three Transactors stopped by bounded `SIGINT`, its
+PostgreSQL instance shut down, and its self-verifying evidence manifest
+SHA-256 is
+`c23915e1406f1fac4046643683d93dc9cf06fee187657761e8f96fa1313b4238`.
+Host verification also found and stopped three older task-owned diagnostic
+PostgreSQL instances; ports `55449`, `55451`, `55453`, `55461`, `54349`,
+`54351`, `54353`, and `54361` are now closed. Evidence directories were
+preserved.
+
+The failed predecessor root was not accepted as progress: both the recovered
+Peer and exact original Peer rejected it. Exact Transactor AOT then localized
+the writer corruption to stale truncated recoveries of
+`datomic.index/filter-nohist-pairs` and
+`datomic.index/separating-retractions`. The already-generic lexical-region
+repair in the decompiler freshly reconstructs both complete bodies; no
+function-name special case was added. The repaired `datomic.index` SHA-256 is
+`93dedc04c7a897b69d6b5f0523c8edcd8b62d407d97d9284ad9f7db4fb9994a2`.
+One focused regression covers continuation past no-history retract/assert
+pairs and correct separation of historic retractions; the runtime-regression
+script SHA-256 is
+`ec68238e3cffbb3bc4573c1897a00cf67dc8d1227c3ee2b465e4b6b7278886e9`
+and passed inside the sealed v5 gate. The updated 247-source manifest SHA-256
+is `d1dce5d974827ccc8b86714e7a3569c34a61ed0e034a69ea4e23b9a1e56ca83f`
+and all entries verify.
+
+**Bounded structural-surface checkpoint (2026-08-28):** The finite current-
+source gate at `/tmp/datomic-stage1-surface-current-v1` replaced the deferred
+surface speculation with one complete relation. All 272 effective namespace
+loads pass (271 cold plus the documented ordered `datomic.transactor-ext`),
+and all 247 oracle and 247 candidate surface probes produce valid dedicated
+EDN. Exact payload comparison is 74 match/173 differ/0 not-comparable, so the
+strict metadata surface is not closed. The differences are systematic rather
+than 173 independent source defects: 116/247 match after removing unstable
+source locations, and 247/247 have identical Var names, callable arities,
+macro/private flags, root kinds, and class ABI when Var metadata is excluded.
+After source locations are removed, every remaining difference falls into only
+four metadata families: `:arglists` (938 Vars in 126 namespaces), `:name`
+(130 Vars/34 namespaces), `:doc` (129 Vars/31 namespaces), and `:tag` (one
+Var/one namespace). The evidence manifest SHA-256 is
+`2dadcc0b676a8702a50d76976f1937d5ea74196a20097dc2db80b6456b5505ce`
+and verifies in full. This closes the runtime-callable surface relation while
+leaving strict metadata recovery open as four generic families; it does not
+authorize a 173-item repair loop.
+
+The tiered read-only classification further separates evidence from noise.
+All 130 `:name` differences retain identical symbol namespace and text; only
+nested symbol-object metadata differs. Of 938 `:arglists` differences, 28
+occur in exact bundled sources and therefore prove compile-context variance;
+the remaining 910 decompiled-Datomic cases divide into four finite shapes:
+263 type-hint/symbol-metadata only, 313 symbol spelling/metadata only, 79
+reordered but anonymized-equal signatures, and 255 structural/destructuring
+forms. All callable arities still match. The 129 original-string to candidate-
+`nil` docs and sole lost `OperationFuture` tag are genuine strict metadata
+gaps concentrated in generic protocol reconstruction, which also amplifies
+127 of the reported `:name` rows. A fresh recovery of the exact 32 affected
+namespaces now passes 32/32 raw-exact surfaces and all 130 protocol-family Vars,
+closing 127 `:name`, 129 `:doc`, ten `:arglists`, and one `:tag` rows with no
+unresolved family result. The generic protocol repair and its new multi-
+`classForName` persistence regression pass; validator SHA-256 is
+`a19fbd8ed0085fd65be3f274fa8dc8fde62684fd692da806e3cdfbf97e31ce6b`.
+The focused relation and evidence-manifest SHA-256 values are
+`ecd4be3af08e379cda5e03aca07d9678fa1593f525ef037ebb00a22874907a31`
+and `00beca24fd3242315b80712d30e9d3617cdda273bdaecc0e18623cae8763d31e`.
+This is not a checked-in tree promotion: the 32 regenerated files overlap the
+current `datomic.index` repair and contain broad compiler-ID churn. A fresh
+integrated 247-source twin and the complete relation remain required.
+
+**Integrated Stage 1 promotion checkpoint (2026-08-28):** The pending
+protocol/source integration is now complete. Fresh independent recoveries at
+`/tmp/datomic-stage1-integrated-twin-v3-a` and `-v3-b` each pass all 247
+namespace rows as 160 strict Datomic decompiles, two exact Datomic dependency
+sources, and 85 exact bundled sources. They contain zero failures and zero
+`BROKEN DECOMP` sentinels and are byte-identical. Their promoted 247-row
+source-manifest-file SHA-256 is
+`bc44fdc277a5452b8fa950eaa390b595f5d93b5705cfb1b2ab4689d07656b69f`.
+The twin evidence manifest SHA-256 is
+`f01000248fd4a9093100aebcf94f783b6863369aba7c74b41da289ea482e097d`
+and verifies in full.
+
+The full sealed external-source run at
+`/tmp/datomic-stage1-integrated-twin-v3-surface` proves 272/272 effective
+loads, all 247 oracle probes, and all 247 candidate probes. Its tiered relation
+is 232/247 raw exact, 243/247 exact after source-location stripping, and
+247/247 exact when Var metadata is excluded. Only 31 metadata rows across four
+namespaces remain: 28 `:arglists` rows in two namespaces and three `:name` rows
+in two namespaces. All fifteen raw-differing namespaces are exact shipped
+sources; no decompiled Datomic namespace remains in the residual cohort. The
+typed classifier therefore passes while the top-level strict-exact gate
+honestly reports 15 expected differences. The evidence manifest SHA-256 is
+`4921abcfb0926790780c21889e71ab05889d0347496d3272fafd5464f5d073a2`
+and verifies in full. Runtime inputs and directory membership are unchanged
+after loads and surfaces, the candidate classpath contains no original Peer,
+Transactor, or core2 implementation AOT, and no licensed reference bytes were
+copied.
+
+The focused runtime gate caught one real defect before promotion. Fresh
+`datomic.promise/settable-future` still emitted raw monitor forms and threw
+`IllegalMonitorStateException`: generic `let*` compaction creates the in-memory
+head `clojure.core/let`, while the locking recognizer accepted only
+unqualified `let`; pprint/readback had masked the difference in the old
+fixture. The generic repair accepts exactly those two core forms while
+retaining the full lock-temp/enter/try/finally/exit proof. A subsequent aborted
+v2 whole-corpus run exposed eager inspection of unrelated scalar `let` bodies,
+so the recognizer now proves an actual `try` before traversing it; an ordinary
+qualified `let` and `foreign/let` are strict negatives. The complete
+decompiler validator passes. The regenerated `datomic.promise` contains both
+source-level `locking` forms, and the full focused runtime suite passes against
+the complete v3 candidate. That suite now also proves an empty persistent
+index returns the initialized `disjoined-datoms` map rather than stale `nil`.
+The current compactor, decompiler validator, and focused runtime-regression
+SHA-256 values are
+`9e392d551c873626d29a0c79c09bd52ca1aca5eb67f4bc77555476bfd5b1542e`,
+`4859299065cadb5a0e707b6aea20a8404b91ee35174d1e02d41a82477e835983`,
+and `62a1111ed043d694c26a3468aac6b0f6a1bab9e86ea1e4b6badaf6eed400cc24`.
+
+The checked-in `transactor/src-clj` tree is byte-identical to Twin A and all
+247 promoted manifest rows verify. The checked-in preflight at
+`/tmp/datomic-stage1-integrated-twin-v3-promotion-preflight` passes exact
+membership and hashes; its evidence-manifest SHA-256 is
+`4751cec79d9ff802fc116b1bc7f82e13d00b9238cc97740f51cfcfed046ec150`.
+Generated multiline forms retain deterministic trailing spaces, so
+`git diff --check` reports generated-source whitespace; promotion deliberately
+did not mutate the sealed twin bytes to hide it. This is a printer-cleanliness
+item, not a runtime or surface gap. Stage 1 remains `In progress` solely for
+the normalized 87-source/3,431-class exact-AOT wrapper and whole-cohort PASS.
+
+**Recovered transport checkpoint (2026-08-28):** The fresh executing gate at
+`/tmp/datomic-recovered-pair-transport-v2` passed the full seed `1001` →
+restart → augment `1066` → persistent-index publication/adoption sequence and
+then the bounded same-endpoint interruption. A 20-second `SIGSTOP` of the
+exact owned boot-3 Transactor PID made zero-argument sync on the same recovered
+Peer connection return exactly `:cognitect.anomalies/unavailable`. After
+`SIGCONT`, that connection recovered on attempt 44 after 43 bounded
+unavailable retries, synced at basis `1066`, committed and uniquely read one
+`:db/doc` sentinel at basis `1099`, and exited successfully. A fresh recovered
+Peer then saw basis `1099` while preserving the database id, 96-row Stage 2
+view, and all four augment semantic hashes. The 535-entry Peer path reported
+source protocol `file`, zero visible Peer/core2 AOT, and zero forbidden
+implementation entries. All three Transactors stopped by bounded `SIGINT`,
+PostgreSQL reports `shut down`, host ports `54363` and `55463` are closed, and
+all 123 evidence-manifest entries verify. The evidence-manifest SHA-256 is
+`87eaf2e129aa5d3ec12b4e84a9c3143e623b21767a00ee0c3916ea3c037383f6`.
+The first v1 attempt is retained only as a pre-service harness failure: the
+network-restricted sandbox denied PostgreSQL's localhost bind, and cleanup
+completed with the cluster shut down. It is not Datomic evidence.
+
+**Recovered HA checkpoint (2026-08-28):** The sealed run at
+`/tmp/datomic-recovered-pair-ha-v1` passes one fail-stop takeover and self-
+fencing row after replaying the complete main, index, and transport path.
+Transactor B remained non-serving standby while A owned coordination through
+revision 25. After the exact A PID entered `SIGSTOP`, B promoted at revision
+26 and opened port 54366. The same recovered Peer connection moved from A on
+54365 to B on 54366, recovered on attempt six after one timeout and four exact
+unavailable outcomes, synced at basis 1099, and committed/read exactly one
+sentinel at basis 1101. After `SIGCONT`, A reported exact heartbeat conflict
+and process failure and self-fenced with exit 255. B continued through recorded
+revision 34; a fresh Peer preserved database id, the 96-row view, and all four
+semantic hashes at basis 1101. Three Transactor stops were graceful, one was
+the required self-fence, PostgreSQL shut down, all three host ports are closed,
+and no run process remains. All 140 evidence entries verify; manifest SHA-256
+is `62859ef9ec8e66c43743434ea35974dde6dfd8362ff23cc6226d86721f2edf88`.
+This closes only the bounded fail-stop row. In-flight acknowledgement,
+delayed/partitioned writer, and no-writable-split-brain rows remain open.
+
+The transport harness change reuses the already-proven Stage 3 marker
+protocol. `stage3/transport_probe.clj` now accepts an explicit expected source
+protocol while retaining `jar` as the old default; the recovered gate passes
+`file` for its unpacked JKS-free Peer runtime. The probe and repository runner
+SHA-256 values are
+`24ebf30a78088a5720737d1c7ac5c3a3fc91b16f130cbefdc10f6f276f645a9a`
+and `70be908febf3487e41d7c84dd9583e729c3bc51e6ff819ea14c7f63a8e348691`.
+Backward-compatible JAR and recovered file-origin probes, shell syntax, help,
+and diff-integrity checks pass. No recovery source changed because this gate
+exposed no recovery defect.
 
 **PostgreSQL vertical-slice checkpoint (2026-08-28):** The recovered
 Transactor and recovered Peer now complete the main path through provisioned
@@ -1215,7 +1713,7 @@ The historical `vslice8` inputs were subsequently found unsuitable as a
 reproducible gate: its Transactor discovery record pointed at live repository
 sources, its Peer artifact was stale against 11 current Peer files, and the
 canonical Peer artifact still packaged two licensed JKS resources. Those facts
-are no longer papered over. The new repository runner
+are no longer papered over. The v3 repository runner snapshot
 `datomic-rev/transactor/scripts/validate-postgresql-vertical-slice.sh`, SHA-256
 `3544bdb504ab7926359cbfe366c3bcbc8c85ad14292f68d1e4827cc228e88639`,
 rebuilds and byte-compares the current Peer, stages a JKS-free runtime
@@ -1226,7 +1724,7 @@ classpaths. Its no-service preflight passed at
 runtime-regression probe; its evidence-manifest SHA-256 is
 `94cc29daebbedec4123d712f31f127bacad449df6d5e620014dbab79095eed0c`.
 
-The current executing repository-gate run passed at
+The earlier executing repository-gate run passed at
 `/tmp/datomic-recovered-pair-live-v3`. Seed basis `1001`/64 rows survived a
 fresh Transactor and fresh data-directory restart with exact database id,
 basis, row count, and four semantic hashes; catchup replayed 37,372 bytes from
@@ -1259,7 +1757,7 @@ Before that run, the six earlier deliberate runtime repairs in `datomic.common`,
 `datomic.db`, `datomic.future`, `datomic.kv-cluster`,
 `datomic.memory-size`, and `datomic.update` passed their AOT/decompiler and
 focused behavior checks. Together with the `compare-byte-arrays` correction
-described below, they were honestly repinned. The current 247-row source
+described below, they were honestly repinned. The v3 247-row source
 manifest SHA-256 is
 `6f27a4259ea02bb3eba6214d44b7c155d0d3dda1128a8d0be5301c2d00257786`.
 A fresh structural root at
@@ -1307,14 +1805,17 @@ regression plus one focused runtime regression pass. With that defect fixed,
 the same probe correctly reports PostgreSQL's missing `datomic_kvs` relation;
 external table provisioning is therefore an explicit harness precondition.
 
-This checkpoint advances Stages 2--6 but does not close them. Stage 2 still
-needs final classification of all 117 overlaps. Stage 3 now proves graceful
-success-path shutdown but still needs injected startup-failure cleanup. Stage
-4 still needs the exact CAS/root rejection and failure matrix. Stage 5 still
-needs rejection,
-concurrency, and fault-injected acknowledgement-boundary tests. Stage 6 still
-needs persistent-index scheduling/publication and transport-interruption
-coverage. Stage 7 HA remains pending.
+The earlier v3 checkpoint advanced Stages 2--6. Stage 2 still needs final
+classification of all 117 overlaps. The dedicated missing-schema gate now
+closes Stage 3's success and injected-failure process boundary. The focused
+storage-CAS gate now closes Stage 4's exact PostgreSQL ref/log-root rejection
+boundary while preserving the winning authoritative rows. The transaction-v5
+gate closes Stage 5's bounded stale-CAS/uniqueness rejection and concurrent
+ordering rows; fault-injected acknowledgement and full licensed-oracle
+transaction equivalence remain open. The index-v5 and transport-v2 checkpoints
+close Stage 6's persistent-index publication, fresh-process adoption, and
+interruption/reconnection completion boundary. HA-v1 advances Stage 7 through
+one takeover/self-fence row; the broader HA completion matrix remains open.
 
 **Superseded anti-ceremony checkpoint (2026-08-28):** Before the runtime result
 above, the recovery work had produced a real candidate corpus, but the most
@@ -1357,8 +1858,8 @@ the bytecode-proved captured-field/function-name discrimination, bounded
 impure-loop return repair, and persistent pre-namespace-load protocol-method
 Var discrimination described below. Its source-first validator passes 52/52
 tagged groups; v22 predates these final repairs and is still only diagnostic.
-The fresh whole-tree failures below, rather than these superseded snapshots,
-now define the promotion boundary.
+The later bounded current-source surface relation, rather than those
+superseded snapshots, now defines the promotion boundary.
 The Java slice independently reproduces 46 sources to all 52 classes with
 exact ABI/code and an isolated compile/oracle boundary. Sanitized nano and the
 recursively scanned 532-artifact dependency closure pass twin-build/audit
@@ -1369,19 +1870,31 @@ resource provenance, and the first corrected full run was stopped for
 incomplete evidence binding. The subsequent 1,055-input-sealed diagnostic
 proved 271 cold loads plus the one bytecode-supported production-order load and
 verified the post-load/post-surface input seals. That historical run remains
-non-promotable because its raw-output protocol obscured 36 probes. The
-replacement dedicated-channel all-247 run now supersedes its surface diagnosis:
-all 247 processes pass on both sides, with 228 exact surfaces and the 19
-classified differences recorded above.
+non-promotable because its raw-output protocol obscured 36 probes. Its
+replacement dedicated-channel predecessor made all 247 processes pass on both
+sides, with 228 exact surfaces and 19 classified differences. Those historical
+counts are themselves superseded by the later bounded current-source surface
+relation recorded above.
 The current structural validator additionally proves the exact compiler
 metadata-elision setting from the hash-pinned Transactor's embedded POM; its
 fresh discovery-only replay passes and has a recursively verified evidence
 manifest, but executes neither loads nor surfaces and is not a Stage 1 pass.
 
-**Still open:** The verified v22 source tree is diagnostic, not promotable.
-Its correct all-247 replay loads every namespace on both sides but retains the
-19 exact value-surface differences and 83 raw runtime-type-ledger differences
-recorded above. The current full-tree ordered delta reads all 247 files and has
+**Still open (current boundary):** The verified v22 source tree and its 19
+value-surface/83 runtime-type diagnostics are historical, not promotable and
+not the current Stage 1 result. Fresh integrated v3 twins recovered 247/247
+sources twice with byte-identical trees and promoted the complete tree at
+manifest-file SHA-256
+`bc44fdc277a5452b8fa950eaa390b595f5d93b5705cfb1b2ab4689d07656b69f`.
+The current bounded gate proves 272/272 effective loads and valid
+oracle/candidate probes for all 247 namespaces. Raw payloads are exact for
+232/247, location-stripped payloads for 243/247, and callable/root/class shape
+for 247/247 when Var metadata is excluded. The remaining strict Var metadata
+is only 31 Vars in four namespaces: 28 `:arglists` rows in two namespaces and
+three bundled-source `:name` rows in two namespaces. No decompiled Datomic
+namespace remains in the strict residual. Normalized exact-source AOT
+acceptance is the sole open Stage 1 boundary.
+The historical full-tree ordered delta reads all 247 files and has
 removed the regex-identity false positives. Its fresh v8 replay remains an
 honest expected failure and now reports 804 residual issues after the exact
 v6--v8 relation stages described below. The v6 baseline reduced the issue
@@ -1904,10 +2417,16 @@ sanitized, licensed, runtime, and output roots mutually non-overlapping before
 the first write. Generated candidate trees require pre/post seals around the
 scanner, comparator, and verifier; every failed as well as successful run needs
 a complete manifest and per-relation status. The historical sed class-name
-skeleton must become diagnostic rather than an independent semantic gate, and
-candidate A/B byte determinism must be enforced rather than merely reported.
-These are same-run acceptance requirements carried forward from the frozen
-adversarial audit, not optional later hardening.
+skeleton and candidate A/B raw-byte comparison must remain diagnostics rather
+than independent semantic gates. The typed, whole-cohort normalized relation
+is authoritative: retained evidence already shows 12 namespaces whose fresh
+compilations have different raw bytes while preserving the mapped ABI,
+instruction, frame, constructor-capture, and local-node relations. Requiring
+raw byte identity here would silently change the Stage 1 objective into a
+separate reproducible-build project. The same-run scanner, JVM verifier,
+complete normalized relations, isolation, sealing, and failure evidence remain
+acceptance requirements carried forward from the frozen adversarial audit,
+not optional later hardening.
 The current read-only integration audit further fixes the concrete wrapper
 shape. The compile root should contain exactly the 87 report-bound source
 entries (85 bundled plus `datomic.query.support` and `datomic.specs`, including
@@ -1930,24 +2449,34 @@ must run before scanner and verifier because its exact 3-by-3,431 class map is
 an input to both. The clean environment must additionally reject
 `JDK_JAVAC_OPTIONS` and `CLASSPATH`; the full Corretto image presently contains
 465 files and 90 directories and needs a reproducible relative tree seal.
-The known 12-namespace/219-class candidate A/B byte differences remain an
-acceptance failure even when later diagnostic gates continue. A post-preflight
-EXIT evidence path, bounded TERM-to-KILL cleanup, per-gate candidate/input
-seals, and explicit PASS/FAIL/NOT_RUN rows are required before this wrapper can
-be promoted.
-The full merged 247 Transactor plus 25 Peer-core2 structural discovery/load
-gate has now rerun from a fresh root with the sanitized Nano and generated
-resources proved at the runtime boundary: 272/272 loads pass. The exhaustive
-surface half and normalized exact-source AOT promotion boundary remain open;
-they are distinct from the now-proven PostgreSQL main-path runtime slice.
+The known 12-namespace/219-class candidate A/B raw-byte differences remain a
+required diagnostic, but do not fail a complete typed normalized A/B relation.
+A post-preflight EXIT evidence path, bounded TERM-to-KILL cleanup, per-gate
+candidate/input seals, and explicit PASS/FAIL/NOT_RUN rows are required before
+this wrapper can be promoted.
+The full merged 247 Transactor plus 25 Peer-core2 structural gate now proves
+272/272 effective loads and 247/247 runtime-callable/class surfaces. The only
+strict Var-metadata residuals are bounded compile-context differences in exact
+shipped sources; no decompiled Datomic namespace remains in that residual.
+Normalized exact-source AOT acceptance is the sole open Stage 1 boundary and
+is distinct from the proven PostgreSQL and transport runtime path.
 
-**Next direct action:** Close the deferred Stage 1 exact-source/surface boundary
-and classify all 117 Stage 2 overlaps. Then exercise the first still-open
-concrete Stage 3--7 boundary: injected-startup-failure cleanup, exact SQL
-CAS/root rejection, transport interruption, or active/standby takeover. The
-existing Stage 2/3 Peer harnesses remain licensed-Transactor oracle fixtures and
-must not be relabeled as the recovered-pair gate. Do not resume an
-unconstrained 189-residual loop.
+**Next direct action:** Continue the bounded transaction/transport overlap
+cohort pulled by the already-green rejection, concurrent-ordering,
+crash/acknowledgement, and same-Peer reconnect gates. `datomic.transaction` and
+`datomic.cache` are resolved; the remaining ranked cohort is `datomic.promise`, `datomic.queue`,
+`datomic.builtins`, `datomic.reconnector2`, `datomic.connector`, and
+`datomic.artemis-client`. Attach existing runtime evidence first and add one
+focused behavior probe only for an uncovered residual. Keep broad
+`datomic.db`, `datomic.peer`, `datomic.fressian`, and `datomic.error` rows and
+the six partial storage/publication rows explicitly open until focused dormant-
+branch or sealed namespace-wide bytecode evidence closes them. In parallel
+only where it does not interrupt that executable boundary, close the already-
+bounded 87-source exact-AOT wrapper. Rerun downstream gates only when their
+executable sources change. Do not resume residual-by-residual edits or expand
+the HA matrix before this Stage 2/AOT checkpoint closes. The existing Stage
+2/3 Peer harnesses remain licensed-Transactor oracle fixtures and must not be
+relabeled as recovered-pair gates.
 
 ## Goal completion
 

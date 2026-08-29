@@ -471,11 +471,11 @@
                                                                temp__5804__auto__ (seq s__29235)]
                                                            (when
                                                              temp__5804__auto__
-                                                             (let
+                                                             (let 
                                                                [s__29235 temp__5804__auto__]
                                                                (if
                                                                  (chunked-seq? s__29235)
-                                                                 (let
+                                                                 (let 
                                                                    [c__6371__auto__
                                                                     (chunk-first s__29235)
                                                                     size__6372__auto__
@@ -485,13 +485,13 @@
                                                                       (java.lang.Integer/valueOf
                                                                         (int size__6372__auto__)))]
                                                                    (if
-                                                                     (loop
+                                                                     (loop 
                                                                        [i__29236 (int 0)]
                                                                        (if
                                                                          (<
                                                                            i__29236
                                                                            size__6372__auto__)
-                                                                         (let
+                                                                         (let 
                                                                            [s
                                                                             (.nth
                                                                               ^clojure.lang.Indexed c__6371__auto__
@@ -512,7 +512,7 @@
                                                                      (chunk-cons
                                                                        (chunk b__29237)
                                                                        nil)))
-                                                                 (let
+                                                                 (let 
                                                                    [s (first s__29235)]
                                                                    (cons
                                                                      [:li
@@ -548,11 +548,11 @@
                                                                temp__5804__auto__ (seq s__29248)]
                                                            (when
                                                              temp__5804__auto__
-                                                             (let
+                                                             (let 
                                                                [s__29248 temp__5804__auto__]
                                                                (if
                                                                  (chunked-seq? s__29248)
-                                                                 (let
+                                                                 (let 
                                                                    [c__6371__auto__
                                                                     (chunk-first s__29248)
                                                                     size__6372__auto__
@@ -562,13 +562,13 @@
                                                                       (java.lang.Integer/valueOf
                                                                         (int size__6372__auto__)))]
                                                                    (if
-                                                                     (loop
+                                                                     (loop 
                                                                        [i__29249 (int 0)]
                                                                        (if
                                                                          (<
                                                                            i__29249
                                                                            size__6372__auto__)
-                                                                         (let
+                                                                         (let 
                                                                            [s
                                                                             (.nth
                                                                               ^clojure.lang.Indexed c__6371__auto__
@@ -589,7 +589,7 @@
                                                                      (chunk-cons
                                                                        (chunk b__29250)
                                                                        nil)))
-                                                                 (let
+                                                                 (let 
                                                                    [s (first s__29248)]
                                                                    (cons
                                                                      [:li
@@ -639,17 +639,17 @@
                                 (let [iter__6373__auto__ (fn iter__29266
                                                            ([s__29267]
                                                              (lazy-seq
-                                                               (let
+                                                               (let 
                                                                  [s__29267 s__29267
                                                                   temp__5804__auto__
                                                                   (seq s__29267)]
                                                                  (when
                                                                    temp__5804__auto__
-                                                                   (let
+                                                                   (let 
                                                                      [s__29267 temp__5804__auto__]
                                                                      (if
                                                                        (chunked-seq? s__29267)
-                                                                       (let
+                                                                       (let 
                                                                          [c__6371__auto__
                                                                           (chunk-first s__29267)
                                                                           size__6372__auto__
@@ -662,13 +662,13 @@
                                                                               (int
                                                                                 size__6372__auto__)))]
                                                                          (if
-                                                                           (loop
+                                                                           (loop 
                                                                              [i__29268 (int 0)]
                                                                              (if
                                                                                (<
                                                                                  i__29268
                                                                                  size__6372__auto__)
-                                                                               (let
+                                                                               (let 
                                                                                  [db
                                                                                   (.nth
                                                                                     ^clojure.lang.Indexed c__6371__auto__
@@ -695,7 +695,7 @@
                                                                            (chunk-cons
                                                                              (chunk b__29269)
                                                                              nil)))
-                                                                       (let
+                                                                       (let 
                                                                          [db (first s__29267)]
                                                                          (cons
                                                                            [:li
@@ -749,17 +749,17 @@
                                 (let [iter__6373__auto__ (fn iter__29279
                                                            ([s__29280]
                                                              (lazy-seq
-                                                               (let
+                                                               (let 
                                                                  [s__29280 s__29280
                                                                   temp__5804__auto__
                                                                   (seq s__29280)]
                                                                  (when
                                                                    temp__5804__auto__
-                                                                   (let
+                                                                   (let 
                                                                      [s__29280 temp__5804__auto__]
                                                                      (if
                                                                        (chunked-seq? s__29280)
-                                                                       (let
+                                                                       (let 
                                                                          [c__6371__auto__
                                                                           (chunk-first s__29280)
                                                                           size__6372__auto__
@@ -772,13 +772,13 @@
                                                                               (int
                                                                                 size__6372__auto__)))]
                                                                          (if
-                                                                           (loop
+                                                                           (loop 
                                                                              [i__29281 (int 0)]
                                                                              (if
                                                                                (<
                                                                                  i__29281
                                                                                  size__6372__auto__)
-                                                                               (let
+                                                                               (let 
                                                                                  [db
                                                                                   (.nth
                                                                                     ^clojure.lang.Indexed c__6371__auto__
@@ -805,7 +805,7 @@
                                                                            (chunk-cons
                                                                              (chunk b__29282)
                                                                              nil)))
-                                                                       (let
+                                                                       (let 
                                                                          [db (first s__29280)]
                                                                          (cons
                                                                            [:li
@@ -1041,11 +1041,11 @@
                                                                 temp__5804__auto__ (seq s__29339)]
                                                             (when
                                                               temp__5804__auto__
-                                                              (let
+                                                              (let 
                                                                 [s__29339 temp__5804__auto__]
                                                                 (if
                                                                   (chunked-seq? s__29339)
-                                                                  (let
+                                                                  (let 
                                                                     [c__6371__auto__
                                                                      (chunk-first s__29339)
                                                                      size__6372__auto__
@@ -1056,13 +1056,13 @@
                                                                          (int
                                                                            size__6372__auto__)))]
                                                                     (if
-                                                                      (loop
+                                                                      (loop 
                                                                         [i__29340 (int 0)]
                                                                         (if
                                                                           (<
                                                                             i__29340
                                                                             size__6372__auto__)
-                                                                          (let
+                                                                          (let 
                                                                             [vec__29345
                                                                              (.nth
                                                                                ^clojure.lang.Indexed c__6371__auto__
@@ -1092,7 +1092,7 @@
                                                                       (chunk-cons
                                                                         (chunk b__29341)
                                                                         nil)))
-                                                                  (let
+                                                                  (let 
                                                                     [vec__29349 (first s__29339)
                                                                      tid
                                                                      (nth vec__29349 (int 0) nil)
@@ -1157,11 +1157,11 @@
                                                                 temp__5804__auto__ (seq s__29361)]
                                                             (when
                                                               temp__5804__auto__
-                                                              (let
+                                                              (let 
                                                                 [s__29361 temp__5804__auto__]
                                                                 (if
                                                                   (chunked-seq? s__29361)
-                                                                  (let
+                                                                  (let 
                                                                     [c__6371__auto__
                                                                      (chunk-first s__29361)
                                                                      size__6372__auto__
@@ -1172,13 +1172,13 @@
                                                                          (int
                                                                            size__6372__auto__)))]
                                                                     (if
-                                                                      (loop
+                                                                      (loop 
                                                                         [i__29362 (int 0)]
                                                                         (if
                                                                           (<
                                                                             i__29362
                                                                             size__6372__auto__)
-                                                                          (let
+                                                                          (let 
                                                                             [vec__29367
                                                                              (.nth
                                                                                ^clojure.lang.Indexed c__6371__auto__
@@ -1208,7 +1208,7 @@
                                                                       (chunk-cons
                                                                         (chunk b__29363)
                                                                         nil)))
-                                                                  (let
+                                                                  (let 
                                                                     [vec__29371 (first s__29361)
                                                                      tid
                                                                      (nth vec__29371 (int 0) nil)
@@ -1605,23 +1605,23 @@
                                       [:tr
                                        [:td ":db/id"]
                                        [:td (^clojure.lang.IFn elink (:db/id emap))]]
-                                      (let [iter__6373__auto__ (fn
+                                      (let [iter__6373__auto__ (fn 
                                                                  iter__29442
                                                                  ([s__29443]
                                                                    (lazy-seq
-                                                                     (let
+                                                                     (let 
                                                                        [s__29443 s__29443
                                                                         temp__5804__auto__
                                                                         (seq s__29443)]
                                                                        (when
                                                                          temp__5804__auto__
-                                                                         (let
+                                                                         (let 
                                                                            [s__29443
                                                                             temp__5804__auto__]
                                                                            (if
                                                                              (chunked-seq?
                                                                                s__29443)
-                                                                             (let
+                                                                             (let 
                                                                                [c__6371__auto__
                                                                                 (chunk-first
                                                                                   s__29443)
@@ -1635,14 +1635,14 @@
                                                                                     (int
                                                                                       size__6372__auto__)))]
                                                                                (if
-                                                                                 (loop
+                                                                                 (loop 
                                                                                    [i__29444
                                                                                     (int 0)]
                                                                                    (if
                                                                                      (<
                                                                                        i__29444
                                                                                        size__6372__auto__)
-                                                                                     (let
+                                                                                     (let 
                                                                                        [vec__29449
                                                                                         (.nth
                                                                                           ^clojure.lang.Indexed c__6371__auto__
@@ -1674,13 +1674,13 @@
                                                                                                     a
                                                                                                     (first
                                                                                                       v))]]]
-                                                                                               (let
+                                                                                               (let 
                                                                                                  [iter__6373__auto__
-                                                                                                  (fn
+                                                                                                  (fn 
                                                                                                     iter__29452
                                                                                                     ([s__29453]
                                                                                                       (lazy-seq
-                                                                                                        (let
+                                                                                                        (let 
                                                                                                           [s__29453
                                                                                                            s__29453
                                                                                                            temp__5804__auto__
@@ -1688,13 +1688,13 @@
                                                                                                              s__29453)]
                                                                                                           (when
                                                                                                             temp__5804__auto__
-                                                                                                            (let
+                                                                                                            (let 
                                                                                                               [s__29453
                                                                                                                temp__5804__auto__]
                                                                                                               (if
                                                                                                                 (chunked-seq?
                                                                                                                   s__29453)
-                                                                                                                (let
+                                                                                                                (let 
                                                                                                                   [c__6371__auto__
                                                                                                                    (chunk-first
                                                                                                                      s__29453)
@@ -1708,7 +1708,7 @@
                                                                                                                        (int
                                                                                                                          size__6372__auto__)))]
                                                                                                                   (if
-                                                                                                                    (loop
+                                                                                                                    (loop 
                                                                                                                       [i__29454
                                                                                                                        (int
                                                                                                                          0)]
@@ -1716,7 +1716,7 @@
                                                                                                                         (<
                                                                                                                           i__29454
                                                                                                                           size__6372__auto__)
-                                                                                                                        (let
+                                                                                                                        (let 
                                                                                                                           [v
                                                                                                                            (.nth
                                                                                                                              ^clojure.lang.Indexed c__6371__auto__
@@ -1744,7 +1744,7 @@
                                                                                                                       (chunk
                                                                                                                         b__29455)
                                                                                                                       nil)))
-                                                                                                                (let
+                                                                                                                (let 
                                                                                                                   [v
                                                                                                                    (first
                                                                                                                      s__29453)]
@@ -1781,7 +1781,7 @@
                                                                                  (chunk-cons
                                                                                    (chunk b__29445)
                                                                                    nil)))
-                                                                             (let
+                                                                             (let 
                                                                                [vec__29467
                                                                                 (first s__29443)
                                                                                 a
@@ -1809,13 +1809,13 @@
                                                                                             a
                                                                                             (first
                                                                                               v))]]]
-                                                                                       (let
+                                                                                       (let 
                                                                                          [iter__6373__auto__
-                                                                                          (fn
+                                                                                          (fn 
                                                                                             iter__29470
                                                                                             ([s__29471]
                                                                                               (lazy-seq
-                                                                                                (let
+                                                                                                (let 
                                                                                                   [s__29471
                                                                                                    s__29471
                                                                                                    temp__5804__auto__
@@ -1823,13 +1823,13 @@
                                                                                                      s__29471)]
                                                                                                   (when
                                                                                                     temp__5804__auto__
-                                                                                                    (let
+                                                                                                    (let 
                                                                                                       [s__29471
                                                                                                        temp__5804__auto__]
                                                                                                       (if
                                                                                                         (chunked-seq?
                                                                                                           s__29471)
-                                                                                                        (let
+                                                                                                        (let 
                                                                                                           [c__6371__auto__
                                                                                                            (chunk-first
                                                                                                              s__29471)
@@ -1843,7 +1843,7 @@
                                                                                                                (int
                                                                                                                  size__6372__auto__)))]
                                                                                                           (if
-                                                                                                            (loop
+                                                                                                            (loop 
                                                                                                               [i__29472
                                                                                                                (int
                                                                                                                  0)]
@@ -1851,7 +1851,7 @@
                                                                                                                 (<
                                                                                                                   i__29472
                                                                                                                   size__6372__auto__)
-                                                                                                                (let
+                                                                                                                (let 
                                                                                                                   [v
                                                                                                                    (.nth
                                                                                                                      ^clojure.lang.Indexed c__6371__auto__
@@ -1879,7 +1879,7 @@
                                                                                                               (chunk
                                                                                                                 b__29473)
                                                                                                               nil)))
-                                                                                                        (let
+                                                                                                        (let 
                                                                                                           [v
                                                                                                            (first
                                                                                                              s__29471)]
@@ -2077,11 +2077,11 @@
                                                         (let [s__29504 s__29504
                                                               temp__5804__auto__ (seq s__29504)]
                                                           (when temp__5804__auto__
-                                                            (let
+                                                            (let 
                                                               [s__29504 temp__5804__auto__]
                                                               (if
                                                                 (chunked-seq? s__29504)
-                                                                (let
+                                                                (let 
                                                                   [c__6371__auto__
                                                                    (chunk-first s__29504)
                                                                    size__6372__auto__
@@ -2091,13 +2091,13 @@
                                                                      (java.lang.Integer/valueOf
                                                                        (int size__6372__auto__)))]
                                                                   (if
-                                                                    (loop
+                                                                    (loop 
                                                                       [i__29505 (int 0)]
                                                                       (if
                                                                         (<
                                                                           i__29505
                                                                           size__6372__auto__)
-                                                                        (let
+                                                                        (let 
                                                                           [bind
                                                                            (.nth
                                                                              ^clojure.lang.Indexed c__6371__auto__
@@ -2114,7 +2114,7 @@
                                                                     (chunk-cons
                                                                       (chunk b__29506)
                                                                       nil)))
-                                                                (let
+                                                                (let 
                                                                   [bind (first s__29504)]
                                                                   (cons
                                                                     [:th (str bind)]
@@ -2127,11 +2127,11 @@
                                                        (let [s__29517 s__29517
                                                              temp__5804__auto__ (seq s__29517)]
                                                          (when temp__5804__auto__
-                                                           (let
+                                                           (let 
                                                              [s__29517 temp__5804__auto__]
                                                              (if
                                                                (chunked-seq? s__29517)
-                                                               (let
+                                                               (let 
                                                                  [c__6371__auto__
                                                                   (chunk-first s__29517)
                                                                   size__6372__auto__
@@ -2141,13 +2141,13 @@
                                                                     (java.lang.Integer/valueOf
                                                                       (int size__6372__auto__)))]
                                                                  (if
-                                                                   (loop
+                                                                   (loop 
                                                                      [i__29518 (int 0)]
                                                                      (if
                                                                        (<
                                                                          i__29518
                                                                          size__6372__auto__)
-                                                                       (let
+                                                                       (let 
                                                                          [r
                                                                           (.nth
                                                                             ^clojure.lang.Indexed c__6371__auto__
@@ -2155,13 +2155,13 @@
                                                                          (chunk-append
                                                                            b__29519
                                                                            [:tr
-                                                                            (let
+                                                                            (let 
                                                                               [iter__6373__auto__
-                                                                               (fn
+                                                                               (fn 
                                                                                  iter__29523
                                                                                  ([s__29524]
                                                                                    (lazy-seq
-                                                                                     (let
+                                                                                     (let 
                                                                                        [s__29524
                                                                                         s__29524
                                                                                         temp__5804__auto__
@@ -2169,13 +2169,13 @@
                                                                                           s__29524)]
                                                                                        (when
                                                                                          temp__5804__auto__
-                                                                                         (let
+                                                                                         (let 
                                                                                            [s__29524
                                                                                             temp__5804__auto__]
                                                                                            (if
                                                                                              (chunked-seq?
                                                                                                s__29524)
-                                                                                             (let
+                                                                                             (let 
                                                                                                [c__6371__auto__
                                                                                                 (chunk-first
                                                                                                   s__29524)
@@ -2189,7 +2189,7 @@
                                                                                                     (int
                                                                                                       size__6372__auto__)))]
                                                                                                (if
-                                                                                                 (loop
+                                                                                                 (loop 
                                                                                                    [i__29525
                                                                                                     (int
                                                                                                       0)]
@@ -2197,7 +2197,7 @@
                                                                                                      (<
                                                                                                        i__29525
                                                                                                        size__6372__auto__)
-                                                                                                     (let
+                                                                                                     (let 
                                                                                                        [c
                                                                                                         (.nth
                                                                                                           ^clojure.lang.Indexed c__6371__auto__
@@ -2222,7 +2222,7 @@
                                                                                                    (chunk
                                                                                                      b__29526)
                                                                                                    nil)))
-                                                                                             (let
+                                                                                             (let 
                                                                                                [c
                                                                                                 (first
                                                                                                   s__29524)]
@@ -2244,29 +2244,29 @@
                                                                    (chunk-cons
                                                                      (chunk b__29519)
                                                                      nil)))
-                                                               (let
+                                                               (let 
                                                                  [r (first s__29517)]
                                                                  (cons
                                                                    [:tr
-                                                                    (let
+                                                                    (let 
                                                                       [iter__6373__auto__
-                                                                       (fn
+                                                                       (fn 
                                                                          iter__29538
                                                                          ([s__29539]
                                                                            (lazy-seq
-                                                                             (let
+                                                                             (let 
                                                                                [s__29539 s__29539
                                                                                 temp__5804__auto__
                                                                                 (seq s__29539)]
                                                                                (when
                                                                                  temp__5804__auto__
-                                                                                 (let
+                                                                                 (let 
                                                                                    [s__29539
                                                                                     temp__5804__auto__]
                                                                                    (if
                                                                                      (chunked-seq?
                                                                                        s__29539)
-                                                                                     (let
+                                                                                     (let 
                                                                                        [c__6371__auto__
                                                                                         (chunk-first
                                                                                           s__29539)
@@ -2280,7 +2280,7 @@
                                                                                             (int
                                                                                               size__6372__auto__)))]
                                                                                        (if
-                                                                                         (loop
+                                                                                         (loop 
                                                                                            [i__29540
                                                                                             (int
                                                                                               0)]
@@ -2288,7 +2288,7 @@
                                                                                              (<
                                                                                                i__29540
                                                                                                size__6372__auto__)
-                                                                                             (let
+                                                                                             (let 
                                                                                                [c
                                                                                                 (.nth
                                                                                                   ^clojure.lang.Indexed c__6371__auto__
@@ -2313,7 +2313,7 @@
                                                                                            (chunk
                                                                                              b__29541)
                                                                                            nil)))
-                                                                                     (let
+                                                                                     (let 
                                                                                        [c
                                                                                         (first
                                                                                           s__29539)]
@@ -2389,11 +2389,11 @@
                                                         (let [s__29558 s__29558
                                                               temp__5804__auto__ (seq s__29558)]
                                                           (when temp__5804__auto__
-                                                            (let
+                                                            (let 
                                                               [s__29558 temp__5804__auto__]
                                                               (if
                                                                 (chunked-seq? s__29558)
-                                                                (let
+                                                                (let 
                                                                   [c__6371__auto__
                                                                    (chunk-first s__29558)
                                                                    size__6372__auto__
@@ -2403,13 +2403,13 @@
                                                                      (java.lang.Integer/valueOf
                                                                        (int size__6372__auto__)))]
                                                                   (if
-                                                                    (loop
+                                                                    (loop 
                                                                       [i__29559 (int 0)]
                                                                       (if
                                                                         (<
                                                                           i__29559
                                                                           size__6372__auto__)
-                                                                        (let
+                                                                        (let 
                                                                           [bind
                                                                            (.nth
                                                                              ^clojure.lang.Indexed c__6371__auto__
@@ -2426,7 +2426,7 @@
                                                                     (chunk-cons
                                                                       (chunk b__29560)
                                                                       nil)))
-                                                                (let
+                                                                (let 
                                                                   [bind (first s__29558)]
                                                                   (cons
                                                                     [:th (str bind)]
@@ -2439,11 +2439,11 @@
                                                        (let [s__29571 s__29571
                                                              temp__5804__auto__ (seq s__29571)]
                                                          (when temp__5804__auto__
-                                                           (let
+                                                           (let 
                                                              [s__29571 temp__5804__auto__]
                                                              (if
                                                                (chunked-seq? s__29571)
-                                                               (let
+                                                               (let 
                                                                  [c__6371__auto__
                                                                   (chunk-first s__29571)
                                                                   size__6372__auto__
@@ -2453,13 +2453,13 @@
                                                                     (java.lang.Integer/valueOf
                                                                       (int size__6372__auto__)))]
                                                                  (if
-                                                                   (loop
+                                                                   (loop 
                                                                      [i__29572 (int 0)]
                                                                      (if
                                                                        (<
                                                                          i__29572
                                                                          size__6372__auto__)
-                                                                       (let
+                                                                       (let 
                                                                          [r
                                                                           (.nth
                                                                             ^clojure.lang.Indexed c__6371__auto__
@@ -2467,13 +2467,13 @@
                                                                          (chunk-append
                                                                            b__29573
                                                                            [:tr
-                                                                            (let
+                                                                            (let 
                                                                               [iter__6373__auto__
-                                                                               (fn
+                                                                               (fn 
                                                                                  iter__29577
                                                                                  ([s__29578]
                                                                                    (lazy-seq
-                                                                                     (let
+                                                                                     (let 
                                                                                        [s__29578
                                                                                         s__29578
                                                                                         temp__5804__auto__
@@ -2481,13 +2481,13 @@
                                                                                           s__29578)]
                                                                                        (when
                                                                                          temp__5804__auto__
-                                                                                         (let
+                                                                                         (let 
                                                                                            [s__29578
                                                                                             temp__5804__auto__]
                                                                                            (if
                                                                                              (chunked-seq?
                                                                                                s__29578)
-                                                                                             (let
+                                                                                             (let 
                                                                                                [c__6371__auto__
                                                                                                 (chunk-first
                                                                                                   s__29578)
@@ -2501,7 +2501,7 @@
                                                                                                     (int
                                                                                                       size__6372__auto__)))]
                                                                                                (if
-                                                                                                 (loop
+                                                                                                 (loop 
                                                                                                    [i__29579
                                                                                                     (int
                                                                                                       0)]
@@ -2509,7 +2509,7 @@
                                                                                                      (<
                                                                                                        i__29579
                                                                                                        size__6372__auto__)
-                                                                                                     (let
+                                                                                                     (let 
                                                                                                        [c
                                                                                                         (.nth
                                                                                                           ^clojure.lang.Indexed c__6371__auto__
@@ -2534,7 +2534,7 @@
                                                                                                    (chunk
                                                                                                      b__29580)
                                                                                                    nil)))
-                                                                                             (let
+                                                                                             (let 
                                                                                                [c
                                                                                                 (first
                                                                                                   s__29578)]
@@ -2556,29 +2556,29 @@
                                                                    (chunk-cons
                                                                      (chunk b__29573)
                                                                      nil)))
-                                                               (let
+                                                               (let 
                                                                  [r (first s__29571)]
                                                                  (cons
                                                                    [:tr
-                                                                    (let
+                                                                    (let 
                                                                       [iter__6373__auto__
-                                                                       (fn
+                                                                       (fn 
                                                                          iter__29592
                                                                          ([s__29593]
                                                                            (lazy-seq
-                                                                             (let
+                                                                             (let 
                                                                                [s__29593 s__29593
                                                                                 temp__5804__auto__
                                                                                 (seq s__29593)]
                                                                                (when
                                                                                  temp__5804__auto__
-                                                                                 (let
+                                                                                 (let 
                                                                                    [s__29593
                                                                                     temp__5804__auto__]
                                                                                    (if
                                                                                      (chunked-seq?
                                                                                        s__29593)
-                                                                                     (let
+                                                                                     (let 
                                                                                        [c__6371__auto__
                                                                                         (chunk-first
                                                                                           s__29593)
@@ -2592,7 +2592,7 @@
                                                                                             (int
                                                                                               size__6372__auto__)))]
                                                                                        (if
-                                                                                         (loop
+                                                                                         (loop 
                                                                                            [i__29594
                                                                                             (int
                                                                                               0)]
@@ -2600,7 +2600,7 @@
                                                                                              (<
                                                                                                i__29594
                                                                                                size__6372__auto__)
-                                                                                             (let
+                                                                                             (let 
                                                                                                [c
                                                                                                 (.nth
                                                                                                   ^clojure.lang.Indexed c__6371__auto__
@@ -2625,7 +2625,7 @@
                                                                                            (chunk
                                                                                              b__29595)
                                                                                            nil)))
-                                                                                     (let
+                                                                                     (let 
                                                                                        [c
                                                                                         (first
                                                                                           s__29593)]
@@ -3295,14 +3295,10 @@
             ensure_thread (fn ensure_thread
                             ([desc]
                               (when-not (contains? (deref threads) desc)
-                                (let [lockee__5782__auto__ threads
-                                      locklocal__5783__auto__ lockee__5782__auto__]
-                                  (monitor-enter locklocal__5783__auto__)
-                                  (try
-                                    (when-not (contains? (deref threads) desc)
-                                      (when (service-queue desc clients)
-                                        (swap! threads conj desc)))
-                                    (finally (do (monitor-exit locklocal__5783__auto__) nil)))))))]
+                                (locking threads
+                                 (when-not (contains? (deref threads) desc)
+                                   (when (service-queue desc clients)
+                                     (swap! threads conj desc)))))))]
         (proxy
           [org.eclipse.jetty.servlets.EventSourceServlet]
           []

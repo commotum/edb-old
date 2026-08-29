@@ -24,8 +24,25 @@
         (clojure.core/import 'java.util.concurrent.atomic.LongAccumulator)
         (clojure.core/import 'java.util.concurrent.atomic.LongAdder))))
   (set! *warn-on-reflection* true)
-  (defonce Metrics {})
-  (defprotocol Metrics (metrics [_]))
+  (let [protocol_metadata__7420 {:column (int 1)}]
+    (defprotocol Metrics (metrics [_] "Return a map of metrics information about an object."))
+    (reset-meta!
+      (clojure.lang.RT/var "datomic.monitor" "Metrics")
+      (assoc (assoc protocol_metadata__7420 :doc nil) :name 'Metrics :ns *ns*))
+    (let [protocol_signature__7421 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta 'metrics {:arglists (clojure.core/list ['_])}),
+                                      :arglists (clojure.core/list ['_]),
+                                      :doc "Return a map of metrics information about an object."}
+                                     :protocol
+                                     (clojure.lang.RT/var "datomic.monitor" "Metrics"))
+          protocol_method_name__7422 (with-meta
+                                       (:name protocol_signature__7421)
+                                       protocol_signature__7421)]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.monitor" "metrics")
+        (assoc protocol_signature__7421 :name protocol_method_name__7422 :ns *ns*))))
   (extend
     java.lang.Runtime
     Metrics
@@ -41,14 +58,18 @@
     StatsUpdate
     (^java.lang.Object addObservation [^java.lang.Object arg0 ^java.lang.Object arg1]))
   (clojure.core/import 'datomic.monitor.StatsUpdate)
-  (def min*
-   (reify
-     java.util.function.LongBinaryOperator
-     (^long applyAsLong [this ^long a ^long b] (min a b))))
-  (def max*
-   (reify
-     java.util.function.LongBinaryOperator
-     (^long applyAsLong [this ^long a ^long b] (max a b))))
+  (.setMeta (clojure.lang.RT/var "datomic.monitor" "min*") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.monitor" "min*")
+    (reify
+      java.util.function.LongBinaryOperator
+      (^long applyAsLong [this ^long a ^long b] (min a b))))
+  (.setMeta (clojure.lang.RT/var "datomic.monitor" "max*") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.monitor" "max*")
+    (reify
+      java.util.function.LongBinaryOperator
+      (^long applyAsLong [this ^long a ^long b] (max a b))))
   (deftype
     Statistics
     [lo hi sum count]
@@ -106,6 +127,14 @@
         nil)))
   (clojure.core/import 'datomic.monitor.Statistics)
   (defn ->Statistics ([lo hi sum count] (datomic.monitor.Statistics. lo hi sum count)))
+  (reset-meta!
+    #'->Statistics
+    (assoc
+      {:arglists (clojure.core/list ['lo 'hi 'sum 'count]), :column (int 1)}
+      :name
+      '->Statistics
+      :ns
+      *ns*))
   (defn init-stats
     ([]
       (datomic.monitor.Statistics.
@@ -116,12 +145,13 @@
   (reset-meta!
     #'init-stats
     (assoc
-      {:private true, :arglists (clojure.core/list []), :column 1}
+      {:private true, :arglists (clojure.core/list []), :column (int 1)}
       :name
       'init-stats
       :ns
       *ns*))
-  (def statistics (atom (init-stats)))
+  (.setMeta (clojure.lang.RT/var "datomic.monitor" "statistics") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.monitor" "statistics") (atom (init-stats)))
   (defn snapshot-statistics
     ([]
       (let [stats (deref statistics)]
@@ -172,25 +202,60 @@
                   (assoc m k {:count (long (.sum ^java.util.concurrent.atomic.LongAdder v))}))))
             {}
             (.-count ^datomic.monitor.Statistics stats))))))
-  (defn load-callback
-    ([prop_name]
-      (let [temp__5804__auto__ (some->
-                                 (java.lang.System/getProperty ^java.lang.String prop_name)
-                                 (edn/read-string))]
-        (when temp__5804__auto__
-          (let [s temp__5804__auto__]
-            (when (symbol? s)
-              (let [temp__5804__auto__ (namespace s)]
-                (when temp__5804__auto__
-                  (let [ns temp__5804__auto__]
-                    (clojure.core/require (symbol ns))
-                    (deref (resolve s)))))))))))
-  (def metric-event-callback (load-callback "datomic.metricEventCallback"))
+  (reset-meta!
+    #'snapshot-statistics
+    (assoc
+      {:arglists (clojure.core/list []), :column (int 1)}
+      :name
+      'snapshot-statistics
+      :ns
+      *ns*))
+  (def load-callback
+   (fn load_callback
+     ([prop_name]
+       (let [temp__5804__auto__ (some->
+                                  (java.lang.System/getProperty ^java.lang.String prop_name)
+                                  (edn/read-string))]
+         (when temp__5804__auto__
+           (let [s temp__5804__auto__]
+             (when (symbol? s)
+               (let [temp__5804__auto__ (namespace s)]
+                 (when temp__5804__auto__
+                   (let [ns temp__5804__auto__]
+                     (clojure.core/require (symbol ns))
+                     (deref (resolve s))))))))))))
+  (reset-meta!
+    #'load-callback
+    (assoc
+      {:arglists (clojure.core/list ['prop-name]), :column (int 1)}
+      :name
+      'load-callback
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.monitor" "metric-event-callback") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.monitor" "metric-event-callback")
+    (load-callback "datomic.metricEventCallback"))
   (defn add-stat
     ([k val]
       (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " val "\n" (pr-str 'k)))))
       (let [temp__5804__auto__ metric-event-callback]
         (when temp__5804__auto__ (let [cb temp__5804__auto__] (^clojure.lang.IFn cb k val))))
       (.addObservation (deref statistics) k val)))
-  (defn ns->ms (^double [^long nanos] (/ (quot nanos 10000) 100.0)))
-  (defn alarm ([k] (add-stat :Alarm 1) (add-stat (keyword (str "Alarm" (name k))) 1))))
+  (reset-meta!
+    #'add-stat
+    (assoc {:arglists (clojure.core/list ['k 'val]), :column (int 1)} :name 'add-stat :ns *ns*))
+  (def ns->ms (fn ns__GT_ms (^double [^long nanos] (/ (quot nanos 10000) 100.0))))
+  (reset-meta!
+    #'ns->ms
+    (assoc
+      {:arglists (clojure.core/list (.withMeta [(.withMeta 'nanos {:tag 'long})] {:tag 'double})),
+       :column (int 1)}
+      :name
+      'ns->ms
+      :ns
+      *ns*))
+  (defn alarm ([k] (add-stat :Alarm 1) (add-stat (keyword (str "Alarm" (name k))) 1)))
+  (reset-meta!
+    #'alarm
+    (assoc {:arglists (clojure.core/list ['k]), :column (int 1)} :name 'alarm :ns *ns*)))

@@ -11,13 +11,13 @@
         (clojure.core/refer 'clojure.core :exclude ['assert])
         (clojure.core/require ['clojure.main :as 'main]))))
   (def ^{:dynamic true} *level* 0)
-  (reset-meta! #'*level* (assoc {:dynamic true, :column 1} :name '*level* :ns *ns*))
+  (reset-meta! #'*level* (assoc {:dynamic true, :column (int 1)} :name '*level* :ns *ns*))
   (def ^{:dynamic true} *result* 0)
-  (reset-meta! #'*result* (assoc {:dynamic true, :column 1} :name '*result* :ns *ns*))
+  (reset-meta! #'*result* (assoc {:dynamic true, :column (int 1)} :name '*result* :ns *ns*))
   (def ^{:dynamic true} *assert-handler* nil)
   (reset-meta!
     #'*assert-handler*
-    (assoc {:dynamic true, :column 1} :name '*assert-handler* :ns *ns*))
+    (assoc {:dynamic true, :column (int 1)} :name '*assert-handler* :ns *ns*))
   (defn local-bindings
     ([env]
       (let [symbols (map key env)]
@@ -30,7 +30,7 @@
   (reset-meta!
     #'local-bindings
     (assoc
-      {:private true, :arglists (clojure.core/list ['env]), :column 1}
+      {:private true, :arglists (clojure.core/list ['env]), :column (int 1)}
       :name
       'local-bindings
       :ns
@@ -48,60 +48,72 @@
           (when (instance? java.lang.Throwable *result*) (throw *result*))
           *result*)
         (finally (pop-thread-bindings)))))
-  (defn assert
-    ([&form &env x msg]
-      (when *assert*
-        (let [bindings (local-bindings &env)]
-          (seq
-            (concat
-              (clojure.core/list 'clojure.core/when-not)
-              (clojure.core/list x)
-              (clojure.core/list
-                (seq
-                  (concat
-                    (clojure.core/list 'clojure.core/let)
-                    (clojure.core/list
-                      (apply
-                        vector
-                        (seq
-                          (concat
-                            (clojure.core/list 'form__30735__auto__)
-                            (clojure.core/list
-                              (seq (concat (clojure.core/list 'quote) (clojure.core/list x))))
-                            (clojure.core/list 'error__30736__auto__)
-                            (clojure.core/list
-                              (seq
-                                (concat
-                                  (clojure.core/list 'clojure.core/ex-info)
-                                  (clojure.core/list msg)
-                                  (clojure.core/list
-                                    (apply
-                                      hash-map
-                                      (seq
-                                        (concat
-                                          (clojure.core/list :form)
-                                          (clojure.core/list 'form__30735__auto__)
-                                          (clojure.core/list :bindings)
-                                          (clojure.core/list bindings))))))))))))
-                    (clojure.core/list
-                      (seq
-                        (concat
-                          (clojure.core/list 'if)
-                          (clojure.core/list 'datomic.assert/*assert-handler*)
-                          (clojure.core/list
-                            (seq
-                              (concat
-                                (clojure.core/list 'datomic.assert/*assert-handler*)
-                                (clojure.core/list 'error__30736__auto__))))
-                          (clojure.core/list
-                            (seq
-                              (concat
-                                (clojure.core/list 'throw)
-                                (clojure.core/list 'error__30736__auto__)))))))))))))))
-    ([&form &env x]
-      (seq
-        (concat
-          (clojure.core/list 'datomic.assert/assert)
-          (clojure.core/list x)
-          (clojure.core/list "Assertion failed, see ex-data for details")))))
+  (reset-meta!
+    #'assertion-repl
+    (assoc
+      {:arglists (clojure.core/list ['error]), :column (int 1)}
+      :name
+      'assertion-repl
+      :ns
+      *ns*))
+  (def assert
+   (fn assert
+     ([&form &env x msg]
+       (when *assert*
+         (let [bindings (local-bindings &env)]
+           (seq
+             (concat
+               (clojure.core/list 'clojure.core/when-not)
+               (clojure.core/list x)
+               (clojure.core/list
+                 (seq
+                   (concat
+                     (clojure.core/list 'clojure.core/let)
+                     (clojure.core/list
+                       (apply
+                         vector
+                         (seq
+                           (concat
+                             (clojure.core/list 'form__30735__auto__)
+                             (clojure.core/list
+                               (seq (concat (clojure.core/list 'quote) (clojure.core/list x))))
+                             (clojure.core/list 'error__30736__auto__)
+                             (clojure.core/list
+                               (seq
+                                 (concat
+                                   (clojure.core/list 'clojure.core/ex-info)
+                                   (clojure.core/list msg)
+                                   (clojure.core/list
+                                     (apply
+                                       hash-map
+                                       (seq
+                                         (concat
+                                           (clojure.core/list :form)
+                                           (clojure.core/list 'form__30735__auto__)
+                                           (clojure.core/list :bindings)
+                                           (clojure.core/list bindings))))))))))))
+                     (clojure.core/list
+                       (seq
+                         (concat
+                           (clojure.core/list 'if)
+                           (clojure.core/list 'datomic.assert/*assert-handler*)
+                           (clojure.core/list
+                             (seq
+                               (concat
+                                 (clojure.core/list 'datomic.assert/*assert-handler*)
+                                 (clojure.core/list 'error__30736__auto__))))
+                           (clojure.core/list
+                             (seq
+                               (concat
+                                 (clojure.core/list 'throw)
+                                 (clojure.core/list 'error__30736__auto__)))))))))))))))
+     ([&form &env x]
+       (seq
+         (concat
+           (clojure.core/list 'datomic.assert/assert)
+           (clojure.core/list x)
+           (clojure.core/list "Assertion failed, see ex-data for details"))))))
+  (reset-meta!
+    #'assert
+    (assoc {:arglists (clojure.core/list ['x] ['x 'msg]), :column (int 1)} :name 'assert :ns *ns*))
   (.setMacro #'assert))

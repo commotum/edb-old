@@ -17,10 +17,71 @@
           ['datomic.config :as 'config]
           ['datomic.slf4j :as 'logger]))))
   (set! *warn-on-reflection* true)
-  (defonce CriticalFailure {})
-  (defprotocol CriticalFailure (add-fail-handler [_ h]) (failing? [_]) (fail [_ msg] [_ msg t]))
-  (declare ->SharedCriticalFailure)
-  (declare map->SharedCriticalFailure)
+  (let [protocol_metadata__7420 {:column (int 1)}]
+    (defprotocol
+      CriticalFailure
+      (add-fail-handler
+        [_ h]
+        "Add a function to be called in even of a critical process failure.\n   Critical failure handlers should be idempotent, e.g. via a delay.")
+      (failing? [_] "Is process in a critical failure? Once true can never be false.")
+      (fail [_ msg] [_ msg t] "Fail the process."))
+    (reset-meta!
+      (clojure.lang.RT/var "datomic.process" "CriticalFailure")
+      (assoc (assoc protocol_metadata__7420 :doc nil) :name 'CriticalFailure :ns *ns*))
+    (let [protocol_signature__7421 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta
+                                        'add-fail-handler
+                                        {:arglists (clojure.core/list ['_ 'h])}),
+                                      :arglists (clojure.core/list ['_ 'h]),
+                                      :doc
+                                      "Add a function to be called in even of a critical process failure.\n   Critical failure handlers should be idempotent, e.g. via a delay."}
+                                     :protocol
+                                     (clojure.lang.RT/var "datomic.process" "CriticalFailure"))
+          protocol_method_name__7422 (with-meta
+                                       (:name protocol_signature__7421)
+                                       protocol_signature__7421)]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.process" "add-fail-handler")
+        (assoc protocol_signature__7421 :name protocol_method_name__7422 :ns *ns*)))
+    (let [protocol_signature__7423 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta 'failing? {:arglists (clojure.core/list ['_])}),
+                                      :arglists (clojure.core/list ['_]),
+                                      :doc
+                                      "Is process in a critical failure? Once true can never be false."}
+                                     :protocol
+                                     (clojure.lang.RT/var "datomic.process" "CriticalFailure"))
+          protocol_method_name__7424 (with-meta
+                                       (:name protocol_signature__7423)
+                                       protocol_signature__7423)]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.process" "failing?")
+        (assoc protocol_signature__7423 :name protocol_method_name__7424 :ns *ns*)))
+    (let [protocol_signature__7425 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta
+                                        'fail
+                                        {:arglists (clojure.core/list ['_ 'msg] ['_ 'msg 't])}),
+                                      :arglists (clojure.core/list ['_ 'msg] ['_ 'msg 't]),
+                                      :doc "Fail the process."}
+                                     :protocol
+                                     (clojure.lang.RT/var "datomic.process" "CriticalFailure"))
+          protocol_method_name__7426 (with-meta
+                                       (:name protocol_signature__7425)
+                                       protocol_signature__7425)]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.process" "fail")
+        (assoc protocol_signature__7425 :name protocol_method_name__7426 :ns *ns*))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.process" "->SharedCriticalFailure")
+    {:declared true, :column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.process" "map->SharedCriticalFailure")
+    {:declared true, :column (int 1)})
   (defrecord
     SharedCriticalFailure
     [handlers prom shutdown]
@@ -60,92 +121,128 @@
   (clojure.core/import 'datomic.process.SharedCriticalFailure)
   (defn ->SharedCriticalFailure
     ([handlers prom shutdown] (datomic.process.SharedCriticalFailure. handlers prom shutdown)))
+  (reset-meta!
+    #'->SharedCriticalFailure
+    (assoc
+      {:arglists (clojure.core/list ['handlers 'prom 'shutdown]), :column (int 1)}
+      :name
+      '->SharedCriticalFailure
+      :ns
+      *ns*))
   (defn map->SharedCriticalFailure
     ([m__7972__auto__]
       (SharedCriticalFailure/create
         (if (instance? clojure.lang.MapEquivalence m__7972__auto__)
           m__7972__auto__
           (into {} m__7972__auto__)))))
-  (defn create-instance
-    ([shutdown_time exit?]
-      (let [handlers (atom []) prom (promise)]
-        (datomic.process.SharedCriticalFailure.
-          handlers
-          prom
-          (delay
-            (deliver prom true)
-            (loop [seq_13046 (seq (deref handlers)) chunk_13047 nil count_13048 0 i_13049 0]
-              (if (< i_13049 count_13048)
-                (let [h (.nth ^clojure.lang.Indexed chunk_13047 (int i_13049))]
-                  (future-call
-                    (fn fn__13050
-                      ([]
-                        (try
-                          (^clojure.lang.IFn h)
-                          (catch
-                            java.lang.Throwable
-                            t__8829__auto__
-                            (do
-                              (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.process")
-                                    ex t__8829__auto__]
-                                (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                                  (.warn
-                                    ^org.slf4j.Logger logger
-                                    (logger/process "error executing future")
-                                    ^java.lang.Throwable ex)
-                                  (logger/caused-by logger ex))
-                                nil)
-                              (datomic.monitor/alarm :UnhandledException)
-                              (throw ^java.lang.Throwable t__8829__auto__)
-                              nil))))))
-                  (recur seq_13046 chunk_13047 count_13048 (inc i_13049)))
-                (let [temp__5804__auto__ (seq seq_13046)]
-                  (when temp__5804__auto__
-                    (let [seq_13046 temp__5804__auto__]
-                      (if (chunked-seq? seq_13046)
-                        (let [c__6065__auto__ (chunk-first seq_13046)]
-                          (recur
-                            (chunk-rest seq_13046)
-                            c__6065__auto__
-                            (int (count c__6065__auto__))
-                            (int 0)))
-                        (let [h (first seq_13046)]
-                          (future-call
-                            (fn fn__13052
-                              ([]
-                                (try
-                                  (^clojure.lang.IFn h)
-                                  (catch
-                                    java.lang.Throwable
-                                    t__8829__auto__
-                                    (do
-                                      (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                     "datomic.process")
-                                            ex t__8829__auto__]
-                                        (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                                          (.warn
-                                            ^org.slf4j.Logger logger
-                                            (logger/process "error executing future")
-                                            ^java.lang.Throwable ex)
-                                          (logger/caused-by logger ex))
-                                        nil)
-                                      (datomic.monitor/alarm :UnhandledException)
-                                      (throw ^java.lang.Throwable t__8829__auto__)
-                                      nil))))))
-                          (recur (next seq_13046) nil 0 0))))))))
-            (java.lang.Thread/sleep (long ^java.lang.Number shutdown_time))
-            (when exit? (java.lang.System/exit (int -1)))
-            :shutdown)))))
-  (defonce instance (create-instance 30000 true))
+  (reset-meta!
+    #'map->SharedCriticalFailure
+    (assoc
+      {:arglists (clojure.core/list ['m__7972__auto__]), :column (int 1)}
+      :name
+      'map->SharedCriticalFailure
+      :ns
+      *ns*))
+  (def create-instance
+   (fn create_instance
+     ([shutdown_time exit?]
+       (let [handlers (atom []) prom (promise)]
+         (datomic.process.SharedCriticalFailure.
+           handlers
+           prom
+           (delay
+             (deliver prom true)
+             (loop [seq_13046 (seq (deref handlers)) chunk_13047 nil count_13048 0 i_13049 0]
+               (if (< i_13049 count_13048)
+                 (let [h (.nth ^clojure.lang.Indexed chunk_13047 (int i_13049))]
+                   (future-call
+                     (fn fn__13050
+                       ([]
+                         (try
+                           (^clojure.lang.IFn h)
+                           (catch
+                             java.lang.Throwable
+                             t__8829__auto__
+                             (do
+                               (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.process")
+                                     ex t__8829__auto__]
+                                 (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                                   (.warn
+                                     ^org.slf4j.Logger logger
+                                     (logger/process "error executing future")
+                                     ^java.lang.Throwable ex)
+                                   (logger/caused-by logger ex))
+                                 nil)
+                               (datomic.monitor/alarm :UnhandledException)
+                               (throw ^java.lang.Throwable t__8829__auto__)
+                               nil))))))
+                   (recur seq_13046 chunk_13047 count_13048 (inc i_13049)))
+                 (let [temp__5804__auto__ (seq seq_13046)]
+                   (when temp__5804__auto__
+                     (let [seq_13046 temp__5804__auto__]
+                       (if (chunked-seq? seq_13046)
+                         (let [c__6065__auto__ (chunk-first seq_13046)]
+                           (recur
+                             (chunk-rest seq_13046)
+                             c__6065__auto__
+                             (int (count c__6065__auto__))
+                             (int 0)))
+                         (let [h (first seq_13046)]
+                           (future-call
+                             (fn fn__13052
+                               ([]
+                                 (try
+                                   (^clojure.lang.IFn h)
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8829__auto__
+                                     (do
+                                       (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                      "datomic.process")
+                                             ex t__8829__auto__]
+                                         (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                                           (.warn
+                                             ^org.slf4j.Logger logger
+                                             (logger/process "error executing future")
+                                             ^java.lang.Throwable ex)
+                                           (logger/caused-by logger ex))
+                                         nil)
+                                       (datomic.monitor/alarm :UnhandledException)
+                                       (throw ^java.lang.Throwable t__8829__auto__)
+                                       nil))))))
+                           (recur (next seq_13046) nil 0 0))))))))
+             (java.lang.Thread/sleep (long ^java.lang.Number shutdown_time))
+             (when exit? (java.lang.System/exit (int -1)))
+             :shutdown))))))
+  (reset-meta!
+    #'create-instance
+    (assoc
+      {:arglists (clojure.core/list ['shutdown-time 'exit?]), :column (int 1)}
+      :name
+      'create-instance
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.process" "instance") {:column (int 1)})
+  (let [v__6812__auto__ #'instance]
+    (when-not (.hasRoot ^clojure.lang.Var v__6812__auto__)
+      (.setMeta (clojure.lang.RT/var "datomic.process" "instance") {:column (int 1)})
+      (.bindRoot (clojure.lang.RT/var "datomic.process" "instance") (create-instance 30000 true))
+      #'instance))
   (defn claim-pid-file
     ([]
       (let [temp__5804__auto__ (config/property "datomic.pidFile")]
         (when temp__5804__auto__
           (let [pid_file temp__5804__auto__] (when (seq pid_file) (spit pid_file logger/pid)))))))
+  (reset-meta!
+    #'claim-pid-file
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'claim-pid-file :ns *ns*))
   (defn throw-if-failing!
     ([]
       (when (failing? instance) (throw (java.lang.RuntimeException. "Process is shutting down")))
       nil))
+  (reset-meta!
+    #'throw-if-failing!
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'throw-if-failing! :ns *ns*))
   (defn fail-on-exception
     ([f]
       (fn fn__13064
@@ -155,4 +252,12 @@
             (catch
               java.lang.Throwable
               t
-              (do (fail instance "Unhandled exception" t) (throw ^java.lang.Throwable t) nil))))))))
+              (do (fail instance "Unhandled exception" t) (throw ^java.lang.Throwable t) nil)))))))
+  (reset-meta!
+    #'fail-on-exception
+    (assoc
+      {:arglists (clojure.core/list ['f]), :column (int 1)}
+      :name
+      'fail-on-exception
+      :ns
+      *ns*)))

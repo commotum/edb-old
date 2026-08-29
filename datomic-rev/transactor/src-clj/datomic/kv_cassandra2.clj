@@ -25,8 +25,10 @@
         (clojure.core/import 'com.datastax.driver.core.Cluster)
         (clojure.core/import 'com.datastax.driver.core.Session))))
   (set! *warn-on-reflection* true)
-  (def cluster-sessions (atom {}))
+  (.setMeta (clojure.lang.RT/var "datomic.kv-cassandra2" "cluster-sessions") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.kv-cassandra2" "cluster-sessions") (atom {}))
   (def cql-keys [:id2 :rev :map :val :chunks])
+  (reset-meta! #'cql-keys (assoc {:column (int 1)} :name 'cql-keys :ns *ns*))
   (deftype
     KVCassandra2
     [cluster session table]
@@ -79,6 +81,14 @@
   (clojure.core/import 'datomic.kv_cassandra2.KVCassandra2)
   (defn ->KVCassandra2
     ([cluster session table] (datomic.kv_cassandra2.KVCassandra2. cluster session table)))
+  (reset-meta!
+    #'->KVCassandra2
+    (assoc
+      {:arglists (clojure.core/list ['cluster 'session 'table]), :column (int 1)}
+      :name
+      '->KVCassandra2
+      :ns
+      *ns*))
   (defn kv-cassandra
     ([endpoint]
       (let [map__26809 endpoint
@@ -96,34 +106,30 @@
             user (or (:user endpoint) "")
             password (or (:password endpoint) "")
             ssl (or (:ssl endpoint) false)
-            map__26810 (let [lockee__5782__auto__ cluster-sessions
-                             locklocal__5783__auto__ lockee__5782__auto__]
-                         (monitor-enter locklocal__5783__auto__)
-                         (try
-                           (or
-                             (clojure.core/get (deref cluster-sessions) endpoint)
-                             (let [c (or
-                                       provided_cluster
-                                       (cass/cluster-from-callback endpoint)
-                                       (cond->
-                                         (Cluster/builder)
-                                         true
-                                         (.addContactPoint ^java.lang.String host)
-                                         true
-                                         (.withPort (int ^java.lang.Number port))
-                                         true
-                                         (.withCredentials
-                                           ^java.lang.String user
-                                           ^java.lang.String password)
-                                         ssl
-                                         (.withSSL)
-                                         true
-                                         (.build)))
-                                   s (.connect ^com.datastax.driver.core.Cluster c)
-                                   m {:cluster c, :session s}]
-                               (swap! cluster-sessions assoc endpoint m)
-                               m))
-                           (finally (do (monitor-exit locklocal__5783__auto__) nil))))
+            map__26810 (locking cluster-sessions
+                        (or
+                          (clojure.core/get (deref cluster-sessions) endpoint)
+                          (let [c (or
+                                    provided_cluster
+                                    (cass/cluster-from-callback endpoint)
+                                    (cond->
+                                      (Cluster/builder)
+                                      true
+                                      (.addContactPoint ^java.lang.String host)
+                                      true
+                                      (.withPort (int ^java.lang.Number port))
+                                      true
+                                      (.withCredentials
+                                        ^java.lang.String user
+                                        ^java.lang.String password)
+                                      ssl
+                                      (.withSSL)
+                                      true
+                                      (.build)))
+                                s (.connect ^com.datastax.driver.core.Cluster c)
+                                m {:cluster c, :session s}]
+                            (swap! cluster-sessions assoc endpoint m)
+                            m)))
             map__26810 (if (seq? map__26810)
                          (if (next map__26810)
                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
@@ -132,4 +138,12 @@
                          map__26810)
             cluster (clojure.core/get map__26810 :cluster)
             session (clojure.core/get map__26810 :session)]
-        (datomic.kv_cassandra2.KVCassandra2. cluster session table)))))
+        (datomic.kv_cassandra2.KVCassandra2. cluster session table))))
+  (reset-meta!
+    #'kv-cassandra
+    (assoc
+      {:arglists (clojure.core/list ['endpoint]), :column (int 1)}
+      :name
+      'kv-cassandra
+      :ns
+      *ns*)))

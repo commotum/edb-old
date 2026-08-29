@@ -12,18 +12,287 @@ the primary PostgreSQL runtime path:
 5. query of the committed immutable database value;
 6. recovered Transactor restart and log/index catchup;
 7. a second transaction after that restart;
-8. a second durable PostgreSQL/log commit; and
-9. another fresh-process restart with an identical recovered Peer snapshot.
+8. a second durable PostgreSQL/log commit;
+9. explicit persistent-index publication through all four index families;
+10. another fresh-process restart that adopts the published root at the exact
+    requested `t`; and
+11. an identical recovered Peer snapshot after adoption;
+12. bounded transport interruption with exact unavailable on the same Peer
+    connection; and
+13. same-connection reconnect, sync, commit/read, plus a fresh-Peer semantic
+    equality check;
+14. a second recovered Transactor proving true standby state while the first
+    remains active;
+15. standby promotion after the exact active PID is stopped, followed by a
+    durable same-Peer commit through the promoted endpoint; and
+16. stale-primary heartbeat-conflict self-fencing, continued promoted-primary
+    heartbeats, and an independent fresh-Peer equality check; and
+17. a dedicated missing-schema startup failure that preserves the original
+    PostgreSQL exception, never reaches service readiness, and cleans up the
+    still-owned recovered process without repeating the green main path; and
+18. a no-service PostgreSQL gate that proves both index-root reference and
+    log-tail root rejection while preserving the winning authoritative rows;
+    and
+19. focused stale-CAS and uniqueness rejection, concurrent CAS arbitration,
+    strict accepted-transaction ordering, and exact canonical state after a
+    recovered Transactor restart and fresh recovered-Peer audit; and
+20. one exact prepublication crash cut in which the authoritative PostgreSQL
+    log-root update is lock-observed, no Peer success is delivered, the owned
+    Transactor and its exact blocked SQL session are terminated, the
+    interrupted transaction remains absent, and two fresh-process recovery/
+    audit passes preserve the expected state.
 
-This is a real vertical-slice milestone, not Goal 2 completion. Failure
-matrices, persistent-index publication, transport interruption, and HA remain
-open.
+This is a real vertical-slice milestone, not Goal 2 completion. The broader
+failure matrices and remaining HA race/in-flight boundaries remain open.
 
 ## Repository-owned executing gate
 
+The current full-path HA promotion run passed at
+`/tmp/datomic-recovered-pair-ha-v1`. It used repository runner SHA-256
+`e61b99c84c0aa8629ab0719929d9b34ed3ebf7011ccb918759ba88021a14565b`
+and HA-probe SHA-256
+`4858e5d7d4b0b4d685860e8966ba73904ba3709d3d05fdcd151d1682dc001808`.
+Its 140-entry self-verifying `evidence.sha256` has SHA-256
+`62859ef9ec8e66c43743434ea35974dde6dfd8362ff23cc6226d86721f2edf88`;
+every entry verifies.
+
+After the transport sentinel at basis `1099`, Transactor A remained active on
+port 54365 while Transactor B proved repeated `:transactor/standby` events, an
+advancing `pod-standby` revision, and no listening service on port 54366. The
+harness then verified A's PID, start time, executable, complete argv, and
+`SIGSTOP` state. B won the PostgreSQL heartbeat CAS at redacted `pod-coord`
+revision 26 after A's last observed revision 25 and began serving. The same
+recovered Peer connection recovered its zero-argument sync on attempt six
+after one bounded timeout and four exact unavailable outcomes, reconnected
+from A's port to B's port, committed exactly one `:db/doc` sentinel, and
+uniquely read it at basis `1101`.
+
+After verified `SIGCONT`, stale A logged exact heartbeat conflict and process
+failure evidence, then exited 255 through its delayed self-fence path. B
+continued heartbeating through redacted coordination revision 34. A new
+recovered-Peer JVM saw basis `1101`, the same database id and 96-row view, and
+the same datoms, history, logical-value, and row hashes as before failover.
+The promoted B stopped by bounded `SIGINT`, PostgreSQL control state is
+`shut down`, host ports 54365, 54366, and 55465 are closed, and no run process
+remains. Only coordination revisions and counts are retained; the SQL heartbeat
+map is not copied into evidence.
+
+This closes one narrow active/standby takeover and stale-primary self-fence
+slice. It does not establish all partition timing, concurrent/in-flight
+transaction, acknowledgement, or writable split-brain cases, so Stage 7 is
+still in progress.
+
+The dedicated startup-failure run passed at
+`/tmp/datomic-recovered-pair-startup-failure-v1` using the current repository
+runner at SHA-256
+`35876097349d13215dd4d8e2cb50fdd339ea78b6770bb67424b5b627cb112bc8`.
+Its 69-entry self-verifying `evidence.sha256` has SHA-256
+`40a45828557f88f9677f0926b992d639461c01f8f5a322344190d57fc7ac573b`;
+every entry verifies. The gate created a fresh PostgreSQL role and catalog but
+deliberately omitted `datomic_kvs`. The exact candidate PID, start time,
+executable, argv, and pid file remained owned while all 20 bounded
+`:kv-cluster/retry` events retained root cause
+`org.postgresql.util.PSQLException`, followed by exact
+`Terminating process - Lifecycle thread failed`. No secondary
+`NullPointerException` occurred.
+
+The launcher did print `System started`, but the service port never opened;
+the gate therefore proves that the marker is not itself readiness. Once the
+expected failure was established, the harness stopped the still-owned JVM by
+SIGINT only (status 130), verified that the schema was still missing and
+PostgreSQL remained responsive, and then shut PostgreSQL down. Both host ports
+are closed and no run process remains. The result deliberately records the
+main, transport, and HA paths as `NOT_RUN`: this is a focused regression for a
+confirmed startup defect, not another expensive replay of already-green work.
+Deeper post-coordination and partial-master cleanup rows remain optional
+failure-matrix extensions.
+
+The focused storage-CAS run passed at
+`/tmp/datomic-recovered-pair-storage-cas-v2` using repository runner SHA-256
+`85819e557c2ae70d112e4a1bf8ab32d281c19cfcd5ba32fedbaddac6fdc7aa6a`
+and storage probe SHA-256
+`31ba167f26caf7f0e453a5128912de9a0fa6ba1549f17f78c24d640019f5f080`.
+Its 84-entry self-verifying `evidence.sha256` has SHA-256
+`98c39f04a7536e51e218fb4d28a38b080ee15fa8d22bb0a8dadfc1fe46f5d7f4`;
+every entry verifies. No Transactor service, Peer transaction workload,
+transport probe, or HA sequence ran.
+
+The gate first executed one sealed low-level probe through the recovered Peer
+reference, truncated only the fresh disposable `datomic_kvs` table, and then
+executed the same probe through the recovered Transactor sources. Both paths
+used the production `ref-index-root/<db-id>` and `pod-log-tail/<db-id>` key
+builders. They created and byte-round-tripped three immutable root targets;
+proved ref creation, exact idempotent replay, revision-1 publication,
+conflicting-create rejection, and differing stale-revision rejection; and
+proved accepted then stale-rejected `log/write-tail-descriptor` publication.
+The winning ref and pod rows were read directly from PostgreSQL and remained
+byte-identical across the losing writes. The stale pod attempt intentionally
+leaves an unreferenced immutable tail value, which is not an authoritative-root
+mutation.
+
+The Peer-reference and Transactor result markers are byte-identical at SHA-256
+`1a706a2617fc903dd0c4f90c6888ea11dc7d13065c7c07a32982f0a739de4021`.
+Each phase ended at exactly 8 rows, 43 stored value bytes, and 2 revisioned
+rows; the intervening truncate was independently observed as 0/0/0. The two
+candidate JVMs exited with zero Datomic-user PostgreSQL sessions, PostgreSQL
+reports `shut down`, ports 54368 and 55468 are closed, and the runtime seal
+verifies. A predecessor at `/tmp/datomic-recovered-pair-storage-cas-v1`
+failed before Datomic execution because the restricted sandbox denied
+PostgreSQL's localhost bind; cleanup succeeded, and it is retained only as
+harness diagnostics.
+
+The focused Stage 5 transaction run passed at
+`/tmp/datomic-recovered-pair-transaction-boundaries-v5` using repository
+runner SHA-256
+`96cc9051e848b6dff811f0e0c22dccb71370eea510fdf17614c77b3c3d5d00dd`
+and transaction-probe SHA-256
+`d2dad703ab7532bf95f1972ac767cdf5490e56a178dd34c3c3ac7309fc826e41`.
+Its 91-entry self-verifying `evidence.sha256` has SHA-256
+`8efea20819c62f167d774d29d7a330f6ef1e018884c50f16a533376d667a3bdd`;
+every entry verifies.
+
+The serial stale-CAS transaction returned exact `:db.error/cas-failed`,
+conflict, and `:datomic/cancelled true` data while preserving basis, counter
+history, same-transaction sentinel absence, and the byte-identical direct SQL
+log-root row. The distinct-entity uniqueness collision returned exact
+`:db.error/unique-conflict` while preserving basis, ownership, companion
+absence, and root. Two four-way CAS rounds each produced exactly one accepted
+worker and three exact conflicts. Worker-distinct companion entities prove
+that only the winner persisted; its report `t`, event `t`, post-round basis,
+and one log-root revision agree, and every loser identity is absent.
+
+Four simultaneous accepted submissions formed one strict report-basis chain
+with exact worker-to-persisted-`t` identity and ordered values
+`[1011 1013 1015 1017]`. No event was duplicated or lost. These gaps are
+evidence that transaction-number allocation is monotonic rather than
+contiguous: rejected attempts can consume or reserve `t` without advancing the
+published database basis or root. The normal accepted CAS returned at basis
+`1005`; a direct PostgreSQL read after return observed root revision 3 advance
+to 4. This is a normal-path observation, not proof against a crash between
+durable publication and acknowledgement.
+
+After graceful restart, a fresh recovered Peer reproduced database id, basis
+`1017`, and canonical transaction-projection SHA-256
+`f5d50940a93d012606e45a840ddf1104d7c05f0be373d082822f07515f9194b9`.
+The fresh Transactor adopted 8,044 log bytes through `tail-t 1017`; PostgreSQL
+remained exactly 48 rows, 12,133 stored value bytes, and 5 revisioned rows.
+Both recovered Transactors stopped by `SIGINT` only with status 130, zero
+Datomic-user sessions remained, PostgreSQL reports `shut down`, and ports
+54369 and 55469 are closed. That normal-path result explicitly records the
+crash boundary and full licensed-oracle equality as `NOT_RUN`; the separate
+prepublication cut below supplies the first of those two rows.
+
+The focused prepublication crash-consistency run passed at
+`/tmp/datomic-recovered-pair-ack-crash-v2`. It uses repository runner SHA-256
+`200049fcc793579a32d5b4e283ef716b7ecb39448a3ffd69c070461cd574030d`
+and acknowledgement probe SHA-256
+`2aa34216585da3c996d81e886b9d01784200f99fb268068a988d5f4bf8c3faad`.
+Its 110-entry self-verifying `evidence.sha256` has SHA-256
+`6f3a5ab8d6c877d7a9f2f8e2e23c4670b9a2228995dd290f854426a5a20fd0c5`;
+every entry verifies.
+
+At baseline basis `1001`, the probe held a row lock on the exact authoritative
+`pod-log-tail/<database-id>` row, whose revision was `3` and whose canonical
+row SHA-256 was
+`86a140d0753dbdfc4401b348aa9ff7e76b6a6213b49fe8ed00f9f4ecb20e9980`.
+After submitting one asynchronous transaction, independent PostgreSQL evidence
+identified one active writer backend blocked by the holder. The Future remained
+incomplete; Peer basis/projection, fault-sentinel absence, and the byte-exact
+root remained unchanged. Exactly one 151-byte nonrevisioned immutable row had
+been inserted. Its parsed metadata was exactly `{:prev <baseline-tail>}`,
+which makes it a strongly attributable transaction-append candidate rather
+than the separate log-tree adoption path, whose descriptor write has no
+prior-tail etag. Its Fressian payload was not decoded.
+
+The harness reverified the complete PID/start-time/executable/argv identity and
+deliberately killed only that Transactor, observing status `137`. PostgreSQL can
+leave a server-side backend asleep in the lock manager after its JVM socket
+dies, so the harness retained the root lock and terminated only the exact
+blocked writer session already identified by PID, user, query, wait state, and
+blocking-holder PID. That forced rollback before lock release. The Peer Future
+then completed with exact unavailable rather than a transaction report. The
+root row, basis `1001`, canonical SHA-256
+`5097b63403add0ea605721300fed58d3f2afa85d14acba9adc0c2bbba8d4e81c`,
+and fault-sentinel absence all remained exact. The immutable row remained as an
+unreachable orphan candidate and is recorded rather than treated as published
+state.
+
+A fresh Transactor replayed 1,456 bytes through `tail-t 1001`; its normal
+startup claim advanced the raw root revision from `3` to `4` without changing
+the semantic database. A recovery transaction then returned at basis/event
+`t 1003` and advanced the root from revision `4` to `5`. A second fresh
+Transactor replayed 1,824 bytes through `tail-t 1003`; a fresh Peer reproduced
+the exact final canonical SHA-256
+`49494672a9c0f6a0860a4a74c5756ed40ae45f7634b962f9a922e440219f249b`,
+the recovery sentinel, and fault-sentinel absence. PostgreSQL ended at 43 rows
+and 11,032 stored value bytes, both restarted Transactors stopped through
+bounded `SIGINT`, zero Datomic-user sessions remained, PostgreSQL reports
+`shut down`, both ports are closed, and all three owned Transactor PIDs are
+absent.
+
+The failed predecessor `-v1` is retained only as diagnostic evidence. It found
+the lock-manager/JVM-lifetime mismatch that required exact blocked-session
+rollback in the corrected cut. The passing row proves no successful Peer result
+for this exact prepublication root-update interruption; it does not prove the
+separate crash window after root publication but before result delivery, nor
+full licensed-oracle transaction equivalence.
+
+The transport-only predecessor passed at
+`/tmp/datomic-recovered-pair-transport-v2`. It uses repository runner SHA-256
+`70be908febf3487e41d7c84dd9583e729c3bc51e6ff819ea14c7f63a8e348691`
+and transport-probe SHA-256
+`24ebf30a78088a5720737d1c7ac5c3a3fc91b16f130cbefdc10f6f276f645a9a`.
+Its self-verifying `evidence.sha256` has SHA-256
+`87eaf2e129aa5d3ec12b4e84a9c3143e623b21767a00ee0c3916ea3c037383f6`;
+all 123 entries verify.
+
+After fresh-process adoption at `tail-t 1066, index-t 1066`, the harness held
+the exact owned Transactor PID in `SIGSTOP` for 20 seconds. Zero-argument sync
+on the same recovered Peer connection returned exactly
+`:cognitect.anomalies/unavailable`. After verified `SIGCONT`, that connection
+recovered on attempt 44 after 43 bounded unavailable retries, synced at basis
+`1066`, committed one `:db/doc` sentinel, and uniquely read it at basis `1099`.
+A new recovered-Peer JVM then saw basis `1099` while preserving database id,
+the 96-row Stage 2 view, and all four augment semantic hashes. The candidate
+boundary contained 535 entries, reported recovered Peer/core2 source protocol
+`file`, exposed no Peer/core2 AOT, and found zero forbidden implementation
+entries. All three Transactors stopped by bounded `SIGINT`, PostgreSQL reports
+`shut down`, and host ports `54363` and `55463` are closed.
+
+The first transport-v1 attempt failed before Datomic execution because the
+network-restricted sandbox denied PostgreSQL's localhost bind. Cleanup status
+was zero and the cluster is shut down; it is retained as harness diagnostics,
+not runtime evidence.
+
+The persistent-index predecessor passed at
+`/tmp/datomic-recovered-pair-index-v5`. It used the repository gate at SHA-256
+`19af9096c7aba455b6c7efce7bbfd345732c4b9ccb6462c887e75bcdff693427`
+and its self-verifying `evidence.sha256` has SHA-256
+`c23915e1406f1fac4046643683d93dc9cf06fee187657761e8f96fa1313b4238`.
+The manifest verifies in full.
+
+After seed/restart and the augment commit at basis `1066`, the recovered Peer
+requested an index at `t 1066` and received both acceptance and reported
+`index-t 1066`. Persistent publication grew PostgreSQL from 42 rows and 18,993
+stored value bytes to 86 rows and 34,597 bytes. A third freshly staged
+Transactor then loaded `tail-t 1066, index-t 1066` with zero log replay bytes.
+Its recovered-Peer snapshot retained the same database id, basis, 96 logical
+rows, and all four semantic hashes; the pre/post-adoption fingerprint is
+byte-identical at SHA-256
+`a9bcda0771d2c1ec7f6b63df54d964ad73220d475306a59312308a7fde2c8347`.
+The run stopped all three Transactors by bounded `SIGINT` and shut down its
+PostgreSQL instance. A host-level cleanup also stopped three leaked PostgreSQL
+instances from earlier disposable diagnostic runs; no associated service port
+remains open and their evidence directories were preserved.
+
+The index-v5 run is the persistent-index predecessor to transport-v2. The
+earlier current-source v3 run below remains the main-path predecessor. It
+proved log replay/adoption but not persistent-index construction, and is now
+superseded for the Stage 6 publication claim by v5.
+
 `transactor/scripts/validate-postgresql-vertical-slice.sh` now reproduces this
 sequence from a fresh current-source Peer build and a freshly prepared
-Transactor runtime. The current executing run passed at
+Transactor runtime. The earlier executing run passed at
 `/tmp/datomic-recovered-pair-live-v3`; the script SHA-256 is
 `3544bdb504ab7926359cbfe366c3bcbc8c85ad14292f68d1e4827cc228e88639`.
 The run's self-verifying `evidence.sha256` has SHA-256
@@ -38,7 +307,7 @@ That structural run loaded all 272 Transactor/core2 namespaces (271 cold and
 one documented order-dependent) and recorded evidence-manifest SHA-256
 `5490edf69d9ae86a1d78edf9644e1196ebf644bbea649c022e83b141f58b5bc8`.
 Surfaces were deliberately not executed and remain an open Stage 1 boundary.
-The 247-row current-source manifest is SHA-256
+The v3 247-row source manifest is SHA-256
 `6f27a4259ea02bb3eba6214d44b7c155d0d3dda1128a8d0be5301c2d00257786`.
 
 The gate does not trust historical runtime directories. It rebuilds the Peer
@@ -87,8 +356,8 @@ the augment and final-restart fingerprints are byte-identical at
 The v1 and v2 executing runs remain useful historical main-path evidence. v1
 predates the checked-in `compare-byte-arrays` source correction. v2 used the
 corrected source, but its summary marker did not itself execute the focused
-runtime validator. v3 closes that evidence gap and is the current-source
-promotion boundary.
+runtime validator. v3 closed that evidence gap and was then superseded as the
+current-source promotion boundary by v5.
 
 Before the executing gate, a no-service run passed at
 `/tmp/datomic-recovered-pair-gate-dry-v7`, including the sealed focused runtime
@@ -211,6 +480,7 @@ surface comparison did not make operationally obvious:
 | `datomic.update/swap-xf!` | transaction path returned `nil` and failed | same generic value-loop continuation defect |
 | `datomic.common/root-cause` and `datomic.kv-cluster/root-cause` | empty-schema retry reporting threw a secondary NPE | recursive false branch was lost across dead `ATHROW` padding |
 | `datomic.common/compare-byte-arrays` | broader recovered-behavior gate lost the equal-length comparison result | stale recovered source retained a synthetic trailing `nil` after a value-bearing loop |
+| `datomic.index/filter-nohist-pairs` and `datomic.index/separating-retractions` | the candidate published a malformed root whose EAVT stopped before new entity data | stale source truncated the false branch at dead padding instead of preserving the lexical-region continuation |
 
 Each confirmed family has a focused regression. The current decompiler
 validator passes, including the exact AOT-shaped recursive `root-cause` and
@@ -221,9 +491,9 @@ candidate classpath. The relevant current hashes are:
 - generic decompiler `ast.clj`:
   `d5a1f337486adf1bf375746cb752844997d0f6622bb40f106d0855f2f64b1cd8`;
 - decompiler validator:
-  `8bf72f48b5f04769e1fc6c8eff6d9b2b98aabb995050239e384e9a469c13e333`;
+  `a1891d4b82a27f17f7b92bb0c8313155bb9a5efd69ab9f383137f8d814899aa6`;
 - focused runtime validator:
-  `9e661bd3211dd3c483675d08138421d4255f97ae0cb1311f5d7adbe731c66a42`;
+  `ec68238e3cffbb3bc4573c1897a00cf67dc8d1227c3ee2b465e4b6b7278886e9`;
 - recovered `datomic.common`:
   `4c2ec9ffa19f227dbc39352bd9a1f0d77c19a75b01325ff1e08f074dcaa553d3`;
 - recovered `datomic.kv-cluster`:
@@ -248,16 +518,39 @@ decompiler regression plus the signed-byte/equal/prefix behavior matrix pass.
 The v3 PostgreSQL gate then ran that sealed focused validator and re-established
 the complete main path from the corrected current source.
 
+The persistent-index defect was similarly constrained rather than patched by
+name. Exact AOT control flow for both index functions recurs past matched
+retract/assert pairs and returns lazy continuation values from the alternate
+branches. The generic lexical-region repair already expresses that rule and a
+fresh decompile reconstructs both complete bodies. The stale checked-in
+`datomic.index` was replaced with those AOT-derived forms at SHA-256
+`93dedc04c7a897b69d6b5f0523c8edcd8b62d407d97d9284ad9f7db4fb9994a2`.
+One focused regression verifies continuation past a no-history pair, retention
+of the tail, capture of historic retract/assert pairs and unmatched retracts,
+and exclusion of no-history values from history. It passes inside v5. The
+updated 247-entry source-manifest file has SHA-256
+`d1dce5d974827ccc8b86714e7a3569c34a61ed0e034a69ea4e23b9a1e56ca83f`
+and every entry verifies.
+
 ## Honest boundary and next probe
 
-- The repository gate now proves three bounded graceful `SIGINT` shutdowns,
-  exact PID/argv/start-time ownership, closed ports, and final PostgreSQL
-  shutdown. Injected-startup-failure cleanup is still not proven.
-- The `index-t 66` to `1001` observation proves restart replay/adoption. It
-  does not yet prove the complete persistent-index scheduling and publication
-  machinery.
-- SQL CAS/root rejection, transaction rejection/concurrency, acknowledgement
-  under injected failure, transport interruption, and HA/fencing remain open.
+- The HA gate proves three bounded graceful `SIGINT` shutdowns plus one
+  conflict-driven stale-active self-fence, exact PID/argv/start-time ownership,
+  closed ports, and final PostgreSQL shutdown. The separate missing-schema
+  gate proves bounded injected-startup cleanup while the candidate remains
+  owned, PostgreSQL remains responsive, and the service port never opens.
+- The v5 request at `t 1066`, PostgreSQL growth, and zero-replay fresh restart
+  prove persistent-index scheduling, publication, and root adoption for the
+  deterministic recovered-pair workload. Automatic threshold scheduling and
+  interrupted index construction remain failure/performance extensions, not a
+  gap in the primary publication path.
+- The fail-stop takeover and stale-active conflict/self-fence row is closed.
+  The focused storage gate also closes PostgreSQL index-ref/log-root CAS
+  rejection while preserving the winner. The focused transaction gate closes
+  stale-CAS/uniqueness rejection and concurrent accepted ordering. Fault-
+  injected acknowledgement, delayed/partitioned writers, full oracle
+  transaction equivalence, and the bounded no-writable-split-brain matrix
+  remain open.
 
 The Peer PostgreSQL Stage 2 and Stage 3 harnesses require an explicit,
 content-addressed sanitized Nano input, preserve the 535-entry dependency
@@ -281,9 +574,16 @@ The focused harness evidence is:
 - Stage 3 local validator SHA-256:
   `fdab53cf5bd1ac1ab60cd596f64f59824ae64228c0e583d7f2c4c157b0c3a2f3`.
 
-The main path and its current-source repository gate are green, including the
-confirmed `compare-byte-arrays` repair. The primary workstream now returns to
-the deferred exhaustive Stage 1 exact-source/surface boundary and the 117
-Stage 2 overlaps. After that, the next service probe should be
-injected-startup cleanup, exact SQL CAS/root rejection, transport interruption,
-or active/standby takeover—not another unconstrained source-residual pass.
+The main path and its current-source repository gate are green through stale-
+CAS/uniqueness rejection, concurrent transaction ordering, persistent-index
+publication, fresh-process adoption, same-connection transport recovery, the
+first recovered-pair takeover/self-fence row, and one focused missing-schema
+startup-failure row. The exact PostgreSQL index-ref and log-root rejection row
+is also closed. The next runtime boundary is fault injection at the durable
+commit/acknowledgement edge, followed by the bounded Stage 1/2 stabilization
+checkpoint. The bounded surface run
+separately proves 272/272 effective loads and 247/247 callable/class shapes;
+the protocol family passes a focused fresh recovery, but integrated strict-
+metadata promotion and exact-AOT acceptance remain open. The 117 Stage 2
+overlaps and remaining transaction failure boundary remain required; none
+justify another unconstrained source-residual pass.

@@ -49,4 +49,10 @@
         :ok)))
   (clojure.core/import 'datomic.kv_mem.KVMem)
   (defn ->KVMem ([m] (datomic.kv_mem.KVMem. m)))
-  (defn kv-mem ([m] (datomic.kv_mem.KVMem. m))))
+  (reset-meta!
+    #'->KVMem
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name '->KVMem :ns *ns*))
+  (defn kv-mem ([m] (datomic.kv_mem.KVMem. m)))
+  (reset-meta!
+    #'kv-mem
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'kv-mem :ns *ns*)))

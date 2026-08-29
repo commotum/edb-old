@@ -25,8 +25,10 @@
         (clojure.core/import 'java.net.InetSocketAddress)
         (clojure.core/import 'javax.net.ssl.SSLContext))))
   (set! *warn-on-reflection* true)
-  (def sessions (atom {}))
+  (.setMeta (clojure.lang.RT/var "datomic.kv-cassandra3" "sessions") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.kv-cassandra3" "sessions") (atom {}))
   (def cql-keys [:id2 :rev :map :val :chunks])
+  (reset-meta! #'cql-keys (assoc {:column (int 1)} :name 'cql-keys :ns *ns*))
   (deftype
     KVCassandra3
     [session table]
@@ -78,6 +80,14 @@
           :ok))))
   (clojure.core/import 'datomic.kv_cassandra3.KVCassandra3)
   (defn ->KVCassandra3 ([session table] (datomic.kv_cassandra3.KVCassandra3. session table)))
+  (reset-meta!
+    #'->KVCassandra3
+    (assoc
+      {:arglists (clojure.core/list ['session 'table]), :column (int 1)}
+      :name
+      '->KVCassandra3
+      :ns
+      *ns*))
   (defn kv-cassandra
     ([endpoint]
       (let [map__33022 endpoint
@@ -95,34 +105,30 @@
             password (:password endpoint)
             local_datacenter (or (:local-datacenter endpoint) "datacenter1")
             ssl (or (:ssl endpoint) false)
-            map__33023 (let [lockee__5782__auto__ sessions
-                             locklocal__5783__auto__ lockee__5782__auto__]
-                         (monitor-enter locklocal__5783__auto__)
-                         (try
-                           (or
-                             (clojure.core/get (deref sessions) endpoint)
-                             (let [s (or
-                                       provided_session
-                                       (cass/session-from-callback endpoint)
-                                       (let [sb (com.datastax.oss.driver.api.core.CqlSessionBuilder.)]
-                                         (cond->
-                                           (.withLocalDatacenter
-                                             (.addContactPoint
-                                               ^com.datastax.oss.driver.api.core.session.SessionBuilder sb
-                                               (InetSocketAddress/createUnresolved
-                                                 ^java.lang.String host
-                                                 (int ^java.lang.Number port)))
-                                             ^java.lang.String local_datacenter)
-                                           (and user password)
-                                           (.withAuthCredentials (str user) (str password))
-                                           ssl
-                                           (.withSslContext (SSLContext/getDefault))
-                                           true
-                                           (.build))))
-                                   m {:session s}]
-                               (swap! sessions assoc endpoint m)
-                               m))
-                           (finally (do (monitor-exit locklocal__5783__auto__) nil))))
+            map__33023 (locking sessions
+                        (or
+                          (clojure.core/get (deref sessions) endpoint)
+                          (let [s (or
+                                    provided_session
+                                    (cass/session-from-callback endpoint)
+                                    (let [sb (com.datastax.oss.driver.api.core.CqlSessionBuilder.)]
+                                      (cond->
+                                        (.withLocalDatacenter
+                                          (.addContactPoint
+                                            ^com.datastax.oss.driver.api.core.session.SessionBuilder sb
+                                            (InetSocketAddress/createUnresolved
+                                              ^java.lang.String host
+                                              (int ^java.lang.Number port)))
+                                          ^java.lang.String local_datacenter)
+                                        (and user password)
+                                        (.withAuthCredentials (str user) (str password))
+                                        ssl
+                                        (.withSslContext (SSLContext/getDefault))
+                                        true
+                                        (.build))))
+                                m {:session s}]
+                            (swap! sessions assoc endpoint m)
+                            m)))
             map__33023 (if (seq? map__33023)
                          (if (next map__33023)
                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
@@ -130,4 +136,12 @@
                            (if (seq map__33023) (first map__33023) {}))
                          map__33023)
             session (clojure.core/get map__33023 :session)]
-        (datomic.kv_cassandra3.KVCassandra3. session table)))))
+        (datomic.kv_cassandra3.KVCassandra3. session table))))
+  (reset-meta!
+    #'kv-cassandra
+    (assoc
+      {:arglists (clojure.core/list ['endpoint]), :column (int 1)}
+      :name
+      'kv-cassandra
+      :ns
+      *ns*)))

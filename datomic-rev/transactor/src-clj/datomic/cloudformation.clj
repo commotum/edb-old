@@ -52,65 +52,83 @@
         (clojure.core/import
           'com.amazonaws.services.cloudformation.model.ValidateTemplateResult))))
   (set! *warn-on-reflection* true)
-  (defn client
-    ([creds config]
-      (if config
-        (let [region (get config :region)
-              override_endpoint (get config :override-endpoint)
-              conf (d/data-to-object
-                     (dissoc config :region :override-endpoint)
-                     com.amazonaws.ClientConfiguration)
-              conn (if creds
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (aws/credentials creds))
-                       (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf))
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-                       (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)))]
-          (cond
-            override_endpoint (.setEndpoint
-                                ^com.amazonaws.AmazonWebServiceClient conn
-                                (str "http://" override_endpoint))
-            region (do
-                     (.setEndpoint
-                       ^com.amazonaws.AmazonWebServiceClient conn
-                       (aws/endpoint-for :cloudformation region))))
-          conn)
-        (client creds)))
-    ([creds]
-      (if creds
-        (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
-          (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-            (aws/credentials creds))
-          (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-            (aws/credentials creds)))
-        (if (instance?
-              com.amazonaws.auth.AWSCredentialsProvider
-              (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-    ([]
-      (if (instance?
-            com.amazonaws.auth.AWSCredentialsProvider
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+  (def client
+   (fn client
+     ([creds config]
+       (if config
+         (let [region (get config :region)
+               override_endpoint (get config :override-endpoint)
+               conf (d/data-to-object
+                      (dissoc config :region :override-endpoint)
+                      com.amazonaws.ClientConfiguration)
+               conn (if creds
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (aws/credentials creds))
+                        (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf))
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+                        (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)))]
+           (cond
+             override_endpoint (.setEndpoint
+                                 ^com.amazonaws.AmazonWebServiceClient conn
+                                 (str "http://" override_endpoint))
+             region (do
+                      (.setEndpoint
+                        ^com.amazonaws.AmazonWebServiceClient conn
+                        (aws/endpoint-for :cloudformation region))))
+           conn)
+         (client creds)))
+     ([creds]
+       (if creds
+         (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
+           (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+             (aws/credentials creds))
+           (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+             (aws/credentials creds)))
+         (if (instance?
+               com.amazonaws.auth.AWSCredentialsProvider
+               (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+     ([]
+       (if (instance?
+             com.amazonaws.auth.AWSCredentialsProvider
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.cloudformation.AmazonCloudFormationClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))
+  (reset-meta!
+    #'client
+    (assoc
+      {:arglists
+       (clojure.core/list
+         (.withMeta [] {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+         (.withMeta
+           ['creds]
+           {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+         (.withMeta
+           ['creds 'config]
+           {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})),
+       :column (int 1)}
+      :name
+      'client
+      :ns
+      *ns*))
   (alter-var-root
     #'d/list-property-types
     assoc
@@ -1627,145 +1645,132 @@
                (when temp__5804__auto__
                  (let [v__19409__auto__ temp__5804__auto__]
                    [:sdkHttpMetadata (d/object-to-data-wrapper v__19409__auto__)])))))))})
-  (defn list-stacks
-    ([o x1]
-      (d/object-to-data
-        (.listStacks
-          ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
-          (d/data-to-object x1 com.amazonaws.services.cloudformation.model.ListStacksRequest)))))
-  (reset-meta!
-    #'list-stacks
-    (assoc
-      {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
-          'x1]),
-       :column 1}
-      :name
-      'list-stacks
-      :ns
-      *ns*))
-  (defn validate-template
-    ([o x1]
-      (d/object-to-data
-        (.validateTemplate
-          ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.cloudformation.model.ValidateTemplateRequest)))))
-  (reset-meta!
-    #'validate-template
-    (assoc
-      {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
-          'x1]),
-       :column 1}
-      :name
-      'validate-template
-      :ns
-      *ns*))
-  (defn create-stack
-    ([o x1]
-      (d/object-to-data
-        (.createStack
-          ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
-          (d/data-to-object x1 com.amazonaws.services.cloudformation.model.CreateStackRequest)))))
-  (reset-meta!
-    #'create-stack
-    (assoc
-      {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
-          'x1]),
-       :column 1}
-      :name
-      'create-stack
-      :ns
-      *ns*))
-  (defn delete-stack
-    ([o x1]
-      (d/object-to-data
-        (.deleteStack
-          ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
-          (d/data-to-object x1 com.amazonaws.services.cloudformation.model.DeleteStackRequest)))))
-  (reset-meta!
-    #'delete-stack
-    (assoc
-      {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
-          'x1]),
-       :column 1}
-      :name
-      'delete-stack
-      :ns
-      *ns*))
-  (defn update-stack
-    ([o x1]
-      (d/object-to-data
-        (.updateStack
-          ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
-          (d/data-to-object x1 com.amazonaws.services.cloudformation.model.UpdateStackRequest)))))
-  (reset-meta!
-    #'update-stack
-    (assoc
-      {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
-          'x1]),
-       :column 1}
-      :name
-      'update-stack
-      :ns
-      *ns*))
-  (defn describe-stack-events
-    ([o x1]
-      (d/object-to-data
-        (.describeStackEvents
-          ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.cloudformation.model.DescribeStackEventsRequest)))))
-  (reset-meta!
-    #'describe-stack-events
-    (assoc
-      {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
-          'x1]),
-       :column 1}
-      :name
-      'describe-stack-events
-      :ns
-      *ns*))
-  (defn describe-stacks
-    ([o x1]
-      (d/object-to-data
-        (.describeStacks
-          ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.cloudformation.model.DescribeStacksRequest)))))
-  (reset-meta!
-    #'describe-stacks
-    (assoc
-      {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
-          'x1]),
-       :column 1}
-      :name
-      'describe-stacks
-      :ns
-      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudformation" "list-stacks")
+    {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudformation" "list-stacks")
+    (fn list_stacks
+      ([o x1]
+        (d/object-to-data
+          (.listStacks
+            ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudformation.model.ListStacksRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudformation" "validate-template")
+    {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudformation" "validate-template")
+    (fn validate_template
+      ([o x1]
+        (d/object-to-data
+          (.validateTemplate
+            ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudformation.model.ValidateTemplateRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudformation" "create-stack")
+    {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudformation" "create-stack")
+    (fn create_stack
+      ([o x1]
+        (d/object-to-data
+          (.createStack
+            ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudformation.model.CreateStackRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudformation" "delete-stack")
+    {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudformation" "delete-stack")
+    (fn delete_stack
+      ([o x1]
+        (d/object-to-data
+          (.deleteStack
+            ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudformation.model.DeleteStackRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudformation" "update-stack")
+    {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudformation" "update-stack")
+    (fn update_stack
+      ([o x1]
+        (d/object-to-data
+          (.updateStack
+            ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudformation.model.UpdateStackRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudformation" "describe-stack-events")
+    {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudformation" "describe-stack-events")
+    (fn describe_stack_events
+      ([o x1]
+        (d/object-to-data
+          (.describeStackEvents
+            ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudformation.model.DescribeStackEventsRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudformation" "describe-stacks")
+    {:related-class com.amazonaws.services.cloudformation.AmazonCloudFormationClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudformation.AmazonCloudFormationClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudformation" "describe-stacks")
+    (fn describe_stacks
+      ([o x1]
+        (d/object-to-data
+          (.describeStacks
+            ^com.amazonaws.services.cloudformation.AmazonCloudFormationClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudformation.model.DescribeStacksRequest))))))
   (defn map->parameters
     ([m]
       (reduce
@@ -1777,12 +1782,23 @@
               (conj coll {:parameterKey (name k), :parameterValue v}))))
         []
         m)))
+  (reset-meta!
+    #'map->parameters
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'map->parameters :ns *ns*))
   (defn parameters->map
     ([pkv]
       (reduce
         (fn fn__30511 ([m pkv] (assoc m (keyword (:parameterKey pkv)) (:parameterValue pkv))))
         {}
         pkv)))
+  (reset-meta!
+    #'parameters->map
+    (assoc
+      {:arglists (clojure.core/list ['pkv]), :column (int 1)}
+      :name
+      'parameters->map
+      :ns
+      *ns*))
   (defn stack-parameters
     ([client name]
       (-> (describe-stacks client {:stackName name})
@@ -1790,39 +1806,66 @@
        (first)
        (:parameters)
        (parameters->map))))
-  (defn delete-stack-command
-    ([p__30515]
-      (let [map__30516 p__30515
-            map__30516 (if (seq? map__30516)
-                         (if (next map__30516)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__30516))
-                           (if (seq map__30516) (first map__30516) {}))
-                         map__30516)
-            region (get map__30516 :region)
-            stack_name (get map__30516 :stack-name)
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (println (delete-stack (client nil {:region region}) {:stackName stack_name}))
-            (str s__6419__auto__))))))
-  (defn create-stack-command
-    ([p__30519]
-      (let [map__30520 p__30519
-            map__30520 (if (seq? map__30520)
-                         (if (next map__30520)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__30520))
-                           (if (seq map__30520) (first map__30520) {}))
-                         map__30520)
-            region (get map__30520 :region)
-            stack_name (get map__30520 :stack-name)
-            template_file (get map__30520 :template-file)
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (println
-              (create-stack
-                (client nil {:region region})
-                {:stackName stack_name, :templateBody (slurp template_file)}))
-            (str s__6419__auto__)))))))
+  (reset-meta!
+    #'stack-parameters
+    (assoc
+      {:arglists (clojure.core/list ['client 'name]), :column (int 1)}
+      :name
+      'stack-parameters
+      :ns
+      *ns*))
+  (def delete-stack-command
+   (fn delete_stack_command
+     ([p__30515]
+       (let [map__30516 p__30515
+             map__30516 (if (seq? map__30516)
+                          (if (next map__30516)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__30516))
+                            (if (seq map__30516) (first map__30516) {}))
+                          map__30516)
+             region (get map__30516 :region)
+             stack_name (get map__30516 :stack-name)
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (println (delete-stack (client nil {:region region}) {:stackName stack_name}))
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'delete-stack-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['region 'stack-name]}]), :column (int 1)}
+      :name
+      'delete-stack-command
+      :ns
+      *ns*))
+  (def create-stack-command
+   (fn create_stack_command
+     ([p__30519]
+       (let [map__30520 p__30519
+             map__30520 (if (seq? map__30520)
+                          (if (next map__30520)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__30520))
+                            (if (seq map__30520) (first map__30520) {}))
+                          map__30520)
+             region (get map__30520 :region)
+             stack_name (get map__30520 :stack-name)
+             template_file (get map__30520 :template-file)
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (println
+               (create-stack
+                 (client nil {:region region})
+                 {:stackName stack_name, :templateBody (slurp template_file)}))
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'create-stack-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['region 'stack-name 'template-file]}]),
+       :column (int 1)}
+      :name
+      'create-stack-command
+      :ns
+      *ns*)))

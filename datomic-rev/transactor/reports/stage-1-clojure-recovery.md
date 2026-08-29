@@ -1,6 +1,74 @@
 # Stage 1 Transactor Clojure source recovery
 
-## Result — superseded historical checkpoint
+## Current checkpoint — integrated corpus promoted, exact AOT open
+
+Fresh canonical recoveries at
+`/tmp/datomic-stage1-integrated-twin-v3-a` and
+`/tmp/datomic-stage1-integrated-twin-v3-b` each pass all 247 namespace rows:
+160 strict Datomic decompiles, two exact Datomic dependency sources, and 85
+exact bundled sources. Both have zero failures and zero `BROKEN DECOMP`
+sentinels, and their source trees are byte-identical. The promoted 247-row
+source-manifest-file SHA-256 is
+`bc44fdc277a5452b8fa950eaa390b595f5d93b5705cfb1b2ab4689d07656b69f`.
+The twin evidence manifest at
+`/tmp/datomic-stage1-integrated-twin-v3-evidence/manifest.sha256` has SHA-256
+`f01000248fd4a9093100aebcf94f783b6863369aba7c74b41da289ea482e097d`
+and verifies in full.
+
+The full external-source structural run at
+`/tmp/datomic-stage1-integrated-twin-v3-surface` proves 272/272 effective
+loads: 271 isolated cold loads plus the documented topological
+`datomic.transactor-ext` pass. All 247 oracle and 247 candidate probes produce
+valid dedicated EDN. Raw exact agreement is 232/247, source-location-stripped
+agreement is 243/247, and callable/root/class agreement with Var metadata
+excluded is 247/247. The only strict metadata remainder is 31 Vars across four
+namespaces in two families: 28 `:arglists` rows across two namespaces and
+three `:name` rows across two namespaces. All fifteen raw-differing namespaces
+are hash-bound shipped-source namespaces; no decompiled Datomic namespace
+remains in the residual cohort. Those source-evaluation-versus-AOT differences
+belong to the normalized exact-AOT gate, not to another decompiler edit loop.
+The structural evidence manifest SHA-256 is
+`4921abcfb0926790780c21889e71ab05889d0347496d3272fafd5464f5d073a2`
+and verifies in full; the typed classifier is a semantic PASS despite the
+top-level strict-exact gate's expected 15-row FAIL.
+
+The first focused runtime pass against the prior fresh twin stopped promotion
+on `datomic.promise/settable-future`: the source still contained raw
+`monitor-enter`/`monitor-exit` forms and threw
+`IllegalMonitorStateException`. The generic recognizer accepted only an
+unqualified `let`, while the preceding compaction pass emitted the in-memory
+symbol `clojure.core/let`; pprint/readback had hidden that distinction from the
+old fixture. Recovery now accepts exactly `let` or `clojure.core/let`, retains
+all existing lock-temp/enter/try/finally/exit guards, and proves an unrelated
+`foreign/let` and ordinary qualified `let` cannot match. An aborted v2 twin
+then exposed an eager would-be-`try` inspection; the recognizer now proves the
+complete prefix and actual `try` form before traversing it. The complete
+decompiler validator passes, the regenerated `datomic.promise` contains two
+source-level `locking` forms, and the focused runtime suite passes against the
+complete v3 tree. That suite also now proves an empty persistent index returns
+the initialized `disjoined-datoms` partition rather than stale `nil`.
+The current compactor, decompiler validator, and focused runtime-regression
+SHA-256 values are
+`9e392d551c873626d29a0c79c09bd52ca1aca5eb67f4bc77555476bfd5b1542e`,
+`4859299065cadb5a0e707b6aea20a8404b91ee35174d1e02d41a82477e835983`,
+and `62a1111ed043d694c26a3468aac6b0f6a1bab9e86ea1e4b6badaf6eed400cc24`.
+
+The checked-in `transactor/src-clj` tree and checked-in source manifest are
+byte-identical to Twin A. A checked-in source preflight at
+`/tmp/datomic-stage1-integrated-twin-v3-promotion-preflight` passes exact
+247-file membership and hashes; its evidence-manifest SHA-256 is
+`4751cec79d9ff802fc116b1bc7f82e13d00b9238cc97740f51cfcfed046ec150`.
+The promoted generator output retains deterministic trailing spaces on some
+multiline forms, so `git diff --check` reports generated-source whitespace;
+those twin-bound bytes were not silently normalized during promotion.
+
+Stage 1 remains in progress only at the separately bounded normalized
+exact-source AOT acceptance wrapper and its whole 3,431-class relation. The
+integrated Clojure corpus, protocol metadata family, load boundary, callable
+surface, and focused executable regressions are now promoted rather than
+pending.
+
+## Superseded historical checkpoint
 
 This report originally promoted the v7/v8 tree. That promotion is retracted.
 Later whole-tree auditing proved that generic compaction could truncate every
@@ -113,8 +181,12 @@ Whole-artifact recovery exposed real control-flow defects rather than a need
 for larger JVM heaps. The repaired cases include terminal throws and
 non-returning methods, implicit and nested loops, split `try` ranges,
 exceptional-only `finally` handlers, structured continuation boundaries, and
-namespace qualification across successive `in-ns` forms. The focused
-validator now has 24 checks.
+namespace qualification across successive `in-ns` forms. The focused validator
+passes all current groups, including the multi-`classForName` protocol-preintern
+persistence regression. Its SHA-256 is
+`a19fbd8ed0085fd65be3f274fa8dc8fde62684fd692da806e3cdfbf97e31ce6b`;
+the retained regression-log SHA-256 is
+`e8231f52542c083964058e3c9e065cdb34de1ab5cdaad63260c16392050f0446`.
 
 One initially clean-looking 247-source result was rejected after a complete
 Peer regeneration exposed value loss in 16 core.async IOC state-machine loops.
@@ -207,14 +279,17 @@ hashes before recovery.
   still prove bijective per-fresh-JVM compilation-unit mappings, exact
   cross-namespace routing, and complete normalized ABI/code
   equivalence without erasing ambiguity.
-- Finish and seal the active bounded 247-namespace plus 25 Peer-core2
-  structural load and surface gate, using declared semantic namespace names
-  rather than munged initializer names and without original Peer, Transactor,
-  or `core2` AOT fallback. The corrected discovery-only regression is green;
-  partial results from the full run are not completion evidence.
+- The promoted 247-namespace plus 25 Peer-core2 structural gate is sealed at
+  272/272 effective loads and 247/247 callable/root/class surface agreement,
+  without original Peer, Transactor, or `core2` AOT fallback. The protocol
+  family is integrated. Its strict one-tier status remains an expected FAIL
+  only for fifteen hash-bound shipped-source namespaces: 31 metadata rows in
+  `:arglists` and `:name`. The normalized exact-AOT lane must classify those
+  source-evaluation-versus-AOT differences without weakening the exact typed
+  surface.
 - The deterministic JKS-free `nano-impl` derivative, the clean hash-bound
   532-JAR dependency manifest, and four separately authored/generated
   candidate resources are integrated into that structural classpath. The
   archive-content audit and keep/replace/exclude accounting for all 533 shipped
-  dependencies are closed; post-load/post-surface input seals and the final
-  structural evidence manifest remain open until the full run exits.
+  dependencies are closed. The promoted-tree structural evidence manifest and
+  both post-load/post-surface input and directory-membership seals verify.

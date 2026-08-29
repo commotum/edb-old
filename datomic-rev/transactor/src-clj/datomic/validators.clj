@@ -17,10 +17,26 @@
             (throw
               (java.lang.IllegalArgumentException. (str "Unexpected keys " extras " in " m)))))
         nil)))
+  (reset-meta!
+    #'allow-keys
+    (assoc
+      {:arglists (clojure.core/list ['m '& 'ks]), :column (int 1)}
+      :name
+      'allow-keys
+      :ns
+      *ns*))
   (defn require-keys
     ([m & ks]
       (let [missing (set/difference (apply hash-set ks) (apply hash-set (keys m)))]
         (when (seq missing)
           (binding [*print-length* 100 *print-level* 10]
             (throw (java.lang.IllegalArgumentException. (str "Missing keys " missing " in " m)))))
-        nil))))
+        nil)))
+  (reset-meta!
+    #'require-keys
+    (assoc
+      {:arglists (clojure.core/list ['m '& 'ks]), :column (int 1)}
+      :name
+      'require-keys
+      :ns
+      *ns*)))

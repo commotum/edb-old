@@ -27,8 +27,30 @@
           ['datomic.slf4j :as 'logger])
         (clojure.core/import 'java.nio.ByteBuffer))))
   (set! *warn-on-reflection* true)
-  (defonce Impl {})
-  (defprotocol Impl (-get [_ val-key opts]))
+  (let [protocol_metadata__7420 {:column (int 1)}]
+    (defprotocol
+      Impl
+      (-get [_ val-key opts] "Impl of cluster/ClusteredStore that takes nilable opts map."))
+    (reset-meta!
+      (clojure.lang.RT/var "datomic.val-cluster" "Impl")
+      (assoc (assoc protocol_metadata__7420 :doc nil) :name 'Impl :ns *ns*))
+    (let [protocol_signature__7421 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta
+                                        '-get
+                                        {:arglists (clojure.core/list ['_ 'val-key 'opts])}),
+                                      :arglists (clojure.core/list ['_ 'val-key 'opts]),
+                                      :doc
+                                      "Impl of cluster/ClusteredStore that takes nilable opts map."}
+                                     :protocol
+                                     (clojure.lang.RT/var "datomic.val-cluster" "Impl"))
+          protocol_method_name__7422 (with-meta
+                                       (:name protocol_signature__7421)
+                                       protocol_signature__7421)]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.val-cluster" "-get")
+        (assoc protocol_signature__7421 :name protocol_method_name__7422 :ns *ns*))))
   (deftype
     ValCluster
     [val_store]
@@ -266,5 +288,21 @@
           (deref df/bounding-warn-seconds))
         f__16170__auto__)))
   (clojure.core/import 'datomic.val_cluster.ValCluster)
-  (defn ->ValCluster ([val_store] (datomic.val_cluster.ValCluster. val_store)))
-  (defn val-cluster ([val_store] (datomic.val_cluster.ValCluster. val_store))))
+  (def ->ValCluster (fn __GT_ValCluster ([val_store] (datomic.val_cluster.ValCluster. val_store))))
+  (reset-meta!
+    #'->ValCluster
+    (assoc
+      {:arglists (clojure.core/list ['val-store]), :column (int 1)}
+      :name
+      '->ValCluster
+      :ns
+      *ns*))
+  (def val-cluster (fn val_cluster ([val_store] (datomic.val_cluster.ValCluster. val_store))))
+  (reset-meta!
+    #'val-cluster
+    (assoc
+      {:arglists (clojure.core/list ['val-store]), :column (int 1)}
+      :name
+      'val-cluster
+      :ns
+      *ns*)))

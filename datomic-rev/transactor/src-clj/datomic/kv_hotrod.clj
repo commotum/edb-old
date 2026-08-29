@@ -13,15 +13,21 @@
         (clojure.core/require ['datomic.kv-store :as 'kv] ['datomic.io :as 'io])
         (clojure.core/import 'java.nio.ByteBuffer))))
   (set! *warn-on-reflection* true)
-  (def FORCE (delay (into-array [org.infinispan.client.hotrod.Flag/FORCE_RETURN_VALUE])))
-  (def PROPS
-   (doto
-     (java.util.Properties.)
-     (.setProperty "infinispan.client.hotrod.key_size_estimate" "128")
-     (.setProperty "infinispan.client.hotrod.value_size_estimate" "64000")
-     (.setProperty "infinispan.client.hotrod.socket_timeout" "10000")
-     (.setProperty "infinispan.client.hotrod.connect_timeout" "10000")))
-  (def managers (atom {}))
+  (.setMeta (clojure.lang.RT/var "datomic.kv-hotrod" "FORCE") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.kv-hotrod" "FORCE")
+    (delay (into-array [org.infinispan.client.hotrod.Flag/FORCE_RETURN_VALUE])))
+  (.setMeta (clojure.lang.RT/var "datomic.kv-hotrod" "PROPS") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.kv-hotrod" "PROPS")
+    (doto
+      (java.util.Properties.)
+      (.setProperty "infinispan.client.hotrod.key_size_estimate" "128")
+      (.setProperty "infinispan.client.hotrod.value_size_estimate" "64000")
+      (.setProperty "infinispan.client.hotrod.socket_timeout" "10000")
+      (.setProperty "infinispan.client.hotrod.connect_timeout" "10000")))
+  (.setMeta (clojure.lang.RT/var "datomic.kv-hotrod" "managers") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.kv-hotrod" "managers") (atom {}))
   (deftype
     KVHotRod
     [cache]
@@ -84,6 +90,9 @@
         :ok)))
   (clojure.core/import 'datomic.kv_hotrod.KVHotRod)
   (defn ->KVHotRod ([cache] (datomic.kv_hotrod.KVHotRod. cache)))
+  (reset-meta!
+    #'->KVHotRod
+    (assoc {:arglists (clojure.core/list ['cache]), :column (int 1)} :name '->KVHotRod :ns *ns*))
   (defn kv-infinispan
     ([endpoint]
       (let [map__33173 endpoint
@@ -95,17 +104,21 @@
                          map__33173)
             host (clojure.core/get map__33173 :host)
             port (clojure.core/get map__33173 :port)
-            manager (let [lockee__5782__auto__ managers
-                          locklocal__5783__auto__ lockee__5782__auto__]
-                      (monitor-enter locklocal__5783__auto__)
-                      (try
-                        (or
-                          (clojure.core/get (deref managers) endpoint)
-                          (let [m (org.infinispan.client.hotrod.RemoteCacheManager.
-                                    (str host)
-                                    (int port))]
-                            (swap! managers assoc endpoint m)
-                            m))
-                        (finally (do (monitor-exit locklocal__5783__auto__) nil))))]
+            manager (locking managers
+                     (or
+                       (clojure.core/get (deref managers) endpoint)
+                       (let [m (org.infinispan.client.hotrod.RemoteCacheManager.
+                                 (str host)
+                                 (int port))]
+                         (swap! managers assoc endpoint m)
+                         m)))]
         (datomic.kv_hotrod.KVHotRod.
-          (.getCache ^org.infinispan.client.hotrod.RemoteCacheManager manager "datomic"))))))
+          (.getCache ^org.infinispan.client.hotrod.RemoteCacheManager manager "datomic")))))
+  (reset-meta!
+    #'kv-infinispan
+    (assoc
+      {:arglists (clojure.core/list ['endpoint]), :column (int 1)}
+      :name
+      'kv-infinispan
+      :ns
+      *ns*)))

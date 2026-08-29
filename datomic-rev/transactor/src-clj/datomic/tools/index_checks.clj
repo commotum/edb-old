@@ -39,18 +39,49 @@
           (filter
             (fn fn__26982 ([p1__26978#] (contains? as (.a ^datomic.Datom p1__26978#))))
             (apply d/datoms db sort components))))))
-  (defn boot-tail-collision?
-    ([p__26985]
-      (let [vec__26986 p__26985 d1 (nth vec__26986 (int 0) nil) _ (nth vec__26986 (int 1) nil)]
-        (= (.e ^datomic.Datom d1) (db/BOOT-IDS :db.bootstrap/part)))))
-  (defn non-unique?
-    ([p__26990]
-      (let [vec__26991 p__26990 d1 (nth vec__26991 (int 0) nil) d2 (nth vec__26991 (int 1) nil)]
-        (and
-          (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
-          (= (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))
-          (= (boolean (.added ^datomic.Datom d1)) (boolean (.added ^datomic.Datom d2)))))))
+  (reset-meta!
+    #'card-one-collisions
+    (assoc
+      {:arglists (clojure.core/list ['db 'sort 'progress '& 'components]), :column (int 1)}
+      :name
+      'card-one-collisions
+      :ns
+      *ns*))
+  (def boot-tail-collision?
+   (fn boot_tail_collision_QMARK_
+     ([p__26985]
+       (let [vec__26986 p__26985 d1 (nth vec__26986 (int 0) nil) _ (nth vec__26986 (int 1) nil)]
+         (= (.e ^datomic.Datom d1) (db/BOOT-IDS :db.bootstrap/part))))))
+  (reset-meta!
+    #'boot-tail-collision?
+    (assoc
+      {:arglists (clojure.core/list [[(.withMeta 'd1 {:tag 'Datom}) '_]]), :column (int 1)}
+      :name
+      'boot-tail-collision?
+      :ns
+      *ns*))
+  (def non-unique?
+   (fn non_unique_QMARK_
+     ([p__26990]
+       (let [vec__26991 p__26990 d1 (nth vec__26991 (int 0) nil) d2 (nth vec__26991 (int 1) nil)]
+         (and
+           (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
+           (= (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))
+           (= (boolean (.added ^datomic.Datom d1)) (boolean (.added ^datomic.Datom d2))))))))
+  (reset-meta!
+    #'non-unique?
+    (assoc
+      {:arglists
+       (clojure.core/list [[(.withMeta 'd1 {:tag 'Datom}) (.withMeta 'd2 {:tag 'Datom})]]),
+       :column (int 1)}
+      :name
+      'non-unique?
+      :ns
+      *ns*))
   (defn reporter ([f] (fn fn__26997 ([x] (^clojure.lang.IFn f x) x))))
+  (reset-meta!
+    #'reporter
+    (assoc {:arglists (clojure.core/list ['f]), :column (int 1)} :name 'reporter :ns *ns*))
   (defn unique-collisions
     ([db progress]
       (seq
@@ -64,25 +95,50 @@
               (mapcat
                 (fn fn__27000 ([a] (d/datoms db :avet a)))
                 (concat (tools/unique-identities db) (tools/unique-values db)))))))))
+  (reset-meta!
+    #'unique-collisions
+    (assoc
+      {:arglists (clojure.core/list ['db 'progress]), :column (int 1)}
+      :name
+      'unique-collisions
+      :ns
+      *ns*))
   (defn rename-to ([db e] (:v (first (d/datoms db :eavt e :db.sys/reId)))))
+  (reset-meta!
+    #'rename-to
+    (assoc {:arglists (clojure.core/list ['db 'e]), :column (int 1)} :name 'rename-to :ns *ns*))
   (defn rename-from ([db e] (:e (first (d/datoms db :vaet e :db.sys/reId)))))
-  (defn maybe-renamed?
-    ([db p__27005]
-      (let [map__27006 p__27005
-            map__27006 (if (seq? map__27006)
-                         (if (next map__27006)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27006))
-                           (if (seq map__27006) (first map__27006) {}))
-                         map__27006)
-            e (get map__27006 :e)
-            a (get map__27006 :a)
-            v (get map__27006 :v)
-            tx (get map__27006 :tx)]
-        (or
-          (rename-from db e)
-          (rename-to db e)
-          (and (= 20 (.-vtypeid (db/attribute db a))) (or (rename-to db v) (rename-from db v)))))))
+  (reset-meta!
+    #'rename-from
+    (assoc {:arglists (clojure.core/list ['db 'e]), :column (int 1)} :name 'rename-from :ns *ns*))
+  (def maybe-renamed?
+   (fn maybe_renamed_QMARK_
+     ([db p__27005]
+       (let [map__27006 p__27005
+             map__27006 (if (seq? map__27006)
+                          (if (next map__27006)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27006))
+                            (if (seq map__27006) (first map__27006) {}))
+                          map__27006)
+             e (get map__27006 :e)
+             a (get map__27006 :a)
+             v (get map__27006 :v)
+             tx (get map__27006 :tx)]
+         (or
+           (rename-from db e)
+           (rename-to db e)
+           (and
+             (= 20 (.-vtypeid (db/attribute db a)))
+             (or (rename-to db v) (rename-from db v))))))))
+  (reset-meta!
+    #'maybe-renamed?
+    (assoc
+      {:arglists (clojure.core/list ['db {:keys ['e 'a 'v 'tx]}]), :column (int 1)}
+      :name
+      'maybe-renamed?
+      :ns
+      *ns*))
   (defn log-only
     ([cr db progress]
       (let [indexed? (fn indexed_QMARK_
@@ -105,6 +161,14 @@
           (remove
             indexed?
             (map (reporter progress) (mapcat :data (tools/tx-range-from-log cr 0 nil))))))))
+  (reset-meta!
+    #'log-only
+    (assoc
+      {:arglists (clojure.core/list ['cr 'db 'progress]), :column (int 1)}
+      :name
+      'log-only
+      :ns
+      *ns*))
   (defn progress-dot-fn
     ([n]
       (let [c (atom 0)]
@@ -112,6 +176,9 @@
           ([& _]
             (when (zero? (mod (swap! c inc) n))
               (binding [*out* *err*] (do (print ".") (flush)))))))))
+  (reset-meta!
+    #'progress-dot-fn
+    (assoc {:arglists (clojure.core/list ['n]), :column (int 1)} :name 'progress-dot-fn :ns *ns*))
   (defn -main*
     ([uri]
       (let [cr (tools/connection-resources uri)
@@ -219,6 +286,9 @@
                       (prn {:type :log-only, :d (^clojure.lang.IFn p d)})
                       (recur (next seq_27041) nil 0 0))))))))
         (prn {:type :summary, :problems (deref probs)}))))
+  (reset-meta!
+    #'-main*
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name '-main* :ns *ns*))
   (defn -main
     ([uri]
       (try
@@ -233,4 +303,7 @@
             nil)))
       (d/shutdown true)
       (java.lang.System/exit (int 0))
-      nil)))
+      nil))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name '-main :ns *ns*)))

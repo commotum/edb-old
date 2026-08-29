@@ -28,7 +28,17 @@
         (clojure.core/import 'java.sql.SQLException))))
   (set! *warn-on-reflection* true)
   (req/maybe-require 'datomic.kv-sql-ext)
-  (defn constraint-violation? ([e] (.startsWith (.getSQLState ^java.sql.SQLException e) "23")))
+  (def constraint-violation?
+   (fn constraint_violation_QMARK_
+     ([e] (.startsWith (.getSQLState ^java.sql.SQLException e) "23"))))
+  (reset-meta!
+    #'constraint-violation?
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'e {:tag 'SQLException})]), :column (int 1)}
+      :name
+      'constraint-violation?
+      :ns
+      *ns*))
   (deftype
     KVSql
     [spec]
@@ -89,9 +99,15 @@
         :ok)))
   (clojure.core/import 'datomic.kv_sql.KVSql)
   (defn ->KVSql ([spec] (datomic.kv_sql.KVSql. spec)))
+  (reset-meta!
+    #'->KVSql
+    (assoc {:arglists (clojure.core/list ['spec]), :column (int 1)} :name '->KVSql :ns *ns*))
   (defn from-spec ([spec] (datomic.kv_sql.KVSql. spec)))
+  (reset-meta!
+    #'from-spec
+    (assoc {:arglists (clojure.core/list ['spec]), :column (int 1)} :name 'from-spec :ns *ns*))
   (def LOGIN_FAILED 28000)
-  (reset-meta! #'LOGIN_FAILED (assoc {:const true, :column 1} :name 'LOGIN_FAILED :ns *ns*))
+  (reset-meta! #'LOGIN_FAILED (assoc {:const true, :column (int 1)} :name 'LOGIN_FAILED :ns *ns*))
   (extend
     java.sql.SQLException
     kv/Retryable

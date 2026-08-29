@@ -34,17 +34,18 @@
         (clojure.core/import 'org.eclipse.jetty.util.ssl.SslContextFactory)
         (clojure.core/require ['ring.util.servlet :as 'servlet]))))
   (set! *warn-on-reflection* true)
-  (defn handle
-    ([handler base_request request response]
-      (let [request_map (servlet/build-request-map request)
-            response_map (^clojure.lang.IFn handler request_map)]
-        (when response_map
-          (.setCharacterEncoding ^org.eclipse.jetty.server.Response response "UTF-8")
-          (servlet/update-servlet-response response response_map)
-          (.setHandled
-            ^org.eclipse.jetty.server.Request base_request
-            (boolean (.booleanValue true)))
-          nil))))
+  (def handle
+   (fn handle
+     ([handler base_request request response]
+       (let [request_map (servlet/build-request-map request)
+             response_map (^clojure.lang.IFn handler request_map)]
+         (when response_map
+           (.setCharacterEncoding ^org.eclipse.jetty.server.Response response "UTF-8")
+           (servlet/update-servlet-response response response_map)
+           (.setHandled
+             ^org.eclipse.jetty.server.Request base_request
+             (boolean (.booleanValue true)))
+           nil)))))
   (reset-meta!
     #'handle
     (assoc
@@ -55,7 +56,7 @@
           (.withMeta 'base-request {:tag 'Request})
           'request
           (.withMeta 'response {:tag 'Response})]),
-       :column 1}
+       :column (int 1)}
       :name
       'handle
       :ns
@@ -71,7 +72,7 @@
   (reset-meta!
     #'proxy-handler
     (assoc
-      {:private true, :arglists (clojure.core/list ['handler]), :column 1}
+      {:private true, :arglists (clojure.core/list ['handler]), :column (int 1)}
       :name
       'proxy-handler
       :ns
@@ -117,25 +118,26 @@
   (reset-meta!
     #'ssl-context-factory
     (assoc
-      {:private true, :arglists (clojure.core/list ['options]), :column 1}
+      {:private true, :arglists (clojure.core/list ['options]), :column (int 1)}
       :name
       'ssl-context-factory
       :ns
       *ns*))
-  (defn ssl-connector
-    ([server options]
-      (doto
-        (org.eclipse.jetty.server.ServerConnector.
-          ^org.eclipse.jetty.server.Server server
-          (ssl-context-factory options))
-        (.setPort (int (^clojure.lang.IFn options :ssl-port 443)))
-        (.setHost (^clojure.lang.IFn options :host)))))
+  (def ssl-connector
+   (fn ssl_connector
+     ([server options]
+       (doto
+         (org.eclipse.jetty.server.ServerConnector.
+           ^org.eclipse.jetty.server.Server server
+           (ssl-context-factory options))
+         (.setPort (int (^clojure.lang.IFn options :ssl-port 443)))
+         (.setHost (^clojure.lang.IFn options :host))))))
   (reset-meta!
     #'ssl-connector
     (assoc
       {:private true,
        :arglists (clojure.core/list [(.withMeta 'server {:tag 'Server}) 'options]),
-       :column 1}
+       :column (int 1)}
       :name
       'ssl-connector
       :ns
@@ -164,7 +166,7 @@
   (reset-meta!
     #'http-configuration
     (assoc
-      {:private true, :arglists (clojure.core/list ['options]), :column 1}
+      {:private true, :arglists (clojure.core/list ['options]), :column (int 1)}
       :name
       'http-configuration
       :ns
@@ -188,26 +190,31 @@
         (when (or (^clojure.lang.IFn options :ssl?) (^clojure.lang.IFn options :ssl-port))
           (.addConnector ^org.eclipse.jetty.server.Server server (ssl-connector server options)))
         server)))
-  (defn run-jetty
-    ([handler options]
-      (let [s (create-server (dissoc options :configurator))]
-        (let [G__27748 s]
-          (.setHandler
-            ^org.eclipse.jetty.server.handler.HandlerWrapper G__27748
-            (datomic_jetty.impl.ProxyHandler. (partial #'handle handler))))
-        (let [temp__5804__auto__ (:configurator options)]
-          (when temp__5804__auto__
-            (let [configurator temp__5804__auto__] (^clojure.lang.IFn configurator s))))
-        (.start ^org.eclipse.jetty.util.component.AbstractLifeCycle s)
-        (when (:join? options true) (.join ^org.eclipse.jetty.server.Server s))
-        s)))
   (reset-meta!
-    #'run-jetty
+    #'create-server
     (assoc
-      {:tag org.eclipse.jetty.server.Server,
-       :arglists (clojure.core/list ['handler 'options]),
-       :column 1}
+      {:arglists (clojure.core/list ['options]), :column (int 1)}
       :name
-      'run-jetty
+      'create-server
       :ns
-      *ns*)))
+      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.jetty" "run-jetty")
+    {:tag org.eclipse.jetty.server.Server,
+     :arglists (clojure.core/list ['handler 'options]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.jetty" "run-jetty")
+    (fn run_jetty
+      ([handler options]
+        (let [s (create-server (dissoc options :configurator))]
+          (let [G__27748 s]
+            (.setHandler
+              ^org.eclipse.jetty.server.handler.HandlerWrapper G__27748
+              (datomic_jetty.impl.ProxyHandler. (partial #'handle handler))))
+          (let [temp__5804__auto__ (:configurator options)]
+            (when temp__5804__auto__
+              (let [configurator temp__5804__auto__] (^clojure.lang.IFn configurator s))))
+          (.start ^org.eclipse.jetty.util.component.AbstractLifeCycle s)
+          (when (:join? options true) (.join ^org.eclipse.jetty.server.Server s))
+          s)))))

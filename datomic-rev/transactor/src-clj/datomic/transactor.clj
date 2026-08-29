@@ -71,100 +71,116 @@
   (set! *warn-on-reflection* true)
   (req/maybe-require 'datomic.lifecycle-ext)
   (defn aws-creds ([ak sk] (when (and ak sk) {:aws-access-key-id ak, :aws-secret-key sk})))
-  (defn start-lifecycle
-    ([p__26517]
-      (let [map__26518 p__26517
-            map__26518 (if (seq? map__26518)
-                         (if (next map__26518)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__26518))
-                           (if (seq map__26518) (first map__26518) {}))
-                         map__26518)
-            cluster_map (get map__26518 :cluster-map)
-            master_endpoint (get map__26518 :master-endpoint)
-            process (get map__26518 :process)
-            td (get map__26518 :td)
-            status (get map__26518 :status)
-            system_conn (coord/create-system-cluster cluster_map)
-            serve (fn serve
-                    ([]
-                      (reset!
-                        status
-                        (str
-                          "active/"
-                          (.format
-                            (java.text.SimpleDateFormat. "yyyy-MM-dd-kk-mm-ss")
-                            (java.util.Date.))))
-                      (let [master (update/create-master
-                                     :system-cluster-conf
-                                     cluster_map
-                                     :olookup-factory
-                                     domain/system-cache-olookup
-                                     :endpoint
-                                     master_endpoint
-                                     :td
-                                     td)]
-                        (common/schedule
-                          "Datomic Metrics Tracker"
-                          (fn fn__26520
-                            ([]
-                              (let [logger (org.slf4j.LoggerFactory/getLogger
-                                             "datomic.transactor")]
-                                (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                  (.info
-                                    ^org.slf4j.Logger logger
-                                    (logger/process
-                                      {:event :transactor/remote-ips,
-                                       :ips (update/remote-ips master)})))
-                                nil)
-                              (let [stat (monitor/metrics master)]
-                                (loop [seq_26521 (seq
-                                                   [:MemoryIndexMB
-                                                    :MemoryIndexFillMsec
-                                                    :RemotePeers])
-                                       chunk_26522 nil
-                                       count_26523 0
-                                       i_26524 0]
-                                  (if (< i_26524 count_26523)
-                                    (let [k (.nth ^clojure.lang.Indexed chunk_26522 (int i_26524))]
-                                      (let [G__26525 stat
-                                            G__26525 (some-> G__26525 (^clojure.lang.IFn k))]
-                                        (when-not (nil? G__26525) (monitor/add-stat k G__26525)))
-                                      (recur seq_26521 chunk_26522 count_26523 (inc i_26524)))
-                                    (let [temp__5804__auto__ (seq seq_26521)]
-                                      (when temp__5804__auto__
-                                        (let [seq_26521 temp__5804__auto__]
-                                          (if (chunked-seq? seq_26521)
-                                            (let [c__6065__auto__ (chunk-first seq_26521)]
-                                              (recur
-                                                (chunk-rest seq_26521)
-                                                c__6065__auto__
-                                                (int (count c__6065__auto__))
-                                                (int 0)))
-                                            (let [k (first seq_26521)]
-                                              (let [G__26526 stat
-                                                    G__26526 (some->
-                                                               G__26526
-                                                               (^clojure.lang.IFn k))]
-                                                (when-not (nil? G__26526)
-                                                  (monitor/add-stat k G__26526)))
-                                              (recur (next seq_26521) nil 0 0)))))))))))
-                          60000)
-                        (process/add-fail-handler
-                          process
-                          (fn fn__26530 ([] (common/async-shutdown master)))))))
-            lc (lifecycle/start
-                 :cluster
-                 system_conn
-                 :endpoint
-                 master_endpoint
-                 :tick
-                 (config/property "datomic.heartbeatIntervalMsec")
-                 :serve
-                 serve
-                 :ha?
-                 (config/protocol-supports-ha? (common/getx cluster_map :protocol)))]
-        nil)))
+  (reset-meta!
+    #'aws-creds
+    (assoc {:arglists (clojure.core/list ['ak 'sk]), :column (int 1)} :name 'aws-creds :ns *ns*))
+  (def start-lifecycle
+   (fn start_lifecycle
+     ([p__26517]
+       (let [map__26518 p__26517
+             map__26518 (if (seq? map__26518)
+                          (if (next map__26518)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__26518))
+                            (if (seq map__26518) (first map__26518) {}))
+                          map__26518)
+             cluster_map (get map__26518 :cluster-map)
+             master_endpoint (get map__26518 :master-endpoint)
+             process (get map__26518 :process)
+             td (get map__26518 :td)
+             status (get map__26518 :status)
+             system_conn (coord/create-system-cluster cluster_map)
+             serve (fn serve
+                     ([]
+                       (reset!
+                         status
+                         (str
+                           "active/"
+                           (.format
+                             (java.text.SimpleDateFormat. "yyyy-MM-dd-kk-mm-ss")
+                             (java.util.Date.))))
+                       (let [master (update/create-master
+                                      :system-cluster-conf
+                                      cluster_map
+                                      :olookup-factory
+                                      domain/system-cache-olookup
+                                      :endpoint
+                                      master_endpoint
+                                      :td
+                                      td)]
+                         (common/schedule
+                           "Datomic Metrics Tracker"
+                           (fn fn__26520
+                             ([]
+                               (let [logger (org.slf4j.LoggerFactory/getLogger
+                                              "datomic.transactor")]
+                                 (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                   (.info
+                                     ^org.slf4j.Logger logger
+                                     (logger/process
+                                       {:event :transactor/remote-ips,
+                                        :ips (update/remote-ips master)})))
+                                 nil)
+                               (let [stat (monitor/metrics master)]
+                                 (loop [seq_26521 (seq
+                                                    [:MemoryIndexMB
+                                                     :MemoryIndexFillMsec
+                                                     :RemotePeers])
+                                        chunk_26522 nil
+                                        count_26523 0
+                                        i_26524 0]
+                                   (if (< i_26524 count_26523)
+                                     (let [k (.nth
+                                               ^clojure.lang.Indexed chunk_26522
+                                               (int i_26524))]
+                                       (let [G__26525 stat
+                                             G__26525 (some-> G__26525 (^clojure.lang.IFn k))]
+                                         (when-not (nil? G__26525) (monitor/add-stat k G__26525)))
+                                       (recur seq_26521 chunk_26522 count_26523 (inc i_26524)))
+                                     (let [temp__5804__auto__ (seq seq_26521)]
+                                       (when temp__5804__auto__
+                                         (let [seq_26521 temp__5804__auto__]
+                                           (if (chunked-seq? seq_26521)
+                                             (let [c__6065__auto__ (chunk-first seq_26521)]
+                                               (recur
+                                                 (chunk-rest seq_26521)
+                                                 c__6065__auto__
+                                                 (int (count c__6065__auto__))
+                                                 (int 0)))
+                                             (let [k (first seq_26521)]
+                                               (let [G__26526 stat
+                                                     G__26526 (some->
+                                                                G__26526
+                                                                (^clojure.lang.IFn k))]
+                                                 (when-not (nil? G__26526)
+                                                   (monitor/add-stat k G__26526)))
+                                               (recur (next seq_26521) nil 0 0)))))))))))
+                           60000)
+                         (process/add-fail-handler
+                           process
+                           (fn fn__26530 ([] (common/async-shutdown master)))))))
+             lc (lifecycle/start
+                  :cluster
+                  system_conn
+                  :endpoint
+                  master_endpoint
+                  :tick
+                  (config/property "datomic.heartbeatIntervalMsec")
+                  :serve
+                  serve
+                  :ha?
+                  (config/protocol-supports-ha? (common/getx cluster_map :protocol)))]
+         nil))))
+  (reset-meta!
+    #'start-lifecycle
+    (assoc
+      {:arglists
+       (clojure.core/list [{:keys ['cluster-map 'master-endpoint 'process 'td 'status]}]),
+       :column (int 1)}
+      :name
+      'start-lifecycle
+      :ns
+      *ns*))
   (def tprop->sysprop
    {:memcached "datomic.memcachedServers",
     :aws-cloudwatch-region "datomic.cloudwatchRegion",
@@ -203,6 +219,7 @@
     :aws-cloudwatch-access-key-id "datomic.cloudwatchAccesKeyId",
     :memcached-auto-discovery "datomic.memcachedAutoDiscovery",
     :local-memcached-username "datomic.localMemcachedUsername"})
+  (reset-meta! #'tprop->sysprop (assoc {:column (int 1)} :name 'tprop->sysprop :ns *ns*))
   (defn convert-transactor-props-to-system-props
     ([props]
       (loop [seq_26534 (seq tprop->sysprop) chunk_26535 nil count_26536 0 i_26537 0]
@@ -235,6 +252,14 @@
                             ^java.lang.String sp
                             ^java.lang.String v))))
                     (recur (next seq_26534) nil 0 0))))))))))
+  (reset-meta!
+    #'convert-transactor-props-to-system-props
+    (assoc
+      {:arglists (clojure.core/list ['props]), :column (int 1)}
+      :name
+      'convert-transactor-props-to-system-props
+      :ns
+      *ns*))
   (defn ensure-args
     ([props propsfile]
       (let [props (merge {:data-dir "./data", :log-dir "log"} props)
@@ -368,56 +393,108 @@
                      args
                      [:port :inf-port :h2-port :cassandra-port])]
           args))))
-  (defmulti create-cluster-map :protocol)
+  (reset-meta!
+    #'ensure-args
+    (assoc
+      {:arglists (clojure.core/list ['props 'propsfile]), :column (int 1)}
+      :name
+      'ensure-args
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.transactor" "create-cluster-map") {:column (int 1)})
+  (let [v__5792__auto__ #'create-cluster-map]
+    (when-not (and
+                (.hasRoot ^clojure.lang.Var v__5792__auto__)
+                (instance? clojure.lang.MultiFn (deref v__5792__auto__)))
+      (.setMeta (clojure.lang.RT/var "datomic.transactor" "create-cluster-map") {:column (int 1)})
+      (.bindRoot
+        (clojure.lang.RT/var "datomic.transactor" "create-cluster-map")
+        (clojure.lang.MultiFn.
+          "create-cluster-map"
+          :protocol
+          :default
+          #'clojure.core/global-hierarchy))
+      #'create-cluster-map))
   (defn supported-protocol?
     ([protocol]
       (or
         (and (= :limited-edition protocol) (config/limited-edition?))
         (and (not= :limited-edition protocol) (config/pro?)))))
-  (defn aws-cred-query-params
-    ([p__26577]
-      (let [map__26578 p__26577
-            map__26578 (if (seq? map__26578)
-                         (if (next map__26578)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__26578))
-                           (if (seq map__26578) (first map__26578) {}))
-                         map__26578)
-            access_key_id (get map__26578 :aws-dynamodb-peer-access-key-id)
-            secret_key (get map__26578 :aws-dynamodb-peer-secret-key)]
-        (when (or access_key_id secret_key)
-          (str "?aws_access_key_id=" access_key_id "&aws_secret_key=" secret_key)))))
-  (defn cassandra-query-params
-    ([cluster_map]
-      (let [params (select-keys cluster_map [:user :password :ssl :local-datacenter])]
-        (when-not (empty? params)
-          (str
-            "?"
-            (str/join
-              "&"
-              (map
-                (fn fn__26582
-                  ([p__26581]
-                    (let [vec__26583 p__26581
-                          k (nth vec__26583 (int 0) nil)
-                          v (nth vec__26583 (int 1) nil)]
-                      (str (name k) "=" v))))
-                params)))))))
-  (defn ddb+s3-uri
-    ([p__26588 dbname]
-      (let [map__26589 p__26588
-            map__26589 (if (seq? map__26589)
-                         (if (next map__26589)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__26589))
-                           (if (seq map__26589) (first map__26589) {}))
-                         map__26589)
-            cluster_map map__26589
-            system (get map__26589 :system)
-            aws_dynamodb_table (get map__26589 :aws-dynamodb-table)
-            system_root (get map__26589 :system-root)
-            root_or_table (if (= system "_default") aws_dynamodb_table system_root)]
-        (str "datomic:ddb+s3://" (:aws-region cluster_map) "/" root_or_table "/" dbname))))
+  (reset-meta!
+    #'supported-protocol?
+    (assoc
+      {:arglists (clojure.core/list ['protocol]), :column (int 1)}
+      :name
+      'supported-protocol?
+      :ns
+      *ns*))
+  (def aws-cred-query-params
+   (fn aws_cred_query_params
+     ([p__26577]
+       (let [map__26578 p__26577
+             map__26578 (if (seq? map__26578)
+                          (if (next map__26578)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__26578))
+                            (if (seq map__26578) (first map__26578) {}))
+                          map__26578)
+             access_key_id (get map__26578 :aws-dynamodb-peer-access-key-id)
+             secret_key (get map__26578 :aws-dynamodb-peer-secret-key)]
+         (when (or access_key_id secret_key)
+           (str "?aws_access_key_id=" access_key_id "&aws_secret_key=" secret_key))))))
+  (reset-meta!
+    #'aws-cred-query-params
+    (assoc
+      {:arglists
+       (clojure.core/list
+         [{'access-key-id :aws-dynamodb-peer-access-key-id,
+           'secret-key :aws-dynamodb-peer-secret-key}]),
+       :column (int 1)}
+      :name
+      'aws-cred-query-params
+      :ns
+      *ns*))
+  (def cassandra-query-params
+   (fn cassandra_query_params
+     ([cluster_map]
+       (let [params (select-keys cluster_map [:user :password :ssl :local-datacenter])]
+         (when-not (empty? params)
+           (str
+             "?"
+             (str/join
+               "&"
+               (map
+                 (fn fn__26582
+                   ([p__26581]
+                     (let [vec__26583 p__26581
+                           k (nth vec__26583 (int 0) nil)
+                           v (nth vec__26583 (int 1) nil)]
+                       (str (name k) "=" v))))
+                 params))))))))
+  (reset-meta!
+    #'cassandra-query-params
+    (assoc
+      {:arglists (clojure.core/list ['cluster-map]), :column (int 1)}
+      :name
+      'cassandra-query-params
+      :ns
+      *ns*))
+  (def ddb+s3-uri
+   (fn ddb_PLUS_s3_uri
+     ([p__26588 dbname]
+       (let [map__26589 p__26588
+             map__26589 (if (seq? map__26589)
+                          (if (next map__26589)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__26589))
+                            (if (seq map__26589) (first map__26589) {}))
+                          map__26589)
+             cluster_map map__26589
+             system (get map__26589 :system)
+             aws_dynamodb_table (get map__26589 :aws-dynamodb-table)
+             system_root (get map__26589 :system-root)
+             root_or_table (if (= system "_default") aws_dynamodb_table system_root)]
+         (str "datomic:ddb+s3://" (:aws-region cluster_map) "/" root_or_table "/" dbname)))))
   (reset-meta!
     #'ddb+s3-uri
     (assoc
@@ -425,114 +502,134 @@
        :arglists
        (clojure.core/list
          [{:keys ['system 'aws-dynamodb-table 'system-root], :as 'cluster-map} 'dbname]),
-       :column 1}
+       :column (int 1)}
       :name
       'ddb+s3-uri
       :ns
       *ns*))
-  (defn connection-uri
-    ([cluster_map args]
-      (let [dbname "<DB-NAME>" G__26591 (:protocol cluster_map)]
-        (case
-          G__26591
-          :couchbase
-          (str
-            "datomic:couchbase://"
-            (:host cluster_map)
-            "/"
-            (:bucket cluster_map)
-            "/"
-            dbname
-            (let [temp__5804__auto__ (:password cluster_map)]
-              (when temp__5804__auto__ (let [pwd temp__5804__auto__] (str "?password=" pwd)))))
-          :cass3
-          (str
-            "datomic:cass3://"
-            (:system-root cluster_map)
-            "/"
-            dbname
-            (cassandra-query-params cluster_map))
-          :cass2
-          (str
-            "datomic:cass2://"
-            (:system-root cluster_map)
-            "/"
-            dbname
-            (cassandra-query-params cluster_map))
-          :s3
-          (str
-            "datomic:s3://"
-            (:system-root cluster_map)
-            "/"
-            (:aws-s3-path cluster_map)
-            "/"
-            dbname
-            (aws-cred-query-params args))
-          :sql
-          (str
-            "datomic:sql://"
-            dbname
-            "?"
-            (:system-root cluster_map)
-            (when (:sql-user args) (str "?user=" (:sql-user args)))
-            (when (:sql-password args) (str "&password=" (:sql-password args)))
-            (let [temp__5804__auto__ (:sql-driver-params args)]
-              (when temp__5804__auto__
-                (let [sql_driver_params temp__5804__auto__] (str "&" sql_driver_params)))))
-          :cass
-          (str
-            "datomic:cass://"
-            (:system-root cluster_map)
-            "/"
-            dbname
-            (cassandra-query-params cluster_map))
-          :ddb-local
-          (str
-            "datomic:ddb-local://"
-            (:override-endpoint cluster_map)
-            "/"
-            (:system-root cluster_map)
-            "/"
-            dbname
-            (aws-cred-query-params args))
-          :inf
-          (str "datomic:inf://" (:system-root cluster_map) "/" dbname)
-          :ddb
-          (str
-            "datomic:ddb://"
-            (:region cluster_map)
-            "/"
-            (:system-root cluster_map)
-            "/"
-            dbname
-            (aws-cred-query-params args))
-          :dev
-          (str
-            "datomic:dev://"
-            (:system-root cluster_map)
-            "/"
-            dbname
-            (when-not (= {:h2-port (inc (:port cluster_map))} (select-keys cluster_map [:h2-port]))
-              (str "?" (uri/map->query-string (select-keys cluster_map [:h2-port])))))
-          :mem
-          (str "datomic:mem://" dbname)
-          :limited-edition
-          (str "datomic:limited-edition://" (:system-root cluster_map) "/" dbname)
-          :ddb+s3
-          (ddb+s3-uri cluster_map dbname)))))
-  (defn connection-uri-message
-    ([cluster_map args]
-      (let [G__26595 (:protocol cluster_map)]
-        (case
-          G__26595
-          (:ddb+s3 :cass3 :ddb-local :inf :ddb :couchbase :cass :s3 :cass2 :mem)
-          (connection-uri cluster_map args)
-          :sql
-          (str
-            (connection-uri cluster_map args)
-            ", you may need to change the user and password parameters to work with your jdbc driver")
-          (:dev :limited-edition)
-          (str (connection-uri cluster_map args) ", storing data in: " (:data-dir args))))))
+  (def connection-uri
+   (fn connection_uri
+     ([cluster_map args]
+       (let [dbname "<DB-NAME>" G__26591 (:protocol cluster_map)]
+         (case
+           G__26591
+           :couchbase
+           (str
+             "datomic:couchbase://"
+             (:host cluster_map)
+             "/"
+             (:bucket cluster_map)
+             "/"
+             dbname
+             (let [temp__5804__auto__ (:password cluster_map)]
+               (when temp__5804__auto__ (let [pwd temp__5804__auto__] (str "?password=" pwd)))))
+           :cass3
+           (str
+             "datomic:cass3://"
+             (:system-root cluster_map)
+             "/"
+             dbname
+             (cassandra-query-params cluster_map))
+           :cass2
+           (str
+             "datomic:cass2://"
+             (:system-root cluster_map)
+             "/"
+             dbname
+             (cassandra-query-params cluster_map))
+           :s3
+           (str
+             "datomic:s3://"
+             (:system-root cluster_map)
+             "/"
+             (:aws-s3-path cluster_map)
+             "/"
+             dbname
+             (aws-cred-query-params args))
+           :sql
+           (str
+             "datomic:sql://"
+             dbname
+             "?"
+             (:system-root cluster_map)
+             (when (:sql-user args) (str "?user=" (:sql-user args)))
+             (when (:sql-password args) (str "&password=" (:sql-password args)))
+             (let [temp__5804__auto__ (:sql-driver-params args)]
+               (when temp__5804__auto__
+                 (let [sql_driver_params temp__5804__auto__] (str "&" sql_driver_params)))))
+           :cass
+           (str
+             "datomic:cass://"
+             (:system-root cluster_map)
+             "/"
+             dbname
+             (cassandra-query-params cluster_map))
+           :ddb-local
+           (str
+             "datomic:ddb-local://"
+             (:override-endpoint cluster_map)
+             "/"
+             (:system-root cluster_map)
+             "/"
+             dbname
+             (aws-cred-query-params args))
+           :inf
+           (str "datomic:inf://" (:system-root cluster_map) "/" dbname)
+           :ddb
+           (str
+             "datomic:ddb://"
+             (:region cluster_map)
+             "/"
+             (:system-root cluster_map)
+             "/"
+             dbname
+             (aws-cred-query-params args))
+           :dev
+           (str
+             "datomic:dev://"
+             (:system-root cluster_map)
+             "/"
+             dbname
+             (when-not (=
+                         {:h2-port (inc (:port cluster_map))}
+                         (select-keys cluster_map [:h2-port]))
+               (str "?" (uri/map->query-string (select-keys cluster_map [:h2-port])))))
+           :mem
+           (str "datomic:mem://" dbname)
+           :limited-edition
+           (str "datomic:limited-edition://" (:system-root cluster_map) "/" dbname)
+           :ddb+s3
+           (ddb+s3-uri cluster_map dbname))))))
+  (reset-meta!
+    #'connection-uri
+    (assoc
+      {:arglists (clojure.core/list ['cluster-map 'args]), :column (int 1)}
+      :name
+      'connection-uri
+      :ns
+      *ns*))
+  (def connection-uri-message
+   (fn connection_uri_message
+     ([cluster_map args]
+       (let [G__26595 (:protocol cluster_map)]
+         (case
+           G__26595
+           (:ddb+s3 :cass3 :ddb-local :inf :ddb :couchbase :cass :s3 :cass2 :mem)
+           (connection-uri cluster_map args)
+           :sql
+           (str
+             (connection-uri cluster_map args)
+             ", you may need to change the user and password parameters to work with your jdbc driver")
+           (:dev :limited-edition)
+           (str (connection-uri cluster_map args) ", storing data in: " (:data-dir args)))))))
+  (reset-meta!
+    #'connection-uri-message
+    (assoc
+      {:arglists (clojure.core/list ['cluster-map 'args]), :column (int 1)}
+      :name
+      'connection-uri-message
+      :ns
+      *ns*))
   (defn h2-cluster-map
     ([args]
       (let [map__26597 args
@@ -582,32 +679,43 @@
             (str host ":" port)
             :h2-port
             (or h2_port (inc port)))))))
-  (defn ddb+s3-cluster-map
-    ([p__26606]
-      (let [map__26607 p__26606
-            map__26607 (if (seq? map__26607)
-                         (if (next map__26607)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__26607))
-                           (if (seq map__26607) (first map__26607) {}))
-                         map__26607)
-            args map__26607
-            system (get map__26607 :system)
-            system (or system "_default")]
-        (when (and system (not= system "_default") (re-find #"[^a-zA-Z0-9-]" system))
-          (throw
-            (java.lang.IllegalArgumentException.
-              (str
-                "Invalid system: "
-                system
-                ". System can only contain alphanumerical characters and dashes"))))
-        (merge
-          (select-keys args [:aws-dynamodb-table :aws-region])
-          {:system system, :system-root (str (:aws-dynamodb-table args) "/" system)}))))
+  (reset-meta!
+    #'h2-cluster-map
+    (assoc
+      {:arglists (clojure.core/list ['args]), :column (int 1)}
+      :name
+      'h2-cluster-map
+      :ns
+      *ns*))
+  (def ddb+s3-cluster-map
+   (fn ddb_PLUS_s3_cluster_map
+     ([p__26606]
+       (let [map__26607 p__26606
+             map__26607 (if (seq? map__26607)
+                          (if (next map__26607)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__26607))
+                            (if (seq map__26607) (first map__26607) {}))
+                          map__26607)
+             args map__26607
+             system (get map__26607 :system)
+             system (or system "_default")]
+         (when (and system (not= system "_default") (re-find #"[^a-zA-Z0-9-]" system))
+           (throw
+             (java.lang.IllegalArgumentException.
+               (str
+                 "Invalid system: "
+                 system
+                 ". System can only contain alphanumerical characters and dashes"))))
+         (merge
+           (select-keys args [:aws-dynamodb-table :aws-region])
+           {:system system, :system-root (str (:aws-dynamodb-table args) "/" system)})))))
   (reset-meta!
     #'ddb+s3-cluster-map
     (assoc
-      {:private true, :arglists (clojure.core/list [{:keys ['system], :as 'args}]), :column 1}
+      {:private true,
+       :arglists (clojure.core/list [{:keys ['system], :as 'args}]),
+       :column (int 1)}
       :name
       'ddb+s3-cluster-map
       :ns
@@ -894,12 +1002,18 @@
                    :aws-cloudwatch-secret-key
                    :aws-s3-log-secret-key)})))
           nil))))
+  (reset-meta!
+    #'run*
+    (assoc {:arglists (clojure.core/list ['args]), :column (int 1)} :name 'run* :ns *ns*))
   (defn prepare-run
     ([]
       (bridge/install)
       (cast2slf4j/redirect)
       (logger/log-uncaught-exceptions)
       (log-gc/log-gc-events)))
+  (reset-meta!
+    #'prepare-run
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'prepare-run :ns *ns*))
   (defn run
     ([props propsfile]
       (prepare-run)
@@ -911,4 +1025,12 @@
               (catch
                 java.lang.Throwable
                 t
-                (process/fail process/instance "Error starting transactor" t)))))))))
+                (process/fail process/instance "Error starting transactor" t))))))))
+  (reset-meta!
+    #'run
+    (assoc
+      {:arglists (clojure.core/list ['props 'propsfile]), :column (int 1)}
+      :name
+      'run
+      :ns
+      *ns*)))

@@ -26,8 +26,12 @@
           ['datomic.monitor :as 'monitor]
           ['datomic.process :as 'process]
           ['datomic.slf4j :as 'logger]))))
-  (def monitored-instances-ref
-   (delay (atom [(java.lang.Runtime/getRuntime) (domain/system-cache)])))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.process-monitor" "monitored-instances-ref")
+    {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.process-monitor" "monitored-instances-ref")
+    (delay (atom [(java.lang.Runtime/getRuntime) (domain/system-cache)])))
   (defn convert-nanos-to-millis
     ([snapshot]
       (let [round (fn round
@@ -43,6 +47,14 @@
                 (assoc m k v))))
           {}
           snapshot))))
+  (reset-meta!
+    #'convert-nanos-to-millis
+    (assoc
+      {:arglists (clojure.core/list ['snapshot]), :column (int 1)}
+      :name
+      'convert-nanos-to-millis
+      :ns
+      *ns*))
   (defn snapshot-metrics
     ([]
       (let [status_map (mapv
@@ -50,6 +62,9 @@
                          (deref (deref monitored-instances-ref)))
             statistic_data (convert-nanos-to-millis (monitor/snapshot-statistics))]
         (apply merge statistic_data (map second status_map)))))
+  (reset-meta!
+    #'snapshot-metrics
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'snapshot-metrics :ns *ns*))
   (defn metrics-callback
     ([]
       (let [s (config/property "datomic.metricsCallback")
@@ -81,6 +96,9 @@
         (if (contains? result__8585__auto__ :returned)
           (:returned result__8585__auto__)
           (do (throw (:threw result__8585__auto__)) nil)))))
+  (reset-meta!
+    #'metrics-callback
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'metrics-callback :ns *ns*))
   (defn report-metrics
     ([callback]
       (let [m (snapshot-metrics)]
@@ -135,26 +153,39 @@
           (if (contains? result__8585__auto__ :returned)
             (:returned result__8585__auto__)
             (do (throw (:threw result__8585__auto__)) nil))))))
-  (def start-metrics-delay
-   (delay
-     (let [temp__5804__auto__ (metrics-callback)]
-       (when temp__5804__auto__
-         (let [callback temp__5804__auto__]
-           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.process-monitor")]
-             (when (.isInfoEnabled ^org.slf4j.Logger logger)
-               (.info
-                 ^org.slf4j.Logger logger
-                 (logger/process #:metrics{:started (config/property "datomic.metricsCallback")})))
-             nil)
-           (process/add-fail-handler
-             process/instance
-             (fn fn__31967 ([] (monitor/add-stat :SelfDestruct 1) (report-metrics callback))))
-           (future-call (fn fn__31969 ([] (report-metrics callback))))
-           (common/schedule
-             "Datomic Metrics Reporter"
-             (partial report-metrics callback)
-             60000))))))
   (reset-meta!
-    #'start-metrics-delay
-    (assoc {:private true, :column 1} :name 'start-metrics-delay :ns *ns*))
-  (defn start-metrics ([] (deref start-metrics-delay))))
+    #'report-metrics
+    (assoc
+      {:arglists (clojure.core/list ['callback]), :column (int 1)}
+      :name
+      'report-metrics
+      :ns
+      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.process-monitor" "start-metrics-delay")
+    {:private true, :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.process-monitor" "start-metrics-delay")
+    (delay
+      (let [temp__5804__auto__ (metrics-callback)]
+        (when temp__5804__auto__
+          (let [callback temp__5804__auto__]
+            (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.process-monitor")]
+              (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                (.info
+                  ^org.slf4j.Logger logger
+                  (logger/process
+                    #:metrics{:started (config/property "datomic.metricsCallback")})))
+              nil)
+            (process/add-fail-handler
+              process/instance
+              (fn fn__31967 ([] (monitor/add-stat :SelfDestruct 1) (report-metrics callback))))
+            (future-call (fn fn__31969 ([] (report-metrics callback))))
+            (common/schedule
+              "Datomic Metrics Reporter"
+              (partial report-metrics callback)
+              60000))))))
+  (defn start-metrics ([] (deref start-metrics-delay)))
+  (reset-meta!
+    #'start-metrics
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'start-metrics :ns *ns*)))

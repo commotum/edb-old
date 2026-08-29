@@ -28,7 +28,9 @@
         (clojure.core/import 'java.io.FileInputStream)
         (clojure.core/import 'java.io.FileOutputStream)
         (clojure.core/import 'java.net.URI))))
-  (declare file-system-storage)
+  (.setMeta
+    (clojure.lang.RT/var "datomic.fsbackup" "file-system-storage")
+    {:declared true, :column (int 1)})
   (defn split-path
     ([path]
       (let [temp__5802__auto__ (re-find #"(.*)/([^/]*)" path)]
@@ -39,6 +41,9 @@
                 name (nth vec__31609 (int 2) nil)]
             [parent name])
           [nil path]))))
+  (reset-meta!
+    #'split-path
+    (assoc {:arglists (clojure.core/list ['path]), :column (int 1)} :name 'split-path :ns *ns*))
   (defn invert-case
     ([s]
       (apply
@@ -64,7 +69,7 @@
   (reset-meta!
     #'invert-case
     (assoc
-      {:private true, :arglists (clojure.core/list ['s]), :column 1}
+      {:private true, :arglists (clojure.core/list ['s]), :column (int 1)}
       :name
       'invert-case
       :ns
@@ -83,7 +88,7 @@
   (reset-meta!
     #'invert-prefix-case
     (assoc
-      {:private true, :arglists (clojure.core/list ['s]), :column 1}
+      {:private true, :arglists (clojure.core/list ['s]), :column (int 1)}
       :name
       'invert-prefix-case
       :ns
@@ -130,6 +135,14 @@
         {:k k})))
   (clojure.core/import 'datomic.fsbackup.FileSystemStorage)
   (defn ->FileSystemStorage ([root] (datomic.fsbackup.FileSystemStorage. root)))
+  (reset-meta!
+    #'->FileSystemStorage
+    (assoc
+      {:arglists (clojure.core/list ['root]), :column (int 1)}
+      :name
+      '->FileSystemStorage
+      :ns
+      *ns*))
   (defn file-system-storage
     ([root]
       (let [f (jio/file root)]
@@ -140,8 +153,25 @@
               :backup/not-a-directory
               (str "Not a directory: " (.getAbsolutePath ^java.io.File f)))))
         (datomic.fsbackup.FileSystemStorage. f))))
-  (defn storage-from-uri
-    ([uri]
-      (if (.getHost ^java.net.URI uri)
-        (error/arg :db.error/invalid-backup-uri "Storage file URI can not include host")
-        (file-system-storage (.getPath (jio/as-url uri)))))))
+  (reset-meta!
+    #'file-system-storage
+    (assoc
+      {:arglists (clojure.core/list ['root]), :column (int 1)}
+      :name
+      'file-system-storage
+      :ns
+      *ns*))
+  (def storage-from-uri
+   (fn storage_from_uri
+     ([uri]
+       (if (.getHost ^java.net.URI uri)
+         (error/arg :db.error/invalid-backup-uri "Storage file URI can not include host")
+         (file-system-storage (.getPath (jio/as-url uri)))))))
+  (reset-meta!
+    #'storage-from-uri
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'uri {:tag 'URI})]), :column (int 1)}
+      :name
+      'storage-from-uri
+      :ns
+      *ns*)))

@@ -132,4 +132,5 @@
     10
     124
     99
-    56]))
+    56])
+  (reset-meta! #'table (assoc {:column (int 1)} :name 'table :ns *ns*)))

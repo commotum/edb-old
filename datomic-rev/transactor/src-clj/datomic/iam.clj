@@ -33,65 +33,85 @@
         (clojure.core/import 'com.amazonaws.services.identitymanagement.model.GetUserRequest)
         (clojure.core/import
           'com.amazonaws.services.identitymanagement.model.PutUserPolicyRequest))))
-  (defn client
-    ([creds config]
-      (if config
-        (let [region (get config :region)
-              override_endpoint (get config :override-endpoint)
-              conf (d/data-to-object
-                     (dissoc config :region :override-endpoint)
-                     com.amazonaws.ClientConfiguration)
-              conn (if creds
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (aws/credentials creds))
-                       (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf))
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-                       (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)))]
-          (cond
-            override_endpoint (.setEndpoint
-                                ^com.amazonaws.AmazonWebServiceClient conn
-                                (str "http://" override_endpoint))
-            region (do
-                     (.setEndpoint
-                       ^com.amazonaws.AmazonWebServiceClient conn
-                       (aws/endpoint-for :iam region))))
-          conn)
-        (client creds)))
-    ([creds]
-      (if creds
-        (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
-          (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-            (aws/credentials creds))
-          (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-            (aws/credentials creds)))
-        (if (instance?
-              com.amazonaws.auth.AWSCredentialsProvider
-              (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-    ([]
-      (if (instance?
-            com.amazonaws.auth.AWSCredentialsProvider
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+  (def client
+   (fn client
+     ([creds config]
+       (if config
+         (let [region (get config :region)
+               override_endpoint (get config :override-endpoint)
+               conf (d/data-to-object
+                      (dissoc config :region :override-endpoint)
+                      com.amazonaws.ClientConfiguration)
+               conn (if creds
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (aws/credentials creds))
+                        (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf))
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+                        (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)))]
+           (cond
+             override_endpoint (.setEndpoint
+                                 ^com.amazonaws.AmazonWebServiceClient conn
+                                 (str "http://" override_endpoint))
+             region (do
+                      (.setEndpoint
+                        ^com.amazonaws.AmazonWebServiceClient conn
+                        (aws/endpoint-for :iam region))))
+           conn)
+         (client creds)))
+     ([creds]
+       (if creds
+         (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
+           (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+             (aws/credentials creds))
+           (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+             (aws/credentials creds)))
+         (if (instance?
+               com.amazonaws.auth.AWSCredentialsProvider
+               (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+     ([]
+       (if (instance?
+             com.amazonaws.auth.AWSCredentialsProvider
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))
+  (reset-meta!
+    #'client
+    (assoc
+      {:arglists
+       (clojure.core/list
+         (.withMeta
+           []
+           {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+         (.withMeta
+           ['creds]
+           {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+         (.withMeta
+           ['creds 'config]
+           {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})),
+       :column (int 1)}
+      :name
+      'client
+      :ns
+      *ns*))
   (defmethod
     d/data-to-object
     [:map com.amazonaws.services.identitymanagement.model.AddUserToGroupRequest]
@@ -3162,582 +3182,538 @@
                (when temp__5804__auto__
                  (let [v__19409__auto__ temp__5804__auto__]
                    [:path (d/object-to-data-wrapper v__19409__auto__)])))))))})
-  (defn get-user
-    ([o x1]
-      (d/object-to-data
-        (.getUser
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object x1 com.amazonaws.services.identitymanagement.model.GetUserRequest)))))
-  (reset-meta!
-    #'get-user
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'get-user
-      :ns
-      *ns*))
-  (defn get-role
-    ([o x1]
-      (d/object-to-data
-        (.getRole
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object x1 com.amazonaws.services.identitymanagement.model.GetRoleRequest)))))
-  (reset-meta!
-    #'get-role
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'get-role
-      :ns
-      *ns*))
-  (defn get-instance-profile
-    ([o x1]
-      (d/object-to-data
-        (.getInstanceProfile
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.GetInstanceProfileRequest)))))
-  (reset-meta!
-    #'get-instance-profile
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'get-instance-profile
-      :ns
-      *ns*))
-  (defn create-instance-profile
-    ([o x1]
-      (d/object-to-data
-        (.createInstanceProfile
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.CreateInstanceProfileRequest)))))
-  (reset-meta!
-    #'create-instance-profile
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'create-instance-profile
-      :ns
-      *ns*))
-  (defn create-user
-    ([o x1]
-      (d/object-to-data
-        (.createUser
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.CreateUserRequest)))))
-  (reset-meta!
-    #'create-user
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'create-user
-      :ns
-      *ns*))
-  (defn create-role
-    ([o x1]
-      (d/object-to-data
-        (.createRole
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.CreateRoleRequest)))))
-  (reset-meta!
-    #'create-role
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'create-role
-      :ns
-      *ns*))
-  (defn list-users
-    ([o x1]
-      (d/object-to-data
-        (.listUsers
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.ListUsersRequest)))))
-  (reset-meta!
-    #'list-users
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'list-users
-      :ns
-      *ns*))
-  (defn list-roles
-    ([o x1]
-      (d/object-to-data
-        (.listRoles
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.ListRolesRequest)))))
-  (reset-meta!
-    #'list-roles
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'list-roles
-      :ns
-      *ns*))
-  (defn list-instance-profiles
-    ([o x1]
-      (d/object-to-data
-        (.listInstanceProfiles
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.ListInstanceProfilesRequest)))))
-  (reset-meta!
-    #'list-instance-profiles
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'list-instance-profiles
-      :ns
-      *ns*))
-  (defn list-access-keys
-    ([o x1]
-      (d/object-to-data
-        (.listAccessKeys
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.ListAccessKeysRequest)))))
-  (reset-meta!
-    #'list-access-keys
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'list-access-keys
-      :ns
-      *ns*))
-  (defn put-user-policy
-    ([o x1]
-      (d/object-to-data
-        (.putUserPolicy
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.PutUserPolicyRequest)))))
-  (reset-meta!
-    #'put-user-policy
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'put-user-policy
-      :ns
-      *ns*))
-  (defn put-role-policy
-    ([o x1]
-      (d/object-to-data
-        (.putRolePolicy
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.PutRolePolicyRequest)))))
-  (reset-meta!
-    #'put-role-policy
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'put-role-policy
-      :ns
-      *ns*))
-  (defn put-group-policy
-    ([o x1]
-      (d/object-to-data
-        (.putGroupPolicy
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.PutGroupPolicyRequest)))))
-  (reset-meta!
-    #'put-group-policy
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'put-group-policy
-      :ns
-      *ns*))
-  (defn create-access-key
-    ([o x1]
-      (d/object-to-data
-        (.createAccessKey
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.CreateAccessKeyRequest)))))
-  (reset-meta!
-    #'create-access-key
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'create-access-key
-      :ns
-      *ns*))
-  (defn delete-access-key
-    ([o x1]
-      (d/object-to-data
-        (.deleteAccessKey
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.DeleteAccessKeyRequest)))))
-  (reset-meta!
-    #'delete-access-key
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'delete-access-key
-      :ns
-      *ns*))
-  (defn delete-user-policy
-    ([o x1]
-      (d/object-to-data
-        (.deleteUserPolicy
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.DeleteUserPolicyRequest)))))
-  (reset-meta!
-    #'delete-user-policy
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'delete-user-policy
-      :ns
-      *ns*))
-  (defn delete-group-policy
-    ([o x1]
-      (d/object-to-data
-        (.deleteGroupPolicy
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.DeleteGroupPolicyRequest)))))
-  (reset-meta!
-    #'delete-group-policy
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'delete-group-policy
-      :ns
-      *ns*))
-  (defn list-user-policies
-    ([o x1]
-      (d/object-to-data
-        (.listUserPolicies
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.ListUserPoliciesRequest)))))
-  (reset-meta!
-    #'list-user-policies
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'list-user-policies
-      :ns
-      *ns*))
-  (defn list-role-policies
-    ([o x1]
-      (d/object-to-data
-        (.listRolePolicies
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.ListRolePoliciesRequest)))))
-  (reset-meta!
-    #'list-role-policies
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'list-role-policies
-      :ns
-      *ns*))
-  (defn add-role-to-instance-profile
-    ([o x1]
-      (d/object-to-data
-        (.addRoleToInstanceProfile
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.AddRoleToInstanceProfileRequest)))))
-  (reset-meta!
-    #'add-role-to-instance-profile
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'add-role-to-instance-profile
-      :ns
-      *ns*))
-  (defn create-group
-    ([o x1]
-      (d/object-to-data
-        (.createGroup
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.CreateGroupRequest)))))
-  (reset-meta!
-    #'create-group
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'create-group
-      :ns
-      *ns*))
-  (defn delete-group
-    ([o x1]
-      (d/object-to-data
-        (.deleteGroup
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.DeleteGroupRequest)))))
-  (reset-meta!
-    #'delete-group
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'delete-group
-      :ns
-      *ns*))
-  (defn delete-user
-    ([o x1]
-      (d/object-to-data
-        (.deleteUser
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.DeleteUserRequest)))))
-  (reset-meta!
-    #'delete-user
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'delete-user
-      :ns
-      *ns*))
-  (defn add-user-to-group
-    ([o x1]
-      (d/object-to-data
-        (.addUserToGroup
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.AddUserToGroupRequest)))))
-  (reset-meta!
-    #'add-user-to-group
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'add-user-to-group
-      :ns
-      *ns*))
-  (defn remove-user-from-group
-    ([o x1]
-      (d/object-to-data
-        (.removeUserFromGroup
-          ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.identitymanagement.model.RemoveUserFromGroupRequest)))))
-  (reset-meta!
-    #'remove-user-from-group
-    (assoc
-      {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta
-            'o
-            {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
-          'x1]),
-       :column 1}
-      :name
-      'remove-user-from-group
-      :ns
-      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "get-user")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "get-user")
+    (fn get_user
+      ([o x1]
+        (d/object-to-data
+          (.getUser
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.GetUserRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "get-role")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "get-role")
+    (fn get_role
+      ([o x1]
+        (d/object-to-data
+          (.getRole
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.GetRoleRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "get-instance-profile")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "get-instance-profile")
+    (fn get_instance_profile
+      ([o x1]
+        (d/object-to-data
+          (.getInstanceProfile
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.GetInstanceProfileRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "create-instance-profile")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "create-instance-profile")
+    (fn create_instance_profile
+      ([o x1]
+        (d/object-to-data
+          (.createInstanceProfile
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.CreateInstanceProfileRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "create-user")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "create-user")
+    (fn create_user
+      ([o x1]
+        (d/object-to-data
+          (.createUser
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.CreateUserRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "create-role")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "create-role")
+    (fn create_role
+      ([o x1]
+        (d/object-to-data
+          (.createRole
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.CreateRoleRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "list-users")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "list-users")
+    (fn list_users
+      ([o x1]
+        (d/object-to-data
+          (.listUsers
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.ListUsersRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "list-roles")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "list-roles")
+    (fn list_roles
+      ([o x1]
+        (d/object-to-data
+          (.listRoles
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.ListRolesRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "list-instance-profiles")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "list-instance-profiles")
+    (fn list_instance_profiles
+      ([o x1]
+        (d/object-to-data
+          (.listInstanceProfiles
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.ListInstanceProfilesRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "list-access-keys")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "list-access-keys")
+    (fn list_access_keys
+      ([o x1]
+        (d/object-to-data
+          (.listAccessKeys
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.ListAccessKeysRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "put-user-policy")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "put-user-policy")
+    (fn put_user_policy
+      ([o x1]
+        (d/object-to-data
+          (.putUserPolicy
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.PutUserPolicyRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "put-role-policy")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "put-role-policy")
+    (fn put_role_policy
+      ([o x1]
+        (d/object-to-data
+          (.putRolePolicy
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.PutRolePolicyRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "put-group-policy")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "put-group-policy")
+    (fn put_group_policy
+      ([o x1]
+        (d/object-to-data
+          (.putGroupPolicy
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.PutGroupPolicyRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "create-access-key")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "create-access-key")
+    (fn create_access_key
+      ([o x1]
+        (d/object-to-data
+          (.createAccessKey
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.CreateAccessKeyRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "delete-access-key")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "delete-access-key")
+    (fn delete_access_key
+      ([o x1]
+        (d/object-to-data
+          (.deleteAccessKey
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.DeleteAccessKeyRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "delete-user-policy")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "delete-user-policy")
+    (fn delete_user_policy
+      ([o x1]
+        (d/object-to-data
+          (.deleteUserPolicy
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.DeleteUserPolicyRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "delete-group-policy")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "delete-group-policy")
+    (fn delete_group_policy
+      ([o x1]
+        (d/object-to-data
+          (.deleteGroupPolicy
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.DeleteGroupPolicyRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "list-user-policies")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "list-user-policies")
+    (fn list_user_policies
+      ([o x1]
+        (d/object-to-data
+          (.listUserPolicies
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.ListUserPoliciesRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "list-role-policies")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "list-role-policies")
+    (fn list_role_policies
+      ([o x1]
+        (d/object-to-data
+          (.listRolePolicies
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.ListRolePoliciesRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "add-role-to-instance-profile")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "add-role-to-instance-profile")
+    (fn add_role_to_instance_profile
+      ([o x1]
+        (d/object-to-data
+          (.addRoleToInstanceProfile
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.AddRoleToInstanceProfileRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "create-group")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "create-group")
+    (fn create_group
+      ([o x1]
+        (d/object-to-data
+          (.createGroup
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.CreateGroupRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "delete-group")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "delete-group")
+    (fn delete_group
+      ([o x1]
+        (d/object-to-data
+          (.deleteGroup
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.DeleteGroupRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "delete-user")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "delete-user")
+    (fn delete_user
+      ([o x1]
+        (d/object-to-data
+          (.deleteUser
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.DeleteUserRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "add-user-to-group")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "add-user-to-group")
+    (fn add_user_to_group
+      ([o x1]
+        (d/object-to-data
+          (.addUserToGroup
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.AddUserToGroupRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.iam" "remove-user-from-group")
+    {:related-class com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta
+          'o
+          {:tag 'com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient})
+        'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.iam" "remove-user-from-group")
+    (fn remove_user_from_group
+      ([o x1]
+        (d/object-to-data
+          (.removeUserFromGroup
+            ^com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.identitymanagement.model.RemoveUserFromGroupRequest))))))
   (defn arn->account-id ([arn] (second (re-find #"arn:aws:iam::(\d+)" arn))))
-  (defn user-arn ([account_id user_name] (str "arn:aws:iam::" account_id ":user/" user_name)))
-  (def accounts-ref (atom {}))
-  (reset-meta! #'accounts-ref (assoc {:private true, :column 1} :name 'accounts-ref :ns *ns*))
-  (defn get-account-id ([client] (arn->account-id (get-in (get-user client {}) [:user :arn]))))
+  (reset-meta!
+    #'arn->account-id
+    (assoc
+      {:arglists (clojure.core/list ['arn]), :column (int 1)}
+      :name
+      'arn->account-id
+      :ns
+      *ns*))
+  (def user-arn
+   (fn user_arn ([account_id user_name] (str "arn:aws:iam::" account_id ":user/" user_name))))
+  (reset-meta!
+    #'user-arn
+    (assoc
+      {:arglists (clojure.core/list ['account-id 'user-name]), :column (int 1)}
+      :name
+      'user-arn
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.iam" "accounts-ref") {:private true, :column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.iam" "accounts-ref") (atom {}))
+  (def get-account-id
+   (fn get_account_id ([client] (arn->account-id (get-in (get-user client {}) [:user :arn])))))
+  (reset-meta!
+    #'get-account-id
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'client {:tag 'AmazonIdentityManagementClient})]),
+       :column (int 1)}
+      :name
+      'get-account-id
+      :ns
+      *ns*))
   (defn delete-all-access-keys
     ([iam username]
       (let [ks (list-access-keys iam {:userName username})]
@@ -3748,6 +3724,14 @@
                 (delete-access-key iam {:userName username, :accessKeyId p1__27419#})
                 (catch java.lang.Throwable e e))))
           (map :accessKeyId (:accessKeyMetadata ks))))))
+  (reset-meta!
+    #'delete-all-access-keys
+    (assoc
+      {:arglists (clojure.core/list ['iam 'username]), :column (int 1)}
+      :name
+      'delete-all-access-keys
+      :ns
+      *ns*))
   (defn delete-policies
     ([iam username policynames]
       (common/mapk
@@ -3757,10 +3741,26 @@
               (delete-user-policy iam {:userName username, :policyName p1__27423#})
               (catch java.lang.Throwable e e))))
         policynames)))
+  (reset-meta!
+    #'delete-policies
+    (assoc
+      {:arglists (clojure.core/list ['iam 'username 'policynames]), :column (int 1)}
+      :name
+      'delete-policies
+      :ns
+      *ns*))
   (defn delete-all-policies
     ([iam username]
       (let [ks (list-user-policies iam {:userName username})]
         (delete-policies iam username (:policyNames ks)))))
+  (reset-meta!
+    #'delete-all-policies
+    (assoc
+      {:arglists (clojure.core/list ['iam 'username]), :column (int 1)}
+      :name
+      'delete-all-policies
+      :ns
+      *ns*))
   (defn deep-delete-account
     ([iam username]
       (into
@@ -3771,257 +3771,382 @@
          (try (delete-all-policies iam username) (catch java.lang.Throwable e e))
          :user
          (try (delete-user iam {:userName username}) (catch java.lang.Throwable e e))])))
+  (reset-meta!
+    #'deep-delete-account
+    (assoc
+      {:arglists (clojure.core/list ['iam 'username]), :column (int 1)}
+      :name
+      'deep-delete-account
+      :ns
+      *ns*))
   (defn get-account-id-command ([_] (get-account-id (client))))
-  (defn create-user-command
-    ([p__27436]
-      (let [map__27437 p__27436
-            map__27437 (if (seq? map__27437)
-                         (if (next map__27437)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27437))
-                           (if (seq map__27437) (first map__27437) {}))
-                         map__27437)
-            user_name (get map__27437 :user-name)]
-        (try
-          (let [s__6419__auto__ (java.io.StringWriter.)]
-            (binding [*out* s__6419__auto__]
-              (do
-                (println (:user (create-user (client) {:userName user_name})))
-                (str s__6419__auto__))))
-          (catch
-            com.amazonaws.services.identitymanagement.model.EntityAlreadyExistsException
-            _
-            nil)))))
-  (defn create-group-command
-    ([p__27440]
-      (let [map__27441 p__27440
-            map__27441 (if (seq? map__27441)
-                         (if (next map__27441)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27441))
-                           (if (seq map__27441) (first map__27441) {}))
-                         map__27441)
-            group_name (get map__27441 :group-name)
-            results (:group (create-group (client) {:groupName group_name}))
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__] (do (println results) (str s__6419__auto__))))))
-  (defn create-access-key-command
-    ([p__27444]
-      (let [map__27445 p__27444
-            map__27445 (if (seq? map__27445)
-                         (if (next map__27445)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27445))
-                           (if (seq map__27445) (first map__27445) {}))
-                         map__27445)
-            user_name (get map__27445 :user-name)]
-        (try
-          (let [new_creds (:accessKey (create-access-key (client) {:userName user_name}))
-                s__6419__auto__ (java.io.StringWriter.)]
-            (binding [*out* s__6419__auto__]
-              (do
-                (println (str (:accessKeyId new_creds) " " (:secretAccessKey new_creds)))
-                (str s__6419__auto__))))
-          (catch
-            com.amazonaws.services.identitymanagement.model.LimitExceededException
-            _
-            (cli/fail
-              (let [s__6419__auto__ (java.io.StringWriter.)]
-                (binding [*out* s__6419__auto__]
-                  (do
-                    (println "**ERROR**")
-                    (println "Cannot create additional access keys for user ${USERNAME}.")
-                    (println
-                      "Either delete one of the existing access keys, or use an existing access-key-id/secret-key pair.")
-                    (println
-                      "Go to the the IAM tab of your AWS Console: https://console.aws.amazon.com/iam/home#s=Users")
-                    (println "and follow the path below to delete an access key:")
-                    (println
-                      "Iam Home > Users > ${USERNAME} > Security Credentials > Manage Access Keys")
-                    (println "****")
-                    (str s__6419__auto__))))))))))
-  (defn create-credentials-command
-    ([p__27451]
-      (let [map__27452 p__27451
-            map__27452 (if (seq? map__27452)
-                         (if (next map__27452)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27452))
-                           (if (seq map__27452) (first map__27452) {}))
-                         map__27452)
-            prefix (get map__27452 :prefix)
-            iam_client (client)
-            peer_user_name {:userName (str prefix "-peer")}
-            dynamo_user_name {:userName (str prefix "-transactor-dynamo")}
-            metrics_user_name {:userName (str prefix "-transactor-metrics")}
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (create-user iam_client peer_user_name)
-            (println (str "peer.username=" (:userName peer_user_name)))
-            (let [peer_access_key (:accessKey (create-access-key iam_client peer_user_name))]
-              (println (str "peer.aws-access-key-id=" (:accessKeyId peer_access_key)))
-              (println (str "peer.aws-secret-key=" (:secretAccessKey peer_access_key))))
-            (create-user iam_client dynamo_user_name)
-            (println (str "transactor.dynamo.username=" (:userName dynamo_user_name)))
-            (let [dynamo_access_key (:accessKey (create-access-key iam_client dynamo_user_name))]
-              (println
-                (str "transactor.dynamo.aws-access-key-id=" (:accessKeyId dynamo_access_key)))
-              (println
-                (str "transactor.dynamo.aws-secret-key=" (:secretAccessKey dynamo_access_key))))
-            (create-user iam_client metrics_user_name)
-            (println (str "transactor.metrics.username=" (:userName metrics_user_name)))
-            (let [metrics_access_key (:accessKey (create-access-key iam_client metrics_user_name))]
-              (println
-                (str "transactor.metrics.aws-access-key-id=" (:accessKeyId metrics_access_key)))
-              (println
-                (str "transactor.metrics.aws-secret-key=" (:secretAccessKey metrics_access_key))))
-            (str s__6419__auto__))))))
-  (defn dynamo-r-policy-command
-    ([p__27455]
-      (let [map__27456 p__27455
-            map__27456 (if (seq? map__27456)
-                         (if (next map__27456)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27456))
-                           (if (seq map__27456) (first map__27456) {}))
-                         map__27456)
-            account_id (get map__27456 :account-id)
-            table_name (get map__27456 :table-name)
-            arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (json/pprint
-              {"Statement"
-               [{"Effect" "Allow",
-                 "Action"
-                 ["dynamodb:GetItem" "dynamodb:BatchGetItem" "dynamodb:Scan" "dynamodb:Query"],
-                 "Resource" arn}]}
-              :escape-slash
-              false)
-            (str s__6419__auto__))))))
-  (defn dynamo-rw-policy-command
-    ([p__27459]
-      (let [map__27460 p__27459
-            map__27460 (if (seq? map__27460)
-                         (if (next map__27460)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27460))
-                           (if (seq map__27460) (first map__27460) {}))
-                         map__27460)
-            account_id (get map__27460 :account-id)
-            table_name (get map__27460 :table-name)
-            arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (json/pprint
-              {"Statement" [{"Effect" "Allow", "Action" ["dynamodb:*"], "Resource" arn}]}
-              :escape-slash
-              false)
-            (str s__6419__auto__))))))
-  (defn metrics-w-policy-command
-    ([_] (metrics-w-policy-command))
-    ([]
-      (let [s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (json/pprint
-              {"Statement"
-               [{"Effect" "Allow",
-                 "Action" ["cloudwatch:PutMetricData" "cloudwatch:PutMetricDataBatch"],
-                 "Resource" "*",
-                 "Condition" {"Bool" {"aws:SecureTransport" "true"}}}]}
-              :escape-slash
-              false)
-            (str s__6419__auto__))))))
-  (defn s3-w-policy-command
-    ([p__27465]
-      (let [map__27466 p__27465
-            map__27466 (if (seq? map__27466)
-                         (if (next map__27466)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27466))
-                           (if (seq map__27466) (first map__27466) {}))
-                         map__27466)
-            bucket_name (get map__27466 :bucket-name)
-            arn (str "arn:aws:s3:::" bucket_name)
-            s__6419__auto__ (java.io.StringWriter.)]
-        (binding [*out* s__6419__auto__]
-          (do
-            (json/pprint
-              {"Statement"
-               [{"Effect" "Allow", "Action" ["s3:PutObject"], "Resource" [arn (str arn "/*")]}]}
-              :escape-slash
-              false)
-            (str s__6419__auto__))))))
-  (defn assign-peer-user-command
-    ([p__27469]
-      (let [map__27470 p__27469
-            map__27470 (if (seq? map__27470)
-                         (if (next map__27470)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27470))
-                           (if (seq map__27470) (first map__27470) {}))
-                         map__27470)
-            user_name (get map__27470 :user-name)
-            table_name (get map__27470 :table-name)
-            policy_name (str user_name "-" table_name "-peer")
-            iam_client (client)
-            policy_doc (dynamo-r-policy-command
-                         {:account-id (get-account-id client), :table-name table_name})]
-        (put-user-policy
-          iam_client
-          {:userName user_name, :policyName policy_name, :policyDocument policy_doc}))))
-  (defn assign-transactor-dynamo-user-command
-    ([p__27472]
-      (let [map__27473 p__27472
-            map__27473 (if (seq? map__27473)
-                         (if (next map__27473)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27473))
-                           (if (seq map__27473) (first map__27473) {}))
-                         map__27473)
-            user_name (get map__27473 :user-name)
-            table_name (get map__27473 :table-name)
-            policy_name (str user_name "-" table_name "-transactor-dynamo")
-            iam_client (client)
-            policy_doc (dynamo-rw-policy-command
-                         {:account-id (get-account-id iam_client), :table-name table_name})]
-        (put-user-policy
-          iam_client
-          {:userName user_name, :policyName policy_name, :policyDocument policy_doc}))))
-  (defn assign-transactor-log-user-command
-    ([p__27475]
-      (let [map__27476 p__27475
-            map__27476 (if (seq? map__27476)
-                         (if (next map__27476)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27476))
-                           (if (seq map__27476) (first map__27476) {}))
-                         map__27476)
-            user_name (get map__27476 :user-name)
-            bucket_name (get map__27476 :bucket-name)
-            policy_name (str user_name "-transactor-s3")
-            iam_client (client)
-            policy_doc (s3-w-policy-command {:bucket-name bucket_name})]
-        (put-user-policy
-          iam_client
-          {:userName user_name, :policyName policy_name, :policyDocument policy_doc}))))
-  (defn assign-transactor-metrics-user-command
-    ([p__27478]
-      (let [map__27479 p__27478
-            map__27479 (if (seq? map__27479)
-                         (if (next map__27479)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27479))
-                           (if (seq map__27479) (first map__27479) {}))
-                         map__27479)
-            user_name (get map__27479 :user-name)
-            policy_name (str user_name "-transactor-metrics")
-            iam_client (client)
-            policy_doc (metrics-w-policy-command)]
-        (put-user-policy
-          iam_client
-          {:userName user_name, :policyName policy_name, :policyDocument policy_doc})))))
+  (reset-meta!
+    #'get-account-id-command
+    (assoc
+      {:arglists (clojure.core/list ['_]), :column (int 1)}
+      :name
+      'get-account-id-command
+      :ns
+      *ns*))
+  (def create-user-command
+   (fn create_user_command
+     ([p__27436]
+       (let [map__27437 p__27436
+             map__27437 (if (seq? map__27437)
+                          (if (next map__27437)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27437))
+                            (if (seq map__27437) (first map__27437) {}))
+                          map__27437)
+             user_name (get map__27437 :user-name)]
+         (try
+           (let [s__6419__auto__ (java.io.StringWriter.)]
+             (binding [*out* s__6419__auto__]
+               (do
+                 (println (:user (create-user (client) {:userName user_name})))
+                 (str s__6419__auto__))))
+           (catch
+             com.amazonaws.services.identitymanagement.model.EntityAlreadyExistsException
+             _
+             nil))))))
+  (reset-meta!
+    #'create-user-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['user-name]}]), :column (int 1)}
+      :name
+      'create-user-command
+      :ns
+      *ns*))
+  (def create-group-command
+   (fn create_group_command
+     ([p__27440]
+       (let [map__27441 p__27440
+             map__27441 (if (seq? map__27441)
+                          (if (next map__27441)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27441))
+                            (if (seq map__27441) (first map__27441) {}))
+                          map__27441)
+             group_name (get map__27441 :group-name)
+             results (:group (create-group (client) {:groupName group_name}))
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__] (do (println results) (str s__6419__auto__)))))))
+  (reset-meta!
+    #'create-group-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['group-name]}]), :column (int 1)}
+      :name
+      'create-group-command
+      :ns
+      *ns*))
+  (def create-access-key-command
+   (fn create_access_key_command
+     ([p__27444]
+       (let [map__27445 p__27444
+             map__27445 (if (seq? map__27445)
+                          (if (next map__27445)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27445))
+                            (if (seq map__27445) (first map__27445) {}))
+                          map__27445)
+             user_name (get map__27445 :user-name)]
+         (try
+           (let [new_creds (:accessKey (create-access-key (client) {:userName user_name}))
+                 s__6419__auto__ (java.io.StringWriter.)]
+             (binding [*out* s__6419__auto__]
+               (do
+                 (println (str (:accessKeyId new_creds) " " (:secretAccessKey new_creds)))
+                 (str s__6419__auto__))))
+           (catch
+             com.amazonaws.services.identitymanagement.model.LimitExceededException
+             _
+             (cli/fail
+               (let [s__6419__auto__ (java.io.StringWriter.)]
+                 (binding [*out* s__6419__auto__]
+                   (do
+                     (println "**ERROR**")
+                     (println "Cannot create additional access keys for user ${USERNAME}.")
+                     (println
+                       "Either delete one of the existing access keys, or use an existing access-key-id/secret-key pair.")
+                     (println
+                       "Go to the the IAM tab of your AWS Console: https://console.aws.amazon.com/iam/home#s=Users")
+                     (println "and follow the path below to delete an access key:")
+                     (println
+                       "Iam Home > Users > ${USERNAME} > Security Credentials > Manage Access Keys")
+                     (println "****")
+                     (str s__6419__auto__)))))))))))
+  (reset-meta!
+    #'create-access-key-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['user-name]}]), :column (int 1)}
+      :name
+      'create-access-key-command
+      :ns
+      *ns*))
+  (def create-credentials-command
+   (fn create_credentials_command
+     ([p__27451]
+       (let [map__27452 p__27451
+             map__27452 (if (seq? map__27452)
+                          (if (next map__27452)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27452))
+                            (if (seq map__27452) (first map__27452) {}))
+                          map__27452)
+             prefix (get map__27452 :prefix)
+             iam_client (client)
+             peer_user_name {:userName (str prefix "-peer")}
+             dynamo_user_name {:userName (str prefix "-transactor-dynamo")}
+             metrics_user_name {:userName (str prefix "-transactor-metrics")}
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (create-user iam_client peer_user_name)
+             (println (str "peer.username=" (:userName peer_user_name)))
+             (let [peer_access_key (:accessKey (create-access-key iam_client peer_user_name))]
+               (println (str "peer.aws-access-key-id=" (:accessKeyId peer_access_key)))
+               (println (str "peer.aws-secret-key=" (:secretAccessKey peer_access_key))))
+             (create-user iam_client dynamo_user_name)
+             (println (str "transactor.dynamo.username=" (:userName dynamo_user_name)))
+             (let [dynamo_access_key (:accessKey (create-access-key iam_client dynamo_user_name))]
+               (println
+                 (str "transactor.dynamo.aws-access-key-id=" (:accessKeyId dynamo_access_key)))
+               (println
+                 (str "transactor.dynamo.aws-secret-key=" (:secretAccessKey dynamo_access_key))))
+             (create-user iam_client metrics_user_name)
+             (println (str "transactor.metrics.username=" (:userName metrics_user_name)))
+             (let [metrics_access_key (:accessKey
+                                        (create-access-key iam_client metrics_user_name))]
+               (println
+                 (str "transactor.metrics.aws-access-key-id=" (:accessKeyId metrics_access_key)))
+               (println
+                 (str "transactor.metrics.aws-secret-key=" (:secretAccessKey metrics_access_key))))
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'create-credentials-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['prefix]}]), :column (int 1)}
+      :name
+      'create-credentials-command
+      :ns
+      *ns*))
+  (def dynamo-r-policy-command
+   (fn dynamo_r_policy_command
+     ([p__27455]
+       (let [map__27456 p__27455
+             map__27456 (if (seq? map__27456)
+                          (if (next map__27456)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27456))
+                            (if (seq map__27456) (first map__27456) {}))
+                          map__27456)
+             account_id (get map__27456 :account-id)
+             table_name (get map__27456 :table-name)
+             arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (json/pprint
+               {"Statement"
+                [{"Effect" "Allow",
+                  "Action"
+                  ["dynamodb:GetItem" "dynamodb:BatchGetItem" "dynamodb:Scan" "dynamodb:Query"],
+                  "Resource" arn}]}
+               :escape-slash
+               false)
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'dynamo-r-policy-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['account-id 'table-name]}]), :column (int 1)}
+      :name
+      'dynamo-r-policy-command
+      :ns
+      *ns*))
+  (def dynamo-rw-policy-command
+   (fn dynamo_rw_policy_command
+     ([p__27459]
+       (let [map__27460 p__27459
+             map__27460 (if (seq? map__27460)
+                          (if (next map__27460)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27460))
+                            (if (seq map__27460) (first map__27460) {}))
+                          map__27460)
+             account_id (get map__27460 :account-id)
+             table_name (get map__27460 :table-name)
+             arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (json/pprint
+               {"Statement" [{"Effect" "Allow", "Action" ["dynamodb:*"], "Resource" arn}]}
+               :escape-slash
+               false)
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'dynamo-rw-policy-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['account-id 'table-name]}]), :column (int 1)}
+      :name
+      'dynamo-rw-policy-command
+      :ns
+      *ns*))
+  (def metrics-w-policy-command
+   (fn metrics_w_policy_command
+     ([_] (metrics-w-policy-command))
+     ([]
+       (let [s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (json/pprint
+               {"Statement"
+                [{"Effect" "Allow",
+                  "Action" ["cloudwatch:PutMetricData" "cloudwatch:PutMetricDataBatch"],
+                  "Resource" "*",
+                  "Condition" {"Bool" {"aws:SecureTransport" "true"}}}]}
+               :escape-slash
+               false)
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'metrics-w-policy-command
+    (assoc
+      {:arglists (clojure.core/list [] ['_]), :column (int 1)}
+      :name
+      'metrics-w-policy-command
+      :ns
+      *ns*))
+  (def s3-w-policy-command
+   (fn s3_w_policy_command
+     ([p__27465]
+       (let [map__27466 p__27465
+             map__27466 (if (seq? map__27466)
+                          (if (next map__27466)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27466))
+                            (if (seq map__27466) (first map__27466) {}))
+                          map__27466)
+             bucket_name (get map__27466 :bucket-name)
+             arn (str "arn:aws:s3:::" bucket_name)
+             s__6419__auto__ (java.io.StringWriter.)]
+         (binding [*out* s__6419__auto__]
+           (do
+             (json/pprint
+               {"Statement"
+                [{"Effect" "Allow", "Action" ["s3:PutObject"], "Resource" [arn (str arn "/*")]}]}
+               :escape-slash
+               false)
+             (str s__6419__auto__)))))))
+  (reset-meta!
+    #'s3-w-policy-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['bucket-name]}]), :column (int 1)}
+      :name
+      's3-w-policy-command
+      :ns
+      *ns*))
+  (def assign-peer-user-command
+   (fn assign_peer_user_command
+     ([p__27469]
+       (let [map__27470 p__27469
+             map__27470 (if (seq? map__27470)
+                          (if (next map__27470)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27470))
+                            (if (seq map__27470) (first map__27470) {}))
+                          map__27470)
+             user_name (get map__27470 :user-name)
+             table_name (get map__27470 :table-name)
+             policy_name (str user_name "-" table_name "-peer")
+             iam_client (client)
+             policy_doc (dynamo-r-policy-command
+                          {:account-id (get-account-id client), :table-name table_name})]
+         (put-user-policy
+           iam_client
+           {:userName user_name, :policyName policy_name, :policyDocument policy_doc})))))
+  (reset-meta!
+    #'assign-peer-user-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['user-name 'table-name]}]), :column (int 1)}
+      :name
+      'assign-peer-user-command
+      :ns
+      *ns*))
+  (def assign-transactor-dynamo-user-command
+   (fn assign_transactor_dynamo_user_command
+     ([p__27472]
+       (let [map__27473 p__27472
+             map__27473 (if (seq? map__27473)
+                          (if (next map__27473)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27473))
+                            (if (seq map__27473) (first map__27473) {}))
+                          map__27473)
+             user_name (get map__27473 :user-name)
+             table_name (get map__27473 :table-name)
+             policy_name (str user_name "-" table_name "-transactor-dynamo")
+             iam_client (client)
+             policy_doc (dynamo-rw-policy-command
+                          {:account-id (get-account-id iam_client), :table-name table_name})]
+         (put-user-policy
+           iam_client
+           {:userName user_name, :policyName policy_name, :policyDocument policy_doc})))))
+  (reset-meta!
+    #'assign-transactor-dynamo-user-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['user-name 'table-name]}]), :column (int 1)}
+      :name
+      'assign-transactor-dynamo-user-command
+      :ns
+      *ns*))
+  (def assign-transactor-log-user-command
+   (fn assign_transactor_log_user_command
+     ([p__27475]
+       (let [map__27476 p__27475
+             map__27476 (if (seq? map__27476)
+                          (if (next map__27476)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27476))
+                            (if (seq map__27476) (first map__27476) {}))
+                          map__27476)
+             user_name (get map__27476 :user-name)
+             bucket_name (get map__27476 :bucket-name)
+             policy_name (str user_name "-transactor-s3")
+             iam_client (client)
+             policy_doc (s3-w-policy-command {:bucket-name bucket_name})]
+         (put-user-policy
+           iam_client
+           {:userName user_name, :policyName policy_name, :policyDocument policy_doc})))))
+  (reset-meta!
+    #'assign-transactor-log-user-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['user-name 'bucket-name]}]), :column (int 1)}
+      :name
+      'assign-transactor-log-user-command
+      :ns
+      *ns*))
+  (def assign-transactor-metrics-user-command
+   (fn assign_transactor_metrics_user_command
+     ([p__27478]
+       (let [map__27479 p__27478
+             map__27479 (if (seq? map__27479)
+                          (if (next map__27479)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27479))
+                            (if (seq map__27479) (first map__27479) {}))
+                          map__27479)
+             user_name (get map__27479 :user-name)
+             policy_name (str user_name "-transactor-metrics")
+             iam_client (client)
+             policy_doc (metrics-w-policy-command)]
+         (put-user-policy
+           iam_client
+           {:userName user_name, :policyName policy_name, :policyDocument policy_doc})))))
+  (reset-meta!
+    #'assign-transactor-metrics-user-command
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['user-name]}]), :column (int 1)}
+      :name
+      'assign-transactor-metrics-user-command
+      :ns
+      *ns*)))

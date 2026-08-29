@@ -24,23 +24,24 @@
           ['clojure.java.shell :as 'sh]
           ['clojure.string :as 'str]
           ['datomic.require :as 'req]))))
-  (defn unique-index
-    ([xrel k v]
-      (reduce
-        (fn fn__20377
-          ([m x]
-            (let [temp__5802__auto__ (get x k)]
-              (if temp__5802__auto__
-                (let [xk temp__5802__auto__ temp__5802__auto__ (if v (get x v) x)]
-                  (if temp__5802__auto__ (let [xv temp__5802__auto__] (assoc m xk xv)) m))
-                m))))
-        {}
-        xrel))
-    ([xrel k] (unique-index xrel k nil)))
+  (def unique-index
+   (fn unique_index
+     ([xrel k v]
+       (reduce
+         (fn fn__20377
+           ([m x]
+             (let [temp__5802__auto__ (get x k)]
+               (if temp__5802__auto__
+                 (let [xk temp__5802__auto__ temp__5802__auto__ (if v (get x v) x)]
+                   (if temp__5802__auto__ (let [xv temp__5802__auto__] (assoc m xk xv)) m))
+                 m))))
+         {}
+         xrel))
+     ([xrel k] (unique-index xrel k nil))))
   (reset-meta!
     #'unique-index
     (assoc
-      {:private true, :arglists (clojure.core/list ['xrel 'k] ['xrel 'k 'v]), :column 1}
+      {:private true, :arglists (clojure.core/list ['xrel 'k] ['xrel 'k 'v]), :column (int 1)}
       :name
       'unique-index
       :ns
@@ -141,6 +142,14 @@
                                             (str " (default " df ")")))))))))
                             (recur (next seq_20389) nil 0 0)))))))))
             nil)))))
+  (reset-meta!
+    #'print-help
+    (assoc
+      {:arglists (clojure.core/list ['cmd 'spec 'positions]), :column (int 1)}
+      :name
+      'print-help
+      :ns
+      *ns*))
   (defn cli->map
     ([strings positions vararg]
       (let [G__20409 strings
@@ -186,12 +195,20 @@
                       (assoc m (keyword k) (into [s] more))
                       (recur more pmore (assoc m (keyword k) s))))))
               m))))))
+  (reset-meta!
+    #'cli->map
+    (assoc
+      {:arglists (clojure.core/list ['strings 'positions 'vararg]), :column (int 1)}
+      :name
+      'cli->map
+      :ns
+      *ns*))
   (defn expand-short-names
     ([m spec] (let [idx (unique-index spec :short-name :long-name)] (set/rename-keys m idx))))
   (reset-meta!
     #'expand-short-names
     (assoc
-      {:private true, :arglists (clojure.core/list ['m 'spec]), :column 1}
+      {:private true, :arglists (clojure.core/list ['m 'spec]), :column (int 1)}
       :name
       'expand-short-names
       :ns
@@ -208,31 +225,71 @@
                 (assoc m k ((get idx k identity) v)))))
           {}
           m))))
+  (reset-meta!
+    #'coerce-vals
+    (assoc
+      {:arglists (clojure.core/list ['m 'spec]), :column (int 1)}
+      :name
+      'coerce-vals
+      :ns
+      *ns*))
   (defn apply-defaults
     ([m spec] (let [defaults (unique-index spec :long-name :default)] (merge defaults m))))
+  (reset-meta!
+    #'apply-defaults
+    (assoc
+      {:arglists (clojure.core/list ['m 'spec]), :column (int 1)}
+      :name
+      'apply-defaults
+      :ns
+      *ns*))
   (defn missing-values
     ([m spec]
       (let [required (into #{} (keys (unique-index spec :long-name :required)))]
         (set/difference required (set (keys m))))))
-  (defn parse-or-exit!
-    ([cmd args spec positions vararg]
-      (if (some #{"--help"} args)
-        (do (print-help cmd spec positions) (java.lang.System/exit (int -1)) nil)
-        (let [m (apply-defaults
-                  (coerce-vals (expand-short-names (cli->map args positions vararg) spec) spec)
-                  spec)
-              missing (missing-values m spec)]
-          (if (seq missing)
-            (do
-              (print-help cmd spec positions)
-              (println "\n**** missing required arguments" missing "****")
-              (java.lang.System/exit (int -1))
-              nil)
-            m))))
-    ([cmd arg spec positions] (parse-or-exit! cmd arg spec positions nil)))
-  (def failed (atom false))
+  (reset-meta!
+    #'missing-values
+    (assoc
+      {:arglists (clojure.core/list ['m 'spec]), :column (int 1)}
+      :name
+      'missing-values
+      :ns
+      *ns*))
+  (def parse-or-exit!
+   (fn parse_or_exit_BANG_
+     ([cmd args spec positions vararg]
+       (if (some #{"--help"} args)
+         (do (print-help cmd spec positions) (java.lang.System/exit (int -1)) nil)
+         (let [m (apply-defaults
+                   (coerce-vals (expand-short-names (cli->map args positions vararg) spec) spec)
+                   spec)
+               missing (missing-values m spec)]
+           (if (seq missing)
+             (do
+               (print-help cmd spec positions)
+               (println "\n**** missing required arguments" missing "****")
+               (java.lang.System/exit (int -1))
+               nil)
+             m))))
+     ([cmd arg spec positions] (parse-or-exit! cmd arg spec positions nil))))
+  (reset-meta!
+    #'parse-or-exit!
+    (assoc
+      {:arglists
+       (clojure.core/list ['cmd 'arg 'spec 'positions] ['cmd 'args 'spec 'positions 'vararg]),
+       :column (int 1)}
+      :name
+      'parse-or-exit!
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.cli" "failed") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.cli" "failed") (atom false))
   (defn fail ([msg] (reset! failed true) msg))
-  (def exit-after-command (atom true))
+  (reset-meta!
+    #'fail
+    (assoc {:arglists (clojure.core/list ['msg]), :column (int 1)} :name 'fail :ns *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.cli" "exit-after-command") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.cli" "exit-after-command") (atom true))
   (defn shell
     ([& args]
       (let [map__20439 (apply sh/sh args)
@@ -248,6 +305,9 @@
         (when-not (or (= 0 exit) (seq err))
           (throw (ex-info "Shell command failed" {:args args, :result m})))
         (:out m))))
+  (reset-meta!
+    #'shell
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name 'shell :ns *ns*))
   (defn development-version
     ([& _]
       (let [map__20442 (read-string (slurp "pom.clj"))
@@ -259,4 +319,12 @@
                          map__20442)
             version_prefix (get map__20442 :version-prefix)
             revision (str/trimr (shell "build/revision"))]
-        (str version_prefix "." revision)))))
+        (str version_prefix "." revision))))
+  (reset-meta!
+    #'development-version
+    (assoc
+      {:arglists (clojure.core/list ['& '_]), :column (int 1)}
+      :name
+      'development-version
+      :ns
+      *ns*)))

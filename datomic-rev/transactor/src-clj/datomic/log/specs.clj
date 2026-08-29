@@ -11,6 +11,9 @@
         (clojure.core/refer 'clojure.core)
         (clojure.core/require ['clojure.spec.alpha :as 's] ['datomic.log :as 'log]))))
   (defn sorted-by-t? ([x] (= (map :t x) (sort (map :t x)))))
+  (reset-meta!
+    #'sorted-by-t?
+    (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'sorted-by-t? :ns *ns*))
   (clojure.core/in-ns 'datomic.log)
   (alias 's 'clojure.spec.alpha)
   (s/def-impl

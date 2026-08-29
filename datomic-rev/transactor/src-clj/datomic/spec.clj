@@ -11,4 +11,7 @@
       (let [conformed (s/conform spec x)]
         (when (= :clojure.spec.alpha/invalid conformed)
           (throw (ex-info (s/explain-str spec x) {:data (s/explain-data spec x), :value x})))
-        conformed))))
+        conformed)))
+  (reset-meta!
+    #'conform!
+    (assoc {:arglists (clojure.core/list ['spec 'x]), :column (int 1)} :name 'conform! :ns *ns*)))

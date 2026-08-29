@@ -29,7 +29,18 @@
           (map
             (fn fn__17974 ([p1__17970#] (str/split p1__17970# #"=")))
             (str/split (or q "") #"&"))))))
+  (reset-meta!
+    #'parse-query-string
+    (assoc
+      {:arglists (clojure.core/list ['q]), :column (int 1)}
+      :name
+      'parse-query-string
+      :ns
+      *ns*))
   (defn read-port ([portstr] (let [port (edn/read-string portstr)] (when (integer? port) port))))
+  (reset-meta!
+    #'read-port
+    (assoc {:arglists (clojure.core/list ['portstr]), :column (int 1)} :name 'read-port :ns *ns*))
   (defn storage-protocol
     ([uri]
       (if (instance? java.util.Map uri)
@@ -38,11 +49,31 @@
           (nth
             (.split (.getSchemeSpecificPart (java.net.URI. ^java.lang.String uri)) ":")
             (int 0))))))
-  (defmulti parse* storage-protocol)
+  (reset-meta!
+    #'storage-protocol
+    (assoc
+      {:arglists (clojure.core/list ['uri]), :column (int 1)}
+      :name
+      'storage-protocol
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.uri" "parse*") {:column (int 1)})
+  (let [v__5792__auto__ #'parse*]
+    (when-not (and
+                (.hasRoot ^clojure.lang.Var v__5792__auto__)
+                (instance? clojure.lang.MultiFn (deref v__5792__auto__)))
+      (.setMeta (clojure.lang.RT/var "datomic.uri" "parse*") {:column (int 1)})
+      (.bindRoot
+        (clojure.lang.RT/var "datomic.uri" "parse*")
+        (clojure.lang.MultiFn. "parse*" storage-protocol :default #'clojure.core/global-hierarchy))
+      #'parse*))
   (defn fixup-uri-map
     ([m]
       (let [ret (common/force-map-keywords (into {} m))]
         (assoc ret :protocol (keyword (:protocol ret))))))
+  (reset-meta!
+    #'fixup-uri-map
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'fixup-uri-map :ns *ns*))
   (defn param-map
     ([query]
       (when query
@@ -58,6 +89,9 @@
             (map
               (fn fn__17993 ([p1__17986#] (str/split p1__17986# #"=")))
               (str/split (or query "") #"&")))))))
+  (reset-meta!
+    #'param-map
+    (assoc {:arglists (clojure.core/list ['query]), :column (int 1)} :name 'param-map :ns *ns*))
   (defmethod
     parse*
     :ddb
@@ -106,7 +140,7 @@
   (reset-meta!
     #'mapify-ddb+s3-uri
     (assoc
-      {:private true, :arglists (clojure.core/list ['uri]), :column 1}
+      {:private true, :arglists (clojure.core/list ['uri]), :column (int 1)}
       :name
       'mapify-ddb+s3-uri
       :ns
@@ -312,6 +346,9 @@
              :port port,
              :password (or (:password params) "datomic"),
              :h2-port (or (read-port (:h2-port params)) (inc port))})))))
+  (reset-meta!
+    #'parse-h2
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'parse-h2 :ns *ns*))
   (defmethod parse* :limited-edition fn__18073 ([uri] (parse-h2 uri)))
   (defmethod parse* :dev fn__18075 ([uri] (parse-h2 uri)))
   (defmethod
@@ -363,29 +400,60 @@
              (int (java.lang.Integer/parseInt ^java.lang.String port)))}}})))
   (defmethod parse* :default fn__18096 ([uri] nil))
   (defn parse ([uri] (assoc (parse* uri) :uri uri)))
+  (reset-meta!
+    #'parse
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'parse :ns *ns*))
   (defn parse-db
     ([uri]
       (let [cluster_conf (parse uri)]
         (if (:db-name cluster_conf)
           cluster_conf
           (error/arg :db.error/invalid-db-uri (str "Invalid database URI " uri))))))
+  (reset-meta!
+    #'parse-db
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'parse-db :ns *ns*))
   (defn remove-query-string ([s] (str/replace s #"\?.*" "")))
   (reset-meta!
     #'remove-query-string
     (assoc
-      {:private true, :arglists (clojure.core/list ['s]), :column 1}
+      {:private true, :arglists (clojure.core/list ['s]), :column (int 1)}
       :name
       'remove-query-string
       :ns
       *ns*))
-  (defn loggable-cluster-conf
-    ([cluster_conf]
-      (let [m (select-keys
-                cluster_conf
-                [:protocol :db-name :system-root :host :port :bucket :db-id])]
-        (cond-> m (:system-root m) (update :system-root remove-query-string)))))
-  (defmulti create (fn fn__18104 ([cluster_conf] (:protocol cluster_conf))))
+  (def loggable-cluster-conf
+   (fn loggable_cluster_conf
+     ([cluster_conf]
+       (let [m (select-keys
+                 cluster_conf
+                 [:protocol :db-name :system-root :host :port :bucket :db-id])]
+         (cond-> m (:system-root m) (update :system-root remove-query-string))))))
+  (reset-meta!
+    #'loggable-cluster-conf
+    (assoc
+      {:arglists (clojure.core/list ['cluster-conf]), :column (int 1)}
+      :name
+      'loggable-cluster-conf
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.uri" "create") {:column (int 1)})
+  (let [v__5792__auto__ #'create]
+    (when-not (and
+                (.hasRoot ^clojure.lang.Var v__5792__auto__)
+                (instance? clojure.lang.MultiFn (deref v__5792__auto__)))
+      (.setMeta (clojure.lang.RT/var "datomic.uri" "create") {:column (int 1)})
+      (.bindRoot
+        (clojure.lang.RT/var "datomic.uri" "create")
+        (clojure.lang.MultiFn.
+          "create"
+          (fn fn__18104 ([cluster_conf] (:protocol cluster_conf)))
+          :default
+          #'clojure.core/global-hierarchy))
+      #'create))
   (defn query-key ([s] (str/replace (name s) "-" "_")))
+  (reset-meta!
+    #'query-key
+    (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'query-key :ns *ns*))
   (defn query-args
     ([m]
       (str/join
@@ -398,6 +466,9 @@
                     v (nth vec__18112 (int 1) nil)]
                 (str (query-key k) "=" v))))
           m))))
+  (reset-meta!
+    #'query-args
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'query-args :ns *ns*))
   (defmethod
     create
     :ddb
@@ -660,19 +731,36 @@
                     v (nth vec__18182 (int 1) nil)]
                 (str (name k) "=" v))))
           (filter second m)))))
-  (defn create-h2
-    ([cluster_conf]
-      (let [system_root (str/trim (common/getx cluster_conf :system-root))]
-        (when-not (or (.startsWith ^java.lang.String system_root ":") (= system_root ""))
-          (str
-            "datomic:"
-            (name (:protocol cluster_conf))
-            "://"
-            system_root
-            (let [temp__5804__auto__ (:db-name cluster_conf)]
-              (when temp__5804__auto__ (let [db_name temp__5804__auto__] (str "/" db_name))))
-            (when-not (= {:h2-port 4335} (select-keys cluster_conf [:h2-port]))
-              (str "?" (map->query-string (select-keys cluster_conf [:h2-port])))))))))
+  (reset-meta!
+    #'map->query-string
+    (assoc
+      {:arglists (clojure.core/list ['m]), :column (int 1)}
+      :name
+      'map->query-string
+      :ns
+      *ns*))
+  (def create-h2
+   (fn create_h2
+     ([cluster_conf]
+       (let [system_root (str/trim (common/getx cluster_conf :system-root))]
+         (when-not (or (.startsWith ^java.lang.String system_root ":") (= system_root ""))
+           (str
+             "datomic:"
+             (name (:protocol cluster_conf))
+             "://"
+             system_root
+             (let [temp__5804__auto__ (:db-name cluster_conf)]
+               (when temp__5804__auto__ (let [db_name temp__5804__auto__] (str "/" db_name))))
+             (when-not (= {:h2-port 4335} (select-keys cluster_conf [:h2-port]))
+               (str "?" (map->query-string (select-keys cluster_conf [:h2-port]))))))))))
+  (reset-meta!
+    #'create-h2
+    (assoc
+      {:arglists (clojure.core/list ['cluster-conf]), :column (int 1)}
+      :name
+      'create-h2
+      :ns
+      *ns*))
   (defmethod create :dev fn__18190 ([cluster_conf] (create-h2 cluster_conf)))
   (defmethod create :limited-edition fn__18192 ([cluster_conf] (create-h2 cluster_conf)))
   (defmethod
@@ -696,4 +784,12 @@
         "datomic:mem://"
         (let [temp__5804__auto__ (:db-name cluster_conf)]
           (when temp__5804__auto__ (let [db_name temp__5804__auto__] (str db_name)))))))
-  (defn db-uri ([uri db_name] (create (assoc (parse uri) :db-name db_name)))))
+  (def db-uri (fn db_uri ([uri db_name] (create (assoc (parse uri) :db-name db_name)))))
+  (reset-meta!
+    #'db-uri
+    (assoc
+      {:arglists (clojure.core/list ['uri 'db-name]), :column (int 1)}
+      :name
+      'db-uri
+      :ns
+      *ns*)))

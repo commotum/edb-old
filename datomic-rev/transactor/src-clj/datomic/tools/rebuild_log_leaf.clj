@@ -167,25 +167,45 @@
                 cat
                 (map (fn fn__32680 ([p1__32672#] (into {} p1__32672#))))
                 (log/log-dir-seq (log/seek-tx log 0)))))))))
+  (reset-meta!
+    #'find-bounding-segments
+    (assoc
+      {:arglists (clojure.core/list ['log 'k]), :column (int 1)}
+      :name
+      'find-bounding-segments
+      :ns
+      *ns*))
   (defn log-leaf-entries
     ([uri]
       (sequence
         cat
         (log/log-dir-seq (log/seek-tx (tools/log (tools/connection-resources uri)) 0)))))
-  (defn t ([d] (long (.getT ^datomic.impl.db.IDatum d))))
+  (reset-meta!
+    #'log-leaf-entries
+    (assoc
+      {:arglists (clojure.core/list ['uri]), :column (int 1)}
+      :name
+      'log-leaf-entries
+      :ns
+      *ns*))
+  (def t (fn t ([d] (long (.getT ^datomic.impl.db.IDatum d)))))
   (reset-meta!
     #'t
     (assoc
-      {:private true, :arglists (clojure.core/list [(.withMeta 'd {:tag 'IDatum})]), :column 1}
+      {:private true,
+       :arglists (clojure.core/list [(.withMeta 'd {:tag 'IDatum})]),
+       :column (int 1)}
       :name
       't
       :ns
       *ns*))
-  (defn e ([d] (long (.getE ^datomic.impl.db.IDatum d))))
+  (def e (fn e ([d] (long (.getE ^datomic.impl.db.IDatum d)))))
   (reset-meta!
     #'e
     (assoc
-      {:private true, :arglists (clojure.core/list [(.withMeta 'd {:tag 'IDatum})]), :column 1}
+      {:private true,
+       :arglists (clojure.core/list [(.withMeta 'd {:tag 'IDatum})]),
+       :column (int 1)}
       :name
       'e
       :ns
@@ -234,24 +254,33 @@
       nil
       nil
       nil))
-  (defn build-leaf-segment
-    ([db initial_t boundary_t]
-      (mapv
-        (fn fn__32688
-          ([p__32687]
-            (let [vec__32689 p__32687
-                  t (nth vec__32689 (int 0) nil)
-                  data (nth vec__32689 (int 1) nil)]
-              (zipmap
-                [:id :t :data]
-                [(common/rand-uuid) t (java.util.ArrayList. ^java.util.Collection data)]))))
-        (sort-by
-          first
-          (group-by
-            t
-            (filter
-              (fn fn__32693 ([p1__32686#] (<= initial_t (t p1__32686#) (dec boundary_t))))
-              (db/datoms db :eavt nil)))))))
+  (def build-leaf-segment
+   (fn build_leaf_segment
+     ([db initial_t boundary_t]
+       (mapv
+         (fn fn__32688
+           ([p__32687]
+             (let [vec__32689 p__32687
+                   t (nth vec__32689 (int 0) nil)
+                   data (nth vec__32689 (int 1) nil)]
+               (zipmap
+                 [:id :t :data]
+                 [(common/rand-uuid) t (java.util.ArrayList. ^java.util.Collection data)]))))
+         (sort-by
+           first
+           (group-by
+             t
+             (filter
+               (fn fn__32693 ([p1__32686#] (<= initial_t (t p1__32686#) (dec boundary_t))))
+               (db/datoms db :eavt nil))))))))
+  (reset-meta!
+    #'build-leaf-segment
+    (assoc
+      {:arglists (clojure.core/list ['db 'initial-t 'boundary-t]), :column (int 1)}
+      :name
+      'build-leaf-segment
+      :ns
+      *ns*))
   (s/def-impl
     'datomic.tools.rebuild-log-leaf/semantic-tx
     (clojure.core/list
@@ -273,6 +302,9 @@
       nil
       nil))
   (defn semantic-tx ([tx] (update (dissoc tx :id) :data set)))
+  (reset-meta!
+    #'semantic-tx
+    (assoc {:arglists (clojure.core/list ['tx]), :column (int 1)} :name 'semantic-tx :ns *ns*))
   (s/def-impl
     'datomic.tools.rebuild-log-leaf/semantic-diffs
     (clojure.core/list
@@ -295,6 +327,14 @@
       nil
       nil))
   (defn semantic-diffs ([s1 s2] (data/diff (mapv semantic-tx s1) (mapv semantic-tx s2))))
+  (reset-meta!
+    #'semantic-diffs
+    (assoc
+      {:arglists (clojure.core/list ['s1 's2]), :column (int 1)}
+      :name
+      'semantic-diffs
+      :ns
+      *ns*))
   (s/def-impl
     'datomic.tools.rebuild-log-leaf/path-to-t
     (clojure.core/list
@@ -354,6 +394,14 @@
          :dir-size (java.lang.Integer/valueOf (int (count dir))),
          :dir (vec dir),
          :dir-idx didx})))
+  (reset-meta!
+    #'path-to-t
+    (assoc
+      {:arglists (clojure.core/list ['log 'olookup 't]), :column (int 1)}
+      :name
+      'path-to-t
+      :ns
+      *ns*))
   (defn rebuild-log-leaf
     ([uri k]
       (let [cr (tools/connection-resources uri)
@@ -394,32 +442,49 @@
                (str/join " " ["bin/run -m datomic.tools.rebuild-log-leaf -i" uri repair_id])}))
           #:cognitect.anomalies{:category :cognitect.anomalies/conflict,
                                 :message (str "Unable to find rewriteable log segment " k)}))))
-  (defn race-to-adopt
-    ([cr root_id retry_limit]
-      (let [cluster (:cluster cr)]
-        (loop [n 0]
-          (do
-            (when (>= n retry_limit)
-              (throw (ex-info "Unable to update log root" {:attempts (long n)})))
-            (or
-              (try
-                [(long n) (:desc (log/adopt-root (tools/log cr) cluster root_id nil))]
-                (catch
-                  java.lang.Throwable
-                  t
-                  (do
-                    (let [logger (org.slf4j.LoggerFactory/getLogger
-                                   "datomic.tools.rebuild-log-leaf")
-                          ex t]
-                      (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                        (.info
-                          ^org.slf4j.Logger logger
-                          (logger/process "Lost race to replace log root")
-                          ^java.lang.Throwable ex)
-                        (logger/caused-by logger ex))
-                      nil)
-                    nil)))
-              (recur (inc n))))))))
+  (reset-meta!
+    #'rebuild-log-leaf
+    (assoc
+      {:arglists (clojure.core/list ['uri 'k]), :column (int 1)}
+      :name
+      'rebuild-log-leaf
+      :ns
+      *ns*))
+  (def race-to-adopt
+   (fn race_to_adopt
+     ([cr root_id retry_limit]
+       (let [cluster (:cluster cr)]
+         (loop [n 0]
+           (do
+             (when (>= n retry_limit)
+               (throw (ex-info "Unable to update log root" {:attempts (long n)})))
+             (or
+               (try
+                 [(long n) (:desc (log/adopt-root (tools/log cr) cluster root_id nil))]
+                 (catch
+                   java.lang.Throwable
+                   t
+                   (do
+                     (let [logger (org.slf4j.LoggerFactory/getLogger
+                                    "datomic.tools.rebuild-log-leaf")
+                           ex t]
+                       (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                         (.info
+                           ^org.slf4j.Logger logger
+                           (logger/process "Lost race to replace log root")
+                           ^java.lang.Throwable ex)
+                         (logger/caused-by logger ex))
+                       nil)
+                     nil)))
+               (recur (inc n)))))))))
+  (reset-meta!
+    #'race-to-adopt
+    (assoc
+      {:arglists (clojure.core/list ['cr 'root-id 'retry-limit]), :column (int 1)}
+      :name
+      'race-to-adopt
+      :ns
+      *ns*))
   (defn install-rebuilt-leaf
     ([uri rebuild]
       (ds/conform! :datomic.tools.rebuild-log-leaf/rebuild rebuild)
@@ -463,6 +528,14 @@
               :tail-desc tail_desc}})
           #:cognitect.anomalies{:category :cognitect.anomalies/conflict,
                                 :message "Segment to be repaired does not exist"}))))
+  (reset-meta!
+    #'install-rebuilt-leaf
+    (assoc
+      {:arglists (clojure.core/list ['uri 'rebuild]), :column (int 1)}
+      :name
+      'install-rebuilt-leaf
+      :ns
+      *ns*))
   (defn crosscheck-log
     ([uri]
       (let [cr (tools/connection-resources uri)
@@ -481,6 +554,9 @@
           db
           :eavt
           (fn fn__32719 ([_] (when (zero? (mod (swap! ct inc) 10000)) (print ".") (flush))))))))
+  (reset-meta!
+    #'crosscheck-log
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'crosscheck-log :ns *ns*))
   (defn -main*
     ([flag uri k]
       (if (= flag "-r")
@@ -493,4 +569,15 @@
           (do
             (when :default (throw (java.lang.IllegalArgumentException. "Invalid command.")))
             nil)))))
-  (defn -main ([& args] (try (apply -main* args) (finally (shutdown-agents))))))
+  (reset-meta!
+    #'-main*
+    (assoc
+      {:arglists (clojure.core/list ['flag 'uri 'k]), :column (int 1)}
+      :name
+      '-main*
+      :ns
+      *ns*))
+  (defn -main ([& args] (try (apply -main* args) (finally (shutdown-agents)))))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))

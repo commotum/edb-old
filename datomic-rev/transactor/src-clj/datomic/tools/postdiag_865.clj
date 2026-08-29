@@ -24,41 +24,50 @@
           ['datomic.tools :as 'tools]
           ['datomic.tools.repair-865 :as 'repair])
         (clojure.core/import 'java.io.PushbackReader))))
-  (defn unique-problems
-    ([db es unique_fn]
-      (mapv
-        (fn fn__31134
-          ([p__31133]
-            (let [vec__31135 p__31133
-                  _ (nth vec__31135 (int 0) nil)
-                  a (nth vec__31135 (int 1) nil)
-                  v (nth vec__31135 (int 2) nil)]
-              (into [] (d/datoms db :avet a v)))))
-        (sort-by
-          first
-          (filter
-            (fn fn__31140
-              ([p__31139]
-                (let [vec__31141 p__31139
-                      ce (nth vec__31141 (int 0) nil)
-                      a (nth vec__31141 (int 1) nil)
-                      v (nth vec__31141 (int 2) nil)]
-                  (> ce 1))))
-            (d/q
-              [:find
-               (clojure.core/list 'count '?e2)
-               '?a
-               '?v
-               :in
-               '$
-               ['?e1 '...]
-               ['?a '...]
-               :where
-               ['?e1 '?a '?v]
-               ['?e2 '?a '?v]]
-              db
-              es
-              (^clojure.lang.IFn unique_fn db)))))))
+  (def unique-problems
+   (fn unique_problems
+     ([db es unique_fn]
+       (mapv
+         (fn fn__31134
+           ([p__31133]
+             (let [vec__31135 p__31133
+                   _ (nth vec__31135 (int 0) nil)
+                   a (nth vec__31135 (int 1) nil)
+                   v (nth vec__31135 (int 2) nil)]
+               (into [] (d/datoms db :avet a v)))))
+         (sort-by
+           first
+           (filter
+             (fn fn__31140
+               ([p__31139]
+                 (let [vec__31141 p__31139
+                       ce (nth vec__31141 (int 0) nil)
+                       a (nth vec__31141 (int 1) nil)
+                       v (nth vec__31141 (int 2) nil)]
+                   (> ce 1))))
+             (d/q
+               [:find
+                (clojure.core/list 'count '?e2)
+                '?a
+                '?v
+                :in
+                '$
+                ['?e1 '...]
+                ['?a '...]
+                :where
+                ['?e1 '?a '?v]
+                ['?e2 '?a '?v]]
+               db
+               es
+               (^clojure.lang.IFn unique_fn db))))))))
+  (reset-meta!
+    #'unique-problems
+    (assoc
+      {:arglists (clojure.core/list ['db 'es 'unique-fn]), :column (int 1)}
+      :name
+      'unique-problems
+      :ns
+      *ns*))
   (defn card-problems
     ([db es]
       (mapv
@@ -92,6 +101,14 @@
               db
               es
               (tools/card-ones db)))))))
+  (reset-meta!
+    #'card-problems
+    (assoc
+      {:arglists (clojure.core/list ['db 'es]), :column (int 1)}
+      :name
+      'card-problems
+      :ns
+      *ns*))
   (defn fulltext-problems
     ([db es ts]
       (sort-by
@@ -113,6 +130,14 @@
           es
           (tools/fulltexts db)
           (mapv d/t->tx ts)))))
+  (reset-meta!
+    #'fulltext-problems
+    (assoc
+      {:arglists (clojure.core/list ['db 'es 'ts]), :column (int 1)}
+      :name
+      'fulltext-problems
+      :ns
+      *ns*))
   (defn ts->es
     ([cr ts]
       (reduce
@@ -120,6 +145,9 @@
           ([es t] (into es (map :e (:data (first (tools/tx-range-from-log cr t (inc t))))))))
         #{}
         ts)))
+  (reset-meta!
+    #'ts->es
+    (assoc {:arglists (clojure.core/list ['cr 'ts]), :column (int 1)} :name 'ts->es :ns *ns*))
   (defn partially-indexed-transactions
     ([db]
       (d/q
@@ -129,6 +157,14 @@
          ['?e :db.sys/partiallyIndexed]
          [(clojure.core/list 'datomic.api/tx->t '?e) '?t]]
         db)))
+  (reset-meta!
+    #'partially-indexed-transactions
+    (assoc
+      {:arglists (clojure.core/list ['db]), :column (int 1)}
+      :name
+      'partially-indexed-transactions
+      :ns
+      *ns*))
   (defn -main
     ([uri checkfile]
       (try
@@ -165,4 +201,12 @@
             nil)))
       (d/shutdown true)
       (java.lang.System/exit (int 0))
-      nil)))
+      nil))
+  (reset-meta!
+    #'-main
+    (assoc
+      {:arglists (clojure.core/list ['uri 'checkfile]), :column (int 1)}
+      :name
+      '-main
+      :ns
+      *ns*)))

@@ -1,10 +1,11 @@
 (ns stage3.transport-probe
   "Bounded external-transactor interruption and recovery probe.
 
-  Invoke in a fresh recovered-candidate JVM with exactly one SQL URI argument.
-  After STAGE3-FAULT-READY, send the exact line FAULT once the transactor has
-  been stopped.  After STAGE3-RESUME-READY, resume the transactor and send the
-  exact line RESUME."
+  Invoke in a fresh recovered-candidate JVM with one SQL URI and, optionally,
+  the expected recovered-source URL protocol (default: jar). After
+  STAGE3-FAULT-READY, send the exact line FAULT once the transactor has been
+  stopped. After STAGE3-RESUME-READY, resume the transactor and send the exact
+  line RESUME."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [datomic.api :as d])
@@ -102,7 +103,7 @@
           (re-matches #"(?i)datomic-transactor[^/]*[.]jar" name)))))
 
 (defn- audit-candidate-boundary!
-  []
+  [expected-source-protocol]
   (let [entries (classpath-entries)
         forbidden (vec (filter forbidden-classpath-entry? entries))
         peer-source (io/resource "datomic/peer.clj")
@@ -118,12 +119,14 @@
     (ensure! core2-source
              "Recovered datomic.core2 source is not visible"
              {})
-    (ensure! (= "jar" (.getProtocol peer-source))
+    (ensure! (= expected-source-protocol (.getProtocol peer-source))
              "Recovered datomic.peer must load from the candidate artifact"
-             {:peer-source-protocol (.getProtocol peer-source)})
-    (ensure! (= "jar" (.getProtocol core2-source))
+             {:expected-source-protocol expected-source-protocol
+              :peer-source-protocol (.getProtocol peer-source)})
+    (ensure! (= expected-source-protocol (.getProtocol core2-source))
              "Recovered datomic.core2 must load from the candidate artifact"
-             {:core2-source-protocol (.getProtocol core2-source)})
+             {:core2-source-protocol (.getProtocol core2-source)
+              :expected-source-protocol expected-source-protocol})
     (ensure! (and (nil? peer-aot) (nil? core2-aot))
              "Original Peer/core2 AOT implementation must not be visible"
              {:core2-aot-visible? (boolean core2-aot)
@@ -131,17 +134,18 @@
     (sorted-map
       :classpath-entry-count (count entries)
       :core2-aot-visible? false
-      :core2-source-protocol "jar"
+      :core2-source-protocol expected-source-protocol
       :forbidden-implementation-entry-count 0
       :peer-aot-visible? false
-      :peer-source-protocol "jar")))
+      :peer-source-protocol expected-source-protocol)))
 
-(defn- parse-uri!
+(defn- parse-arguments!
   [args]
-  (ensure! (= 1 (count args))
-           "Usage: transport_probe.clj URI"
+  (ensure! (<= 1 (count args) 2)
+           "Usage: transport_probe.clj URI [EXPECTED_SOURCE_PROTOCOL]"
            {:argument-count (count args)})
-  (let [uri (first args)]
+  (let [[uri supplied-source-protocol] args
+        expected-source-protocol (or supplied-source-protocol "jar")]
     (ensure! (and (string? uri) (not (str/blank? uri)))
              "URI must not be blank"
              {:uri-present? (boolean (and (string? uri)
@@ -149,7 +153,11 @@
     (ensure! (str/starts-with? uri "datomic:sql://")
              "URI must identify an external SQL database"
              {:sql-uri? false})
-    uri))
+    (ensure! (#{"jar" "file"} expected-source-protocol)
+             "Expected source protocol must be jar or file"
+             {:expected-source-protocol expected-source-protocol})
+    {:expected-source-protocol expected-source-protocol
+     :uri uri}))
 
 (defn- read-command!
   [^BufferedReader reader expected]
@@ -310,8 +318,8 @@
         :value sentinel-value))))
 
 (defn- run-probe!
-  [uri]
-  (let [boundary (audit-candidate-boundary!)
+  [uri expected-source-protocol]
+  (let [boundary (audit-candidate-boundary! expected-source-protocol)
         reader (BufferedReader.
                  (InputStreamReader. System/in StandardCharsets/UTF_8))
         conn (d/connect uri)]
@@ -371,8 +379,9 @@
   [& args]
   (let [operation
         (capture
-          #(let [uri (parse-uri! args)]
-             (run-probe! uri)))
+          #(let [{:keys [expected-source-protocol uri]}
+                 (parse-arguments! args)]
+             (run-probe! uri expected-source-protocol)))
         cleanup (capture shutdown!)
         successful? (and (contains? operation :returned)
                          (contains? cleanup :returned))]

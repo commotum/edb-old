@@ -26,22 +26,40 @@
       (when (instance? java.lang.Throwable o)
         (throw (java.util.concurrent.ExecutionException. ^java.lang.Throwable o)))
       o))
-  (defn call-user-code
-    ([exec listener]
-      (try
-        (do (.execute ^java.util.concurrent.Executor exec ^java.lang.Runnable listener) nil)
-        (catch
-          java.lang.Throwable
-          t
-          (let [temp__5802__auto__ (java.lang.Thread/getDefaultUncaughtExceptionHandler)]
-            (if temp__5802__auto__
-              (let [h temp__5802__auto__]
-                (.uncaughtException
-                  ^java.lang.Thread$UncaughtExceptionHandler h
-                  (java.lang.Thread/currentThread)
-                  ^java.lang.Throwable t)
-                nil)
-              (do (.printStackTrace ^java.lang.Throwable t) nil)))))))
+  (reset-meta!
+    #'throw-executionexception-if-throwable
+    (assoc
+      {:arglists (clojure.core/list ['o]), :column (int 1)}
+      :name
+      'throw-executionexception-if-throwable
+      :ns
+      *ns*))
+  (def call-user-code
+   (fn call_user_code
+     ([exec listener]
+       (try
+         (do (.execute ^java.util.concurrent.Executor exec ^java.lang.Runnable listener) nil)
+         (catch
+           java.lang.Throwable
+           t
+           (let [temp__5802__auto__ (java.lang.Thread/getDefaultUncaughtExceptionHandler)]
+             (if temp__5802__auto__
+               (let [h temp__5802__auto__]
+                 (.uncaughtException
+                   ^java.lang.Thread$UncaughtExceptionHandler h
+                   (java.lang.Thread/currentThread)
+                   ^java.lang.Throwable t)
+                 nil)
+               (do (.printStackTrace ^java.lang.Throwable t) nil))))))))
+  (reset-meta!
+    #'call-user-code
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'exec {:tag 'Executor}) 'listener]),
+       :column (int 1)}
+      :name
+      'call-user-code
+      :ns
+      *ns*))
   (defn settable-future
     ([]
       (let [d (java.util.concurrent.CountDownLatch. (int 1)) listeners (atom []) v (atom d)]
@@ -56,9 +74,9 @@
             [this ^java.lang.Runnable listener ^java.util.concurrent.Executor exec]
             (do
               (let [execute_now (locking listeners
-                                  (if (.isRealized this)
-                                    true
-                                    (do (swap! listeners conj [listener exec]) false)))]
+                                 (if (.isRealized this)
+                                   true
+                                   (do (swap! listeners conj [listener exec]) false)))]
                 (when execute_now (call-user-code exec listener)))
               nil))
           (invoke
@@ -67,8 +85,7 @@
                     (clojure.lang.Numbers/isPos
                       (long (.getCount ^java.util.concurrent.CountDownLatch d)))
                     (compare-and-set! v d x))
-              (locking listeners
-                (do (.countDown ^java.util.concurrent.CountDownLatch d) nil))
+              (locking listeners (do (.countDown ^java.util.concurrent.CountDownLatch d) nil))
               (loop [seq_11928 (seq (deref listeners)) chunk_11929 nil count_11930 0 i_11931 0]
                 (if (< i_11931 count_11930)
                   (let [vec__11932 (.nth ^clojure.lang.Indexed chunk_11929 (int i_11931))
@@ -137,4 +154,10 @@
                 (binding [*print-length* 5 *print-level* 3] (pr-str (deref v)))
                 :pending)
               ">"))))))
-  (defn delivered ([o] (deliver (settable-future) o))))
+  (reset-meta!
+    #'settable-future
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'settable-future :ns *ns*))
+  (defn delivered ([o] (deliver (settable-future) o)))
+  (reset-meta!
+    #'delivered
+    (assoc {:arglists (clojure.core/list ['o]), :column (int 1)} :name 'delivered :ns *ns*)))

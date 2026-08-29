@@ -43,8 +43,12 @@
         (clojure.core/import 'datomic.functions.Fn9)
         (clojure.core/import 'datomic.functions.Fn10))))
   (set! *warn-on-reflection* true)
-  (declare ->Function)
-  (declare map->Function)
+  (.setMeta
+    (clojure.lang.RT/var "datomic.function" "->Function")
+    {:declared true, :column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.function" "map->Function")
+    {:declared true, :column (int 1)})
   (defrecord
     Function
     [lang imports requires params code fnref]
@@ -93,24 +97,42 @@
   (defn ->Function
     ([lang imports requires params code fnref]
       (datomic.function.Function. lang imports requires params code fnref)))
+  (reset-meta!
+    #'->Function
+    (assoc
+      {:arglists (clojure.core/list ['lang 'imports 'requires 'params 'code 'fnref]),
+       :column (int 1)}
+      :name
+      '->Function
+      :ns
+      *ns*))
   (defn map->Function
     ([m__7972__auto__]
       (Function/create
         (if (instance? clojure.lang.MapEquivalence m__7972__auto__)
           m__7972__auto__
           (into {} m__7972__auto__)))))
-  (defn print-function
-    ([dbfn w]
-      (.write
-        ^java.io.Writer w
-        (str "#db/fn" (select-keys dbfn [:lang :imports :requires :params :code])))
-      nil))
+  (reset-meta!
+    #'map->Function
+    (assoc
+      {:arglists (clojure.core/list ['m__7972__auto__]), :column (int 1)}
+      :name
+      'map->Function
+      :ns
+      *ns*))
+  (def print-function
+   (fn print_function
+     ([dbfn w]
+       (.write
+         ^java.io.Writer w
+         (str "#db/fn" (select-keys dbfn [:lang :imports :requires :params :code])))
+       nil)))
   (reset-meta!
     #'print-function
     (assoc
       {:private true,
        :arglists (clojure.core/list ['dbfn (.withMeta 'w {:tag 'java.io.Writer})]),
-       :column 1}
+       :column (int 1)}
       :name
       'print-function
       :ns
@@ -133,6 +155,14 @@
           (when imports (eval (seq (concat (clojure.core/list 'clojure.core/import) imports))))
           (when (seq requires) (apply clojure.core/require requires))
           (let [f (eval expr)] (clojure.lang.Namespace/remove ^clojure.lang.Symbol gns) f)))))
+  (reset-meta!
+    #'compile-clojure
+    (assoc
+      {:arglists (clojure.core/list ['imports 'requires 'params 'code]), :column (int 1)}
+      :name
+      'compile-clojure
+      :ns
+      *ns*))
   (defn normalize
     ([m]
       (let [map__9263 (common/force-map-keywords m)
@@ -170,7 +200,7 @@
   (reset-meta!
     #'normalize
     (assoc
-      {:private true, :arglists (clojure.core/list ['m]), :column 1}
+      {:private true, :arglists (clojure.core/list ['m]), :column (int 1)}
       :name
       'normalize
       :ns
@@ -198,4 +228,7 @@
                       (error/arg
                         :db.error/source-lang-not-supported
                         (str "Source lang: " lang " not supported yet."))))]
-        (datomic.function.Function. lang imports requires params code fnref)))))
+        (datomic.function.Function. lang imports requires params code fnref))))
+  (reset-meta!
+    #'construct
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'construct :ns *ns*)))

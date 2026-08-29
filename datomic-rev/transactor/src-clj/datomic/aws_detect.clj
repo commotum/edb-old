@@ -25,15 +25,35 @@
                    (.setConnectTimeout (int ^java.lang.Number timeout))
                    (.setReadTimeout (int ^java.lang.Number timeout)))]
         (.getInputStream ^java.net.URLConnection conn))))
+  (reset-meta!
+    #'quickstream
+    (assoc
+      {:arglists (clojure.core/list ['path 'timeout]), :column (int 1)}
+      :name
+      'quickstream
+      :ns
+      *ns*))
   (defn get-ec2-private-ip
     ([]
       (try
         (slurp (quickstream "http://169.254.169.254/latest/meta-data/local-ipv4" 1000))
         (catch java.lang.Throwable _ nil))))
+  (reset-meta!
+    #'get-ec2-private-ip
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'get-ec2-private-ip :ns *ns*))
   (defn get-ec2-public-ip
     ([]
       (try
         (slurp (quickstream "http://169.254.169.254/latest/meta-data/public-ipv4" 1000))
         (catch java.lang.Throwable _ nil))))
-  (def running-in-ec2-ref (delay (boolean (get-ec2-public-ip))))
-  (defn running-in-ec2? ([] (deref running-in-ec2-ref))))
+  (reset-meta!
+    #'get-ec2-public-ip
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'get-ec2-public-ip :ns *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.aws-detect" "running-in-ec2-ref") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.aws-detect" "running-in-ec2-ref")
+    (delay (boolean (get-ec2-public-ip))))
+  (defn running-in-ec2? ([] (deref running-in-ec2-ref)))
+  (reset-meta!
+    #'running-in-ec2?
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'running-in-ec2? :ns *ns*)))

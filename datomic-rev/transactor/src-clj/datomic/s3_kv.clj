@@ -17,8 +17,17 @@
           ['datomic.io :as 'io]
           ['datomic.simple-kv :as 'skv]))))
   (set! *warn-on-reflection* true)
-  (defn s3-storage-path
-    ([base k] (str base "/" (when-not (.contains ^java.lang.String k "/") "data/") k)))
+  (def s3-storage-path
+   (fn s3_storage_path
+     ([base k] (str base "/" (when-not (.contains ^java.lang.String k "/") "data/") k))))
+  (reset-meta!
+    #'s3-storage-path
+    (assoc
+      {:arglists (clojure.core/list ['base (.withMeta 'k {:tag 'String})]), :column (int 1)}
+      :name
+      's3-storage-path
+      :ns
+      *ns*))
   (deftype
     S3Storage
     [s3 bucket base]
@@ -39,24 +48,52 @@
         (catch java.lang.Exception ex nil))))
   (clojure.core/import 'datomic.s3_kv.S3Storage)
   (defn ->S3Storage ([s3 bucket base] (datomic.s3_kv.S3Storage. s3 bucket base)))
-  (defn s3-storage
-    ([& p__27065]
-      (let [map__27066 p__27065
-            map__27066 (if (seq? map__27066)
-                         (if (next map__27066)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__27066))
-                           (if (seq map__27066) (first map__27066) {}))
-                         map__27066)
-            s3 (get map__27066 :s3)
-            bucket (get map__27066 :bucket)
-            base (get map__27066 :base)]
-        (when-not (and s3 bucket base)
-          (throw
-            (java.lang.AssertionError.
-              (str "Assert failed: " (pr-str (clojure.core/list 'and 's3 'bucket 'base))))))
-        (datomic.s3_kv.S3Storage. s3 bucket base))))
+  (reset-meta!
+    #'->S3Storage
+    (assoc
+      {:arglists (clojure.core/list ['s3 'bucket 'base]), :column (int 1)}
+      :name
+      '->S3Storage
+      :ns
+      *ns*))
+  (def s3-storage
+   (fn s3_storage
+     ([& p__27065]
+       (let [map__27066 p__27065
+             map__27066 (if (seq? map__27066)
+                          (if (next map__27066)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__27066))
+                            (if (seq map__27066) (first map__27066) {}))
+                          map__27066)
+             s3 (get map__27066 :s3)
+             bucket (get map__27066 :bucket)
+             base (get map__27066 :base)]
+         (when-not (and s3 bucket base)
+           (throw
+             (java.lang.AssertionError.
+               (str "Assert failed: " (pr-str (clojure.core/list 'and 's3 'bucket 'base))))))
+         (datomic.s3_kv.S3Storage. s3 bucket base)))))
+  (reset-meta!
+    #'s3-storage
+    (assoc
+      {:arglists (clojure.core/list ['& {:keys ['s3 'bucket 'base]}]), :column (int 1)}
+      :name
+      's3-storage
+      :ns
+      *ns*))
   (defn storage-from-conf-
     ([conf]
       (s3-storage :s3 (s3/s3-service conf) :bucket (:system-root conf) :base (:aws-s3-path conf))))
-  (def storage-from-conf (memoize storage-from-conf-)))
+  (reset-meta!
+    #'storage-from-conf-
+    (assoc
+      {:arglists (clojure.core/list ['conf]), :column (int 1)}
+      :name
+      'storage-from-conf-
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.s3-kv" "storage-from-conf") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.s3-kv" "storage-from-conf")
+    (memoize storage-from-conf-)))

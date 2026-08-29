@@ -23,19 +23,28 @@
           ['datomic.kv-store :as 'kv])
         (clojure.core/import 'java.nio.ByteBuffer))))
   (set! *warn-on-reflection* true)
-  (defn expected-map
-    ([expect_map]
-      (into
-        {}
-        (map
-          (fn fn__32730
-            ([p__32729]
-              (let [vec__32731 p__32729
-                    k (nth vec__32731 (int 0) nil)
-                    v (nth vec__32731 (int 1) nil)]
-                [(name k)
-                 (if (nil? v) {:exists false} {:value {(if (number? v) :n :s) (str v)}})])))
-          expect_map))))
+  (def expected-map
+   (fn expected_map
+     ([expect_map]
+       (into
+         {}
+         (map
+           (fn fn__32730
+             ([p__32729]
+               (let [vec__32731 p__32729
+                     k (nth vec__32731 (int 0) nil)
+                     v (nth vec__32731 (int 1) nil)]
+                 [(name k)
+                  (if (nil? v) {:exists false} {:value {(if (number? v) :n :s) (str v)}})])))
+           expect_map)))))
+  (reset-meta!
+    #'expected-map
+    (assoc
+      {:arglists (clojure.core/list ['expect-map]), :column (int 1)}
+      :name
+      'expected-map
+      :ns
+      *ns*))
   (deftype
     KVDynamoSKV
     [client table skv prefix]
@@ -88,48 +97,67 @@
   (clojure.core/import 'datomic.kv_dynamo_skv.KVDynamoSKV)
   (defn ->KVDynamoSKV
     ([client table skv prefix] (datomic.kv_dynamo_skv.KVDynamoSKV. client table skv prefix)))
-  (defn kv-ddb-skv-
-    ([creds prefix skv]
-      (let [sbuf (skv/get-with-retry skv "config/dynamo.properties")
-            _ (when-not sbuf
-                (throw
-                  (java.lang.AssertionError.
-                    (str
-                      "Assert failed: "
-                      "No 'config/dynamo.properties' key found in storage"
-                      "\n"
-                      (pr-str 'sbuf))))
-                nil)
-            props (let [G__32745 (java.util.Properties.)]
-                    (.load
-                      ^java.util.Properties G__32745
-                      (java.io.StringReader. (io/bbuf->string sbuf)))
-                    G__32745)
-            table (.getProperty ^java.util.Properties props "aws-dynamodb-table")
-            _ (when-not table
-                (throw
-                  (java.lang.AssertionError.
-                    (str
-                      "Assert failed: "
-                      "No 'aws-dynamodb-table' entry found in config/dynamo.properties"
-                      "\n"
-                      (pr-str 'table))))
-                nil)
-            region (.getProperty ^java.util.Properties props "aws-dynamodb-region")
-            override_endpoint (.getProperty
-                                ^java.util.Properties props
-                                "aws-dynamodb-override-endpoint")
-            _ (when-not table
-                (throw
-                  (java.lang.AssertionError.
-                    (str
-                      "Assert failed: "
-                      "No 'aws-dynamodb-region' entry found in config/dynamo.properties"
-                      "\n"
-                      (pr-str 'table))))
-                nil)
-            client (ddb/client
-                     creds
-                     {:region region, :override-endpoint override_endpoint, :maxErrorRetry 0})]
-        (datomic.kv_dynamo_skv.KVDynamoSKV. client table skv prefix))))
-  (def kv-ddb-skv (memoize kv-ddb-skv-)))
+  (reset-meta!
+    #'->KVDynamoSKV
+    (assoc
+      {:arglists (clojure.core/list ['client 'table 'skv 'prefix]), :column (int 1)}
+      :name
+      '->KVDynamoSKV
+      :ns
+      *ns*))
+  (def kv-ddb-skv-
+   (fn kv_ddb_skv_
+     ([creds prefix skv]
+       (let [sbuf (skv/get-with-retry skv "config/dynamo.properties")
+             _ (when-not sbuf
+                 (throw
+                   (java.lang.AssertionError.
+                     (str
+                       "Assert failed: "
+                       "No 'config/dynamo.properties' key found in storage"
+                       "\n"
+                       (pr-str 'sbuf))))
+                 nil)
+             props (let [G__32745 (java.util.Properties.)]
+                     (.load
+                       ^java.util.Properties G__32745
+                       (java.io.StringReader. (io/bbuf->string sbuf)))
+                     G__32745)
+             table (.getProperty ^java.util.Properties props "aws-dynamodb-table")
+             _ (when-not table
+                 (throw
+                   (java.lang.AssertionError.
+                     (str
+                       "Assert failed: "
+                       "No 'aws-dynamodb-table' entry found in config/dynamo.properties"
+                       "\n"
+                       (pr-str 'table))))
+                 nil)
+             region (.getProperty ^java.util.Properties props "aws-dynamodb-region")
+             override_endpoint (.getProperty
+                                 ^java.util.Properties props
+                                 "aws-dynamodb-override-endpoint")
+             _ (when-not table
+                 (throw
+                   (java.lang.AssertionError.
+                     (str
+                       "Assert failed: "
+                       "No 'aws-dynamodb-region' entry found in config/dynamo.properties"
+                       "\n"
+                       (pr-str 'table))))
+                 nil)
+             client (ddb/client
+                      creds
+                      {:region region, :override-endpoint override_endpoint, :maxErrorRetry 0})]
+         (datomic.kv_dynamo_skv.KVDynamoSKV. client table skv prefix)))))
+  (reset-meta!
+    #'kv-ddb-skv-
+    (assoc
+      {:arglists (clojure.core/list ['creds (.withMeta 'prefix {:tag 'String}) 'skv]),
+       :column (int 1)}
+      :name
+      'kv-ddb-skv-
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.kv-dynamo-skv" "kv-ddb-skv") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.kv-dynamo-skv" "kv-ddb-skv") (memoize kv-ddb-skv-)))

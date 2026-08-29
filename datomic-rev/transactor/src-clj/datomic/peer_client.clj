@@ -41,28 +41,70 @@
         (clojure.core/import 'datomic.Database)
         (clojure.core/import 'datomic.query.support.MapOnIndexed))))
   (set! *warn-on-reflection* true)
-  (declare ->DbProxy)
-  (declare create-db-proxy)
+  (.setMeta
+    (clojure.lang.RT/var "datomic.peer-client" "->DbProxy")
+    {:declared true, :column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.peer-client" "create-db-proxy")
+    {:declared true, :column (int 1)})
   (defn wrap-tx-result
     ([result conn]
       (update (update result :db-after create-db-proxy conn) :db-before create-db-proxy conn)))
+  (reset-meta!
+    #'wrap-tx-result
+    (assoc
+      {:arglists (clojure.core/list ['result 'conn]), :column (int 1)}
+      :name
+      'wrap-tx-result
+      :ns
+      *ns*))
   (defn base-uri ([cfg] (let [uri (:uri cfg)] (subs uri 0 (long (- (count uri) 2))))))
-  (defn db-uri ([cfg db_name] (str (base-uri cfg) "/" db_name)))
-  (defn result-seq
-    ([result p__24221]
-      (let [map__24222 p__24221
-            map__24222 (if (seq? map__24222)
-                         (if (next map__24222)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__24222))
-                           (if (seq map__24222) (first map__24222) {}))
-                         map__24222)
-            offset (get map__24222 :offset)
-            limit (get map__24222 :limit 1000)]
-        (sequence (common/result-xform offset limit force) result))))
-  (defn apply-timeout
-    ([vq user_timeout]
-      (merge vq {:timeout [60000]} (when user_timeout {:timeout [user_timeout]}))))
+  (reset-meta!
+    #'base-uri
+    (assoc {:arglists (clojure.core/list ['cfg]), :column (int 1)} :name 'base-uri :ns *ns*))
+  (def db-uri (fn db_uri ([cfg db_name] (str (base-uri cfg) "/" db_name))))
+  (reset-meta!
+    #'db-uri
+    (assoc
+      {:arglists (clojure.core/list ['cfg 'db-name]), :column (int 1)}
+      :name
+      'db-uri
+      :ns
+      *ns*))
+  (def result-seq
+   (fn result_seq
+     ([result p__24221]
+       (let [map__24222 p__24221
+             map__24222 (if (seq? map__24222)
+                          (if (next map__24222)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__24222))
+                            (if (seq map__24222) (first map__24222) {}))
+                          map__24222)
+             offset (get map__24222 :offset)
+             limit (get map__24222 :limit 1000)]
+         (sequence (common/result-xform offset limit force) result)))))
+  (reset-meta!
+    #'result-seq
+    (assoc
+      {:arglists (clojure.core/list ['result {:keys ['offset 'limit], :or {'limit 1000}}]),
+       :column (int 1)}
+      :name
+      'result-seq
+      :ns
+      *ns*))
+  (def apply-timeout
+   (fn apply_timeout
+     ([vq user_timeout]
+       (merge vq {:timeout [60000]} (when user_timeout {:timeout [user_timeout]})))))
+  (reset-meta!
+    #'apply-timeout
+    (assoc
+      {:arglists (clojure.core/list ['vq 'user-timeout]), :column (int 1)}
+      :name
+      'apply-timeout
+      :ns
+      *ns*))
   (defn create-db-lookup
     ([conn]
       (fn fn__24225
@@ -71,8 +113,33 @@
             (if (= (:id db) id)
               db
               (do (throw (java.lang.RuntimeException. "Peer client db lookup failed.")) nil)))))))
-  (defonce Unwrap {})
-  (defprotocol Unwrap (unwrap-proxies [x]))
+  (reset-meta!
+    #'create-db-lookup
+    (assoc
+      {:arglists (clojure.core/list ['conn]), :column (int 1)}
+      :name
+      'create-db-lookup
+      :ns
+      *ns*))
+  (let [protocol_metadata__7420 {:column (int 1)}]
+    (defprotocol Unwrap (unwrap-proxies [x] "Unwraps x if a db proxy, else returns x unchanged."))
+    (reset-meta!
+      (clojure.lang.RT/var "datomic.peer-client" "Unwrap")
+      (assoc (assoc protocol_metadata__7420 :doc nil) :name 'Unwrap :ns *ns*))
+    (let [protocol_signature__7421 (assoc
+                                     {:tag nil,
+                                      :name
+                                      (.withMeta
+                                        'unwrap-proxies
+                                        {:arglists (clojure.core/list ['x])}),
+                                      :arglists (clojure.core/list ['x]),
+                                      :doc "Unwraps x if a db proxy, else returns x unchanged."}
+                                     :protocol
+                                     (clojure.lang.RT/var "datomic.peer-client" "Unwrap"))
+          protocol_method_name__7422 'unwrap-proxies]
+      (reset-meta!
+        (clojure.lang.RT/var "datomic.peer-client" "unwrap-proxies")
+        (assoc protocol_signature__7421 :name protocol_method_name__7422 :ns *ns*))))
   (extend java.lang.Object Unwrap {:unwrap-proxies (fn fn__24244 ([x] x))})
   (extend nil Unwrap {:unwrap-proxies (fn fn__24246 ([_] nil))})
   (defn disallow-find-variants!
@@ -83,6 +150,14 @@
         (common/throw-anom
           #:cognitect.anomalies{:category :cognitect.anomalies/incorrect,
                                 :message "Only find-rel elements are allowed in client :find"}))))
+  (reset-meta!
+    #'disallow-find-variants!
+    (assoc
+      {:arglists (clojure.core/list ['query]), :column (int 1)}
+      :name
+      'disallow-find-variants!
+      :ns
+      *ns*))
   (deftype
     Client
     [cfg]
@@ -98,6 +173,9 @@
     (administer-system [this arg_map] (peer/administer-system arg_map)))
   (clojure.core/import 'datomic.peer_client.Client)
   (defn ->Client ([cfg] (datomic.peer_client.Client. cfg)))
+  (reset-meta!
+    #'->Client
+    (assoc {:arglists (clojure.core/list ['cfg]), :column (int 1)} :name '->Client :ns *ns*))
   (extend
     datomic.peer.LocalConnection
     api-p/Connection
@@ -137,34 +215,56 @@
         (error/raise
           :db.error/invalid-db-uri
           "Invalid :uri in client connect map. Note that URI must have '*' in place of database name."))))
-  (defn desc->db
-    ([desc conn] (spi-support/desc->db desc (:database-id desc) (create-db-lookup conn))))
-  (defn local-q
-    ([arg_map qtype]
-      (let [map__24281 arg_map
-            map__24281 (if (seq? map__24281)
-                         (if (next map__24281)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__24281))
-                           (if (seq map__24281) (first map__24281) {}))
-                         map__24281)
-            query (get map__24281 :query)
-            args (get map__24281 :args)
-            offset (get map__24281 :offset)
-            limit (get map__24281 :limit)
-            query (qs/query-map query)
-            _ (disallow-find-variants! query)
-            vec__24282 (q/q* query (map unwrap-proxies args))
-            result (nth vec__24282 (int 0) nil)
-            pf (nth vec__24282 (int 1) nil)
-            xform (common/result-xform offset limit pf)
-            G__24285 qtype]
-        (case
-          G__24285
-          :q
-          (into [] xform result)
-          :qseq
-          (qs/counted-seq (sequence xform result) (common/result-count offset limit result))))))
+  (reset-meta!
+    #'create-client
+    (assoc {:arglists (clojure.core/list ['cfg]), :column (int 1)} :name 'create-client :ns *ns*))
+  (def desc->db
+   (fn desc__GT_db
+     ([desc conn] (spi-support/desc->db desc (:database-id desc) (create-db-lookup conn)))))
+  (reset-meta!
+    #'desc->db
+    (assoc
+      {:arglists (clojure.core/list (.withMeta ['desc 'conn] {:tag 'datomic.Database})),
+       :column (int 1)}
+      :name
+      'desc->db
+      :ns
+      *ns*))
+  (def local-q
+   (fn local_q
+     ([arg_map qtype]
+       (let [map__24281 arg_map
+             map__24281 (if (seq? map__24281)
+                          (if (next map__24281)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__24281))
+                            (if (seq map__24281) (first map__24281) {}))
+                          map__24281)
+             query (get map__24281 :query)
+             args (get map__24281 :args)
+             offset (get map__24281 :offset)
+             limit (get map__24281 :limit)
+             query (qs/query-map query)
+             _ (disallow-find-variants! query)
+             vec__24282 (q/q* query (map unwrap-proxies args))
+             result (nth vec__24282 (int 0) nil)
+             pf (nth vec__24282 (int 1) nil)
+             xform (common/result-xform offset limit pf)
+             G__24285 qtype]
+         (case
+           G__24285
+           :q
+           (into [] xform result)
+           :qseq
+           (qs/counted-seq (sequence xform result) (common/result-count offset limit result)))))))
+  (reset-meta!
+    #'local-q
+    (assoc
+      {:arglists (clojure.core/list ['arg-map 'qtype]), :column (int 1)}
+      :name
+      'local-q
+      :ns
+      *ns*))
   (deftype
     DbProxy
     [desc conn]
@@ -215,6 +315,14 @@
     (unwrap-proxies [this] (desc->db desc conn)))
   (clojure.core/import 'datomic.peer_client.DbProxy)
   (defn ->DbProxy ([desc conn] (datomic.peer_client.DbProxy. desc conn)))
+  (reset-meta!
+    #'->DbProxy
+    (assoc
+      {:arglists (clojure.core/list ['desc 'conn]), :column (int 1)}
+      :name
+      '->DbProxy
+      :ns
+      *ns*))
   (defmethod
     print-method
     datomic.peer_client.DbProxy
@@ -225,9 +333,18 @@
         (str (assoc (.-desc ^datomic.peer_client.DbProxy db) :type :datomic.peer-client/db-proxy)))
       nil))
   (defmethod print-dup datomic.peer_client.DbProxy fn__24296 ([o w] (print-method o w)))
-  (defn create-db-proxy
-    ([db conn] (let [db_id (:id db) desc (spi-support/db->desc db)] (->DbProxy desc conn)))
-    ([conn] (create-db-proxy (api/db conn) conn)))
+  (def create-db-proxy
+   (fn create_db_proxy
+     ([db conn] (let [db_id (:id db) desc (spi-support/db->desc db)] (->DbProxy desc conn)))
+     ([conn] (create-db-proxy (api/db conn) conn))))
+  (reset-meta!
+    #'create-db-proxy
+    (assoc
+      {:arglists (clojure.core/list ['conn] ['db 'conn]), :column (int 1)}
+      :name
+      'create-db-proxy
+      :ns
+      *ns*))
   (extend
     datomic.db.Db
     api-impl/Queryable

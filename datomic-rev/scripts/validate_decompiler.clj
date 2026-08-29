@@ -7,6 +7,7 @@
 
 (let [namespace-init-name "fixture.protocol__init"
       eager-class-name "fixture.protocol.EagerType"
+      later-eager-class-name "fixture.protocol.LaterType"
       target-var 'fixture.protocol/unwrap
       string-instruction
       (fn [instruction-name value]
@@ -68,6 +69,12 @@
       [(string-instruction "ldc" eager-class-name)
        class-for-name-call
        return-instruction]
+      eager-then-later-load-bytecode
+      [(string-instruction "ldc" eager-class-name)
+       class-for-name-call
+       (string-instruction "ldc_w" later-eager-class-name)
+       class-for-name-call
+       return-instruction]
       target-var-bytecode
       [(string-instruction "ldc" "fixture.protocol")
        (string-instruction "ldc_w" "unwrap")
@@ -76,13 +83,16 @@
        own-static-field-write
        return-instruction]
       initialized-class
-      (fn [bytecode]
-        {:class/name eager-class-name
-         :class/methods [{:method/name "<clinit>"
-                          :method/arg-types []
-                          :method/return-type "void"
-                          :method/exception-table #{}
-                          :method/bytecode (vec bytecode)}]})
+      (fn initialized-class
+        ([bytecode]
+         (initialized-class eager-class-name bytecode))
+        ([class-name bytecode]
+         {:class/name class-name
+          :class/methods [{:method/name "<clinit>"
+                           :method/arg-types []
+                           :method/return-type "void"
+                           :method/exception-table #{}
+                           :method/bytecode (vec bytecode)}]}))
       namespace-class
       (fn [clinit-bytecode helper-bytecode load-bytecode]
         {:class/name namespace-init-name
@@ -119,9 +129,27 @@
           namespace-bytecode
           (fn [class-name]
             (when (= eager-class-name class-name) eager-bytecode))))
+      facts-with-later
+      (fn [namespace-bytecode eager-bytecode later-bytecode]
+        (decompiler/preinterned-var-symbols-before-namespace-load
+          namespace-bytecode
+          (fn [class-name]
+            (cond
+              (= eager-class-name class-name) eager-bytecode
+              (= later-eager-class-name class-name) later-bytecode))))
       positive
       (facts (namespace-class [helper-call load-call]
                               eager-load-bytecode [])
+             (initialized-class target-var-bytecode))
+      positive-with-proved-later-class
+      (facts-with-later
+        (namespace-class [helper-call load-call]
+                         eager-then-later-load-bytecode [])
+        (initialized-class target-var-bytecode)
+        (initialized-class later-eager-class-name [return-instruction]))
+      later-class-absent
+      (facts (namespace-class [helper-call load-call]
+                              eager-then-later-load-bytecode [])
              (initialized-class target-var-bytecode))
       absent
       (facts (namespace-class [helper-call load-call]
@@ -224,8 +252,10 @@
                 own-static-field-write
                 return-instruction]))]
   (assert (contains? positive target-var))
+  (assert (contains? positive-with-proved-later-class target-var))
   (doseq [[label evidence]
           [[:absent absent]
+           [:later-class-absent later-class-absent]
            [:after after]
            [:helper-after-load helper-after-load]
            [:conditional-prefix conditional-prefix]
@@ -2075,6 +2105,14 @@
            (do (.countDown d) nil)
            (finally
              (do (monitor-exit locklocal__5783__auto__) nil))))
+      source-stage-expanded
+      '(let* [lockee__5782__auto__ listeners
+              locklocal__5783__auto__ lockee__5782__auto__]
+         (monitor-enter locklocal__5783__auto__)
+         (try
+           (do (.countDown d) nil)
+           (finally
+             (do (monitor-exit locklocal__5783__auto__) nil))))
       wrong-exit
       '(let [lockee__5782__auto__ listeners
              locklocal__5783__auto__ lockee__5782__auto__]
@@ -2095,6 +2133,16 @@
          (fake/monitor-enter locklocal__5783__auto__)
          (try :body
               (finally (monitor-exit locklocal__5783__auto__))))
+      foreign-let
+      '(foreign/let [lockee__5782__auto__ listeners
+                     locklocal__5783__auto__ lockee__5782__auto__]
+         (monitor-enter locklocal__5783__auto__)
+         (try :body
+              (finally (monitor-exit locklocal__5783__auto__))))
+      ordinary-qualified-let
+      '(clojure.core/let [x :value]
+         :effect
+         x)
       extra-finally-body
       '(let [lockee__5782__auto__ listeners
              locklocal__5783__auto__ lockee__5782__auto__]
@@ -2102,10 +2150,15 @@
          (try :body
               (finally (monitor-exit locklocal__5783__auto__) :extra)))
       recovered (compact/macrocompact expanded)
+      source-stage-recovered (compact/macrocompact source-stage-expanded)
       rejected (mapv compact/macrocompact
-                     [wrong-exit wrong-source qualified-lookalike
-                      extra-finally-body])]
+                     [wrong-exit wrong-source qualified-lookalike foreign-let
+                      ordinary-qualified-let extra-finally-body])]
   (assert (= '(locking listeners (do (.countDown d) nil)) recovered))
+  ;; `let*` is first compacted to syntax-quoted `clojure.core/let`; this is
+  ;; the exact pass-order shape that previously escaped locking recovery in
+  ;; datomic.promise/settable-future.
+  (assert (= recovered source-stage-recovered))
   (assert (every? #(not= 'locking (first %)) rejected))
   (assert (some #{'monitor-enter}
                 (tree-seq coll? seq (first rejected))))

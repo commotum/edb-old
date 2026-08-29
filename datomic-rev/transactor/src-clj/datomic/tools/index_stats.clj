@@ -37,11 +37,19 @@
                   count (get map__33072 :count)]
               {:count count, :key-size (size/memory-size key), :attr-id (:a key), :id seg})))
         index)))
+  (reset-meta!
+    #'summarize-keys
+    (assoc
+      {:arglists (clojure.core/list ['index]), :column (int 1)}
+      :name
+      'summarize-keys
+      :ns
+      *ns*))
   (defn get-a ([iselem] (:a (:key iselem))))
   (reset-meta!
     #'get-a
     (assoc
-      {:private true, :arglists (clojure.core/list ['iselem]), :column 1}
+      {:private true, :arglists (clojure.core/list ['iselem]), :column (int 1)}
       :name
       'get-a
       :ns
@@ -61,6 +69,9 @@
           datoms
           :leaf-count-mean
           (long (:mean ms))))))
+  (reset-meta!
+    #'key-means
+    (assoc {:arglists (clojure.core/list ['index]), :column (int 1)} :name 'key-means :ns *ns*))
   (defn -main*
     ([uri]
       (let [db (tools/index-db (tools/connection-resources uri))]
@@ -199,4 +210,10 @@
                                                        (rest s__33078)))
                                                    (recur (rest s__33078))))))))))]
             (^clojure.lang.IFn iter__6373__auto__ [:avet :aevt]))))))
-  (defn -main ([uri] (try (pp/pprint (-main* uri)) (finally (shutdown-agents))))))
+  (reset-meta!
+    #'-main*
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name '-main* :ns *ns*))
+  (defn -main ([uri] (try (pp/pprint (-main* uri)) (finally (shutdown-agents)))))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name '-main :ns *ns*)))

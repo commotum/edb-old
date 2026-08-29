@@ -107,36 +107,64 @@
   (clojure.core/import 'datomic.valcache.puts_pool_impl.ValcachePutsPoolImpl)
   (defn ->ValcachePutsPoolImpl
     ([limit puts pool] (datomic.valcache.puts_pool_impl.ValcachePutsPoolImpl. limit puts pool)))
-  (defn create-valcache-puts-pool
-    ([p__20728]
-      (let [map__20729 p__20728
-            map__20729 (if (seq? map__20729)
-                         (if (next map__20729)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__20729))
-                           (if (seq map__20729) (first map__20729) {}))
-                         map__20729)
-            limit (get map__20729 :limit)
-            threads (get map__20729 :threads)
-            idx (atom 0)
-            exec (java.util.concurrent.ThreadPoolExecutor.
-                   (int threads)
-                   (int threads)
-                   0
-                   TimeUnit/MILLISECONDS
-                   (java.util.concurrent.LinkedBlockingQueue.)
-                   (reify
-                     java.util.concurrent.ThreadFactory
-                     (^java.lang.Thread newThread
-                       [this ^java.lang.Runnable runnable]
-                       (let [G__20731 (java.lang.Thread.
-                                        ^java.lang.Runnable runnable
-                                        (str (gensym "valcache-direct-") (swap! idx inc)))]
-                         (.setDaemon ^java.lang.Thread G__20731 (boolean (.booleanValue true)))
-                         G__20731))))
-            puts (java.util.concurrent.ConcurrentHashMap.)]
-        (datomic.valcache.puts_pool_impl.ValcachePutsPoolImpl. limit puts exec)))
-    ([]
-      (create-valcache-puts-pool
-        {:limit 1000, :threads (config/property "datomic.valcachePutsPool")})))
-  (defonce valcache-puts-pool (delay (create-valcache-puts-pool))))
+  (reset-meta!
+    #'->ValcachePutsPoolImpl
+    (assoc
+      {:arglists (clojure.core/list ['limit 'puts 'pool]), :column (int 1)}
+      :name
+      '->ValcachePutsPoolImpl
+      :ns
+      *ns*))
+  (def create-valcache-puts-pool
+   (fn create_valcache_puts_pool
+     ([p__20728]
+       (let [map__20729 p__20728
+             map__20729 (if (seq? map__20729)
+                          (if (next map__20729)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__20729))
+                            (if (seq map__20729) (first map__20729) {}))
+                          map__20729)
+             limit (get map__20729 :limit)
+             threads (get map__20729 :threads)
+             idx (atom 0)
+             exec (java.util.concurrent.ThreadPoolExecutor.
+                    (int threads)
+                    (int threads)
+                    0
+                    TimeUnit/MILLISECONDS
+                    (java.util.concurrent.LinkedBlockingQueue.)
+                    (reify
+                      java.util.concurrent.ThreadFactory
+                      (^java.lang.Thread newThread
+                        [this ^java.lang.Runnable runnable]
+                        (let [G__20731 (java.lang.Thread.
+                                         ^java.lang.Runnable runnable
+                                         (str (gensym "valcache-direct-") (swap! idx inc)))]
+                          (.setDaemon ^java.lang.Thread G__20731 (boolean (.booleanValue true)))
+                          G__20731))))
+             puts (java.util.concurrent.ConcurrentHashMap.)]
+         (datomic.valcache.puts_pool_impl.ValcachePutsPoolImpl. limit puts exec)))
+     ([]
+       (create-valcache-puts-pool
+         {:limit 1000, :threads (config/property "datomic.valcachePutsPool")}))))
+  (reset-meta!
+    #'create-valcache-puts-pool
+    (assoc
+      {:arglists (clojure.core/list [] [{:keys ['limit 'threads]}]), :column (int 1)}
+      :name
+      'create-valcache-puts-pool
+      :ns
+      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.valcache.puts-pool-impl" "valcache-puts-pool")
+    {:column (int 1)})
+  (let [v__6812__auto__ #'valcache-puts-pool]
+    (when-not (.hasRoot ^clojure.lang.Var v__6812__auto__)
+      (.setMeta
+        (clojure.lang.RT/var "datomic.valcache.puts-pool-impl" "valcache-puts-pool")
+        {:column (int 1)})
+      (.bindRoot
+        (clojure.lang.RT/var "datomic.valcache.puts-pool-impl" "valcache-puts-pool")
+        (delay (create-valcache-puts-pool)))
+      #'valcache-puts-pool)))

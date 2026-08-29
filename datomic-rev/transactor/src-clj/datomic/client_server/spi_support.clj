@@ -38,124 +38,150 @@
   (def client-spi-config
    #:client-spi{:default-query-timeout 10000,
                 :query-grammar-docs "http://docs.datomic.com/query.html#grammar"})
-  (defn needed-t
-    ([p__24169]
-      (let [map__24170 p__24169
-            map__24170 (if (seq? map__24170)
-                         (if (next map__24170)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__24170))
-                           (if (seq map__24170) (first map__24170) {}))
-                         map__24170)
-            t (get map__24170 :t)
-            as_of_t (get map__24170 :as-of-t)
-            since_t (get map__24170 :since-t)]
-        (apply max (remove nil? [t as_of_t since_t])))))
+  (reset-meta! #'client-spi-config (assoc {:column (int 1)} :name 'client-spi-config :ns *ns*))
+  (def needed-t
+   (fn needed_t
+     ([p__24169]
+       (let [map__24170 p__24169
+             map__24170 (if (seq? map__24170)
+                          (if (next map__24170)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__24170))
+                            (if (seq map__24170) (first map__24170) {}))
+                          map__24170)
+             t (get map__24170 :t)
+             as_of_t (get map__24170 :as-of-t)
+             since_t (get map__24170 :since-t)]
+         (apply max (remove nil? [t as_of_t since_t]))))))
   (reset-meta!
     #'needed-t
     (assoc
-      {:private true, :arglists (clojure.core/list [{:keys ['t 'as-of-t 'since-t]}]), :column 1}
+      {:private true,
+       :arglists (clojure.core/list [{:keys ['t 'as-of-t 'since-t]}]),
+       :column (int 1)}
       :name
       'needed-t
       :ns
       *ns*))
-  (defn effective-as-of-t
-    ([p__24172]
-      (let [map__24173 p__24172
-            map__24173 (if (seq? map__24173)
-                         (if (next map__24173)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__24173))
-                           (if (seq map__24173) (first map__24173) {}))
-                         map__24173)
-            t (get map__24173 :t)
-            as_of_t (get map__24173 :as-of-t)]
-        (apply min (remove nil? [t as_of_t])))))
+  (def effective-as-of-t
+   (fn effective_as_of_t
+     ([p__24172]
+       (let [map__24173 p__24172
+             map__24173 (if (seq? map__24173)
+                          (if (next map__24173)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__24173))
+                            (if (seq map__24173) (first map__24173) {}))
+                          map__24173)
+             t (get map__24173 :t)
+             as_of_t (get map__24173 :as-of-t)]
+         (apply min (remove nil? [t as_of_t]))))))
   (reset-meta!
     #'effective-as-of-t
     (assoc
-      {:private true, :arglists (clojure.core/list [{:keys ['t 'as-of-t]}]), :column 1}
+      {:private true, :arglists (clojure.core/list [{:keys ['t 'as-of-t]}]), :column (int 1)}
       :name
       'effective-as-of-t
       :ns
       *ns*))
-  (defn desc->db
-    ([p__24175 db_id db_id_>db]
-      (let [map__24176 p__24175
-            map__24176 (if (seq? map__24176)
-                         (if (next map__24176)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__24176))
-                           (if (seq map__24176) (first map__24176) {}))
-                         map__24176)
-            desc map__24176
-            t (get map__24176 :t)
-            as_of (get map__24176 :as-of)
-            since (get map__24176 :since)
-            history (get map__24176 :history)
-            with_id (get map__24176 :with-id)
-            temp__5802__auto__ (if with_id
-                                 ((common/requiring-resolve!
-                                    'datomic.client-spi.with-cache/cache-get)
-                                   with_id)
-                                 (^clojure.lang.IFn db_id_>db db_id))]
-        (if temp__5802__auto__
-          (let [db temp__5802__auto__
-                basis (.basisT ^datomic.Database db)
-                t (or t (long basis))
-                tmap {:t t,
-                      :as-of-t
-                      (let [G__24177 as_of] (when-not (nil? G__24177) (db/as-of-t db G__24177))),
-                      :since-t
-                      (let [G__24178 since] (when-not (nil? G__24178) (db/as-of-t db G__24178)))}
-                needed_t (needed-t tmap)
-                eff_as_of_t (effective-as-of-t tmap)]
-            (if (< basis needed_t)
-              (error/raise
-                :cluster.error/db-not-ready
-                "DB not ready"
-                {:cognitect.anomalies/category :cognitect.anomalies/busy,
-                 :needed-t needed_t,
-                 :basis (long basis)})
-              (cond->
-                db
-                (< eff_as_of_t basis)
-                (.asOf eff_as_of_t)
-                since
-                (.since since)
-                history
-                (.history))))
-          (error/raise
-            :cluster.error/db-not-available
-            "DB not found"
-            {:cognitect.anomalies/category :cognitect.anomalies/not-found,
-             :database-id (:database-id desc)})))))
+  (def desc->db
+   (fn desc__GT_db
+     ([p__24175 db_id db_id_>db]
+       (let [map__24176 p__24175
+             map__24176 (if (seq? map__24176)
+                          (if (next map__24176)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__24176))
+                            (if (seq map__24176) (first map__24176) {}))
+                          map__24176)
+             desc map__24176
+             t (get map__24176 :t)
+             as_of (get map__24176 :as-of)
+             since (get map__24176 :since)
+             history (get map__24176 :history)
+             with_id (get map__24176 :with-id)
+             temp__5802__auto__ (if with_id
+                                  ((common/requiring-resolve!
+                                     'datomic.client-spi.with-cache/cache-get)
+                                    with_id)
+                                  (^clojure.lang.IFn db_id_>db db_id))]
+         (if temp__5802__auto__
+           (let [db temp__5802__auto__
+                 basis (.basisT ^datomic.Database db)
+                 t (or t (long basis))
+                 tmap {:t t,
+                       :as-of-t
+                       (let [G__24177 as_of] (when-not (nil? G__24177) (db/as-of-t db G__24177))),
+                       :since-t
+                       (let [G__24178 since] (when-not (nil? G__24178) (db/as-of-t db G__24178)))}
+                 needed_t (needed-t tmap)
+                 eff_as_of_t (effective-as-of-t tmap)]
+             (if (< basis needed_t)
+               (error/raise
+                 :cluster.error/db-not-ready
+                 "DB not ready"
+                 {:cognitect.anomalies/category :cognitect.anomalies/busy,
+                  :needed-t needed_t,
+                  :basis (long basis)})
+               (cond->
+                 db
+                 (< eff_as_of_t basis)
+                 (.asOf eff_as_of_t)
+                 since
+                 (.since since)
+                 history
+                 (.history))))
+           (error/raise
+             :cluster.error/db-not-available
+             "DB not found"
+             {:cognitect.anomalies/category :cognitect.anomalies/not-found,
+              :database-id (:database-id desc)}))))))
+  (reset-meta!
+    #'desc->db
+    (assoc
+      {:arglists
+       (clojure.core/list
+         [{:keys ['t 'as-of 'since 'history 'with-id], :as 'desc} 'db-id 'db-id->db]),
+       :column (int 1)}
+      :name
+      'desc->db
+      :ns
+      *ns*))
   (defn remove-nil-vals
     ([m] (into {} (remove (fn fn__24184 ([p1__24183#] (nil? (second p1__24183#))))) m)))
   (reset-meta!
     #'remove-nil-vals
     (assoc
-      {:private true, :arglists (clojure.core/list ['m]), :column 1}
+      {:private true, :arglists (clojure.core/list ['m]), :column (int 1)}
       :name
       'remove-nil-vals
       :ns
       *ns*))
-  (defn db->desc
-    ([db]
-      (remove-nil-vals
-        {:database-id (.id ^datomic.Database db),
-         :t (long (.basisT ^datomic.Database db)),
-         :next-t (long (.nextT ^datomic.Database db)),
-         :as-of (.asOfT ^datomic.Database db),
-         :since (.sinceT ^datomic.Database db),
-         :history (.isHistory ^datomic.Database db)})))
-  (defn get-db ([conn] (.db ^datomic.Connection conn)))
+  (def db->desc
+   (fn db__GT_desc
+     ([db]
+       (remove-nil-vals
+         {:database-id (.id ^datomic.Database db),
+          :t (long (.basisT ^datomic.Database db)),
+          :next-t (long (.nextT ^datomic.Database db)),
+          :as-of (.asOfT ^datomic.Database db),
+          :since (.sinceT ^datomic.Database db),
+          :history (.isHistory ^datomic.Database db)}))))
+  (reset-meta!
+    #'db->desc
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]), :column (int 1)}
+      :name
+      'db->desc
+      :ns
+      *ns*))
+  (def get-db (fn get_db ([conn] (.db ^datomic.Connection conn))))
   (reset-meta!
     #'get-db
     (assoc
       {:private true,
        :arglists (clojure.core/list [(.withMeta 'conn {:tag 'Connection})]),
-       :column 1}
+       :column (int 1)}
       :name
       'get-db
       :ns
@@ -246,10 +272,28 @@
                                         :message "Loading database"})))
             nil)))))
   (clojure.core/import 'datomic.client_server.spi_support.ClientServer)
-  (defn ->ClientServer
-    ([id_>conn token_manager load_ch]
-      (datomic.client_server.spi_support.ClientServer. id_>conn token_manager load_ch)))
-  (defn create-spi
-    ([id_>conn token_manager & p__24209]
-      (let [vec__24210 p__24209 load_ch (nth vec__24210 (int 0) nil)]
-        (->ClientServer id_>conn token_manager load_ch)))))
+  (def ->ClientServer
+   (fn __GT_ClientServer
+     ([id_>conn token_manager load_ch]
+       (datomic.client_server.spi_support.ClientServer. id_>conn token_manager load_ch))))
+  (reset-meta!
+    #'->ClientServer
+    (assoc
+      {:arglists (clojure.core/list ['id->conn 'token-manager 'load-ch]), :column (int 1)}
+      :name
+      '->ClientServer
+      :ns
+      *ns*))
+  (def create-spi
+   (fn create_spi
+     ([id_>conn token_manager & p__24209]
+       (let [vec__24210 p__24209 load_ch (nth vec__24210 (int 0) nil)]
+         (->ClientServer id_>conn token_manager load_ch)))))
+  (reset-meta!
+    #'create-spi
+    (assoc
+      {:arglists (clojure.core/list ['id->conn 'token-manager '& ['load-ch]]), :column (int 1)}
+      :name
+      'create-spi
+      :ns
+      *ns*)))

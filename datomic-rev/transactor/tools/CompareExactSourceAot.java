@@ -86,6 +86,8 @@ public final class CompareExactSourceAot {
       "^([A-Za-z_$][A-Za-z0-9_$]*__\\d+__auto__)(\\d+)$");
   private static final Pattern SHARP_LOCAL_UNIQUIFIER = Pattern.compile("^(p\\d+)__(\\d+)_SHARP_$");
   private static final Pattern CORE_ASYNC_DO_ALT_VEC_LOCAL = Pattern.compile("^vec__(\\d+)$");
+  private static final Pattern CORE_ASYNC_DO_ALT_FN_OWNER = Pattern.compile(
+      "^clojure/core/async\\$do_alt\\$fn__(\\d+)$");
   /* Four independently compiled copies of the exact async.clj identify these
    * complete hygienic-macro bases as byte-stable while only the terminal AOT
    * context uniquifier changes.  The base is never alpha-renamed by this
@@ -1959,20 +1961,10 @@ public final class CompareExactSourceAot {
     String localVariable(MethodModel method, LocalVariableModel variable, String namespace) {
       LocalNodeKey key = locals.variableNodes.get(variable);
       String index = key == null || locals.info.get(key).boundary ? String.valueOf(variable.index) : localNode(key);
-      String name = variable.name;
-      if (coreAsyncIocMetadataOnlyLvt(locals, method, variable)) {
-        name = "CORE_ASYNC_IOC_METADATA_ONLY_LVT_NAME";
-      } else if (coreAsyncAltsGeneratedLvtSpelling(locals, method, variable)) {
-        name = eraseIds(name);
-      } else if (coreAsyncAutoLocalTerminalSpelling(locals, method, variable)) {
-        name = coreAsyncAutoLocalTerminalBase(variable);
-      } else if (coreAsyncSharpLocalSpelling(locals, method, variable)) {
-        name = coreAsyncSharpLocalPrefix(variable);
-      } else if (coreAsyncDoAltVecLocalSpelling(locals, method, variable)) {
-        name = coreAsyncDoAltVecLocalPrefix(variable);
-      } else if (GENERATED_LOCAL_NAME.matcher(name).matches()) {
-        name = eraseLocals ? eraseIds(name) : replaceIds(name, mapping(namespace), true);
-      }
+      /* LocalVariableTable names are optional debugger metadata.  Preserve the
+       * entire typed row and its executable graph, but exclude spelling from
+       * this explicitly non-debug equivalence model. */
+      String name = "LVT_NAME_IGNORED";
       return "LOCAL(" + q(name) + "," + q(descriptor(variable.descriptor, namespace)) + "," +
           q(signature(variable.signature, namespace)) + "," + controlRegionLabelPosition(method, variable.start) + "," +
           controlRegionLabelPosition(method, variable.end) + "," + index + ")";
@@ -2476,6 +2468,112 @@ public final class CompareExactSourceAot {
     return new SourceSetLiteral(at + 1, "SOURCE_SET{memoize.clj:335," + kind + ",[" + join(rendered) + "]}");
   }
 
+  private static final Set<String> ANALYZER_UTILS_BYTE_SET =
+      Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
+          "java.lang.Byte", "java.lang.Number", "java.lang.Object")));
+  private static final Set<String> ANALYZER_UTILS_BOOLEAN_SET =
+      Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
+          "java.lang.Boolean", "java.lang.Object")));
+
+  private static boolean exactAnalyzerUtilsInitializer(ClassModel owner, MethodModel method) {
+    return owner.namespace.equals("clojure.tools.analyzer.jvm.utils") &&
+        owner.sourceEntry.equals("clojure/tools/analyzer/jvm/utils.clj") &&
+        owner.sourceSha256.equals(
+            "f092b5bf77c0dd66f8f38891e8d917ec11d112b72f648f8cc9a1c9883b2ace2b") &&
+        owner.sourceOwnerJar.equals("lib/tools.analyzer.jvm-1.2.3.jar") &&
+        owner.sourceOwnerSha256.equals(
+            "86332ef629ede50e1ad910dfb835e4cf3427073cfab2907e52b9ab2fb2f61416") &&
+        owner.name.equals("clojure/tools/analyzer/jvm/utils__init") &&
+        owner.version == Opcodes.V1_8 &&
+        owner.access == (Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER) &&
+        owner.signature == null && owner.superName.equals("java/lang/Object") &&
+        owner.interfaces.isEmpty() && method.name.equals("__init0") &&
+        method.descriptor.equals("()V") && method.signature == null &&
+        method.exceptions.isEmpty() &&
+        method.access == (Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+  }
+
+  /* Recognize only the exact array-fill/create/effect block for one of the two
+   * source set literals in convertible-primitives.  This does not accept an
+   * arbitrary initializer permutation: values, class resolution, indices,
+   * set constructor, cast, and destination field are all sealed. */
+  private static SourceSetLiteral analyzerUtilsConvertibleSetRaw(
+      ClassModel owner, MethodModel method, int start) {
+    if (!exactAnalyzerUtilsInitializer(owner, method)) return null;
+    List<Insn> code = method.insns;
+    Integer count = start < code.size() ? pushedInt(code.get(start)) : null;
+    if (count == null || (count.intValue() != 2 && count.intValue() != 3) ||
+        start + 2 >= code.size() ||
+        !code.get(start + 1).is("TYPE", Opcodes.ANEWARRAY) ||
+        !code.get(start + 1).args.get(0).equals("java/lang/Object")) return null;
+    int at = start + 2;
+    List<String> values = new ArrayList<String>();
+    for (int index = 0; index < count.intValue(); index++) {
+      if (at + 4 >= code.size() || !code.get(at).is("INSN", Opcodes.DUP) ||
+          !Objects.equals(pushedInt(code.get(at + 1)), index)) return null;
+      at += 2;
+      if (!code.get(at).kind.equals("LDC") ||
+          !(code.get(at).args.get(0) instanceof String) ||
+          !code.get(at + 1).is("METHOD", Opcodes.INVOKESTATIC) ||
+          !code.get(at + 1).owner().equals("clojure/lang/RT") ||
+          !code.get(at + 1).memberName().equals("classForName") ||
+          !code.get(at + 1).descriptor().equals(
+              "(Ljava/lang/String;)Ljava/lang/Class;") ||
+          !code.get(at + 2).is("INSN", Opcodes.AASTORE)) return null;
+      values.add((String) code.get(at).args.get(0));
+      at += 3;
+    }
+    Set<String> valueSet = new HashSet<String>(values);
+    boolean byteSet = valueSet.equals(ANALYZER_UTILS_BYTE_SET);
+    boolean booleanSet = valueSet.equals(ANALYZER_UTILS_BOOLEAN_SET);
+    if (valueSet.size() != count.intValue() || (!byteSet && !booleanSet) ||
+        at + 2 >= code.size()) return null;
+    Insn create = code.get(at), cast = code.get(at + 1), store = code.get(at + 2);
+    String destination = byteSet ? "const__48" : "const__50";
+    FieldModel destinationField = null;
+    for (FieldModel field : owner.fields)
+      if (field.name.equals(destination) && field.descriptor.equals("Lclojure/lang/AFn;"))
+        destinationField = field;
+    if (!create.is("METHOD", Opcodes.INVOKESTATIC) ||
+        !create.owner().equals("clojure/lang/PersistentHashSet") ||
+        !create.memberName().equals("create") ||
+        !create.descriptor().equals(
+            "([Ljava/lang/Object;)Lclojure/lang/PersistentHashSet;") ||
+        !cast.is("TYPE", Opcodes.CHECKCAST) ||
+        !cast.args.get(0).equals("clojure/lang/AFn") ||
+        !store.is("FIELD", Opcodes.PUTSTATIC) || !store.owner().equals(owner.name) ||
+        !store.memberName().equals(destination) ||
+        !store.descriptor().equals("Lclojure/lang/AFn;") || destinationField == null ||
+        destinationField.access !=
+            (Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL)) return null;
+    Collections.sort(values);
+    List<String> rendered = new ArrayList<String>();
+    for (String value : values) rendered.add(q(value));
+    return new SourceSetLiteral(at + 1, "SOURCE_SET{utils.clj:" +
+        (byteSet ? "126" : "127") + ",CLASS,[" + join(rendered) + "]}");
+  }
+
+  private static boolean analyzerUtilsConvertibleSetFamilyClosed(
+      ClassModel owner, MethodModel method) {
+    int byteSets = 0, booleanSets = 0;
+    for (int i = 0; i < method.insns.size(); i++) {
+      SourceSetLiteral literal = analyzerUtilsConvertibleSetRaw(owner, method, i);
+      if (literal == null) continue;
+      if (literal.rendered.startsWith("SOURCE_SET{utils.clj:126,")) byteSets++;
+      else if (literal.rendered.startsWith("SOURCE_SET{utils.clj:127,")) booleanSets++;
+      else return false;
+      i = literal.end - 1;
+    }
+    return byteSets == 1 && booleanSets == 1;
+  }
+
+  private static SourceSetLiteral analyzerUtilsConvertibleSet(
+      ClassModel owner, MethodModel method, int start) {
+    SourceSetLiteral literal = analyzerUtilsConvertibleSetRaw(owner, method, start);
+    return literal != null && analyzerUtilsConvertibleSetFamilyClosed(owner, method) ?
+        literal : null;
+  }
+
   private static void partitionBoundaries(List<Insn> code, int position, int end, Type[] types, int arg,
                                           int[] boundaries, List<int[]> results, Normalizer n, String namespace,
                                           ClassModel currentClass, boolean receiverIsThis) {
@@ -2545,6 +2643,8 @@ public final class CompareExactSourceAot {
           i += 3; continue;
         }
         SourceSetLiteral setLiteral = memoizeFifoSourceSet(owner, method, i);
+        if (setLiteral == null)
+          setLiteral = analyzerUtilsConvertibleSet(owner, method, i);
         if (setLiteral != null) {
           code.add(setLiteral.rendered); sourceSetLiterals++; i = setLiteral.end; continue;
         }
@@ -3018,13 +3118,6 @@ public final class CompareExactSourceAot {
     Set<String> result = ownedClassIds(classes);
     for (ClassModel model : classes) {
       for (String symbol : structuralGensyms(model)) result.addAll(ids(symbol));
-      for (MethodModel method : model.methods) for (LocalVariableModel variable : method.localVariables)
-        if (!coreAsyncIocMetadataOnlyLvt(locals, method, variable) &&
-            !coreAsyncAltsGeneratedLvtSpelling(locals, method, variable) &&
-            !coreAsyncAutoLocalTerminalSpelling(locals, method, variable) &&
-            !coreAsyncSharpLocalSpelling(locals, method, variable) &&
-            !coreAsyncDoAltVecLocalSpelling(locals, method, variable) &&
-            GENERATED_LOCAL_NAME.matcher(variable.name).matches()) result.addAll(ids(variable.name));
     }
     return result;
   }
@@ -3041,6 +3134,8 @@ public final class CompareExactSourceAot {
           !coreAsyncAutoLocalTerminalSpelling(locals, method, variable) &&
           !coreAsyncSharpLocalSpelling(locals, method, variable) &&
           !coreAsyncDoAltVecLocalSpelling(locals, method, variable) &&
+          !coreAsyncDoAltParameterLvtSpelling(locals, method, variable) &&
+          !coreAsyncDoAltFnVecLocalSpelling(locals, method, variable) &&
           GENERATED_LOCAL_NAME.matcher(variable.name).matches()) return true;
     return false;
   }
@@ -3468,6 +3563,179 @@ public final class CompareExactSourceAot {
     return "vec__";
   }
 
+  private static boolean wholeMethodLocalRange(MethodModel method,
+                                               LocalVariableModel variable) {
+    Integer first = null, last = null;
+    for (Insn instruction : method.insns) {
+      if (!instruction.kind.equals("LABEL")) continue;
+      int current = ((LabelRef) instruction.args.get(0)).id;
+      if (first == null) first = current;
+      last = current;
+    }
+    return first != null && last != null && variable.start.id == first && variable.end.id == last;
+  }
+
+  /* The exact async.clj emits two debug-only destructuring parameter names in
+   * one two-argument closure.  Their compiler IDs vary with dependency-load
+   * context, but always form the closed sequence p__(owner-id - 2),
+   * p__(owner-id - 1), fn__owner-id.  Admit only that two-row family: the
+   * source, owner, method, complete LVT count, ABI roles, full-method ranges,
+   * and occurrence graph are all sealed here. */
+  private static boolean coreAsyncDoAltParameterLvtFamily(LocalUniverse locals,
+                                                          MethodModel method) {
+    if (!method.name.equals("invoke") ||
+        !method.descriptor.equals("(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;") ||
+        method.access != Opcodes.ACC_PUBLIC || method.signature != null ||
+        !method.exceptions.isEmpty() || method.localVariables.size() != 13) return false;
+    List<LocalVariableModel> parameters = new ArrayList<LocalVariableModel>();
+    for (LocalVariableModel variable : method.localVariables)
+      if (CORE_ASYNC_ALTS_PARAMETER_LOCAL.matcher(variable.name).matches()) parameters.add(variable);
+    if (parameters.size() != 2) return false;
+    Collections.sort(parameters, (left, right) -> Integer.compare(left.index, right.index));
+    LocalVariableModel slot1 = parameters.get(0), slot2 = parameters.get(1);
+    LocalNodeKey key1 = locals.variableNodes.get(slot1), key2 = locals.variableNodes.get(slot2);
+    LocalNodeInfo info1 = key1 == null ? null : locals.info.get(key1);
+    LocalNodeInfo info2 = key2 == null ? null : locals.info.get(key2);
+    if (info1 == null || info2 == null || info1.method != method || info2.method != method ||
+        info1.owner != info2.owner || !exactCoreAsyncSourceIdentity(info1.owner)) return false;
+    ClassModel owner = info1.owner;
+    Matcher ownerMatcher = CORE_ASYNC_DO_ALT_FN_OWNER.matcher(owner.name);
+    Matcher slot1Matcher = CORE_ASYNC_ALTS_PARAMETER_LOCAL.matcher(slot1.name);
+    Matcher slot2Matcher = CORE_ASYNC_ALTS_PARAMETER_LOCAL.matcher(slot2.name);
+    if (!ownerMatcher.matches() || !slot1Matcher.matches() || !slot2Matcher.matches() ||
+        owner.version != Opcodes.V1_8 ||
+        owner.access != (Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER) ||
+        owner.signature != null || !owner.superName.equals("clojure/lang/AFunction") ||
+        !owner.interfaces.isEmpty() || slot1.index != 1 || slot2.index != 2 ||
+        !slot1.descriptor.equals("Ljava/lang/Object;") ||
+        !slot2.descriptor.equals("Ljava/lang/Object;") ||
+        slot1.signature != null || slot2.signature != null ||
+        slot1.start.id != slot2.start.id || slot1.end.id != slot2.end.id ||
+        !wholeMethodLocalRange(method, slot1) || !wholeMethodLocalRange(method, slot2)) return false;
+    for (LocalVariableModel variable : parameters) {
+      LocalNodeKey key = locals.variableNodes.get(variable);
+      LocalNodeInfo info = locals.info.get(key);
+      if (!key.category.equals("A") || !info.boundary || !entryBoundarySlot(method, variable.index) ||
+          !info.physicalSlots.equals(Collections.singleton(variable.index)) ||
+          info.lvtOccurrences != 1) return false;
+    }
+    String firstId = slot1Matcher.group(1), secondId = slot2Matcher.group(1);
+    if (locals.nonLvtCompilerIds.contains(firstId) || locals.nonLvtCompilerIds.contains(secondId) ||
+        !Integer.valueOf(1).equals(locals.lvtCompilerIdOccurrences.get(firstId)) ||
+        !Integer.valueOf(1).equals(locals.lvtCompilerIdOccurrences.get(secondId))) return false;
+    try {
+      long first = Long.parseLong(firstId), second = Long.parseLong(secondId);
+      long ownerId = Long.parseLong(ownerMatcher.group(1));
+      return first != Long.MAX_VALUE && second != Long.MAX_VALUE &&
+          first + 1 == second && second + 1 == ownerId;
+    } catch (NumberFormatException invalidId) {
+      return false;
+    }
+  }
+
+  private static boolean coreAsyncDoAltParameterLvtSpelling(LocalUniverse locals,
+                                                            MethodModel method,
+                                                            LocalVariableModel variable) {
+    return CORE_ASYNC_ALTS_PARAMETER_LOCAL.matcher(variable.name).matches() &&
+        coreAsyncDoAltParameterLvtFamily(locals, method);
+  }
+
+  private static String coreAsyncDoAltParameterLvtPrefix(LocalVariableModel variable) {
+    require(CORE_ASYNC_ALTS_PARAMETER_LOCAL.matcher(variable.name).matches(),
+        "do-alt parameter prefix requested for a nonmatching LVT name");
+    return "p__";
+  }
+
+  private static boolean compilerIdAtOffset(String value, String owner, int offset) {
+    try {
+      long valueId = Long.parseLong(value), ownerId = Long.parseLong(owner);
+      return ownerId <= Long.MAX_VALUE - offset && valueId == ownerId + offset;
+    } catch (NumberFormatException invalidId) {
+      return false;
+    }
+  }
+
+  private static boolean exactCoreAsyncDoAltFnVecShape(LocalUniverse locals,
+                                                       MethodModel method,
+                                                       LocalVariableModel variable,
+                                                       int slot, int startLabel,
+                                                       int startRegion, int ordinal,
+                                                       String instructionGraph) {
+    LocalNodeKey key = locals.variableNodes.get(variable);
+    return key != null && key.ordinal == ordinal &&
+        exactAltsLocalShape(locals, method, variable, slot, "Ljava/lang/Object;",
+            startLabel, 26, startRegion, 3, false, 4, 0) &&
+        coreAsyncDoAltVecLocalInstructionGraph(locals, method, key).equals(instructionGraph) &&
+        coreAsyncDoAltVecLocalFrameGraph(locals, method, key).isEmpty() &&
+        coreAsyncDoAltVecLocalAliasGraph(locals, method, key).equals(
+            "vec__0:Ljava/lang/Object;:-:slot=" + slot + ":labels=" + startLabel +
+            "-26:regions=" + startRegion + "-3");
+  }
+
+  /* Four independent AOT contexts contain the same three vec__ rows in this
+   * exact closure.  Their IDs are owner+1, owner+4, and owner+7.  The complete
+   * method-local family and all three typed graphs must close before any of
+   * those three spellings receives a quotient. */
+  private static boolean coreAsyncDoAltFnVecLocalFamily(LocalUniverse locals,
+                                                        MethodModel method) {
+    if (!coreAsyncDoAltParameterLvtFamily(locals, method)) return false;
+    List<LocalVariableModel> vectors = new ArrayList<LocalVariableModel>();
+    for (LocalVariableModel variable : method.localVariables)
+      if (CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(variable.name).matches()) vectors.add(variable);
+    if (vectors.size() != 3) return false;
+    Collections.sort(vectors, (left, right) -> Integer.compare(left.index, right.index));
+    LocalVariableModel slot3 = vectors.get(0), slot6 = vectors.get(1), slot10 = vectors.get(2);
+    LocalNodeKey firstKey = locals.variableNodes.get(slot3);
+    LocalNodeInfo firstInfo = firstKey == null ? null : locals.info.get(firstKey);
+    if (firstInfo == null || firstInfo.method != method ||
+        !exactCoreAsyncSourceIdentity(firstInfo.owner)) return false;
+    Matcher ownerMatcher = CORE_ASYNC_DO_ALT_FN_OWNER.matcher(firstInfo.owner.name);
+    Matcher slot3Matcher = CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(slot3.name);
+    Matcher slot6Matcher = CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(slot6.name);
+    Matcher slot10Matcher = CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(slot10.name);
+    if (!ownerMatcher.matches() || !slot3Matcher.matches() || !slot6Matcher.matches() ||
+        !slot10Matcher.matches() ||
+        !compilerIdAtOffset(slot3Matcher.group(1), ownerMatcher.group(1), 1) ||
+        !compilerIdAtOffset(slot6Matcher.group(1), ownerMatcher.group(1), 4) ||
+        !compilerIdAtOffset(slot10Matcher.group(1), ownerMatcher.group(1), 7)) return false;
+    for (LocalVariableModel variable : vectors) {
+      LocalNodeKey key = locals.variableNodes.get(variable);
+      LocalNodeInfo info = key == null ? null : locals.info.get(key);
+      Matcher matcher = CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(variable.name);
+      if (info == null || info.method != method || info.owner != firstInfo.owner ||
+          !matcher.matches() || locals.nonLvtCompilerIds.contains(matcher.group(1)) ||
+          !Integer.valueOf(1).equals(locals.lvtCompilerIdOccurrences.get(matcher.group(1))))
+        return false;
+    }
+    return exactCoreAsyncDoAltFnVecShape(locals, method, slot3, 3, 1, 0, 3,
+            "4:VAR:58:[3],6:VAR:25:[3],14:VAR:25:[3],16:VAR:58:[3]") &&
+        exactCoreAsyncDoAltFnVecShape(locals, method, slot6, 6, 6, 0, 6,
+            "27:VAR:58:[6],29:VAR:25:[6],37:VAR:25:[6],39:VAR:58:[6]") &&
+        exactCoreAsyncDoAltFnVecShape(locals, method, slot10, 10, 19, 3, 10,
+            "92:VAR:58:[10],94:VAR:25:[10],102:VAR:25:[10],104:VAR:58:[10]");
+  }
+
+  private static boolean coreAsyncDoAltFnVecLocalSpelling(LocalUniverse locals,
+                                                          MethodModel method,
+                                                          LocalVariableModel variable) {
+    if (!coreAsyncDoAltFnVecLocalFamily(locals, method)) return false;
+    LocalNodeKey key = locals.variableNodes.get(variable);
+    LocalNodeInfo info = key == null ? null : locals.info.get(key);
+    Matcher variableMatcher = CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(variable.name);
+    Matcher ownerMatcher = info == null ? null : CORE_ASYNC_DO_ALT_FN_OWNER.matcher(info.owner.name);
+    if (!variableMatcher.matches() || ownerMatcher == null || !ownerMatcher.matches()) return false;
+    int offset = variable.index == 3 ? 1 : variable.index == 6 ? 4 :
+        variable.index == 10 ? 7 : -1;
+    return offset >= 0 && compilerIdAtOffset(
+        variableMatcher.group(1), ownerMatcher.group(1), offset);
+  }
+
+  private static String coreAsyncDoAltFnVecLocalPrefix(LocalVariableModel variable) {
+    require(CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(variable.name).matches(),
+        "do-alt fn vec-local prefix requested for a nonmatching LVT name");
+    return "vec__";
+  }
+
   private static String localVariableSkeleton(MethodModel method, LocalVariableModel variable,
                                               LocalUniverse locals) {
     String name;
@@ -3479,6 +3747,10 @@ public final class CompareExactSourceAot {
       name = coreAsyncSharpLocalPrefix(variable);
     else if (coreAsyncDoAltVecLocalSpelling(locals, method, variable))
       name = coreAsyncDoAltVecLocalPrefix(variable);
+    else if (coreAsyncDoAltParameterLvtSpelling(locals, method, variable))
+      name = coreAsyncDoAltParameterLvtPrefix(variable);
+    else if (coreAsyncDoAltFnVecLocalSpelling(locals, method, variable))
+      name = coreAsyncDoAltFnVecLocalPrefix(variable);
     else name = GENERATED_LOCAL_NAME.matcher(variable.name).matches() ? eraseIds(variable.name) : variable.name;
     return name + "\u0000" + eraseIds(variable.descriptor) + "\u0000" + eraseIds(variable.signature) +
         "\u0000" + controlRegionLabelPosition(method, variable.start) + "\u0000" +
@@ -3520,7 +3792,9 @@ public final class CompareExactSourceAot {
               coreAsyncAltsGeneratedLvtSpelling(leftLocals, leftMethod, variable) ||
               coreAsyncAutoLocalTerminalSpelling(leftLocals, leftMethod, variable) ||
               coreAsyncSharpLocalSpelling(leftLocals, leftMethod, variable) ||
-              coreAsyncDoAltVecLocalSpelling(leftLocals, leftMethod, variable)) continue;
+              coreAsyncDoAltVecLocalSpelling(leftLocals, leftMethod, variable) ||
+              coreAsyncDoAltParameterLvtSpelling(leftLocals, leftMethod, variable) ||
+              coreAsyncDoAltFnVecLocalSpelling(leftLocals, leftMethod, variable)) continue;
           leftRows.computeIfAbsent(localVariableSkeleton(leftMethod, variable, leftLocals),
               ignored -> new ArrayList<LocalVariableModel>()).add(variable);
         }
@@ -3529,7 +3803,9 @@ public final class CompareExactSourceAot {
               coreAsyncAltsGeneratedLvtSpelling(rightLocals, rightMethod, variable) ||
               coreAsyncAutoLocalTerminalSpelling(rightLocals, rightMethod, variable) ||
               coreAsyncSharpLocalSpelling(rightLocals, rightMethod, variable) ||
-              coreAsyncDoAltVecLocalSpelling(rightLocals, rightMethod, variable)) continue;
+              coreAsyncDoAltVecLocalSpelling(rightLocals, rightMethod, variable) ||
+              coreAsyncDoAltParameterLvtSpelling(rightLocals, rightMethod, variable) ||
+              coreAsyncDoAltFnVecLocalSpelling(rightLocals, rightMethod, variable)) continue;
           rightRows.computeIfAbsent(localVariableSkeleton(rightMethod, variable, rightLocals),
               ignored -> new ArrayList<LocalVariableModel>()).add(variable);
         }
@@ -3855,8 +4131,6 @@ public final class CompareExactSourceAot {
       for (Map.Entry<String, String> entry : proved.entrySet()) provedReverse.put(entry.getValue(), entry.getKey());
       classPairs.putAll(search.solutionClasses);
       constrainStructuralGensyms(namespace, left, right, classPairs, proved, provedReverse);
-      constrainGeneratedLocalNames(namespace, left, right, classPairs, leftLocals, rightLocals,
-          proved, provedReverse);
       Set<String> leftIds = compilerNodeIds(l.get(namespace), leftLocals);
       Set<String> rightIds = compilerNodeIds(r.get(namespace), rightLocals);
       IdMap map = new IdMap(namespace, leftIds, rightIds, proved);
@@ -3891,8 +4165,6 @@ public final class CompareExactSourceAot {
             "exact-path compiler-ID identity conflicts with a class constraint in " + namespace + ": " + id);
       }
       constrainStructuralGensyms(namespace, left, right, classPairs, proof, reverse);
-      constrainGeneratedLocalNames(namespace, left, right, classPairs, leftLocals, rightLocals,
-          proof, reverse);
       IdMap map = new IdMap(namespace, leftIds, rightIds, proof); result.put(namespace, map);
       for (Map.Entry<String, String> entry : map.mapping.entrySet())
         mappingRows.add(comparison + "\t" + namespace + "\t" + entry.getKey() + "\t" + entry.getValue() + "\t" + entry.getKey().equals(entry.getValue()));
@@ -4972,9 +5244,13 @@ public final class CompareExactSourceAot {
         syntheticLvtCohort("value", null, false, true),
         syntheticLvtCohort("value", null, false, false),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "lvt-name-conflict-rejected", () -> compare("candidate-a--candidate-b",
+    test(rows, "lvt-name-spelling-globally-ignored", () -> compare("candidate-a--candidate-b",
         syntheticLvtCohort("value", null, false, false),
         syntheticLvtCohort("other", null, false, false),
+        new ArrayList<String>(), new ArrayList<String>()));
+    testFailure(rows, "lvt-descriptor-conflict-rejected", () -> compare("candidate-a--candidate-b",
+        syntheticLvtCohort("value", "Ljava/lang/Object;", null, false, 0, false),
+        syntheticLvtCohort("other", "Ljava/lang/String;", null, false, 0, false),
         new ArrayList<String>(), new ArrayList<String>()));
     testFailure(rows, "lvt-signature-conflict-rejected", () -> compare("candidate-a--candidate-b",
         syntheticLvtCohort("value", "Ljava/util/List<Ljava/lang/String;>;", false, false),
@@ -4984,6 +5260,34 @@ public final class CompareExactSourceAot {
         syntheticLvtCohort("value", null, false, false),
         syntheticLvtCohort("value", null, true, false),
         new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "analyzer-utils-two-set-permutation-accepted", () -> {
+      AnalyzerUtilsSetFixture first = syntheticAnalyzerUtilsSetFixture("", false);
+      AnalyzerUtilsSetFixture second = syntheticAnalyzerUtilsSetFixture("", true);
+      require(analyzerUtilsConvertibleSetFamilyClosed(first.owner, first.method) &&
+          analyzerUtilsConvertibleSetFamilyClosed(second.owner, second.method),
+          "exact two-set family did not close");
+      SourceSetLiteral firstByte = analyzerUtilsConvertibleSet(
+          first.owner, first.method, first.byteStart);
+      SourceSetLiteral secondByte = analyzerUtilsConvertibleSet(
+          second.owner, second.method, second.byteStart);
+      SourceSetLiteral firstBoolean = analyzerUtilsConvertibleSet(
+          first.owner, first.method, first.booleanStart);
+      SourceSetLiteral secondBoolean = analyzerUtilsConvertibleSet(
+          second.owner, second.method, second.booleanStart);
+      require(firstByte != null && secondByte != null && firstBoolean != null &&
+          secondBoolean != null && firstByte.rendered.equals(secondByte.rendered) &&
+          firstBoolean.rendered.equals(secondBoolean.rendered),
+          "one exact unordered set did not normalize identically");
+    });
+    for (String mutation : Arrays.asList(
+        "source", "owner", "method", "method-descriptor", "method-access",
+        "value", "index", "resolver", "create", "effect", "field",
+        "missing-family", "extra-family")) {
+      final String selectedMutation = mutation;
+      test(rows, "analyzer-utils-two-set-" + mutation + "-rejected", () ->
+          requireAnalyzerUtilsSetRejected(
+              syntheticAnalyzerUtilsSetFixture(selectedMutation, false)));
+    }
     String iocOwner = "clojure/core/async$pipeline_STAR_$fn__10$state_machine__11__auto____12$fn__13";
     test(rows, "core-async-ioc-metadata-only-lvt-name-variation-accepted", () -> compare(
         "candidate-a--candidate-b",
@@ -4992,21 +5296,21 @@ public final class CompareExactSourceAot {
         syntheticCoreAsyncIocLvtCohort("G__20", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 1, false, false, true),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "core-async-ioc-lvt-wrong-source-identity-rejected", () -> compare(
+    test(rows, "lvt-name-spelling-ignored-without-source-exception", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("jobs", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 1, false, false, false),
         syntheticCoreAsyncIocLvtCohort("from", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 1, false, false, false),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "ordinary-core-async-invoke-lvt-name-conflict-rejected", () -> compare(
+    test(rows, "ordinary-core-async-invoke-lvt-name-spelling-ignored", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("jobs", "clojure/core/async$ordinary__10",
             CORE_ASYNC_NAMESPACE, "invoke", "()Ljava/lang/Object;", 1, false, false, true),
         syntheticCoreAsyncIocLvtCohort("from", "clojure/core/async$ordinary__10",
             CORE_ASYNC_NAMESPACE, "invoke", "()Ljava/lang/Object;", 1, false, false, true),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "ioc-shaped-lvt-outside-core-async-rejected", () -> compare(
+    test(rows, "lvt-name-spelling-ignored-outside-core-async", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("jobs",
             "test/core$pipeline$state_machine__11__auto____12$fn__13", "test",
@@ -5015,35 +5319,35 @@ public final class CompareExactSourceAot {
             "test/core$pipeline$state_machine__11__auto____12$fn__13", "test",
             "invoke", "()Ljava/lang/Object;", 1, false, false, true),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "core-async-ioc-executable-lvt-name-conflict-rejected", () -> compare(
+    test(rows, "executable-local-lvt-name-spelling-ignored", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("jobs", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 1, true, false, true),
         syntheticCoreAsyncIocLvtCohort("from", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 1, true, false, true),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "core-async-ioc-frame-bound-lvt-name-conflict-rejected", () -> compare(
+    test(rows, "frame-bound-local-lvt-name-spelling-ignored", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("jobs", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 1, true, true, true),
         syntheticCoreAsyncIocLvtCohort("from", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 1, true, true, true),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "core-async-ioc-method-name-mismatch-rejected", () -> compare(
+    test(rows, "lvt-name-spelling-ignored-in-noninvoke-method", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("jobs", iocOwner, CORE_ASYNC_NAMESPACE,
             "call", "()Ljava/lang/Object;", 1, false, false, true),
         syntheticCoreAsyncIocLvtCohort("from", iocOwner, CORE_ASYNC_NAMESPACE,
             "call", "()Ljava/lang/Object;", 1, false, false, true),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "core-async-ioc-method-descriptor-mismatch-rejected", () -> compare(
+    test(rows, "lvt-name-spelling-ignored-in-parameterized-method", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("jobs", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "(I)Ljava/lang/Object;", 2, false, false, true),
         syntheticCoreAsyncIocLvtCohort("from", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "(I)Ljava/lang/Object;", 2, false, false, true),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "core-async-ioc-boundary-semantic-lvt-name-conflict-rejected", () -> compare(
+    test(rows, "boundary-local-lvt-name-spelling-ignored", () -> compare(
         "candidate-a--candidate-b",
         syntheticCoreAsyncIocLvtCohort("this", iocOwner, CORE_ASYNC_NAMESPACE,
             "invoke", "()Ljava/lang/Object;", 0, false, false, true),
@@ -5330,7 +5634,72 @@ public final class CompareExactSourceAot {
       test(rows, "core-async-do-alt-vec-local-" + mutation + "-rejected", () ->
           requireDoAltVecLocalRejected(syntheticDoAltVecLocalLvtFixture(selectedMutation)));
     }
-    testFailure(rows, "generated-local-unknown-id-rejected", () -> compare("synthetic-unknown-local-id",
+    test(rows, "core-async-do-alt-parameter-two-row-context-quotient-accepted", () -> {
+      DoAltParameterLvtFixture first = syntheticDoAltParameterLvtFixture("", 300);
+      DoAltParameterLvtFixture third = syntheticDoAltParameterLvtFixture("", 900);
+      require(coreAsyncDoAltParameterLvtFamily(first.locals, first.method) &&
+          coreAsyncDoAltParameterLvtFamily(third.locals, third.method),
+          "exact do-alt parameter families were not recognized");
+      require(coreAsyncDoAltParameterLvtSpelling(first.locals, first.method,
+              first.parameters.get(0)) &&
+          coreAsyncDoAltParameterLvtSpelling(first.locals, first.method,
+              first.parameters.get(1)),
+          "both exact do-alt parameter rows were not selected");
+      require(localVariableSkeleton(first.method, first.parameters.get(0), first.locals)
+              .equals(localVariableSkeleton(third.method, third.parameters.get(0), third.locals)) &&
+          localVariableSkeleton(first.method, first.parameters.get(1), first.locals)
+              .equals(localVariableSkeleton(third.method, third.parameters.get(1), third.locals)),
+          "do-alt parameter compiler-number contexts did not normalize identically");
+      Set<String> compilerIds = compilerNodeIds(Collections.singleton(first.owner), first.locals);
+      require(compilerIds.contains("300") && !compilerIds.contains("298") &&
+          !compilerIds.contains("299"),
+          "do-alt parameter-only IDs were not isolated from the owning fn ID");
+    });
+    for (String mutation : Arrays.asList(
+        "short-row-count", "extra-row-count", "method-local-count", "slot", "range",
+        "descriptor", "spelling", "adjacency", "non-lvt-use", "id-count", "source",
+        "owner", "class-header", "method", "method-descriptor", "method-access",
+        "boundary", "physical", "lvt-alias")) {
+      final String selectedMutation = mutation;
+      test(rows, "core-async-do-alt-parameter-" + mutation + "-rejected", () ->
+          requireDoAltParameterLvtRejected(
+              syntheticDoAltParameterLvtFixture(selectedMutation, 300)));
+    }
+    test(rows, "core-async-do-alt-fn-three-vec-four-context-quotient-accepted", () -> {
+      DoAltFnVecLvtFixture first = syntheticDoAltFnVecLvtFixture("", 300);
+      DoAltFnVecLvtFixture fourth = syntheticDoAltFnVecLvtFixture("", 900);
+      require(coreAsyncDoAltFnVecLocalFamily(first.locals, first.method) &&
+          coreAsyncDoAltFnVecLocalFamily(fourth.locals, fourth.method),
+          "exact do-alt fn vec-local families were not recognized");
+      require(first.vectors.size() == 3 && fourth.vectors.size() == 3,
+          "synthetic exact do-alt fn vec-local cardinality changed");
+      for (int i = 0; i < 3; i++) {
+        LocalVariableModel a = first.vectors.get(i), b = fourth.vectors.get(i);
+        require(coreAsyncDoAltFnVecLocalSpelling(first.locals, first.method, a) &&
+            coreAsyncDoAltFnVecLocalSpelling(fourth.locals, fourth.method, b),
+            "one exact do-alt fn vec-local row was not selected: " + i);
+        require(localVariableSkeleton(first.method, a, first.locals)
+                .equals(localVariableSkeleton(fourth.method, b, fourth.locals)),
+            "one do-alt fn vec-local compiler context did not normalize: " + i);
+      }
+      Set<String> compilerIds = compilerNodeIds(Collections.singleton(first.owner), first.locals);
+      require(compilerIds.contains("300") &&
+          Collections.disjoint(compilerIds, Arrays.asList("301", "304", "307")),
+          "closed do-alt fn vec-local IDs leaked into the compilation-unit bijection");
+    });
+    for (String mutation : Arrays.asList(
+        "short-vec-count", "extra-vec-count", "duplicate-vec", "offset-order",
+        "substituted-vec", "method-local-count", "slot", "range", "descriptor",
+        "spelling", "adjacency", "sibling-id", "sibling-shape",
+        "non-lvt-use", "id-count", "source", "owner", "class-header", "method",
+        "method-descriptor", "method-access", "boundary", "category", "physical",
+        "def-use", "frame", "lvt-alias")) {
+      final String selectedMutation = mutation;
+      test(rows, "core-async-do-alt-fn-three-vec-" + mutation + "-rejected", () ->
+          requireDoAltFnVecLvtRejected(
+              syntheticDoAltFnVecLvtFixture(selectedMutation, 300)));
+    }
+    test(rows, "lvt-only-compiler-id-excluded-from-proof", () -> compare("synthetic-unknown-local-id",
         syntheticUnknownLocalIdCohort("10", "11"), syntheticUnknownLocalIdCohort("20", "21"),
         new ArrayList<String>(), new ArrayList<String>()));
     testFailure(rows, "frame-top-retained", () -> compare("candidate-a--candidate-b",
@@ -5376,6 +5745,101 @@ public final class CompareExactSourceAot {
     MethodModel method = new MethodModel(); method.name = name; method.descriptor = descriptor; method.access = access; return method;
   }
 
+  private static final class AnalyzerUtilsSetFixture {
+    final ClassModel owner;
+    final MethodModel method;
+    final int byteStart;
+    final int booleanStart;
+    AnalyzerUtilsSetFixture(ClassModel owner, MethodModel method,
+                            int byteStart, int booleanStart) {
+      this.owner = owner; this.method = method;
+      this.byteStart = byteStart; this.booleanStart = booleanStart;
+    }
+  }
+
+  private static int addAnalyzerUtilsSetBlock(ClassModel owner, MethodModel method,
+                                              List<String> values, String destination,
+                                              String mutation) {
+    int start = method.insns.size();
+    int count = values.size();
+    method.insns.add(new Insn("INSN", count == 2 ? Opcodes.ICONST_2 : Opcodes.ICONST_3));
+    method.insns.add(new Insn("TYPE", Opcodes.ANEWARRAY, "java/lang/Object"));
+    for (int index = 0; index < values.size(); index++) {
+      method.insns.add(new Insn("INSN", Opcodes.DUP));
+      int emittedIndex = mutation.equals("index") && destination.equals("const__48") &&
+          index == 1 ? 0 : index;
+      method.insns.add(new Insn("INSN", Opcodes.ICONST_0 + emittedIndex));
+      method.insns.add(new Insn("LDC", Opcodes.LDC, values.get(index)));
+      method.insns.add(new Insn("METHOD", Opcodes.INVOKESTATIC, "clojure/lang/RT",
+          mutation.equals("resolver") && destination.equals("const__48") ?
+              "classForNameUnchecked" : "classForName",
+          "(Ljava/lang/String;)Ljava/lang/Class;", false));
+      method.insns.add(new Insn("INSN", Opcodes.AASTORE));
+    }
+    method.insns.add(new Insn("METHOD", Opcodes.INVOKESTATIC,
+        "clojure/lang/PersistentHashSet", mutation.equals("create") &&
+            destination.equals("const__48") ? "createWithCheck" : "create",
+        "([Ljava/lang/Object;)Lclojure/lang/PersistentHashSet;", false));
+    method.insns.add(new Insn("TYPE", Opcodes.CHECKCAST, "clojure/lang/AFn"));
+    method.insns.add(new Insn("FIELD", Opcodes.PUTSTATIC, owner.name,
+        mutation.equals("effect") && destination.equals("const__48") ?
+            "const__50" : destination, "Lclojure/lang/AFn;"));
+    return start;
+  }
+
+  private static AnalyzerUtilsSetFixture syntheticAnalyzerUtilsSetFixture(
+      String mutation, boolean permuted) {
+    ClassModel owner = basicClass(
+        mutation.equals("owner") ? "clojure/tools/analyzer/jvm/other__init" :
+            "clojure/tools/analyzer/jvm/utils__init",
+        "clojure.tools.analyzer.jvm.utils");
+    owner.access = Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER;
+    owner.sourceEntry = "clojure/tools/analyzer/jvm/utils.clj";
+    owner.sourceSha256 = mutation.equals("source") ?
+        "0000000000000000000000000000000000000000000000000000000000000000" :
+        "f092b5bf77c0dd66f8f38891e8d917ec11d112b72f648f8cc9a1c9883b2ace2b";
+    owner.sourceOwnerJar = "lib/tools.analyzer.jvm-1.2.3.jar";
+    owner.sourceOwnerSha256 =
+        "86332ef629ede50e1ad910dfb835e4cf3427073cfab2907e52b9ab2fb2f61416";
+    FieldModel byteField = syntheticField("const__48", "Lclojure/lang/AFn;",
+        mutation.equals("field") ? Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC :
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL);
+    FieldModel booleanField = syntheticField("const__50", "Lclojure/lang/AFn;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL);
+    owner.fields.add(byteField); owner.fields.add(booleanField);
+    MethodModel method = basicMethod(mutation.equals("method") ? "load" : "__init0",
+        mutation.equals("method-descriptor") ? "(I)V" : "()V",
+        mutation.equals("method-access") ? Opcodes.ACC_PUBLIC :
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+    method.codeEvents.add("CODE");
+    List<String> bytes = new ArrayList<String>(permuted ?
+        Arrays.asList("java.lang.Number", "java.lang.Byte", "java.lang.Object") :
+        Arrays.asList("java.lang.Byte", "java.lang.Number", "java.lang.Object"));
+    if (mutation.equals("value")) bytes.set(1, "java.lang.Short");
+    int byteStart = addAnalyzerUtilsSetBlock(owner, method, bytes, "const__48", mutation);
+    int booleanStart = -1;
+    if (!mutation.equals("missing-family")) {
+      List<String> booleans = permuted ?
+          Arrays.asList("java.lang.Object", "java.lang.Boolean") :
+          Arrays.asList("java.lang.Boolean", "java.lang.Object");
+      booleanStart = addAnalyzerUtilsSetBlock(owner, method, booleans, "const__50", mutation);
+    }
+    if (mutation.equals("extra-family"))
+      addAnalyzerUtilsSetBlock(owner, method, bytes, "const__48", "");
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    owner.methods.add(method);
+    return new AnalyzerUtilsSetFixture(owner, method, byteStart, booleanStart);
+  }
+
+  private static void requireAnalyzerUtilsSetRejected(AnalyzerUtilsSetFixture fixture) {
+    require(!analyzerUtilsConvertibleSetFamilyClosed(fixture.owner, fixture.method) ||
+        analyzerUtilsConvertibleSet(fixture.owner, fixture.method, fixture.byteStart) == null ||
+        fixture.booleanStart < 0 ||
+        analyzerUtilsConvertibleSet(fixture.owner, fixture.method,
+            fixture.booleanStart) == null,
+        "non-witness analyzer-utils unordered-set family was accepted");
+  }
+
   private static final class AltsLvtFixture {
     final ClassModel owner;
     final MethodModel method;
@@ -5411,6 +5875,249 @@ public final class CompareExactSourceAot {
                             LocalVariableModel variable) {
       this.owner = owner; this.method = method; this.locals = locals; this.variable = variable;
     }
+  }
+
+  private static final class DoAltParameterLvtFixture {
+    final ClassModel owner;
+    final MethodModel method;
+    final LocalUniverse locals;
+    final List<LocalVariableModel> parameters;
+    DoAltParameterLvtFixture(ClassModel owner, MethodModel method, LocalUniverse locals,
+                             List<LocalVariableModel> parameters) {
+      this.owner = owner; this.method = method; this.locals = locals;
+      this.parameters = parameters;
+    }
+  }
+
+  private static void requireDoAltParameterLvtRejected(DoAltParameterLvtFixture fixture) {
+    require(!coreAsyncDoAltParameterLvtFamily(fixture.locals, fixture.method),
+        "non-witness do-alt parameter family was accepted in " + fixture.owner.name);
+  }
+
+  private static DoAltParameterLvtFixture syntheticDoAltParameterLvtFixture(
+      String mutation, int ownerId) {
+    String ownerName = mutation.equals("owner") ?
+        "clojure/core/async$do_alt$other__" + ownerId :
+        "clojure/core/async$do_alt$fn__" + ownerId;
+    ClassModel owner = basicClass(ownerName, CORE_ASYNC_NAMESPACE);
+    owner.access |= Opcodes.ACC_SUPER;
+    owner.superName = mutation.equals("class-header") ?
+        "java/lang/Object" : "clojure/lang/AFunction";
+    stampExactCoreAsyncSource(owner, !mutation.equals("source"));
+    String methodName = mutation.equals("method") ? "applyTo" : "invoke";
+    String methodDescriptor = mutation.equals("method-descriptor") ?
+        "(Ljava/lang/Object;)Ljava/lang/Object;" :
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+    int methodAccess = mutation.equals("method-access") ?
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC : Opcodes.ACC_PUBLIC;
+    MethodModel method = basicMethod(methodName, methodDescriptor, methodAccess);
+    method.codeEvents.add("CODE");
+    LabelRef start = new LabelRef(0), middle = new LabelRef(1), end = new LabelRef(2);
+    method.insns.add(new Insn("LABEL", -1, start));
+    method.insns.add(new Insn("INSN", Opcodes.NOP));
+    method.insns.add(new Insn("LABEL", -1, middle));
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    method.insns.add(new Insn("LABEL", -1, end));
+
+    int firstId = mutation.equals("adjacency") ? ownerId - 3 : ownerId - 2;
+    int secondId = ownerId - 1;
+    String firstName = mutation.equals("spelling") ? "q__" + firstId : "p__" + firstId;
+    String firstDescriptor = mutation.equals("descriptor") ?
+        "Lclojure/lang/ISeq;" : "Ljava/lang/Object;";
+    int firstSlot = mutation.equals("slot") ? 3 : 1;
+    LocalVariableModel first = new LocalVariableModel(firstName, firstDescriptor, null,
+        start, end, firstSlot);
+    LocalVariableModel second = new LocalVariableModel("p__" + secondId,
+        "Ljava/lang/Object;", null, start, mutation.equals("range") ? middle : end, 2);
+    List<LocalVariableModel> parameters = new ArrayList<LocalVariableModel>();
+    parameters.add(first);
+    if (!mutation.equals("short-row-count")) parameters.add(second);
+    method.localVariables.addAll(parameters);
+    if (mutation.equals("extra-row-count"))
+      method.localVariables.add(new LocalVariableModel("p__" + (ownerId - 3),
+          "Ljava/lang/Object;", null, start, end, 3));
+    int ordinaryRows = mutation.equals("method-local-count") ? 10 : 11;
+    for (int i = 0; i < ordinaryRows; i++)
+      method.localVariables.add(new LocalVariableModel("ordinary" + i,
+          "Ljava/lang/Object;", null, start, end, i + 3));
+    owner.methods.add(method);
+
+    LocalUniverse locals = new LocalUniverse();
+    int ordinal = 0;
+    for (LocalVariableModel variable : parameters) {
+      LocalNodeKey key = new LocalNodeKey(owner.name, method.name, method.descriptor,
+          ordinal++, "A");
+      Set<Integer> physical = mutation.equals("physical") && variable == first ?
+          new TreeSet<Integer>(Arrays.asList(variable.index, variable.index + 1)) :
+          Collections.singleton(variable.index);
+      LocalNodeInfo info = new LocalNodeInfo(key, owner, method,
+          !(mutation.equals("boundary") && variable == first), physical);
+      info.lvtOccurrences = mutation.equals("lvt-alias") && variable == first ? 2 : 1;
+      locals.info.put(key, info);
+      locals.variableNodes.put(variable, key);
+      locals.methodNodes.computeIfAbsent(method,
+          ignored -> new TreeSet<LocalNodeKey>()).add(key);
+      Matcher matcher = CORE_ASYNC_ALTS_PARAMETER_LOCAL.matcher(variable.name);
+      if (matcher.matches())
+        locals.lvtCompilerIdOccurrences.put(matcher.group(1),
+            mutation.equals("id-count") && variable == first ? 2 : 1);
+    }
+    if (mutation.equals("non-lvt-use")) locals.nonLvtCompilerIds.add(String.valueOf(firstId));
+    return new DoAltParameterLvtFixture(owner, method, locals, parameters);
+  }
+
+  private static final class DoAltFnVecLvtFixture {
+    final ClassModel owner;
+    final MethodModel method;
+    final LocalUniverse locals;
+    final LocalVariableModel target;
+    final List<LocalVariableModel> vectors;
+    DoAltFnVecLvtFixture(ClassModel owner, MethodModel method, LocalUniverse locals,
+                         LocalVariableModel target, List<LocalVariableModel> vectors) {
+      this.owner = owner; this.method = method; this.locals = locals;
+      this.target = target; this.vectors = vectors;
+    }
+  }
+
+  private static void requireDoAltFnVecLvtRejected(DoAltFnVecLvtFixture fixture) {
+    require(!coreAsyncDoAltFnVecLocalFamily(fixture.locals, fixture.method),
+        "non-witness do-alt fn vec-local family was accepted in " + fixture.owner.name);
+    for (LocalVariableModel variable : fixture.method.localVariables)
+      require(!coreAsyncDoAltFnVecLocalSpelling(fixture.locals, fixture.method, variable),
+          "malformed do-alt fn vec-local family selected a row: " + variable.name);
+  }
+
+  private static DoAltFnVecLvtFixture syntheticDoAltFnVecLvtFixture(
+      String mutation, int ownerId) {
+    String ownerName = mutation.equals("owner") ?
+        "clojure/core/async$do_alt$other__" + ownerId :
+        "clojure/core/async$do_alt$fn__" + ownerId;
+    ClassModel owner = basicClass(ownerName, CORE_ASYNC_NAMESPACE);
+    owner.access |= Opcodes.ACC_SUPER;
+    owner.superName = mutation.equals("class-header") ?
+        "java/lang/Object" : "clojure/lang/AFunction";
+    stampExactCoreAsyncSource(owner, !mutation.equals("source"));
+    String methodName = mutation.equals("method") ? "applyTo" : "invoke";
+    String methodDescriptor = mutation.equals("method-descriptor") ?
+        "(Ljava/lang/Object;)Ljava/lang/Object;" :
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+    int methodAccess = mutation.equals("method-access") ?
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC : Opcodes.ACC_PUBLIC;
+    MethodModel method = basicMethod(methodName, methodDescriptor, methodAccess);
+    method.codeEvents.add("CODE");
+    LabelRef[] labels = new LabelRef[27];
+    for (int i = 0; i < labels.length; i++) labels[i] = new LabelRef(i);
+    for (int i = 0; i < 106; i++) method.insns.add(new Insn("INSN", Opcodes.NOP));
+    int[] labelPositions = {0, 1, 2, 5, 7, 8, 9, 10, 11, 13, 15, 17, 18,
+        20, 21, 22, 23, 24, 25, 40, 41, 42, 43, 44, 45, 46, 105};
+    for (int i = 0; i < labels.length; i++)
+      method.insns.set(labelPositions[i], new Insn("LABEL", -1, labels[i]));
+    method.insns.set(3, new Insn("JUMP", Opcodes.GOTO, labels[8]));
+    method.insns.set(12, new Insn("JUMP", Opcodes.GOTO, labels[12]));
+    method.insns.set(19, new Insn("JUMP", Opcodes.GOTO, labels[18]));
+    int[][] vecInstructions = {{4, 6, 14, 16}, {27, 29, 37, 39}, {92, 94, 102, 104}};
+    int[] vecSlots = {3, 6, 10};
+    for (int i = 0; i < vecInstructions.length; i++) {
+      int slot = vecSlots[i];
+      int[] positions = vecInstructions[i];
+      method.insns.set(positions[0], new Insn("VAR", Opcodes.ASTORE, slot));
+      method.insns.set(positions[1], new Insn("VAR", Opcodes.ALOAD, slot));
+      method.insns.set(positions[2], new Insn("VAR",
+          mutation.equals("def-use") && i == 0 ? Opcodes.ASTORE : Opcodes.ALOAD, slot));
+      method.insns.set(positions[3], new Insn("VAR", Opcodes.ASTORE, slot));
+    }
+    if (mutation.equals("frame"))
+      method.insns.set(50, new Insn("FRAME", -1, Opcodes.F_NEW,
+          new Object[0], new Object[0]));
+
+    LocalVariableModel parameter1 = new LocalVariableModel("p__" + (ownerId - 2),
+        "Ljava/lang/Object;", null, labels[0], labels[26], 1);
+    LocalVariableModel parameter2 = new LocalVariableModel("p__" + (ownerId - 1),
+        "Ljava/lang/Object;", null, labels[0], labels[26], 2);
+    int targetId = mutation.equals("adjacency") ? ownerId + 2 :
+        mutation.equals("offset-order") ? ownerId + 4 : ownerId + 1;
+    int siblingId = mutation.equals("sibling-id") ? ownerId + 5 :
+        mutation.equals("offset-order") ? ownerId + 1 : ownerId + 4;
+    String targetName = mutation.equals("spelling") ?
+        "seq__" + targetId : "vec__" + targetId;
+    LocalVariableModel target = new LocalVariableModel(targetName,
+        mutation.equals("descriptor") ? "Lclojure/lang/ISeq;" : "Ljava/lang/Object;",
+        null, mutation.equals("range") ? labels[2] : labels[1], labels[26],
+        mutation.equals("slot") ? 4 : 3);
+    LocalVariableModel sibling6 = new LocalVariableModel("vec__" + siblingId,
+        "Ljava/lang/Object;", null,
+        mutation.equals("sibling-shape") ? labels[7] : labels[6], labels[26], 6);
+    String sibling10Name = mutation.equals("substituted-vec") ?
+        "seq__" + (ownerId + 7) : mutation.equals("duplicate-vec") ?
+        "vec__" + siblingId : "vec__" + (ownerId + 7);
+    LocalVariableModel sibling10 = new LocalVariableModel(sibling10Name,
+        "Ljava/lang/Object;", null, labels[19], labels[26], 10);
+    List<LocalVariableModel> vectors = new ArrayList<LocalVariableModel>();
+    vectors.add(target); vectors.add(sibling6);
+    if (!mutation.equals("short-vec-count")) vectors.add(sibling10);
+    if (mutation.equals("extra-vec-count"))
+      vectors.add(new LocalVariableModel("vec__" + (ownerId + 10),
+          "Ljava/lang/Object;", null, labels[20], labels[26], 11));
+    method.localVariables.add(parameter1); method.localVariables.add(parameter2);
+    method.localVariables.addAll(vectors);
+    int ordinaryRows = mutation.equals("short-vec-count") ? 9 :
+        mutation.equals("extra-vec-count") || mutation.equals("method-local-count") ? 7 : 8;
+    for (int i = 0; i < ordinaryRows; i++)
+      method.localVariables.add(new LocalVariableModel("ordinary" + i,
+          "Ljava/lang/Object;", null, labels[0], labels[26], i + 12));
+    owner.methods.add(method);
+
+    LocalUniverse locals = new LocalUniverse();
+    LocalVariableModel[] parameters = {parameter1, parameter2};
+    for (int i = 0; i < parameters.length; i++) {
+      LocalVariableModel variable = parameters[i];
+      LocalNodeKey key = new LocalNodeKey(owner.name, method.name, method.descriptor,
+          i + 1, "A");
+      LocalNodeInfo info = new LocalNodeInfo(key, owner, method, true,
+          Collections.singleton(variable.index));
+      info.lvtOccurrences = 1;
+      locals.info.put(key, info); locals.variableNodes.put(variable, key);
+      locals.methodNodes.computeIfAbsent(method,
+          ignored -> new TreeSet<LocalNodeKey>()).add(key);
+      Matcher matcher = CORE_ASYNC_ALTS_PARAMETER_LOCAL.matcher(variable.name);
+      require(matcher.matches(), "synthetic do-alt parameter spelling changed");
+      locals.lvtCompilerIdOccurrences.put(matcher.group(1), 1);
+    }
+    for (LocalVariableModel variable : vectors) {
+      int ordinal = variable == target ? 3 : variable == sibling6 ? 6 :
+          variable == sibling10 ? 10 : 11;
+      String category = mutation.equals("category") && variable == target ? "I" : "A";
+      Set<Integer> physical = mutation.equals("physical") && variable == target ?
+          new TreeSet<Integer>(Arrays.asList(variable.index, variable.index + 1)) :
+          Collections.singleton(variable.index);
+      LocalNodeKey key = new LocalNodeKey(owner.name, method.name, method.descriptor,
+          ordinal, category);
+      LocalNodeInfo info = new LocalNodeInfo(key, owner, method,
+          mutation.equals("boundary") && variable == target, physical);
+      info.instructionOccurrences = 4;
+      info.frameOccurrences = mutation.equals("frame") && variable == target ? 1 : 0;
+      info.lvtOccurrences = mutation.equals("lvt-alias") && variable == target ? 2 : 1;
+      locals.info.put(key, info); locals.variableNodes.put(variable, key);
+      locals.methodNodes.get(method).add(key);
+      if (!info.boundary) locals.generated.add(key);
+      int vectorIndex = variable == target ? 0 : variable == sibling6 ? 1 :
+          variable == sibling10 ? 2 : -1;
+      if (vectorIndex >= 0)
+        for (int position : vecInstructions[vectorIndex])
+          locals.instructionNodes.put(method.insns.get(position), key);
+      Matcher matcher = CORE_ASYNC_DO_ALT_VEC_LOCAL.matcher(variable.name);
+      if (matcher.matches()) {
+        locals.lvtCompilerIdOccurrences.merge(matcher.group(1), 1, Integer::sum);
+        if (mutation.equals("id-count") && variable == target)
+          locals.lvtCompilerIdOccurrences.merge(matcher.group(1), 1, Integer::sum);
+      }
+      if (mutation.equals("frame") && variable == target) {
+        Map<Integer, LocalNodeKey> cells = new TreeMap<Integer, LocalNodeKey>();
+        cells.put(variable.index, key); locals.frameNodes.put(method.insns.get(50), cells);
+      }
+    }
+    if (mutation.equals("non-lvt-use")) locals.nonLvtCompilerIds.add(String.valueOf(targetId));
+    return new DoAltFnVecLvtFixture(owner, method, locals, target, vectors);
   }
 
   private static void requireDoAltVecLocalRejected(DoAltVecLocalLvtFixture fixture) {
@@ -5820,6 +6527,15 @@ public final class CompareExactSourceAot {
   private static Map<String, ClassModel> syntheticLvtCohort(String name, String signature,
                                                              boolean startAtControl,
                                                              boolean extraRow) {
+    return syntheticLvtCohort(name, "Ljava/lang/Object;", signature,
+        startAtControl, 0, extraRow);
+  }
+
+  private static Map<String, ClassModel> syntheticLvtCohort(String name, String descriptor,
+                                                             String signature,
+                                                             boolean startAtControl,
+                                                             int slot,
+                                                             boolean extraRow) {
     ClassModel model = basicClass("test/LvtLocals", "test");
     MethodModel method = basicMethod("run", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
     method.codeEvents.add("CODE");
@@ -5829,8 +6545,8 @@ public final class CompareExactSourceAot {
     method.insns.add(new Insn("LABEL", -1, control));
     method.insns.add(new Insn("INSN", Opcodes.RETURN));
     method.insns.add(new Insn("LABEL", -1, end));
-    method.localVariables.add(new LocalVariableModel(name, "Ljava/lang/Object;", signature,
-        startAtControl ? control : start, end, 0));
+    method.localVariables.add(new LocalVariableModel(name, descriptor, signature,
+        startAtControl ? control : start, end, slot));
     if (extraRow) method.localVariables.add(new LocalVariableModel("extra", "Ljava/lang/Object;", null,
         start, end, 1));
     model.methods.add(method);

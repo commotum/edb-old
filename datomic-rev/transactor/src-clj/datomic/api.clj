@@ -31,261 +31,675 @@
         (clojure.core/import 'datomic.Entity)
         (clojure.core/import 'datomic.Log))))
   (set! *warn-on-reflection* true)
-  (defn connect ([uri] (Peer/connect uri)))
-  (reset-meta!
-    #'connect
-    (assoc
-      {:tag datomic.Connection, :arglists (clojure.core/list ['uri]), :column 1}
-      :name
-      'connect
-      :ns
-      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.api" "connect")
+    {:tag datomic.Connection, :arglists (clojure.core/list ['uri]), :column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.api" "connect") (fn 
+                                                             connect
+                                                             ([uri] (Peer/connect uri))))
   (defn create-database ([uri] (Peer/createDatabase uri)))
+  (reset-meta!
+    #'create-database
+    (assoc
+      {:arglists (clojure.core/list ['uri]), :column (int 1)}
+      :name
+      'create-database
+      :ns
+      *ns*))
   (defn delete-database ([uri] (Peer/deleteDatabase uri)))
+  (reset-meta!
+    #'delete-database
+    (assoc
+      {:arglists (clojure.core/list ['uri]), :column (int 1)}
+      :name
+      'delete-database
+      :ns
+      *ns*))
   (defn get-database-names ([uri] (Peer/getDatabaseNames uri)))
+  (reset-meta!
+    #'get-database-names
+    (assoc
+      {:arglists (clojure.core/list ['uri]), :column (int 1)}
+      :name
+      'get-database-names
+      :ns
+      *ns*))
   (defn administer-system ([options] (Peer/administerSystem ^java.util.Map options)))
-  (defn rename-database ([uri new_name] (Peer/renameDatabase uri ^java.lang.String new_name)))
+  (reset-meta!
+    #'administer-system
+    (assoc
+      {:arglists (clojure.core/list ['options]), :column (int 1)}
+      :name
+      'administer-system
+      :ns
+      *ns*))
+  (def rename-database
+   (fn rename_database ([uri new_name] (Peer/renameDatabase uri ^java.lang.String new_name))))
+  (reset-meta!
+    #'rename-database
+    (assoc
+      {:arglists (clojure.core/list ['uri (.withMeta 'new-name {:tag 'String})]), :column (int 1)}
+      :name
+      'rename-database
+      :ns
+      *ns*))
   (defn q ([query & inputs] (datomic.query/q query inputs)))
-  (defn query ([query_map] (datomic.query/query query_map)))
-  (defn qseq ([query_map] (datomic.query/qseq query_map)))
-  (defn tempid
-    ([partition n] (Peer/tempid partition (long ^java.lang.Number n)))
-    ([partition] (Peer/tempid partition)))
+  (reset-meta!
+    #'q
+    (assoc {:arglists (clojure.core/list ['query '& 'inputs]), :column (int 1)} :name 'q :ns *ns*))
+  (def query (fn query ([query_map] (datomic.query/query query_map))))
+  (reset-meta!
+    #'query
+    (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'query :ns *ns*))
+  (def qseq (fn qseq ([query_map] (datomic.query/qseq query_map))))
+  (reset-meta!
+    #'qseq
+    (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'qseq :ns *ns*))
+  (def tempid
+   (fn tempid
+     ([partition n] (Peer/tempid partition (long ^java.lang.Number n)))
+     ([partition] (Peer/tempid partition))))
+  (reset-meta!
+    #'tempid
+    (assoc
+      {:arglists (clojure.core/list ['partition] ['partition 'n]), :column (int 1)}
+      :name
+      'tempid
+      :ns
+      *ns*))
   (defn t->tx ([^long t] (Peer/toTx (long t))))
-  (defn tx->t (^long [tx] (Peer/toT tx)))
+  (reset-meta!
+    #'t->tx
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 't {:tag 'long})]), :column (int 1)}
+      :name
+      't->tx
+      :ns
+      *ns*))
+  (def tx->t (fn tx__GT_t (^long [tx] (Peer/toT tx))))
+  (reset-meta!
+    #'tx->t
+    (assoc
+      {:arglists (clojure.core/list (.withMeta ['tx] {:tag 'long})), :column (int 1)}
+      :name
+      'tx->t
+      :ns
+      *ns*))
   (defn part ([eid] (Peer/part eid)))
+  (reset-meta!
+    #'part
+    (assoc {:arglists (clojure.core/list ['eid]), :column (int 1)} :name 'part :ns *ns*))
   (defn function ([m] (Peer/function ^java.util.Map m)))
-  (defn db ([connection] (.db ^datomic.Connection connection)))
   (reset-meta!
-    #'db
+    #'function
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'function :ns *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.api" "db")
+    {:tag datomic.Database,
+     :arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.api" "db")
+    (fn db ([connection] (.db ^datomic.Connection connection))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.api" "log")
+    {:tag datomic.Log,
+     :arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.api" "log")
+    (fn log ([connection] (.log ^datomic.Connection connection))))
+  (def sync
+   (fn sync
+     ([connection t] (.sync ^datomic.Connection connection (long ^java.lang.Number t)))
+     ([connection] (.sync ^datomic.Connection connection))))
+  (reset-meta!
+    #'sync
     (assoc
-      {:tag datomic.Database,
-       :arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]),
-       :column 1}
+      {:arglists
+       (clojure.core/list
+         [(.withMeta 'connection {:tag 'Connection})]
+         [(.withMeta 'connection {:tag 'Connection}) 't]),
+       :column (int 1)}
       :name
-      'db
+      'sync
       :ns
       *ns*))
-  (defn log ([connection] (.log ^datomic.Connection connection)))
+  (def sync-index
+   (fn sync_index
+     ([connection t] (.syncIndex ^datomic.Connection connection (long ^java.lang.Number t)))))
   (reset-meta!
-    #'log
+    #'sync-index
     (assoc
-      {:tag datomic.Log,
-       :arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]),
-       :column 1}
+      {:arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection}) 't]),
+       :column (int 1)}
       :name
-      'log
+      'sync-index
       :ns
       *ns*))
-  (defn sync
-    ([connection t] (.sync ^datomic.Connection connection (long ^java.lang.Number t)))
-    ([connection] (.sync ^datomic.Connection connection)))
-  (defn sync-index
-    ([connection t] (.syncIndex ^datomic.Connection connection (long ^java.lang.Number t))))
-  (defn sync-schema
-    ([connection t] (.syncSchema ^datomic.Connection connection (long ^java.lang.Number t))))
-  (defn sync-excise
-    ([connection t] (.syncExcise ^datomic.Connection connection (long ^java.lang.Number t))))
-  (defn request-index ([connection] (.requestIndex ^datomic.Connection connection)))
-  (defn gc-storage
-    ([connection older_than]
-      (.gcStorage ^datomic.Connection connection ^java.util.Date older_than)
-      nil))
-  (defn transact
-    ([connection tx_data & p__15798]
-      (let [map__15799 p__15798
-            map__15799 (if (seq? map__15799)
-                         (if (next map__15799)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__15799))
-                           (if (seq map__15799) (first map__15799) {}))
-                         map__15799)
-            options map__15799]
-        (.transact ^datomic.Connection connection ^java.util.List tx_data options))))
-  (defn transact-async
-    ([connection tx_data & p__15801]
-      (let [map__15802 p__15801
-            map__15802 (if (seq? map__15802)
-                         (if (next map__15802)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__15802))
-                           (if (seq map__15802) (first map__15802) {}))
-                         map__15802)
-            options map__15802]
-        (.transactAsync ^datomic.Connection connection ^java.util.List tx_data options))))
-  (defn tx-report-queue ([connection] (.txReportQueue ^datomic.Connection connection)))
-  (defn remove-tx-report-queue
-    ([connection] (.removeTxReportQueue ^datomic.Connection connection) nil))
-  (defn as-of ([db t] (.asOf ^datomic.Database db t)))
+  (def sync-schema
+   (fn sync_schema
+     ([connection t] (.syncSchema ^datomic.Connection connection (long ^java.lang.Number t)))))
   (reset-meta!
-    #'as-of
+    #'sync-schema
     (assoc
-      {:tag datomic.Database,
-       :arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 't]),
-       :column 1}
+      {:arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection}) 't]),
+       :column (int 1)}
       :name
-      'as-of
+      'sync-schema
       :ns
       *ns*))
-  (defn since ([db t] (.since ^datomic.Database db t)))
+  (def sync-excise
+   (fn sync_excise
+     ([connection t] (.syncExcise ^datomic.Connection connection (long ^java.lang.Number t)))))
   (reset-meta!
-    #'since
+    #'sync-excise
     (assoc
-      {:tag datomic.Database,
-       :arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 't]),
-       :column 1}
+      {:arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection}) 't]),
+       :column (int 1)}
       :name
-      'since
+      'sync-excise
       :ns
       *ns*))
-  (defn history ([db] (.history ^datomic.Database db)))
+  (def request-index
+   (fn request_index ([connection] (.requestIndex ^datomic.Connection connection))))
   (reset-meta!
-    #'history
+    #'request-index
     (assoc
-      {:tag datomic.Database,
-       :arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]),
-       :column 1}
+      {:arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]), :column (int 1)}
       :name
-      'history
+      'request-index
       :ns
       *ns*))
-  (defn filter ([db pred] (.filter ^datomic.Database db pred)))
+  (def gc-storage
+   (fn gc_storage
+     ([connection older_than]
+       (.gcStorage ^datomic.Connection connection ^java.util.Date older_than)
+       nil)))
   (reset-meta!
-    #'filter
+    #'gc-storage
     (assoc
-      {:tag datomic.Database,
-       :arglists
-       (clojure.core/list [(.withMeta 'db {:tag 'Database}) (.withMeta 'pred {:tag 'Object})]),
-       :column 1}
+      {:arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection}) 'older-than]),
+       :column (int 1)}
       :name
-      'filter
+      'gc-storage
       :ns
       *ns*))
-  (defn with
-    ([db tx_data & opts] (.with ^datomic.Database db ^java.util.List tx_data opts))
-    ([db tx_data] (.with ^datomic.Database db ^java.util.List tx_data)))
-  (defn basis-t ([db] (long (.basisT ^datomic.Database db))))
-  (defn next-t ([db] (long (.nextT ^datomic.Database db))))
-  (defn as-of-t ([db] (.asOfT ^datomic.Database db)))
-  (defn since-t ([db] (.sinceT ^datomic.Database db)))
-  (defn is-history ([db] (.isHistory ^datomic.Database db)))
-  (defn is-filtered ([db] (.isFiltered ^datomic.Database db)))
-  (defn attribute ([db attrid] (.attribute ^datomic.Database db attrid)))
-  (defn entity ([db eid] (.entity ^datomic.Database db eid)))
-  (defn pull
-    ([db pattern eid & p__15819]
-      (let [map__15820 p__15819
-            map__15820 (if (seq? map__15820)
-                         (if (next map__15820)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__15820))
-                           (if (seq map__15820) (first map__15820) {}))
-                         map__15820)
-            options map__15820]
-        (.pull ^datomic.Database db pattern eid options))))
-  (defn index-pull ([db arg_map] (datomic.pull/dereffed-index-pull db arg_map)))
-  (defn pull-many
-    ([db pattern eids & p__15823]
-      (let [map__15824 p__15823
-            map__15824 (if (seq? map__15824)
-                         (if (next map__15824)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__15824))
-                           (if (seq map__15824) (first map__15824) {}))
-                         map__15824)
-            options map__15824]
-        (.pullMany ^datomic.Database db pattern ^java.util.List eids options))))
-  (defn touch ([entity] (.touch ^datomic.Entity entity)))
-  (defn entity-db ([entity] (.db ^datomic.Entity entity)))
-  (defn index-range ([db attrid start end] (.indexRange ^datomic.Database db attrid start end)))
-  (defn tx-range ([log start end] (.txRange ^datomic.Log log start end)))
-  (defn ident ([db eid] (.ident ^datomic.Database db eid)))
-  (defn entid ([db ident] (.entid ^datomic.Database db ident)))
-  (defn entid-at ([db part t_or_date] (.entidAt ^datomic.Database db part t_or_date)))
-  (defn invoke ([db eid_or_ident & args] (apply db/invoke db eid_or_ident args)))
-  (defn datoms ([db index & components] (db/datoms db index components)))
-  (defn seek-datoms ([db index & components] (db/seek-datoms db index components)))
+  (def transact
+   (fn transact
+     ([connection tx_data & p__15798]
+       (let [map__15799 p__15798
+             map__15799 (if (seq? map__15799)
+                          (if (next map__15799)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__15799))
+                            (if (seq map__15799) (first map__15799) {}))
+                          map__15799)
+             options map__15799]
+         (.transact ^datomic.Connection connection ^java.util.List tx_data options)))))
+  (reset-meta!
+    #'transact
+    (assoc
+      {:arglists
+       (clojure.core/list [(.withMeta 'connection {:tag 'Connection}) 'tx-data '& {:as 'options}]),
+       :column (int 1)}
+      :name
+      'transact
+      :ns
+      *ns*))
+  (def transact-async
+   (fn transact_async
+     ([connection tx_data & p__15801]
+       (let [map__15802 p__15801
+             map__15802 (if (seq? map__15802)
+                          (if (next map__15802)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__15802))
+                            (if (seq map__15802) (first map__15802) {}))
+                          map__15802)
+             options map__15802]
+         (.transactAsync ^datomic.Connection connection ^java.util.List tx_data options)))))
+  (reset-meta!
+    #'transact-async
+    (assoc
+      {:arglists
+       (clojure.core/list [(.withMeta 'connection {:tag 'Connection}) 'tx-data '& {:as 'options}]),
+       :column (int 1)}
+      :name
+      'transact-async
+      :ns
+      *ns*))
+  (def tx-report-queue
+   (fn tx_report_queue ([connection] (.txReportQueue ^datomic.Connection connection))))
+  (reset-meta!
+    #'tx-report-queue
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]), :column (int 1)}
+      :name
+      'tx-report-queue
+      :ns
+      *ns*))
+  (def remove-tx-report-queue
+   (fn remove_tx_report_queue
+     ([connection] (.removeTxReportQueue ^datomic.Connection connection) nil)))
+  (reset-meta!
+    #'remove-tx-report-queue
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]), :column (int 1)}
+      :name
+      'remove-tx-report-queue
+      :ns
+      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.api" "as-of")
+    {:tag datomic.Database,
+     :arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 't]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.api" "as-of")
+    (fn as_of ([db t] (.asOf ^datomic.Database db t))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.api" "since")
+    {:tag datomic.Database,
+     :arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 't]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.api" "since")
+    (fn since ([db t] (.since ^datomic.Database db t))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.api" "history")
+    {:tag datomic.Database,
+     :arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.api" "history")
+    (fn history ([db] (.history ^datomic.Database db))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.api" "filter")
+    {:tag datomic.Database,
+     :arglists
+     (clojure.core/list [(.withMeta 'db {:tag 'Database}) (.withMeta 'pred {:tag 'Object})]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.api" "filter")
+    (fn filter ([db pred] (.filter ^datomic.Database db pred))))
+  (def with
+   (fn with
+     ([db tx_data & opts] (.with ^datomic.Database db ^java.util.List tx_data opts))
+     ([db tx_data] (.with ^datomic.Database db ^java.util.List tx_data))))
+  (reset-meta!
+    #'with
+    (assoc
+      {:arglists
+       (clojure.core/list
+         [(.withMeta 'db {:tag 'Database}) 'tx-data]
+         [(.withMeta 'db {:tag 'Database}) 'tx-data '& 'opts]),
+       :column (int 1)}
+      :name
+      'with
+      :ns
+      *ns*))
+  (def basis-t (fn basis_t ([db] (long (.basisT ^datomic.Database db)))))
+  (reset-meta!
+    #'basis-t
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]), :column (int 1)}
+      :name
+      'basis-t
+      :ns
+      *ns*))
+  (def next-t (fn next_t ([db] (long (.nextT ^datomic.Database db)))))
+  (reset-meta!
+    #'next-t
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]), :column (int 1)}
+      :name
+      'next-t
+      :ns
+      *ns*))
+  (def as-of-t (fn as_of_t ([db] (.asOfT ^datomic.Database db))))
+  (reset-meta!
+    #'as-of-t
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]), :column (int 1)}
+      :name
+      'as-of-t
+      :ns
+      *ns*))
+  (def since-t (fn since_t ([db] (.sinceT ^datomic.Database db))))
+  (reset-meta!
+    #'since-t
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]), :column (int 1)}
+      :name
+      'since-t
+      :ns
+      *ns*))
+  (def is-history (fn is_history ([db] (.isHistory ^datomic.Database db))))
+  (reset-meta!
+    #'is-history
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]), :column (int 1)}
+      :name
+      'is-history
+      :ns
+      *ns*))
+  (def is-filtered (fn is_filtered ([db] (.isFiltered ^datomic.Database db))))
+  (reset-meta!
+    #'is-filtered
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]), :column (int 1)}
+      :name
+      'is-filtered
+      :ns
+      *ns*))
+  (def attribute (fn attribute ([db attrid] (.attribute ^datomic.Database db attrid))))
+  (reset-meta!
+    #'attribute
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'attrid]), :column (int 1)}
+      :name
+      'attribute
+      :ns
+      *ns*))
+  (def entity (fn entity ([db eid] (.entity ^datomic.Database db eid))))
+  (reset-meta!
+    #'entity
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'eid]), :column (int 1)}
+      :name
+      'entity
+      :ns
+      *ns*))
+  (def pull
+   (fn pull
+     ([db pattern eid & p__15819]
+       (let [map__15820 p__15819
+             map__15820 (if (seq? map__15820)
+                          (if (next map__15820)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__15820))
+                            (if (seq map__15820) (first map__15820) {}))
+                          map__15820)
+             options map__15820]
+         (.pull ^datomic.Database db pattern eid options)))))
+  (reset-meta!
+    #'pull
+    (assoc
+      {:arglists
+       (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'pattern 'eid '& {:as 'options}]),
+       :column (int 1)}
+      :name
+      'pull
+      :ns
+      *ns*))
+  (def index-pull (fn index_pull ([db arg_map] (datomic.pull/dereffed-index-pull db arg_map))))
+  (reset-meta!
+    #'index-pull
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'arg-map]), :column (int 1)}
+      :name
+      'index-pull
+      :ns
+      *ns*))
+  (def pull-many
+   (fn pull_many
+     ([db pattern eids & p__15823]
+       (let [map__15824 p__15823
+             map__15824 (if (seq? map__15824)
+                          (if (next map__15824)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__15824))
+                            (if (seq map__15824) (first map__15824) {}))
+                          map__15824)
+             options map__15824]
+         (.pullMany ^datomic.Database db pattern ^java.util.List eids options)))))
+  (reset-meta!
+    #'pull-many
+    (assoc
+      {:arglists
+       (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'pattern 'eids '& {:as 'options}]),
+       :column (int 1)}
+      :name
+      'pull-many
+      :ns
+      *ns*))
+  (def touch (fn touch ([entity] (.touch ^datomic.Entity entity))))
+  (reset-meta!
+    #'touch
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'entity {:tag 'Entity})]), :column (int 1)}
+      :name
+      'touch
+      :ns
+      *ns*))
+  (def entity-db (fn entity_db ([entity] (.db ^datomic.Entity entity))))
+  (reset-meta!
+    #'entity-db
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'entity {:tag 'Entity})]), :column (int 1)}
+      :name
+      'entity-db
+      :ns
+      *ns*))
+  (def index-range
+   (fn index_range ([db attrid start end] (.indexRange ^datomic.Database db attrid start end))))
+  (reset-meta!
+    #'index-range
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'attrid 'start 'end]),
+       :column (int 1)}
+      :name
+      'index-range
+      :ns
+      *ns*))
+  (def tx-range (fn tx_range ([log start end] (.txRange ^datomic.Log log start end))))
+  (reset-meta!
+    #'tx-range
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'log {:tag 'Log}) 'start 'end]), :column (int 1)}
+      :name
+      'tx-range
+      :ns
+      *ns*))
+  (def ident (fn ident ([db eid] (.ident ^datomic.Database db eid))))
+  (reset-meta!
+    #'ident
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'eid]), :column (int 1)}
+      :name
+      'ident
+      :ns
+      *ns*))
+  (def entid (fn entid ([db ident] (.entid ^datomic.Database db ident))))
+  (reset-meta!
+    #'entid
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'ident]), :column (int 1)}
+      :name
+      'entid
+      :ns
+      *ns*))
+  (def entid-at (fn entid_at ([db part t_or_date] (.entidAt ^datomic.Database db part t_or_date))))
+  (reset-meta!
+    #'entid-at
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'part 't-or-date]),
+       :column (int 1)}
+      :name
+      'entid-at
+      :ns
+      *ns*))
+  (def invoke (fn invoke ([db eid_or_ident & args] (apply db/invoke db eid_or_ident args))))
+  (reset-meta!
+    #'invoke
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'eid-or-ident '& 'args]),
+       :column (int 1)}
+      :name
+      'invoke
+      :ns
+      *ns*))
+  (def datoms (fn datoms ([db index & components] (db/datoms db index components))))
+  (reset-meta!
+    #'datoms
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'index '& 'components]),
+       :column (int 1)}
+      :name
+      'datoms
+      :ns
+      *ns*))
+  (def seek-datoms (fn seek_datoms ([db index & components] (db/seek-datoms db index components))))
+  (reset-meta!
+    #'seek-datoms
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'index '& 'components]),
+       :column (int 1)}
+      :name
+      'seek-datoms
+      :ns
+      *ns*))
   (defn resolve-tempid
     ([db tempids tempid] (Peer/resolveTempid ^datomic.Database db tempids tempid)))
-  (defn shutdown
-    ([shutdown_clojure]
-      (Peer/shutdown (boolean (.booleanValue ^java.lang.Boolean shutdown_clojure)))
-      nil))
+  (reset-meta!
+    #'resolve-tempid
+    (assoc
+      {:arglists (clojure.core/list ['db 'tempids 'tempid]), :column (int 1)}
+      :name
+      'resolve-tempid
+      :ns
+      *ns*))
+  (def shutdown
+   (fn shutdown
+     ([shutdown_clojure]
+       (Peer/shutdown (boolean (.booleanValue ^java.lang.Boolean shutdown_clojure)))
+       nil)))
   (reset-meta!
     #'shutdown
     (assoc
-      {:arglists (clojure.core/list ['shutdown-clojure]), :added "0.8.3861", :column 1}
+      {:arglists (clojure.core/list ['shutdown-clojure]), :added "0.8.3861", :column (int 1)}
       :name
       'shutdown
       :ns
       *ns*))
-  (defn release ([conn] (.release ^datomic.Connection conn) nil))
+  (def release (fn release ([conn] (.release ^datomic.Connection conn) nil)))
   (reset-meta!
     #'release
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'conn {:tag 'Connection})]),
        :added "0.8.3861",
-       :column 1}
+       :column (int 1)}
       :name
       'release
       :ns
       *ns*))
-  (defn cancel
-    ([p__15840]
-      (let [map__15841 p__15840
-            map__15841 (if (seq? map__15841)
-                         (if (next map__15841)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__15841))
-                           (if (seq map__15841) (first map__15841) {}))
-                         map__15841)
-            anomaly_map map__15841
-            category (get map__15841 :cognitect.anomalies/category)
-            allowed_anoms #{:cognitect.anomalies/conflict :cognitect.anomalies/incorrect}
-            throw_incorrect_anom (fn throw_incorrect_anom
-                                   ([p1__15839#]
-                                     (throw
-                                       (ex-info
-                                         p1__15839#
-                                         #:cognitect.anomalies{:category
-                                                               :cognitect.anomalies/incorrect,
-                                                               :message p1__15839#}))))]
-        (if (not category)
-          (^clojure.lang.IFn throw_incorrect_anom "Cancel requires :cognitect.anomalies/category")
-          (if (not (some #{category} allowed_anoms))
-            (^clojure.lang.IFn throw_incorrect_anom
-              (str "Invalid :cognitect.anomalies/category provided to cancel: " category))
-            (if (not (fressian/fressianable? anomaly_map))
-              (^clojure.lang.IFn throw_incorrect_anom "Could not marshal data in cancel anomaly")
-              (do
-                (when :default
-                  (throw
-                    (ex-info
-                      (or (:cognitect.anomalies/message anomaly_map) "Operation Cancelled")
-                      (merge {} anomaly_map #:datomic{:cancelled true}))))
-                nil)))))))
+  (def cancel
+   (fn cancel
+     ([p__15840]
+       (let [map__15841 p__15840
+             map__15841 (if (seq? map__15841)
+                          (if (next map__15841)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__15841))
+                            (if (seq map__15841) (first map__15841) {}))
+                          map__15841)
+             anomaly_map map__15841
+             category (get map__15841 :cognitect.anomalies/category)
+             allowed_anoms #{:cognitect.anomalies/conflict :cognitect.anomalies/incorrect}
+             throw_incorrect_anom (fn throw_incorrect_anom
+                                    ([p1__15839#]
+                                      (throw
+                                        (ex-info
+                                          p1__15839#
+                                          #:cognitect.anomalies{:category
+                                                                :cognitect.anomalies/incorrect,
+                                                                :message p1__15839#}))))]
+         (if (not category)
+           (^clojure.lang.IFn throw_incorrect_anom "Cancel requires :cognitect.anomalies/category")
+           (if (not (some #{category} allowed_anoms))
+             (^clojure.lang.IFn throw_incorrect_anom
+               (str "Invalid :cognitect.anomalies/category provided to cancel: " category))
+             (if (not (fressian/fressianable? anomaly_map))
+               (^clojure.lang.IFn throw_incorrect_anom "Could not marshal data in cancel anomaly")
+               (do
+                 (when :default
+                   (throw
+                     (ex-info
+                       (or (:cognitect.anomalies/message anomaly_map) "Operation Cancelled")
+                       (merge {} anomaly_map #:datomic{:cancelled true}))))
+                 nil))))))))
+  (reset-meta!
+    #'cancel
+    (assoc
+      {:arglists (clojure.core/list [{:keys ['cognitect.anomalies/category], :as 'anomaly-map}]),
+       :column (int 1)}
+      :name
+      'cancel
+      :ns
+      *ns*))
   (defn squuid ([] (Peer/squuid)))
-  (defn squuid-time-millis (^long [squuid] (Peer/squuidTimeMillis ^java.util.UUID squuid)))
-  (defn add-listener
-    ([fut f executor]
-      (.addListener
-        ^datomic.ListenableFuture fut
-        ^java.lang.Runnable f
-        ^java.util.concurrent.Executor executor)
-      nil))
-  (defn db-stats ([db] (.dbStats ^datomic.Database db)))
+  (reset-meta!
+    #'squuid
+    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'squuid :ns *ns*))
+  (def squuid-time-millis
+   (fn squuid_time_millis (^long [squuid] (Peer/squuidTimeMillis ^java.util.UUID squuid))))
+  (reset-meta!
+    #'squuid-time-millis
+    (assoc
+      {:arglists (clojure.core/list (.withMeta ['squuid] {:tag 'long})), :column (int 1)}
+      :name
+      'squuid-time-millis
+      :ns
+      *ns*))
+  (def add-listener
+   (fn add_listener
+     ([fut f executor]
+       (.addListener
+         ^datomic.ListenableFuture fut
+         ^java.lang.Runnable f
+         ^java.util.concurrent.Executor executor)
+       nil)))
+  (reset-meta!
+    #'add-listener
+    (assoc
+      {:arglists
+       (clojure.core/list [(.withMeta 'fut {:tag 'datomic.ListenableFuture}) 'f 'executor]),
+       :column (int 1)}
+      :name
+      'add-listener
+      :ns
+      *ns*))
+  (def db-stats (fn db_stats ([db] (.dbStats ^datomic.Database db))))
   (reset-meta!
     #'db-stats
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database})]),
        :added "1.0.6333",
-       :column 1}
+       :column (int 1)}
       :name
       'db-stats
       :ns
       *ns*))
-  (defn implicit-part (^long [^long id] (db/implicit-part id)))
+  (def implicit-part (fn implicit_part (^long [^long id] (db/implicit-part id))))
+  (reset-meta!
+    #'implicit-part
+    (assoc
+      {:arglists (clojure.core/list (.withMeta [(.withMeta 'id {:tag 'long})] {:tag 'long})),
+       :column (int 1)}
+      :name
+      'implicit-part
+      :ns
+      *ns*))
   (defn implicit-part-id ([^long part] (db/implicit-part-id part)))
+  (reset-meta!
+    #'implicit-part-id
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'part {:tag 'long})]), :column (int 1)}
+      :name
+      'implicit-part-id
+      :ns
+      *ns*))
   (loop [seq_15852 (seq
                      {#'administer-system
                       "Administer system. Takes an options map with a required :action key.\n   Throws on failure. Actions include:\n   \n   Release Object Cache\n   :action      :release-object-cache  \n\n   Effect: Clear all entries from the Object Cache.\n\n   Upgrade Schema\n   :action      :upgrade-schema\n   :uri         a URI as per connect\n\n   Effect: Upgrades the base schema of a database to the latest version.\n   NOTE: Read https://docs.datomic.com/operation/deployment.html before calling.",

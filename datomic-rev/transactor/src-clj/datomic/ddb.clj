@@ -75,63 +75,79 @@
         (clojure.core/import 'com.amazonaws.services.dynamodbv2.model.DescribeTableRequest)
         (clojure.core/import 'com.amazonaws.services.dynamodbv2.model.DescribeTableResult))))
   (set! *warn-on-reflection* true)
-  (defn client
-    ([creds config]
-      (if config
-        (let [region (get config :region)
-              override_endpoint (get config :override-endpoint)
-              conf (d/data-to-object
-                     (dissoc config :region :override-endpoint)
-                     com.amazonaws.ClientConfiguration)
-              conn (if creds
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (aws/credentials creds))
-                       (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf))
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-                       (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)))]
-          (cond
-            override_endpoint (.setEndpoint
-                                ^com.amazonaws.AmazonWebServiceClient conn
-                                (str "http://" override_endpoint))
-            region (do
-                     (.setEndpoint
-                       ^com.amazonaws.AmazonWebServiceClient conn
-                       (aws/endpoint-for :dynamodb region))))
-          conn)
-        (client creds)))
-    ([creds]
-      (if creds
-        (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
-          (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient. (aws/credentials creds))
-          (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient. (aws/credentials creds)))
-        (if (instance?
-              com.amazonaws.auth.AWSCredentialsProvider
-              (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-    ([]
-      (if (instance?
-            com.amazonaws.auth.AWSCredentialsProvider
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+  (def client
+   (fn client
+     ([creds config]
+       (if config
+         (let [region (get config :region)
+               override_endpoint (get config :override-endpoint)
+               conf (d/data-to-object
+                      (dissoc config :region :override-endpoint)
+                      com.amazonaws.ClientConfiguration)
+               conn (if creds
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (aws/credentials creds))
+                        (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf))
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+                        (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)))]
+           (cond
+             override_endpoint (.setEndpoint
+                                 ^com.amazonaws.AmazonWebServiceClient conn
+                                 (str "http://" override_endpoint))
+             region (do
+                      (.setEndpoint
+                        ^com.amazonaws.AmazonWebServiceClient conn
+                        (aws/endpoint-for :dynamodb region))))
+           conn)
+         (client creds)))
+     ([creds]
+       (if creds
+         (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
+           (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient. (aws/credentials creds))
+           (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient. (aws/credentials creds)))
+         (if (instance?
+               com.amazonaws.auth.AWSCredentialsProvider
+               (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+     ([]
+       (if (instance?
+             com.amazonaws.auth.AWSCredentialsProvider
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))
+  (reset-meta!
+    #'client
+    (assoc
+      {:arglists
+       (clojure.core/list
+         (.withMeta [] {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient})
+         (.withMeta ['creds] {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient})
+         (.withMeta
+           ['creds 'config]
+           {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient})),
+       :column (int 1)}
+      :name
+      'client
+      :ns
+      *ns*))
   (alter-var-root
     #'d/map-property-types
     assoc
@@ -2107,150 +2123,126 @@
                (when temp__5804__auto__
                  (let [v__19409__auto__ temp__5804__auto__]
                    [:attributeName (d/object-to-data-wrapper v__19409__auto__)])))))))})
-  (defn list-tables
-    ([o x1]
-      (d/object-to-data
-        (.listTables
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.ListTablesRequest)))))
-  (reset-meta!
-    #'list-tables
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'list-tables
-      :ns
-      *ns*))
-  (defn create-table
-    ([o x1]
-      (d/object-to-data
-        (.createTable
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.CreateTableRequest)))))
-  (reset-meta!
-    #'create-table
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'create-table
-      :ns
-      *ns*))
-  (defn update-table
-    ([o x1]
-      (d/object-to-data
-        (.updateTable
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.UpdateTableRequest)))))
-  (reset-meta!
-    #'update-table
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'update-table
-      :ns
-      *ns*))
-  (defn delete-table
-    ([o x1]
-      (d/object-to-data
-        (.deleteTable
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.DeleteTableRequest)))))
-  (reset-meta!
-    #'delete-table
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'delete-table
-      :ns
-      *ns*))
-  (defn describe-table
-    ([o x1]
-      (d/object-to-data
-        (.describeTable
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.DescribeTableRequest)))))
-  (reset-meta!
-    #'describe-table
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'describe-table
-      :ns
-      *ns*))
-  (defn put-item*
-    ([o x1]
-      (d/object-to-data
-        (.putItem
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.PutItemRequest)))))
-  (reset-meta!
-    #'put-item*
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'put-item*
-      :ns
-      *ns*))
-  (defn get-item*
-    ([o x1]
-      (d/object-to-data
-        (.getItem
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.GetItemRequest)))))
-  (reset-meta!
-    #'get-item*
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'get-item*
-      :ns
-      *ns*))
-  (defn delete-item
-    ([o x1]
-      (d/object-to-data
-        (.deleteItem
-          ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
-          (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.DeleteItemRequest)))))
-  (reset-meta!
-    #'delete-item
-    (assoc
-      {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
-       :column 1}
-      :name
-      'delete-item
-      :ns
-      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "list-tables")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "list-tables")
+    (fn list_tables
+      ([o x1]
+        (d/object-to-data
+          (.listTables
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.ListTablesRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "create-table")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "create-table")
+    (fn create_table
+      ([o x1]
+        (d/object-to-data
+          (.createTable
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.CreateTableRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "update-table")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "update-table")
+    (fn update_table
+      ([o x1]
+        (d/object-to-data
+          (.updateTable
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.UpdateTableRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "delete-table")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "delete-table")
+    (fn delete_table
+      ([o x1]
+        (d/object-to-data
+          (.deleteTable
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.DeleteTableRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "describe-table")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "describe-table")
+    (fn describe_table
+      ([o x1]
+        (d/object-to-data
+          (.describeTable
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.DescribeTableRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "put-item*")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "put-item*")
+    (fn put_item_STAR_
+      ([o x1]
+        (d/object-to-data
+          (.putItem
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.PutItemRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "get-item*")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "get-item*")
+    (fn get_item_STAR_
+      ([o x1]
+        (d/object-to-data
+          (.getItem
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.GetItemRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.ddb" "delete-item")
+    {:related-class com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.ddb" "delete-item")
+    (fn delete_item
+      ([o x1]
+        (d/object-to-data
+          (.deleteItem
+            ^com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient o
+            (d/data-to-object x1 com.amazonaws.services.dynamodbv2.model.DeleteItemRequest))))))
   (defn log-errors
     ([f & args]
       (try
@@ -2277,9 +2269,36 @@
               nil)
             (throw ^java.lang.Throwable ase)
             nil)))))
-  (defn put-item ([ddb_client request] (put-item* ddb_client request)))
-  (defn get-item ([ddb_client request] (get-item* ddb_client request)))
+  (reset-meta!
+    #'log-errors
+    (assoc
+      {:arglists (clojure.core/list ['f '& 'args]), :column (int 1)}
+      :name
+      'log-errors
+      :ns
+      *ns*))
+  (def put-item (fn put_item ([ddb_client request] (put-item* ddb_client request))))
+  (reset-meta!
+    #'put-item
+    (assoc
+      {:arglists (clojure.core/list ['ddb-client 'request]), :column (int 1)}
+      :name
+      'put-item
+      :ns
+      *ns*))
+  (def get-item (fn get_item ([ddb_client request] (get-item* ddb_client request))))
+  (reset-meta!
+    #'get-item
+    (assoc
+      {:arglists (clojure.core/list ['ddb-client 'request]), :column (int 1)}
+      :name
+      'get-item
+      :ns
+      *ns*))
   (defn fullname ([s] (cond (keyword? s) (subs (str s) 1) :default (do (str s)))))
+  (reset-meta!
+    #'fullname
+    (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'fullname :ns *ns*))
   (defn create-item
     ([m]
       (reduce
@@ -2291,6 +2310,9 @@
               (assoc m (fullname k) (if (number? v) {:n (str v)} {:s v})))))
         {}
         m)))
+  (reset-meta!
+    #'create-item
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'create-item :ns *ns*))
   (defn deattr
     ([m]
       (let [G__19835 (set (keys m))]
@@ -2303,6 +2325,9 @@
           (do
             (throw (ex-info "Could not parse DDB item " m))
             (clojure.lang.Util/hash G__19835))))))
+  (reset-meta!
+    #'deattr
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'deattr :ns *ns*))
   (defn deitem
     ([m]
       (reduce
@@ -2314,4 +2339,10 @@
               (assoc m (keyword k) (deattr v)))))
         {}
         m)))
-  (defn create-key ([k] {"id" {(if (number? k) :n :s) k}})))
+  (reset-meta!
+    #'deitem
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'deitem :ns *ns*))
+  (defn create-key ([k] {"id" {(if (number? k) :n :s) k}}))
+  (reset-meta!
+    #'create-key
+    (assoc {:arglists (clojure.core/list ['k]), :column (int 1)} :name 'create-key :ns *ns*)))

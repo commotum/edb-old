@@ -17,6 +17,9 @@
           ['clojure.java.io :as 'io]
           ['datomic.common :as 'common :refer (clojure.core/list 'qualified-symbol?)]))))
   (defn wildcard-name? ([s] (and (common/qualified-symbol? s) (= "*" (name s)))))
+  (reset-meta!
+    #'wildcard-name?
+    (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'wildcard-name? :ns *ns*))
   (defn anom-map
     ([category msg]
       #:cognitect.anomalies{:category (keyword "cognitect.anomalies" (name category)),
@@ -24,18 +27,21 @@
   (reset-meta!
     #'anom-map
     (assoc
-      {:private true, :arglists (clojure.core/list ['category 'msg]), :column 1}
+      {:private true, :arglists (clojure.core/list ['category 'msg]), :column (int 1)}
       :name
       'anom-map
       :ns
       *ns*))
-  (defn anomaly!
-    ([name msg cause] (throw (ex-info msg (anom-map name msg) cause)))
-    ([name msg] (throw (ex-info msg (anom-map name msg)))))
+  (def anomaly!
+   (fn anomaly_BANG_
+     ([name msg cause] (throw (ex-info msg (anom-map name msg) cause)))
+     ([name msg] (throw (ex-info msg (anom-map name msg))))))
   (reset-meta!
     #'anomaly!
     (assoc
-      {:private true, :arglists (clojure.core/list ['name 'msg] ['name 'msg 'cause]), :column 1}
+      {:private true,
+       :arglists (clojure.core/list ['name 'msg] ['name 'msg 'cause]),
+       :column (int 1)}
       :name
       'anomaly!
       :ns
@@ -47,7 +53,7 @@
   (reset-meta!
     #'explicit-pred
     (assoc
-      {:private true, :arglists (clojure.core/list ['allow]), :column 1}
+      {:private true, :arglists (clojure.core/list ['allow]), :column (int 1)}
       :name
       'explicit-pred
       :ns
@@ -59,43 +65,45 @@
   (reset-meta!
     #'wildcard-pred
     (assoc
-      {:private true, :arglists (clojure.core/list ['allow]), :column 1}
+      {:private true, :arglists (clojure.core/list ['allow]), :column (int 1)}
       :name
       'wildcard-pred
       :ns
       *ns*))
-  (defn ensure-allow-list!
-    ([allow_list]
-      (when allow_list
-        (when-not (coll? allow_list)
-          (throw
-            (ex-info
-              "xforms expects a vector"
-              {:cognitect.anomalies/category :cognitect.anomalies/incorrect, :value allow_list}))
-          nil))))
+  (def ensure-allow-list!
+   (fn ensure_allow_list_BANG_
+     ([allow_list]
+       (when allow_list
+         (when-not (coll? allow_list)
+           (throw
+             (ex-info
+               "xforms expects a vector"
+               {:cognitect.anomalies/category :cognitect.anomalies/incorrect, :value allow_list}))
+           nil)))))
   (reset-meta!
     #'ensure-allow-list!
     (assoc
-      {:private true, :arglists (clojure.core/list ['allow-list]), :column 1}
+      {:private true, :arglists (clojure.core/list ['allow-list]), :column (int 1)}
       :name
       'ensure-allow-list!
       :ns
       *ns*))
-  (defn ensure-extensions-config!
-    ([p__15047]
-      (let [map__15048 p__15047
-            map__15048 (if (seq? map__15048)
-                         (if (next map__15048)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__15048))
-                           (if (seq map__15048) (first map__15048) {}))
-                         map__15048)
-            xforms (get map__15048 :xforms)]
-        (when xforms (ensure-allow-list! xforms)))))
+  (def ensure-extensions-config!
+   (fn ensure_extensions_config_BANG_
+     ([p__15047]
+       (let [map__15048 p__15047
+             map__15048 (if (seq? map__15048)
+                          (if (next map__15048)
+                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                              (to-array map__15048))
+                            (if (seq map__15048) (first map__15048) {}))
+                          map__15048)
+             xforms (get map__15048 :xforms)]
+         (when xforms (ensure-allow-list! xforms))))))
   (reset-meta!
     #'ensure-extensions-config!
     (assoc
-      {:private true, :arglists (clojure.core/list [{:keys ['xforms]}]), :column 1}
+      {:private true, :arglists (clojure.core/list [{:keys ['xforms]}]), :column (int 1)}
       :name
       'ensure-extensions-config!
       :ns
@@ -112,7 +120,7 @@
   (reset-meta!
     #'allow-list->pred
     (assoc
-      {:private true, :arglists (clojure.core/list ['allow]), :column 1}
+      {:private true, :arglists (clojure.core/list ['allow]), :column (int 1)}
       :name
       'allow-list->pred
       :ns
@@ -125,25 +133,38 @@
             (ensure-extensions-config! m)
             m)
           (anomaly! :not-found (str "'" rsrc "' is not on the classpath"))))))
+  (reset-meta!
+    #'load-extensions-config
+    (assoc
+      {:arglists (clojure.core/list ['rsrc]), :column (int 1)}
+      :name
+      'load-extensions-config
+      :ns
+      *ns*))
   (def config-resource "datomic/extensions.edn")
+  (reset-meta! #'config-resource (assoc {:column (int 1)} :name 'config-resource :ns *ns*))
   (defn load-preds
     ([rsrc]
       (let [config (load-extensions-config rsrc)] {:xforms (allow-list->pred (:xforms config))})))
   (reset-meta!
     #'load-preds
     (assoc
-      {:private true, :arglists (clojure.core/list ['rsrc]), :column 1}
+      {:private true, :arglists (clojure.core/list ['rsrc]), :column (int 1)}
       :name
       'load-preds
       :ns
       *ns*))
-  (def preds-ref (delay (load-preds config-resource)))
-  (reset-meta! #'preds-ref (assoc {:private true, :column 1} :name 'preds-ref :ns *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.extension-resolver" "preds-ref")
+    {:private true, :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.extension-resolver" "preds-ref")
+    (delay (load-preds config-resource)))
   (defn allow? ([sym pred] ((^clojure.lang.IFn pred (deref preds-ref)) sym)))
   (reset-meta!
     #'allow?
     (assoc
-      {:private true, :arglists (clojure.core/list ['sym 'pred]), :column 1}
+      {:private true, :arglists (clojure.core/list ['sym 'pred]), :column (int 1)}
       :name
       'allow?
       :ns
@@ -159,6 +180,14 @@
                          map__15061)
             xforms (get map__15061 :xforms)]
         (into #{} (map namespace (remove nil? xforms))))))
+  (reset-meta!
+    #'user-namespaces
+    (assoc
+      {:arglists (clojure.core/list ['path]), :column (int 1)}
+      :name
+      'user-namespaces
+      :ns
+      *ns*))
   (defn preload!
     ([path]
       (loop [seq_15063 (seq (user-namespaces path)) chunk_15064 nil count_15065 0 i_15066 0]
@@ -179,6 +208,9 @@
                   (let [ns (first seq_15063)]
                     (clojure.core/require (symbol ns))
                     (recur (next seq_15063) nil 0 0))))))))))
+  (reset-meta!
+    #'preload!
+    (assoc {:arglists (clojure.core/list ['path]), :column (int 1)} :name 'preload! :ns *ns*))
   (defn resolve!
     ([x context]
       (if (and (common/qualified-symbol? x) (allow? x context))
@@ -192,8 +224,27 @@
         (anomaly!
           :forbidden
           (str "'" x "' needs to be listed under " context " in datomic/extensions.edn")))))
+  (reset-meta!
+    #'resolve!
+    (assoc
+      {:arglists (clojure.core/list ['x 'context]), :column (int 1)}
+      :name
+      'resolve!
+      :ns
+      *ns*))
   (defn resolve-built-in-xform
     ([sym]
       (when (contains? #{'clojure.edn/read-string 'name 'str 'namespace 'keyword 'symbol} sym)
         (resolve sym))))
-  (defn resolve-xform! ([sym] (or (resolve-built-in-xform sym) (resolve! sym :xforms)))))
+  (reset-meta!
+    #'resolve-built-in-xform
+    (assoc
+      {:arglists (clojure.core/list ['sym]), :column (int 1)}
+      :name
+      'resolve-built-in-xform
+      :ns
+      *ns*))
+  (defn resolve-xform! ([sym] (or (resolve-built-in-xform sym) (resolve! sym :xforms))))
+  (reset-meta!
+    #'resolve-xform!
+    (assoc {:arglists (clojure.core/list ['sym]), :column (int 1)} :name 'resolve-xform! :ns *ns*)))

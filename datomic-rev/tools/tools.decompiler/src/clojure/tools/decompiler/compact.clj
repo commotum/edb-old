@@ -175,6 +175,16 @@
   (and (seq? form)
        (= (symbol operation) (first form))))
 
+(defn recovered-let-call?
+  "Recognize the raw source-stage `let*` after the generic compactor has
+  reconstructed it.  That rule emits `clojure.core/let` via syntax-quote;
+  printed source hides the qualification, so accepting only an unqualified
+  `let` misses the real decompilation pipeline.  No other namespace is
+  accepted."
+  [form]
+  (and (seq? form)
+       (contains? #{'let 'clojure.core/let} (first form))))
+
 (defn monitor-call?
   [operation lock-local form]
   (and (unqualified-call? operation form)
@@ -197,25 +207,29 @@
   lockee/locklocal and matching-enter/exit checks are important: a partial
   monitor pattern is not safe to compact."
   [form]
-  (when (and (unqualified-call? "let" form)
+  (when (and (recovered-let-call? form)
              (= 4 (count form))
              (vector? (second form)))
     (let [[lockee lock lock-local lockee-source :as bindings] (second form)
           enter-form (nth form 2)
-          try-form (nth form 3)
-          finally-form (when (unqualified-call? "try" try-form)
-                         (last try-form))
-          try-body (butlast (rest try-form))]
+          try-form (nth form 3)]
+      ;; Prove the complete locking prefix before inspecting the would-be try
+      ;; sequence.  Ordinary syntax-quoted `clojure.core/let` forms can also
+      ;; have two bodies and a scalar final body; they must fail closed rather
+      ;; than being passed to `rest` as if they were a try form.
       (when (and (= 4 (count bindings))
                  (compiler-lock-temp? "lockee" lockee)
                  (compiler-lock-temp? "locklocal" lock-local)
                  (= lockee lockee-source)
                  (monitor-call? "monitor-enter" lock-local enter-form)
-                 (not-any? #(or (unqualified-call? "catch" %)
-                                (unqualified-call? "finally" %))
-                           try-body)
-                 (matching-monitor-finally? lock-local finally-form))
-        (list* 'locking lock try-body)))))
+                 (unqualified-call? "try" try-form))
+        (let [finally-form (last try-form)
+              try-body (butlast (rest try-form))]
+          (when (and (not-any? #(or (unqualified-call? "catch" %)
+                                    (unqualified-call? "finally" %))
+                               try-body)
+                     (matching-monitor-finally? lock-local finally-form))
+            (list* 'locking lock try-body)))))))
 
 (defn captured-compiler-temp-binding?
   "Detect a compiler `temp__N__auto__` let binding that is mentioned beyond

@@ -47,93 +47,120 @@
         (clojure.core/import 'com.amazonaws.services.cloudwatch.model.DescribeAlarmsResult)
         (clojure.core/import 'com.amazonaws.services.cloudwatch.model.StandardUnit))))
   (set! *warn-on-reflection* true)
-  (defn client
-    ([creds config]
-      (if config
-        (let [region (get config :region)
-              override_endpoint (get config :override-endpoint)
-              conf (d/data-to-object
-                     (dissoc config :region :override-endpoint)
-                     com.amazonaws.ClientConfiguration)
-              conn (if creds
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (aws/credentials creds))
-                       (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-                         (aws/credentials creds)
-                         ^com.amazonaws.ClientConfiguration conf))
-                     (if (instance?
-                           com.amazonaws.auth.AWSCredentialsProvider
-                           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-                       (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)
-                       (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-                         (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
-                         ^com.amazonaws.ClientConfiguration conf)))]
-          (cond
-            override_endpoint (.setEndpoint
-                                ^com.amazonaws.AmazonWebServiceClient conn
-                                (str "http://" override_endpoint))
-            region (do
-                     (.setEndpoint
-                       ^com.amazonaws.AmazonWebServiceClient conn
-                       (aws/endpoint-for :monitoring region))))
-          conn)
-        (client creds)))
-    ([creds]
-      (if creds
-        (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
-          (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient. (aws/credentials creds))
-          (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient. (aws/credentials creds)))
-        (if (instance?
-              com.amazonaws.auth.AWSCredentialsProvider
-              (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-          (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-    ([]
-      (if (instance?
-            com.amazonaws.auth.AWSCredentialsProvider
-            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
-        (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
-          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-  (defn list-metrics
-    ([client request]
-      (let [result (if request
-                     (.listMetrics
-                       ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient client
-                       (d/data-to-object
-                         request
-                         com.amazonaws.services.cloudwatch.model.ListMetricsRequest))
-                     (.listMetrics
-                       ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient client))
-            metrics (.getMetrics
-                      ^com.amazonaws.services.cloudwatch.model.ListMetricsResult result)]
-        (map
-          d/object-to-data
-          (let [temp__5802__auto__ (.getNextToken
-                                     ^com.amazonaws.services.cloudwatch.model.ListMetricsResult result)]
-            (if temp__5802__auto__
-              (let [token temp__5802__auto__]
-                (lazy-seq
-                  (concat
-                    metrics
-                    (list-metrics
-                      client
-                      (let [G__25782 (com.amazonaws.services.cloudwatch.model.ListMetricsRequest.)]
-                        (.setNextToken
-                          ^com.amazonaws.services.cloudwatch.model.ListMetricsRequest G__25782
-                          ^java.lang.String token)
-                        G__25782)))))
-              metrics)))))
-    ([client] (list-metrics client nil)))
+  (def client
+   (fn client
+     ([creds config]
+       (if config
+         (let [region (get config :region)
+               override_endpoint (get config :override-endpoint)
+               conf (d/data-to-object
+                      (dissoc config :region :override-endpoint)
+                      com.amazonaws.ClientConfiguration)
+               conn (if creds
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (aws/credentials creds))
+                        (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+                          (aws/credentials creds)
+                          ^com.amazonaws.ClientConfiguration conf))
+                      (if (instance?
+                            com.amazonaws.auth.AWSCredentialsProvider
+                            (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+                        (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)
+                        (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+                          (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)
+                          ^com.amazonaws.ClientConfiguration conf)))]
+           (cond
+             override_endpoint (.setEndpoint
+                                 ^com.amazonaws.AmazonWebServiceClient conn
+                                 (str "http://" override_endpoint))
+             region (do
+                      (.setEndpoint
+                        ^com.amazonaws.AmazonWebServiceClient conn
+                        (aws/endpoint-for :monitoring region))))
+           conn)
+         (client creds)))
+     ([creds]
+       (if creds
+         (if (instance? com.amazonaws.auth.AWSCredentialsProvider (aws/credentials creds))
+           (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient. (aws/credentials creds))
+           (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient. (aws/credentials creds)))
+         (if (instance?
+               com.amazonaws.auth.AWSCredentialsProvider
+               (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+           (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+     ([]
+       (if (instance?
+             com.amazonaws.auth.AWSCredentialsProvider
+             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))
+         (com.amazonaws.services.cloudwatch.AmazonCloudWatchClient.
+           (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))
+  (reset-meta!
+    #'client
+    (assoc
+      {:arglists
+       (clojure.core/list
+         (.withMeta [] {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient})
+         (.withMeta ['creds] {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient})
+         (.withMeta
+           ['creds 'config]
+           {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient})),
+       :column (int 1)}
+      :name
+      'client
+      :ns
+      *ns*))
+  (def list-metrics
+   (fn list_metrics
+     ([client request]
+       (let [result (if request
+                      (.listMetrics
+                        ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient client
+                        (d/data-to-object
+                          request
+                          com.amazonaws.services.cloudwatch.model.ListMetricsRequest))
+                      (.listMetrics
+                        ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient client))
+             metrics (.getMetrics
+                       ^com.amazonaws.services.cloudwatch.model.ListMetricsResult result)]
+         (map
+           d/object-to-data
+           (let [temp__5802__auto__ (.getNextToken
+                                      ^com.amazonaws.services.cloudwatch.model.ListMetricsResult result)]
+             (if temp__5802__auto__
+               (let [token temp__5802__auto__]
+                 (lazy-seq
+                   (concat
+                     metrics
+                     (list-metrics
+                       client
+                       (let [G__25782 (com.amazonaws.services.cloudwatch.model.ListMetricsRequest.)]
+                         (.setNextToken
+                           ^com.amazonaws.services.cloudwatch.model.ListMetricsRequest G__25782
+                           ^java.lang.String token)
+                         G__25782)))))
+               metrics)))))
+     ([client] (list-metrics client nil))))
+  (reset-meta!
+    #'list-metrics
+    (assoc
+      {:arglists
+       (clojure.core/list ['client] [(.withMeta 'client {:tag 'AmazonCloudWatchClient}) 'request]),
+       :column (int 1)}
+      :name
+      'list-metrics
+      :ns
+      *ns*))
   (alter-var-root
     #'d/list-property-types
     assoc
@@ -1108,59 +1135,52 @@
     [:atom com.amazonaws.services.cloudwatch.model.StandardUnit]
     fn__25918
     ([n _] (StandardUnit/valueOf (name n))))
-  (defn get-metric-statistics
-    ([o x1]
-      (d/object-to-data
-        (.getMetricStatistics
-          ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient o
-          (d/data-to-object
-            x1
-            com.amazonaws.services.cloudwatch.model.GetMetricStatisticsRequest)))))
-  (reset-meta!
-    #'get-metric-statistics
-    (assoc
-      {:related-class com.amazonaws.services.cloudwatch.AmazonCloudWatchClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient}) 'x1]),
-       :column 1}
-      :name
-      'get-metric-statistics
-      :ns
-      *ns*))
-  (defn put-metrics
-    ([o x1]
-      (d/object-to-data
-        (.putMetricData
-          ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient o
-          (d/data-to-object x1 com.amazonaws.services.cloudwatch.model.PutMetricDataRequest)))))
-  (reset-meta!
-    #'put-metrics
-    (assoc
-      {:related-class com.amazonaws.services.cloudwatch.AmazonCloudWatchClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient}) 'x1]),
-       :column 1}
-      :name
-      'put-metrics
-      :ns
-      *ns*))
-  (defn describe-alarms
-    ([o x1]
-      (d/object-to-data
-        (.describeAlarms
-          ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient o
-          (d/data-to-object x1 com.amazonaws.services.cloudwatch.model.DescribeAlarmsRequest)))))
-  (reset-meta!
-    #'describe-alarms
-    (assoc
-      {:related-class com.amazonaws.services.cloudwatch.AmazonCloudWatchClient,
-       :arglists
-       (clojure.core/list
-         [(.withMeta 'o {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient}) 'x1]),
-       :column 1}
-      :name
-      'describe-alarms
-      :ns
-      *ns*)))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudwatch" "get-metric-statistics")
+    {:related-class com.amazonaws.services.cloudwatch.AmazonCloudWatchClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudwatch" "get-metric-statistics")
+    (fn get_metric_statistics
+      ([o x1]
+        (d/object-to-data
+          (.getMetricStatistics
+            ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudwatch.model.GetMetricStatisticsRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudwatch" "put-metrics")
+    {:related-class com.amazonaws.services.cloudwatch.AmazonCloudWatchClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudwatch" "put-metrics")
+    (fn put_metrics
+      ([o x1]
+        (d/object-to-data
+          (.putMetricData
+            ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient o
+            (d/data-to-object x1 com.amazonaws.services.cloudwatch.model.PutMetricDataRequest))))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.cloudwatch" "describe-alarms")
+    {:related-class com.amazonaws.services.cloudwatch.AmazonCloudWatchClient,
+     :arglists
+     (clojure.core/list
+       [(.withMeta 'o {:tag 'com.amazonaws.services.cloudwatch.AmazonCloudWatchClient}) 'x1]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.cloudwatch" "describe-alarms")
+    (fn describe_alarms
+      ([o x1]
+        (d/object-to-data
+          (.describeAlarms
+            ^com.amazonaws.services.cloudwatch.AmazonCloudWatchClient o
+            (d/data-to-object
+              x1
+              com.amazonaws.services.cloudwatch.model.DescribeAlarmsRequest)))))))

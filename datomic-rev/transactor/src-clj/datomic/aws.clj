@@ -22,12 +22,38 @@
         (clojure.core/import 'com.amazonaws.auth.DefaultAWSCredentialsProviderChain))))
   (set! *warn-on-reflection* true)
   (defn aws-access-key-id? ([s] (and (string? s) (= 20 (long (count s))))))
+  (reset-meta!
+    #'aws-access-key-id?
+    (assoc
+      {:arglists (clojure.core/list ['s]), :column (int 1)}
+      :name
+      'aws-access-key-id?
+      :ns
+      *ns*))
   (defn aws-secret-key? ([s] (and (string? s) (= 40 (long (count s))))))
+  (reset-meta!
+    #'aws-secret-key?
+    (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'aws-secret-key? :ns *ns*))
   (defn credentials? ([m] (and (map? m) (:aws-access-key-id m) (:aws-secret-key m))))
-  (defn set-endpoint
-    ([client endpoint]
-      (.setEndpoint ^com.amazonaws.AmazonWebServiceClient client ^java.lang.String endpoint)
-      nil))
+  (reset-meta!
+    #'credentials?
+    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'credentials? :ns *ns*))
+  (def set-endpoint
+   (fn set_endpoint
+     ([client endpoint]
+       (.setEndpoint ^com.amazonaws.AmazonWebServiceClient client ^java.lang.String endpoint)
+       nil)))
+  (reset-meta!
+    #'set-endpoint
+    (assoc
+      {:arglists
+       (clojure.core/list
+         [(.withMeta 'client {:tag 'com.amazonaws.AmazonWebServiceClient}) 'endpoint]),
+       :column (int 1)}
+      :name
+      'set-endpoint
+      :ns
+      *ns*))
   (defn credentials
     ([creds]
       (cond
@@ -52,10 +78,23 @@
                          ^java.lang.String aws_secret_key))
         creds creds
         :default (do (.getCredentials (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))
-  (defn endpoint-for
-    ([service region]
-      (let [sname (name service) rname (name region) G__19513 sname]
-        (case G__19513 "iam" "iam.amazonaws.com" (str sname "." rname ".amazonaws.com")))))
+  (reset-meta!
+    #'credentials
+    (assoc {:arglists (clojure.core/list ['creds]), :column (int 1)} :name 'credentials :ns *ns*))
+  (def endpoint-for
+   (fn endpoint_for
+     ([service region]
+       (let [sname (name service) rname (name region) G__19513 sname]
+         (case G__19513 "iam" "iam.amazonaws.com" (str sname "." rname ".amazonaws.com"))))))
+  (reset-meta!
+    #'endpoint-for
+    (assoc
+      {:arglists (clojure.core/list (.withMeta ['service 'region] {:tag 'java.lang.String})),
+       :column (int 1)}
+      :name
+      'endpoint-for
+      :ns
+      *ns*))
   (defmethod
     d/data-to-object
     [:map com.amazonaws.ClientConfiguration]
@@ -318,227 +357,248 @@
                 k (d/property-to-object (class o) :connectionTTL v java.lang.Long/TYPE)]
             (.setConnectionTTL ^com.amazonaws.ClientConfiguration o (long ^java.lang.Number k))))
         o)))
-  (defn newclient
-    ([&form &env cls creds conf]
-      (seq
-        (concat
-          (clojure.core/list 'if)
-          (clojure.core/list
-            (seq
-              (concat
-                (clojure.core/list 'clojure.core/instance?)
-                (clojure.core/list 'com.amazonaws.auth.AWSCredentialsProvider)
-                (clojure.core/list creds))))
-          (clojure.core/list
-            (seq
-              (concat
-                (clojure.core/list 'new)
-                (clojure.core/list cls)
-                (clojure.core/list
-                  (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentialsProvider}))
-                (clojure.core/list (with-meta conf {:tag 'com.amazonaws.ClientConfiguration})))))
-          (clojure.core/list
-            (seq
-              (concat
-                (clojure.core/list 'new)
-                (clojure.core/list cls)
-                (clojure.core/list (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentials}))
-                (clojure.core/list
-                  (with-meta conf {:tag 'com.amazonaws.ClientConfiguration}))))))))
-    ([&form &env cls creds]
-      (seq
-        (concat
-          (clojure.core/list 'if)
-          (clojure.core/list
-            (seq
-              (concat
-                (clojure.core/list 'clojure.core/instance?)
-                (clojure.core/list 'com.amazonaws.auth.AWSCredentialsProvider)
-                (clojure.core/list creds))))
-          (clojure.core/list
-            (seq
-              (concat
-                (clojure.core/list 'new)
-                (clojure.core/list cls)
-                (clojure.core/list
-                  (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentialsProvider})))))
-          (clojure.core/list
-            (seq
-              (concat
-                (clojure.core/list 'new)
-                (clojure.core/list cls)
-                (clojure.core/list
-                  (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentials})))))))))
+  (def newclient
+   (fn newclient
+     ([&form &env cls creds conf]
+       (seq
+         (concat
+           (clojure.core/list 'if)
+           (clojure.core/list
+             (seq
+               (concat
+                 (clojure.core/list 'clojure.core/instance?)
+                 (clojure.core/list 'com.amazonaws.auth.AWSCredentialsProvider)
+                 (clojure.core/list creds))))
+           (clojure.core/list
+             (seq
+               (concat
+                 (clojure.core/list 'new)
+                 (clojure.core/list cls)
+                 (clojure.core/list
+                   (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentialsProvider}))
+                 (clojure.core/list (with-meta conf {:tag 'com.amazonaws.ClientConfiguration})))))
+           (clojure.core/list
+             (seq
+               (concat
+                 (clojure.core/list 'new)
+                 (clojure.core/list cls)
+                 (clojure.core/list (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentials}))
+                 (clojure.core/list
+                   (with-meta conf {:tag 'com.amazonaws.ClientConfiguration}))))))))
+     ([&form &env cls creds]
+       (seq
+         (concat
+           (clojure.core/list 'if)
+           (clojure.core/list
+             (seq
+               (concat
+                 (clojure.core/list 'clojure.core/instance?)
+                 (clojure.core/list 'com.amazonaws.auth.AWSCredentialsProvider)
+                 (clojure.core/list creds))))
+           (clojure.core/list
+             (seq
+               (concat
+                 (clojure.core/list 'new)
+                 (clojure.core/list cls)
+                 (clojure.core/list
+                   (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentialsProvider})))))
+           (clojure.core/list
+             (seq
+               (concat
+                 (clojure.core/list 'new)
+                 (clojure.core/list cls)
+                 (clojure.core/list
+                   (with-meta creds {:tag 'com.amazonaws.auth.AWSCredentials}))))))))))
+  (reset-meta!
+    #'newclient
+    (assoc
+      {:arglists (clojure.core/list ['cls 'creds] ['cls 'creds 'conf]), :column (int 1)}
+      :name
+      'newclient
+      :ns
+      *ns*))
   (.setMacro #'newclient)
-  (defn defclient
-    ([&form &env cls service]
-      (let [docstr (str
-                     "Create a client. Config options are:\n\n:region    String or Keyword\n:override-endpoint String (Optional, to override the default AWS endpoint).\n\nPlus any of the following:\n"
-                     (let [s__6419__auto__ (java.io.StringWriter.)]
-                       (binding [*out* s__6419__auto__]
-                         (do
-                           (push-thread-bindings (hash-map #'*print-length* nil))
-                           (try
-                             (clojure.pprint/pprint
-                               (d/type-descriptor com.amazonaws.ClientConfiguration))
-                             (finally (pop-thread-bindings)))
-                           (str s__6419__auto__)))))
-            ns (resolve cls)
-            tag (symbol (.getName ^java.lang.Class ns))]
-        (seq
-          (concat
-            (clojure.core/list 'clojure.core/defn)
-            (clojure.core/list 'client)
-            (clojure.core/list docstr)
-            (-> (with-meta [] {:tag tag})
-             (clojure.core/list)
-             (clojure.core/list 'datomic.aws/newclient)
-             (concat
-               (clojure.core/list cls)
-               (clojure.core/list
-                 (seq
-                   (concat
-                     (clojure.core/list
-                       'com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
-             (seq)
-             (clojure.core/list)
-             (concat)
-             (seq)
-             (clojure.core/list))
-            (-> (with-meta ['creds] {:tag tag})
-             (clojure.core/list)
-             (clojure.core/list 'if)
-             (concat
-               (clojure.core/list 'creds)
-               (clojure.core/list
-                 (seq
-                   (concat
-                     (clojure.core/list 'datomic.aws/newclient)
-                     (clojure.core/list cls)
-                     (clojure.core/list
-                       (seq
-                         (concat
-                           (clojure.core/list 'datomic.aws/credentials)
-                           (clojure.core/list 'creds)))))))
-               (clojure.core/list
-                 (seq
-                   (concat
-                     (clojure.core/list 'datomic.aws/newclient)
-                     (clojure.core/list cls)
-                     (clojure.core/list
-                       (seq
-                         (concat
-                           (clojure.core/list
-                             'com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))))
-             (seq)
-             (clojure.core/list)
-             (concat)
-             (seq)
-             (clojure.core/list))
-            (-> (with-meta ['creds 'config] {:tag tag})
-             (clojure.core/list)
-             (clojure.core/list 'if)
-             (concat
-               (clojure.core/list 'config)
-               (clojure.core/list
-                 (seq
-                   (concat
-                     (clojure.core/list 'clojure.core/let)
-                     (clojure.core/list
-                       (apply
-                         vector
-                         (seq
-                           (concat
-                             (clojure.core/list 'region)
-                             (clojure.core/list
-                               (seq
-                                 (concat
-                                   (clojure.core/list 'clojure.core/get)
-                                   (clojure.core/list 'config)
-                                   (clojure.core/list :region))))
-                             (clojure.core/list 'override-endpoint)
-                             (clojure.core/list
-                               (seq
-                                 (concat
-                                   (clojure.core/list 'clojure.core/get)
-                                   (clojure.core/list 'config)
-                                   (clojure.core/list :override-endpoint))))
-                             (clojure.core/list 'conf)
-                             (clojure.core/list
-                               (seq
-                                 (concat
-                                   (clojure.core/list 'datomic.datafy/data-to-object)
-                                   (clojure.core/list
-                                     (seq
-                                       (concat
-                                         (clojure.core/list 'clojure.core/dissoc)
-                                         (clojure.core/list 'config)
-                                         (clojure.core/list :region)
-                                         (clojure.core/list :override-endpoint))))
-                                   (clojure.core/list 'com.amazonaws.ClientConfiguration))))
-                             (clojure.core/list 'conn)
-                             (clojure.core/list
-                               (seq
-                                 (concat
-                                   (clojure.core/list 'if)
-                                   (clojure.core/list 'creds)
-                                   (clojure.core/list
-                                     (seq
-                                       (concat
-                                         (clojure.core/list 'datomic.aws/newclient)
-                                         (clojure.core/list cls)
-                                         (clojure.core/list
-                                           (seq
-                                             (concat
-                                               (clojure.core/list 'datomic.aws/credentials)
-                                               (clojure.core/list 'creds))))
-                                         (clojure.core/list 'conf))))
-                                   (clojure.core/list
-                                     (seq
-                                       (concat
-                                         (clojure.core/list 'datomic.aws/newclient)
-                                         (clojure.core/list cls)
-                                         (clojure.core/list
-                                           (seq
-                                             (concat
-                                               (clojure.core/list
-                                                 'com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))
-                                         (clojure.core/list 'conf)))))))))))
-                     (clojure.core/list
-                       (seq
-                         (concat
-                           (clojure.core/list 'clojure.core/cond)
-                           (clojure.core/list 'override-endpoint)
-                           (clojure.core/list
-                             (seq
-                               (concat
-                                 (clojure.core/list '.setEndpoint)
-                                 (clojure.core/list 'conn)
-                                 (clojure.core/list
-                                   (seq
-                                     (concat
-                                       (clojure.core/list 'clojure.core/str)
-                                       (clojure.core/list "http://")
-                                       (clojure.core/list 'override-endpoint)))))))
-                           (clojure.core/list 'region)
-                           (clojure.core/list
-                             (seq
-                               (concat
-                                 (clojure.core/list '.setEndpoint)
-                                 (clojure.core/list 'conn)
-                                 (clojure.core/list
-                                   (seq
-                                     (concat
-                                       (clojure.core/list 'datomic.aws/endpoint-for)
-                                       (clojure.core/list service)
-                                       (clojure.core/list 'region))))))))))
-                     (clojure.core/list 'conn))))
-               (clojure.core/list
-                 (seq (concat (clojure.core/list 'client) (clojure.core/list 'creds)))))
-             (seq)
-             (clojure.core/list)
-             (concat)
-             (seq)
-             (clojure.core/list)))))))
+  (def defclient
+   (fn defclient
+     ([&form &env cls service]
+       (let [docstr (str
+                      "Create a client. Config options are:\n\n:region    String or Keyword\n:override-endpoint String (Optional, to override the default AWS endpoint).\n\nPlus any of the following:\n"
+                      (let [s__6419__auto__ (java.io.StringWriter.)]
+                        (binding [*out* s__6419__auto__]
+                          (do
+                            (push-thread-bindings (hash-map #'*print-length* nil))
+                            (try
+                              (clojure.pprint/pprint
+                                (d/type-descriptor com.amazonaws.ClientConfiguration))
+                              (finally (pop-thread-bindings)))
+                            (str s__6419__auto__)))))
+             ns (resolve cls)
+             tag (symbol (.getName ^java.lang.Class ns))]
+         (seq
+           (concat
+             (clojure.core/list 'clojure.core/defn)
+             (clojure.core/list 'client)
+             (clojure.core/list docstr)
+             (-> (with-meta [] {:tag tag})
+              (clojure.core/list)
+              (clojure.core/list 'datomic.aws/newclient)
+              (concat
+                (clojure.core/list cls)
+                (clojure.core/list
+                  (seq
+                    (concat
+                      (clojure.core/list
+                        'com.amazonaws.auth.DefaultAWSCredentialsProviderChain.)))))
+              (seq)
+              (clojure.core/list)
+              (concat)
+              (seq)
+              (clojure.core/list))
+             (-> (with-meta ['creds] {:tag tag})
+              (clojure.core/list)
+              (clojure.core/list 'if)
+              (concat
+                (clojure.core/list 'creds)
+                (clojure.core/list
+                  (seq
+                    (concat
+                      (clojure.core/list 'datomic.aws/newclient)
+                      (clojure.core/list cls)
+                      (clojure.core/list
+                        (seq
+                          (concat
+                            (clojure.core/list 'datomic.aws/credentials)
+                            (clojure.core/list 'creds)))))))
+                (clojure.core/list
+                  (seq
+                    (concat
+                      (clojure.core/list 'datomic.aws/newclient)
+                      (clojure.core/list cls)
+                      (clojure.core/list
+                        (seq
+                          (concat
+                            (clojure.core/list
+                              'com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))))))
+              (seq)
+              (clojure.core/list)
+              (concat)
+              (seq)
+              (clojure.core/list))
+             (-> (with-meta ['creds 'config] {:tag tag})
+              (clojure.core/list)
+              (clojure.core/list 'if)
+              (concat
+                (clojure.core/list 'config)
+                (clojure.core/list
+                  (seq
+                    (concat
+                      (clojure.core/list 'clojure.core/let)
+                      (clojure.core/list
+                        (apply
+                          vector
+                          (seq
+                            (concat
+                              (clojure.core/list 'region)
+                              (clojure.core/list
+                                (seq
+                                  (concat
+                                    (clojure.core/list 'clojure.core/get)
+                                    (clojure.core/list 'config)
+                                    (clojure.core/list :region))))
+                              (clojure.core/list 'override-endpoint)
+                              (clojure.core/list
+                                (seq
+                                  (concat
+                                    (clojure.core/list 'clojure.core/get)
+                                    (clojure.core/list 'config)
+                                    (clojure.core/list :override-endpoint))))
+                              (clojure.core/list 'conf)
+                              (clojure.core/list
+                                (seq
+                                  (concat
+                                    (clojure.core/list 'datomic.datafy/data-to-object)
+                                    (clojure.core/list
+                                      (seq
+                                        (concat
+                                          (clojure.core/list 'clojure.core/dissoc)
+                                          (clojure.core/list 'config)
+                                          (clojure.core/list :region)
+                                          (clojure.core/list :override-endpoint))))
+                                    (clojure.core/list 'com.amazonaws.ClientConfiguration))))
+                              (clojure.core/list 'conn)
+                              (clojure.core/list
+                                (seq
+                                  (concat
+                                    (clojure.core/list 'if)
+                                    (clojure.core/list 'creds)
+                                    (clojure.core/list
+                                      (seq
+                                        (concat
+                                          (clojure.core/list 'datomic.aws/newclient)
+                                          (clojure.core/list cls)
+                                          (clojure.core/list
+                                            (seq
+                                              (concat
+                                                (clojure.core/list 'datomic.aws/credentials)
+                                                (clojure.core/list 'creds))))
+                                          (clojure.core/list 'conf))))
+                                    (clojure.core/list
+                                      (seq
+                                        (concat
+                                          (clojure.core/list 'datomic.aws/newclient)
+                                          (clojure.core/list cls)
+                                          (clojure.core/list
+                                            (seq
+                                              (concat
+                                                (clojure.core/list
+                                                  'com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))))
+                                          (clojure.core/list 'conf)))))))))))
+                      (clojure.core/list
+                        (seq
+                          (concat
+                            (clojure.core/list 'clojure.core/cond)
+                            (clojure.core/list 'override-endpoint)
+                            (clojure.core/list
+                              (seq
+                                (concat
+                                  (clojure.core/list '.setEndpoint)
+                                  (clojure.core/list 'conn)
+                                  (clojure.core/list
+                                    (seq
+                                      (concat
+                                        (clojure.core/list 'clojure.core/str)
+                                        (clojure.core/list "http://")
+                                        (clojure.core/list 'override-endpoint)))))))
+                            (clojure.core/list 'region)
+                            (clojure.core/list
+                              (seq
+                                (concat
+                                  (clojure.core/list '.setEndpoint)
+                                  (clojure.core/list 'conn)
+                                  (clojure.core/list
+                                    (seq
+                                      (concat
+                                        (clojure.core/list 'datomic.aws/endpoint-for)
+                                        (clojure.core/list service)
+                                        (clojure.core/list 'region))))))))))
+                      (clojure.core/list 'conn))))
+                (clojure.core/list
+                  (seq (concat (clojure.core/list 'client) (clojure.core/list 'creds)))))
+              (seq)
+              (clojure.core/list)
+              (concat)
+              (seq)
+              (clojure.core/list))))))))
+  (reset-meta!
+    #'defclient
+    (assoc
+      {:arglists (clojure.core/list ['cls 'service]), :column (int 1)}
+      :name
+      'defclient
+      :ns
+      *ns*))
   (.setMacro #'defclient)
-  (defn client-config ([args] (d/data-to-object args com.amazonaws.ClientConfiguration))))
+  (defn client-config ([args] (d/data-to-object args com.amazonaws.ClientConfiguration)))
+  (reset-meta!
+    #'client-config
+    (assoc {:arglists (clojure.core/list ['args]), :column (int 1)} :name 'client-config :ns *ns*)))

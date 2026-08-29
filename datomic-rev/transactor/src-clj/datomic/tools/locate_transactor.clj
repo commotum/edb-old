@@ -24,6 +24,14 @@
         (dissoc endpoint :password)
         [:timestamp]
         (fn fn__26775 ([n] (when n (java.util.Date. (long ^java.lang.Number n))))))))
+  (reset-meta!
+    #'print-format
+    (assoc
+      {:arglists (clojure.core/list ['endpoint]), :column (int 1)}
+      :name
+      'print-format
+      :ns
+      *ns*))
   (defn -main
     ([uri]
       (try
@@ -67,4 +75,7 @@
             nil)))
       (d/shutdown true)
       (java.lang.System/exit (int 0))
-      nil)))
+      nil))
+  (reset-meta!
+    #'-main
+    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name '-main :ns *ns*)))

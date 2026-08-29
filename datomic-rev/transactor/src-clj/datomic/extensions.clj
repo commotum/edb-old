@@ -74,7 +74,7 @@
   (reset-meta!
     #'project
     (assoc
-      {:private true, :arglists (clojure.core/list ['xs 'binds]), :column 1}
+      {:private true, :arglists (clojure.core/list ['xs 'binds]), :column (int 1)}
       :name
       'project
       :ns
@@ -83,32 +83,60 @@
   (reset-meta!
     #'fulltext
     (assoc
-      {:private true, :arglists (clojure.core/list ['db 'attr 'qmap]), :column 1}
+      {:private true, :arglists (clojure.core/list ['db 'attr 'qmap]), :column (int 1)}
       :name
       'fulltext
       :ns
       *ns*))
-  (defn tx-ids
-    ([log start end]
-      (mapv
-        (fn fn__14140 ([p1__14139#] (long (datomic.db/make-eid 3 (long (:t p1__14139#))))))
-        (.txRange ^datomic.Log log start end))))
-  (defn tx-data ([log t] (or (:data (first (.txRange ^datomic.Log log t (inc t)))) [])))
-  (defn missing? ([db e attr] (nil? (seq (datomic.db/datoms db :aevt [attr e])))))
-  (defn ensure-sv-attrid
-    ([db a]
-      (let [attrid (datomic.db/require-attrid db a) attr (datomic.db/attribute db attrid)]
-        (when (= 36 (.-cardinality ^datomic.db.Attribute attr))
-          (throw
-            (java.lang.IllegalArgumentException.
-              (str "cardinality-many attrs not supported: " a))))
-        attrid)))
+  (def tx-ids
+   (fn tx_ids
+     ([log start end]
+       (mapv
+         (fn fn__14140 ([p1__14139#] (long (datomic.db/make-eid 3 (long (:t p1__14139#))))))
+         (.txRange ^datomic.Log log start end)))))
+  (reset-meta!
+    #'tx-ids
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'log {:tag 'Log}) 'start 'end]), :column (int 1)}
+      :name
+      'tx-ids
+      :ns
+      *ns*))
+  (def tx-data
+   (fn tx_data ([log t] (or (:data (first (.txRange ^datomic.Log log t (inc t)))) []))))
+  (reset-meta!
+    #'tx-data
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'log {:tag 'Log}) 't]), :column (int 1)}
+      :name
+      'tx-data
+      :ns
+      *ns*))
+  (def missing?
+   (fn missing_QMARK_ ([db e attr] (nil? (seq (datomic.db/datoms db :aevt [attr e]))))))
+  (reset-meta!
+    #'missing?
+    (assoc
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'e 'attr]), :column (int 1)}
+      :name
+      'missing?
+      :ns
+      *ns*))
+  (def ensure-sv-attrid
+   (fn ensure_sv_attrid
+     ([db a]
+       (let [attrid (datomic.db/require-attrid db a) attr (datomic.db/attribute db attrid)]
+         (when (= 36 (.-cardinality ^datomic.db.Attribute attr))
+           (throw
+             (java.lang.IllegalArgumentException.
+               (str "cardinality-many attrs not supported: " a))))
+         attrid))))
   (reset-meta!
     #'ensure-sv-attrid
     (assoc
       {:private true,
        :arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'a]),
-       :column 1}
+       :column (int 1)}
       :name
       'ensure-sv-attrid
       :ns
@@ -120,6 +148,14 @@
       (let [attrid (ensure-sv-attrid db attr)
             temp__5802__auto__ (first (datomic.db/datoms db :aevt [attrid e]))]
         (if temp__5802__auto__ (let [d temp__5802__auto__] (.v ^datomic.Datom d)) v))))
+  (reset-meta!
+    #'get-else
+    (assoc
+      {:arglists (clojure.core/list ['db 'e 'attr 'v]), :column (int 1)}
+      :name
+      'get-else
+      :ns
+      *ns*))
   (defn get-some
     ([db e & attrs]
       (let [G__14152 (seq attrs)
@@ -134,7 +170,18 @@
                 (if temp__5802__auto__
                   (let [d temp__5802__auto__] [attrid (.v ^datomic.Datom d)])
                   (recur (next attrs))))))))))
+  (reset-meta!
+    #'get-some
+    (assoc
+      {:arglists (clojure.core/list ['db 'e '& 'attrs]), :column (int 1)}
+      :name
+      'get-some
+      :ns
+      *ns*))
   (defn ground ([x] x))
+  (reset-meta!
+    #'ground
+    (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'ground :ns *ns*))
   (defn -gather
     ([db e & attrs]
       (let [cnt (count attrs)
@@ -170,13 +217,43 @@
                             (.v (.get ^datomic.iter.Iter iter)))
                           (recur (inc i) (next attrs)))))))]
         row)))
+  (reset-meta!
+    #'-gather
+    (assoc
+      {:arglists (clojure.core/list ['db 'e '& 'attrs]), :column (int 1)}
+      :name
+      '-gather
+      :ns
+      *ns*))
   (defn / ([a b] (if (and (integer? a) (integer? b)) (quot a b) (clojure.core// a b))))
-  (def != not=)
+  (reset-meta!
+    #'/
+    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '/ :ns *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.extensions" "!=") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.extensions" "!=") not=)
   (defn < ([a b] (neg? (datomic.common/compare a b))))
+  (reset-meta!
+    #'<
+    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '< :ns *ns*))
   (defn > ([a b] (< b a)))
+  (reset-meta!
+    #'>
+    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '> :ns *ns*))
   (defn <= ([a b] (not (< b a))))
+  (reset-meta!
+    #'<=
+    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '<= :ns *ns*))
   (defn >= ([a b] (not (< a b))))
-  (def tuple vector)
-  (def untuple identity)
+  (reset-meta!
+    #'>=
+    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '>= :ns *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.extensions" "tuple") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.extensions" "tuple") vector)
+  (.setMeta (clojure.lang.RT/var "datomic.extensions" "untuple") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.extensions" "untuple") identity)
   (defn q ([query & srcs] (Circular/q query srcs)))
-  (def db-attr-splits stats/db-attr-splits))
+  (reset-meta!
+    #'q
+    (assoc {:arglists (clojure.core/list ['query '& 'srcs]), :column (int 1)} :name 'q :ns *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.extensions" "db-attr-splits") {:column (int 1)})
+  (.bindRoot (clojure.lang.RT/var "datomic.extensions" "db-attr-splits") stats/db-attr-splits))

@@ -55,111 +55,146 @@
   (set! *warn-on-reflection* true)
   (defn peer-message-type
     ([msg] (or (:type msg) (if (:id msg) (if (:data msg) :tx :error) :index))))
-  (defn submit-address ([db_name] (str db_name ".tx-submit")))
-  (defn push-address ([db_name] (str db_name ".tx-result")))
-  (defn write-handlers
-    ([cache]
-      (merge
-        fressian/user-write-handlers
-        index/common-write-handlers
-        {datomic.db.DbId
-         {"dbid"
-          (reify
-            org.fressian.handlers.WriteHandler
-            (^void write
-              [this ^org.fressian.Writer w o]
-              (do
-                (let [dbid o]
-                  (.writeTag ^org.fressian.Writer w "dbid" (int 2))
-                  (.writeObject
-                    ^org.fressian.Writer w
-                    (:part dbid)
-                    (boolean (.booleanValue ^java.lang.Boolean cache)))
-                  (.writeObject
-                    ^org.fressian.Writer w
-                    (:idx dbid)
-                    (boolean (.booleanValue ^java.lang.Boolean cache))))
-                nil)))},
-         datomic.db.Datum
-         {"datum"
-          (reify
-            org.fressian.handlers.WriteHandler
-            (^void write
-              [this ^org.fressian.Writer w o]
-              (do
-                (let [datum o]
-                  (.writeTag ^org.fressian.Writer w "datum" (int 6))
-                  (.writeBoolean
-                    ^org.fressian.Writer w
-                    (boolean (.isAssertion ^datomic.impl.db.IDatum datum)))
-                  (.writeObject
-                    ^org.fressian.Writer w
-                    (java.lang.Integer/valueOf (int (.getP ^datomic.impl.db.IDatum datum)))
-                    (boolean (.booleanValue ^java.lang.Boolean cache)))
-                  (.writeObject
-                    ^org.fressian.Writer w
-                    (long (.eidx ^datomic.db.IDatumImpl datum))
-                    (boolean (.booleanValue ^java.lang.Boolean cache)))
-                  (.writeInt ^org.fressian.Writer w (long (.getA ^datomic.impl.db.IDatum datum)))
-                  (.writeObject ^org.fressian.Writer w (.getV ^datomic.impl.db.IDatum datum))
-                  (.writeObject
-                    ^org.fressian.Writer w
-                    (long (.getT ^datomic.impl.db.IDatum datum))
-                    (boolean (.booleanValue ^java.lang.Boolean cache))))
-                nil)))}}))
-    ([] (write-handlers true)))
-  (def read-handlers
-   (merge
-     fressian/user-read-handlers
-     index/index-read-handlers
-     {"dbid"
-      (reify
-        org.fressian.handlers.ReadHandler
-        (read
-          [this ^org.fressian.Reader rdr tag ^int component_count]
-          (db/->DbId
-            (.readObject ^org.fressian.Reader rdr)
-            (.readObject ^org.fressian.Reader rdr)))),
-      "datum"
-      (reify
-        org.fressian.handlers.ReadHandler
-        (read
-          [this ^org.fressian.Reader rdr tag ^int component_count]
-          (let [assert? (.readBoolean ^org.fressian.Reader rdr)
-                part (.readInt ^org.fressian.Reader rdr)
-                eidx (.readInt ^org.fressian.Reader rdr)
-                eid (db/make-eid part eidx)
-                attrid (.readInt ^org.fressian.Reader rdr)
-                v (common/ensure-vector (.readObject ^org.fressian.Reader rdr))
-                t (.readInt ^org.fressian.Reader rdr)]
-            (if assert?
-              (db/asserting-datum eid attrid v t)
-              (db/retracting-datum eid attrid v t)))))}))
-  (defn writer
-    ([out cache] (fressian/create-writer out (write-handlers cache)))
-    ([out] (writer out true)))
   (reset-meta!
-    #'writer
+    #'peer-message-type
     (assoc
-      {:tag org.fressian.Writer, :arglists (clojure.core/list ['out] ['out 'cache]), :column 1}
+      {:arglists (clojure.core/list ['msg]), :column (int 1)}
       :name
-      'writer
+      'peer-message-type
       :ns
       *ns*))
-  (defn reader ([in] (fressian/create-reader in read-handlers)))
+  (def submit-address (fn submit_address ([db_name] (str db_name ".tx-submit"))))
   (reset-meta!
-    #'reader
+    #'submit-address
     (assoc
-      {:tag org.fressian.Reader,
-       :arglists (clojure.core/list [(.withMeta 'in {:tag 'InputStream})]),
-       :column 1}
+      {:arglists (clojure.core/list ['db-name]), :column (int 1)}
       :name
-      'reader
+      'submit-address
       :ns
       *ns*))
-  (def log-event-map (cache/create-limited 100))
+  (def push-address (fn push_address ([db_name] (str db_name ".tx-result"))))
+  (reset-meta!
+    #'push-address
+    (assoc
+      {:arglists (clojure.core/list ['db-name]), :column (int 1)}
+      :name
+      'push-address
+      :ns
+      *ns*))
+  (def write-handlers
+   (fn write_handlers
+     ([cache]
+       (merge
+         fressian/user-write-handlers
+         index/common-write-handlers
+         {datomic.db.DbId
+          {"dbid"
+           (reify
+             org.fressian.handlers.WriteHandler
+             (^void write
+               [this ^org.fressian.Writer w o]
+               (do
+                 (let [dbid o]
+                   (.writeTag ^org.fressian.Writer w "dbid" (int 2))
+                   (.writeObject
+                     ^org.fressian.Writer w
+                     (:part dbid)
+                     (boolean (.booleanValue ^java.lang.Boolean cache)))
+                   (.writeObject
+                     ^org.fressian.Writer w
+                     (:idx dbid)
+                     (boolean (.booleanValue ^java.lang.Boolean cache))))
+                 nil)))},
+          datomic.db.Datum
+          {"datum"
+           (reify
+             org.fressian.handlers.WriteHandler
+             (^void write
+               [this ^org.fressian.Writer w o]
+               (do
+                 (let [datum o]
+                   (.writeTag ^org.fressian.Writer w "datum" (int 6))
+                   (.writeBoolean
+                     ^org.fressian.Writer w
+                     (boolean (.isAssertion ^datomic.impl.db.IDatum datum)))
+                   (.writeObject
+                     ^org.fressian.Writer w
+                     (java.lang.Integer/valueOf (int (.getP ^datomic.impl.db.IDatum datum)))
+                     (boolean (.booleanValue ^java.lang.Boolean cache)))
+                   (.writeObject
+                     ^org.fressian.Writer w
+                     (long (.eidx ^datomic.db.IDatumImpl datum))
+                     (boolean (.booleanValue ^java.lang.Boolean cache)))
+                   (.writeInt ^org.fressian.Writer w (long (.getA ^datomic.impl.db.IDatum datum)))
+                   (.writeObject ^org.fressian.Writer w (.getV ^datomic.impl.db.IDatum datum))
+                   (.writeObject
+                     ^org.fressian.Writer w
+                     (long (.getT ^datomic.impl.db.IDatum datum))
+                     (boolean (.booleanValue ^java.lang.Boolean cache))))
+                 nil)))}}))
+     ([] (write-handlers true))))
+  (reset-meta!
+    #'write-handlers
+    (assoc
+      {:arglists (clojure.core/list [] ['cache]), :column (int 1)}
+      :name
+      'write-handlers
+      :ns
+      *ns*))
+  (.setMeta (clojure.lang.RT/var "datomic.transaction" "read-handlers") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.transaction" "read-handlers")
+    (merge
+      fressian/user-read-handlers
+      index/index-read-handlers
+      {"dbid"
+       (reify
+         org.fressian.handlers.ReadHandler
+         (read
+           [this ^org.fressian.Reader rdr tag ^int component_count]
+           (db/->DbId
+             (.readObject ^org.fressian.Reader rdr)
+             (.readObject ^org.fressian.Reader rdr)))),
+       "datum"
+       (reify
+         org.fressian.handlers.ReadHandler
+         (read
+           [this ^org.fressian.Reader rdr tag ^int component_count]
+           (let [assert? (.readBoolean ^org.fressian.Reader rdr)
+                 part (.readInt ^org.fressian.Reader rdr)
+                 eidx (.readInt ^org.fressian.Reader rdr)
+                 eid (db/make-eid part eidx)
+                 attrid (.readInt ^org.fressian.Reader rdr)
+                 v (common/ensure-vector (.readObject ^org.fressian.Reader rdr))
+                 t (.readInt ^org.fressian.Reader rdr)]
+             (if assert?
+               (db/asserting-datum eid attrid v t)
+               (db/retracting-datum eid attrid v t)))))}))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.transaction" "writer")
+    {:tag org.fressian.Writer,
+     :arglists (clojure.core/list ['out] ['out 'cache]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.transaction" "writer")
+    (fn writer
+      ([out cache] (fressian/create-writer out (write-handlers cache)))
+      ([out] (writer out true))))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.transaction" "reader")
+    {:tag org.fressian.Reader,
+     :arglists (clojure.core/list [(.withMeta 'in {:tag 'InputStream})]),
+     :column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.transaction" "reader")
+    (fn reader ([in] (fressian/create-reader in read-handlers))))
+  (.setMeta (clojure.lang.RT/var "datomic.transaction" "log-event-map") {:column (int 1)})
+  (.bindRoot
+    (clojure.lang.RT/var "datomic.transaction" "log-event-map")
+    (cache/create-limited 100))
   (def loggable-keys
    [:event :txid :t :msec :apply-msec :datom-count :io-stats :tx-stats :pf-stats])
+  (reset-meta! #'loggable-keys (assoc {:column (int 1)} :name 'loggable-keys :ns *ns*))
   (defn log-completion!
     ([ids]
       (let [written_at (java.lang.System/nanoTime)]
@@ -260,10 +295,26 @@
                                       loggable-keys))))
                               nil))))
                       (recur (next seq_17051) nil 0 0)))))))))))
+  (reset-meta!
+    #'log-completion!
+    (assoc
+      {:arglists (clojure.core/list ['ids]), :column (int 1)}
+      :name
+      'log-completion!
+      :ns
+      *ns*))
   (defn add-to-log-event!
     ([id m]
       (let [tx_info (cache/get-from-cache log-event-map id {})]
         (cache/put log-event-map id (merge tx_info m)))))
+  (reset-meta!
+    #'add-to-log-event!
+    (assoc
+      {:arglists (clojure.core/list ['id 'm]), :column (int 1)}
+      :name
+      'add-to-log-event!
+      :ns
+      *ns*))
   (defn read-message
     ([is]
       (let [read_at (java.lang.System/nanoTime)
@@ -271,5 +322,16 @@
             msg (.readObject ^org.fressian.Reader fin)]
         (cache/put log-event-map (common/getx msg :id) {:read-at (long read_at)})
         msg)))
+  (reset-meta!
+    #'read-message
+    (assoc {:arglists (clojure.core/list ['is]), :column (int 1)} :name 'read-message :ns *ns*))
   (defn create-procargs
-    ([tx options] (cond-> {:id (common/rand-uuid), :data tx} options (assoc :options options)))))
+    ([tx options] (cond-> {:id (common/rand-uuid), :data tx} options (assoc :options options))))
+  (reset-meta!
+    #'create-procargs
+    (assoc
+      {:arglists (clojure.core/list ['tx 'options]), :column (int 1)}
+      :name
+      'create-procargs
+      :ns
+      *ns*)))

@@ -27,50 +27,66 @@
         (and
           (.-isComponent ^datomic.db.Attribute attr)
           (= 20 (.-vtypeid ^datomic.db.Attribute attr))))))
-  (defn component-es-set
-    ([db e via_attrs]
-      (when e
-        (let [es #{e}
-              G__29913 [e]
-              vec__29914 G__29913
-              seq__29915 (seq vec__29914)
-              first__29916 (first seq__29915)
-              seq__29915 (next seq__29915)
-              check first__29916
-              more seq__29915
-              via via_attrs]
-          (loop [es es G__29913 G__29913 via via]
-            (let [es es
-                  vec__29917 G__29913
-                  seq__29918 (seq vec__29917)
-                  first__29919 (first seq__29918)
-                  seq__29918 (next seq__29918)
-                  check first__29919
-                  more seq__29918
-                  via via]
-              (if check
-                (let [comps (reduce
-                              (fn fn__29920
-                                ([s d]
-                                  (if (and
-                                        (or
-                                          (empty? via)
-                                          (contains?
-                                            via
-                                            (java.lang.Integer/valueOf
-                                              (int (.getA ^datomic.impl.db.IDatum d)))))
-                                        (component-attr?
-                                          db
-                                          (java.lang.Integer/valueOf
-                                            (int (.getA ^datomic.impl.db.IDatum d)))))
-                                    (conj s (.getV ^datomic.impl.db.IDatum d))
-                                    s)))
-                              #{}
-                              (db/datoms db :eavt [check]))]
-                  (recur (into es comps) (into more (set/difference comps es)) nil))
-                es))))
-        nil))
-    ([db e] (component-es-set db e nil)))
+  (reset-meta!
+    #'component-attr?
+    (assoc
+      {:arglists (clojure.core/list ['db 'a]), :column (int 1)}
+      :name
+      'component-attr?
+      :ns
+      *ns*))
+  (def component-es-set
+   (fn component_es_set
+     ([db e via_attrs]
+       (when e
+         (let [es #{e}
+               G__29913 [e]
+               vec__29914 G__29913
+               seq__29915 (seq vec__29914)
+               first__29916 (first seq__29915)
+               seq__29915 (next seq__29915)
+               check first__29916
+               more seq__29915
+               via via_attrs]
+           (loop [es es G__29913 G__29913 via via]
+             (let [es es
+                   vec__29917 G__29913
+                   seq__29918 (seq vec__29917)
+                   first__29919 (first seq__29918)
+                   seq__29918 (next seq__29918)
+                   check first__29919
+                   more seq__29918
+                   via via]
+               (if check
+                 (let [comps (reduce
+                               (fn fn__29920
+                                 ([s d]
+                                   (if (and
+                                         (or
+                                           (empty? via)
+                                           (contains?
+                                             via
+                                             (java.lang.Integer/valueOf
+                                               (int (.getA ^datomic.impl.db.IDatum d)))))
+                                         (component-attr?
+                                           db
+                                           (java.lang.Integer/valueOf
+                                             (int (.getA ^datomic.impl.db.IDatum d)))))
+                                     (conj s (.getV ^datomic.impl.db.IDatum d))
+                                     s)))
+                               #{}
+                               (db/datoms db :eavt [check]))]
+                   (recur (into es comps) (into more (set/difference comps es)) nil))
+                 es))))))
+     ([db e] (component-es-set db e nil))))
+  (reset-meta!
+    #'component-es-set
+    (assoc
+      {:arglists (clojure.core/list ['db 'e] ['db 'e 'via-attrs]), :column (int 1)}
+      :name
+      'component-es-set
+      :ns
+      *ns*))
   (defn build-retract-args
     ([db e]
       (let [temp__5804__auto__ (db/resolve-id db e)]
@@ -119,22 +135,39 @@
                         (db/datoms db :vaet [e])))))
                 (transient [])
                 (component-es-set db e))))))))
-  (defn compare-and-swap
-    ([db e a v_old v_new]
-      (when-not (and e a (not (nil? v_new)))
-        (error/arg
-          :db.error/invalid-cas
-          "entity, attribute, and new-value must be specified"
-          {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v-new v_new}))
-      (when (= 36 (.-cardinality (db/attribute db (db/require-attrid db a))))
-        (error/arg
-          :db.error/invalid-cas-many
-          "attribute must be cardinality-one"
-          {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v-new v_new}))
-      (let [v_cur (:v (first (db/datoms db :eavt [e a])))]
-        (if (= v_cur v_old)
-          [[:db/add e a v_new]]
-          (error/state
-            :db.error/cas-failed
-            (str "Compare failed: " v_old " " v_cur)
-            {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v v_cur}))))))
+  (reset-meta!
+    #'build-retract-args
+    (assoc
+      {:arglists (clojure.core/list ['db 'e]), :column (int 1)}
+      :name
+      'build-retract-args
+      :ns
+      *ns*))
+  (def compare-and-swap
+   (fn compare_and_swap
+     ([db e a v_old v_new]
+       (when-not (and e a (not (nil? v_new)))
+         (error/arg
+           :db.error/invalid-cas
+           "entity, attribute, and new-value must be specified"
+           {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v-new v_new}))
+       (when (= 36 (.-cardinality (db/attribute db (db/require-attrid db a))))
+         (error/arg
+           :db.error/invalid-cas-many
+           "attribute must be cardinality-one"
+           {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v-new v_new}))
+       (let [v_cur (:v (first (db/datoms db :eavt [e a])))]
+         (if (= v_cur v_old)
+           [[:db/add e a v_new]]
+           (error/state
+             :db.error/cas-failed
+             (str "Compare failed: " v_old " " v_cur)
+             {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v v_cur}))))))
+  (reset-meta!
+    #'compare-and-swap
+    (assoc
+      {:arglists (clojure.core/list ['db 'e 'a 'v-old 'v-new]), :column (int 1)}
+      :name
+      'compare-and-swap
+      :ns
+      *ns*)))

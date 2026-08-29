@@ -82,17 +82,18 @@
       nil
       nil
       nil))
-  (defn fake-descriptor
-    ([root_id]
-      {:rev 0,
-       :etag "fake",
-       :d/l 3,
-       :d/r root_id,
-       :d/v (config/property "datomic.versionUnique")}))
+  (def fake-descriptor
+   (fn fake_descriptor
+     ([root_id]
+       {:rev 0,
+        :etag "fake",
+        :d/l 3,
+        :d/r root_id,
+        :d/v (config/property "datomic.versionUnique")})))
   (reset-meta!
     #'fake-descriptor
     (assoc
-      {:private true, :arglists (clojure.core/list ['root-id]), :column 1}
+      {:private true, :arglists (clojure.core/list ['root-id]), :column (int 1)}
       :name
       'fake-descriptor
       :ns
@@ -101,10 +102,16 @@
     ([log]
       (let [root (log/get-root-val log) dir (get (:olookup log) (:uuid (first root)))]
         (get (:olookup log) (:uuid (first dir))))))
+  (reset-meta!
+    #'first-leaf
+    (assoc {:arglists (clojure.core/list ['log]), :column (int 1)} :name 'first-leaf :ns *ns*))
   (defn last-leaf
     ([log]
       (let [root (log/get-root-val log) dir (get (:olookup log) (:uuid (last root)))]
         (get (:olookup log) (:uuid (last dir))))))
+  (reset-meta!
+    #'last-leaf
+    (assoc {:arglists (clojure.core/list ['log]), :column (int 1)} :name 'last-leaf :ns *ns*))
   (s/def-impl
     :datomic.tools.log-tools/t-range
     (clojure.core/list 'clojure.spec.alpha/tuple :datomic.log/t :datomic.log/t)
@@ -122,56 +129,80 @@
       nil))
   (defn t-range
     ([log] [(:t (first (first-leaf log))) (inc (log/max-eidx (:data (last (last-leaf log)))))]))
-  (defn create-tree-log
-    ([olookup root_id]
-      (when-not root_id
-        (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root-id)))))
-      (log/->LogImpl olookup (fake-descriptor root_id) (log/empty-tail))))
+  (reset-meta!
+    #'t-range
+    (assoc {:arglists (clojure.core/list ['log]), :column (int 1)} :name 't-range :ns *ns*))
+  (def create-tree-log
+   (fn create_tree_log
+     ([olookup root_id]
+       (when-not root_id
+         (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root-id)))))
+       (log/->LogImpl olookup (fake-descriptor root_id) (log/empty-tail)))))
+  (reset-meta!
+    #'create-tree-log
+    (assoc
+      {:arglists (clojure.core/list ['olookup 'root-id]), :column (int 1)}
+      :name
+      'create-tree-log
+      :ns
+      *ns*))
   (defn write*
     ([cs id val]
       (when-not (= :created (deref (log/zip-and-create cs id val)))
         (throw (java.lang.RuntimeException. "Unable to write to storage"))
         nil)))
-  (defn truncate-log
-    ([cr basis_root_id t]
-      (when (< 1000 t)
-        (let [keep? (fn keep_QMARK_ ([p1__30073#] (< (:t p1__30073#) t)))
-              ol (:olookup cr)
-              cs (:cluster cr)
-              write (partial write* cs)
-              root (get ol basis_root_id)
-              new_root (into [] (take-while keep? root))
-              dir (get ol (:uuid (peek new_root)))
-              new_dir (into [] (take-while keep? dir))
-              leaf (get ol (:uuid (peek new_dir)))
-              new_leaf (into [] (take-while keep? leaf))
-              vec__30074 (repeatedly common/rand-uuid)
-              leaf_id (nth vec__30074 (int 0) nil)
-              dir_id (nth vec__30074 (int 1) nil)
-              root_id (nth vec__30074 (int 2) nil)]
-          (^clojure.lang.IFn write leaf_id (log/fressianed-leaf new_leaf))
-          (^clojure.lang.IFn write
-            dir_id
-            (log/fressianed-dir
-              (conj (pop new_dir) (log/create-entry (:t (first new_leaf)) leaf_id))))
-          (^clojure.lang.IFn write
-            root_id
-            (log/fressianed-dir
-              (conj (pop new_root) (log/create-entry (:t (first new_dir)) dir_id))))
-          {:basis
-           {:root-id basis_root_id,
-            :dir-id (:uuid (peek new_root)),
-            :leaf-id (:uuid (peek new_dir)),
-            :root-count (java.lang.Integer/valueOf (int (count root))),
-            :dir-count (java.lang.Integer/valueOf (int (count dir))),
-            :leaf-count (java.lang.Integer/valueOf (int (count leaf)))},
-           :truncated
-           {:root-id root_id,
-            :dir-id dir_id,
-            :leaf-id leaf_id,
-            :root-count (java.lang.Integer/valueOf (int (count new_root))),
-            :dir-count (java.lang.Integer/valueOf (int (count new_dir))),
-            :leaf-count (java.lang.Integer/valueOf (int (count new_leaf)))}}))))
+  (reset-meta!
+    #'write*
+    (assoc {:arglists (clojure.core/list ['cs 'id 'val]), :column (int 1)} :name 'write* :ns *ns*))
+  (def truncate-log
+   (fn truncate_log
+     ([cr basis_root_id t]
+       (when (< 1000 t)
+         (let [keep? (fn keep_QMARK_ ([p1__30073#] (< (:t p1__30073#) t)))
+               ol (:olookup cr)
+               cs (:cluster cr)
+               write (partial write* cs)
+               root (get ol basis_root_id)
+               new_root (into [] (take-while keep? root))
+               dir (get ol (:uuid (peek new_root)))
+               new_dir (into [] (take-while keep? dir))
+               leaf (get ol (:uuid (peek new_dir)))
+               new_leaf (into [] (take-while keep? leaf))
+               vec__30074 (repeatedly common/rand-uuid)
+               leaf_id (nth vec__30074 (int 0) nil)
+               dir_id (nth vec__30074 (int 1) nil)
+               root_id (nth vec__30074 (int 2) nil)]
+           (^clojure.lang.IFn write leaf_id (log/fressianed-leaf new_leaf))
+           (^clojure.lang.IFn write
+             dir_id
+             (log/fressianed-dir
+               (conj (pop new_dir) (log/create-entry (:t (first new_leaf)) leaf_id))))
+           (^clojure.lang.IFn write
+             root_id
+             (log/fressianed-dir
+               (conj (pop new_root) (log/create-entry (:t (first new_dir)) dir_id))))
+           {:basis
+            {:root-id basis_root_id,
+             :dir-id (:uuid (peek new_root)),
+             :leaf-id (:uuid (peek new_dir)),
+             :root-count (java.lang.Integer/valueOf (int (count root))),
+             :dir-count (java.lang.Integer/valueOf (int (count dir))),
+             :leaf-count (java.lang.Integer/valueOf (int (count leaf)))},
+            :truncated
+            {:root-id root_id,
+             :dir-id dir_id,
+             :leaf-id leaf_id,
+             :root-count (java.lang.Integer/valueOf (int (count new_root))),
+             :dir-count (java.lang.Integer/valueOf (int (count new_dir))),
+             :leaf-count (java.lang.Integer/valueOf (int (count new_leaf)))}})))))
+  (reset-meta!
+    #'truncate-log
+    (assoc
+      {:arglists (clojure.core/list ['cr 'basis-root-id 't]), :column (int 1)}
+      :name
+      'truncate-log
+      :ns
+      *ns*))
   (s/def-impl
     'datomic.tools.log-tools/merge-roots
     (clojure.core/list
@@ -216,22 +247,34 @@
       nil
       nil
       nil))
-  (defn merge-roots
-    ([cr root_id_1 root_id_2]
-      (let [ol (:olookup cr)
-            log_1 (create-tree-log ol root_id_1)
-            log_2 (create-tree-log ol root_id_2)
-            range_1 (t-range log_1)
-            range_2 (t-range log_2)
-            log_root_1 (log/get-root-val log_1)
-            log_root_2 (log/get-root-val log_2)]
-        (if (= (second range_1) (first range_2))
-          (let [merged_root_id (common/rand-uuid)]
-            (write* (:cluster cr) merged_root_id (log/fressianed-dir (into log_root_1 log_root_2)))
-            merged_root_id)
-          (do
-            (throw (ex-info "Logs are not contiguous" {:range-1 range_1, :range-2 range_2}))
-            nil)))))
+  (def merge-roots
+   (fn merge_roots
+     ([cr root_id_1 root_id_2]
+       (let [ol (:olookup cr)
+             log_1 (create-tree-log ol root_id_1)
+             log_2 (create-tree-log ol root_id_2)
+             range_1 (t-range log_1)
+             range_2 (t-range log_2)
+             log_root_1 (log/get-root-val log_1)
+             log_root_2 (log/get-root-val log_2)]
+         (if (= (second range_1) (first range_2))
+           (let [merged_root_id (common/rand-uuid)]
+             (write*
+               (:cluster cr)
+               merged_root_id
+               (log/fressianed-dir (into log_root_1 log_root_2)))
+             merged_root_id)
+           (do
+             (throw (ex-info "Logs are not contiguous" {:range-1 range_1, :range-2 range_2}))
+             nil))))))
+  (reset-meta!
+    #'merge-roots
+    (assoc
+      {:arglists (clojure.core/list ['cr 'root-id-1 'root-id-2]), :column (int 1)}
+      :name
+      'merge-roots
+      :ns
+      *ns*))
   (s/def-impl
     'datomic.tools.log-tools/transform-root
     (clojure.core/list
@@ -266,6 +309,14 @@
                       (assoc result :event :datomic.tools.log-tools/transform-root))))
                 nil)
               result))))))
+  (reset-meta!
+    #'transform-root
+    (assoc
+      {:arglists (clojure.core/list ['cs 'f]), :column (int 1)}
+      :name
+      'transform-root
+      :ns
+      *ns*))
   (s/def-impl
     'datomic.tools.log-tools/race-to-transform-root
     (clojure.core/list
@@ -325,34 +376,55 @@
       nil
       nil
       nil))
-  (defn race-to-transform-root
-    ([cs f retry_limit]
-      (loop [n 0]
-        (if (>= n retry_limit)
-          {:retries (long n), :transform-root-result nil}
-          (let [result (transform-root cs f)]
-            (if result {:retries (long n), :transform-root-result result} (recur (inc n))))))))
-  (defn rebuild-root
-    ([olookup root_id]
-      (let [root (get olookup root_id)]
-        (reduce
-          (fn fn__30098
-            ([p__30097 entry]
-              (let [map__30099 p__30097
-                    map__30099 (if (seq? map__30099)
-                                 (if (next map__30099)
-                                   (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                     (to-array map__30099))
-                                   (if (seq map__30099) (first map__30099) {}))
-                                 map__30099)
-                    rebuilt (get map__30099 :rebuilt)
-                    root (get map__30099 :root)
-                    root_t (:t entry)
-                    dir_t (:t (first (get olookup (:uuid entry))))]
-                (if (= root_t dir_t)
-                  {:rebuilt rebuilt, :root (conj root entry)}
-                  {:rebuilt (conj rebuilt {:root-t root_t, :dir-t dir_t}),
-                   :root (conj root (assoc entry :t dir_t))}))))
-          {:rebuilt nil, :root [(first root)]}
-          (rest root)))))
-  (defn has-t? ([log t] (= t (:t (iter/iget (log/seek-tx log t)))))))
+  (def race-to-transform-root
+   (fn race_to_transform_root
+     ([cs f retry_limit]
+       (loop [n 0]
+         (if (>= n retry_limit)
+           {:retries (long n), :transform-root-result nil}
+           (let [result (transform-root cs f)]
+             (if result {:retries (long n), :transform-root-result result} (recur (inc n)))))))))
+  (reset-meta!
+    #'race-to-transform-root
+    (assoc
+      {:arglists (clojure.core/list ['cs 'f 'retry-limit]), :column (int 1)}
+      :name
+      'race-to-transform-root
+      :ns
+      *ns*))
+  (def rebuild-root
+   (fn rebuild_root
+     ([olookup root_id]
+       (let [root (get olookup root_id)]
+         (reduce
+           (fn fn__30098
+             ([p__30097 entry]
+               (let [map__30099 p__30097
+                     map__30099 (if (seq? map__30099)
+                                  (if (next map__30099)
+                                    (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                      (to-array map__30099))
+                                    (if (seq map__30099) (first map__30099) {}))
+                                  map__30099)
+                     rebuilt (get map__30099 :rebuilt)
+                     root (get map__30099 :root)
+                     root_t (:t entry)
+                     dir_t (:t (first (get olookup (:uuid entry))))]
+                 (if (= root_t dir_t)
+                   {:rebuilt rebuilt, :root (conj root entry)}
+                   {:rebuilt (conj rebuilt {:root-t root_t, :dir-t dir_t}),
+                    :root (conj root (assoc entry :t dir_t))}))))
+           {:rebuilt nil, :root [(first root)]}
+           (rest root))))))
+  (reset-meta!
+    #'rebuild-root
+    (assoc
+      {:arglists (clojure.core/list ['olookup 'root-id]), :column (int 1)}
+      :name
+      'rebuild-root
+      :ns
+      *ns*))
+  (defn has-t? ([log t] (= t (:t (iter/iget (log/seek-tx log t))))))
+  (reset-meta!
+    #'has-t?
+    (assoc {:arglists (clojure.core/list ['log 't]), :column (int 1)} :name 'has-t? :ns *ns*)))

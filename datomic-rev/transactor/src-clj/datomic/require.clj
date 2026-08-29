@@ -25,11 +25,27 @@
                     (let [s (first seq_9828)]
                       (try (clojure.core/require s) (catch java.io.FileNotFoundException _ nil))
                       (recur (next seq_9828) nil 0 0)))))))))))
+  (reset-meta!
+    #'maybe-require
+    (assoc
+      {:arglists (clojure.core/list ['& 'syms]), :column (int 1)}
+      :name
+      'maybe-require
+      :ns
+      *ns*))
   (defn require-and-run
     ([sym & args]
       (let [temp__5804__auto__ (namespace sym)]
         (when temp__5804__auto__ (let [ns temp__5804__auto__] (clojure.core/require (symbol ns)))))
       (apply (resolve sym) args)))
+  (reset-meta!
+    #'require-and-run
+    (assoc
+      {:arglists (clojure.core/list ['sym '& 'args]), :column (int 1)}
+      :name
+      'require-and-run
+      :ns
+      *ns*))
   (defn -main
     ([sname & args]
       (try
@@ -37,4 +53,12 @@
         (catch
           java.lang.Throwable
           t
-          (do (.printStackTrace ^java.lang.Throwable t) (java.lang.System/exit (int -1)) nil))))))
+          (do (.printStackTrace ^java.lang.Throwable t) (java.lang.System/exit (int -1)) nil)))))
+  (reset-meta!
+    #'-main
+    (assoc
+      {:arglists (clojure.core/list ['sname '& 'args]), :column (int 1)}
+      :name
+      '-main
+      :ns
+      *ns*)))
