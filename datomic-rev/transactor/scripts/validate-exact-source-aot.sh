@@ -924,7 +924,8 @@ gate_input_files=("$cohort" "$class_ownership" "$runtime_policy" \
   "$candidate_runtime" "$oracle_runtime" "$candidate_collisions" \
   "$allowed_resources" "$forbidden_payloads")
 write_boundary_seal() {
-  local gate=$1 phase=$2 extra=${3:-} destination="$output_abs/evidence/$gate-$phase.tsv"
+  local gate=$1 phase=$2 extra=${3:-}
+  local destination="$output_abs/evidence/$gate-$phase.tsv"
   {
     printf 'kind\tpath\tsha256\n'
     printf 'tree\t%s\t%s\n' "$jdk_root" "$(tree_digest "$jdk_root")"

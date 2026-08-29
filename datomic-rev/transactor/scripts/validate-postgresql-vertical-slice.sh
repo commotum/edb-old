@@ -98,6 +98,17 @@ Runtime and evidence:
                          Block authoritative PostgreSQL log-root publication,
                          crash the exact owned Transactor before acknowledgement,
                          then prove nonpublication and fresh-process recovery.
+  --transaction-post-publication-fault-only
+                         Freeze the Peer after submission, allow authoritative
+                         publication, crash/restart the Transactor before the
+                         Peer can observe a result, then prove one committed
+                         effect through same-Peer and fresh-Peer recovery.
+  --transaction-ha-inflight-only
+                         Block one Peer transaction before publication, promote
+                         the recovered standby while the active and its writer
+                         are frozen, abort that exact writer, resume/fence the
+                         stale active, then prove same-Peer recovery and one
+                         durable follow-up transaction through the promoted node.
   --with-ha               After transport recovery, run one bounded recovered
                           active/standby takeover and self-fencing cycle.
   --standby-port PORT     Dedicated standby transport port (default: 54340).
@@ -126,6 +137,17 @@ Transaction-ack-fault-only order:
   prove PostgreSQL lock wait and no Peer result -> exact-process SIGKILL -> abort
   its exact blocked SQL session -> prove nonpublication -> restart/recover ->
   restart/fresh-Peer audit -> clean shutdown.
+
+Transaction-post-publication-fault-only order:
+  recovered Transactor -> seed -> lock authoritative log root -> submit CAS plus
+  sentinel -> prove no Peer result -> freeze exact Peer -> terminate holder to
+  publish -> observe root advance -> crash/restart Transactor -> resume same
+  Peer -> prove one committed effect -> restart/fresh-Peer audit -> shutdown.
+
+Transaction-ha-inflight-only order:
+  active + blocked Peer transaction -> standby -> freeze active -> promote ->
+  abort exact blocked writer -> resume and self-fence stale active -> same-Peer
+  unavailable outcome and promoted-node write -> fresh-Peer audit -> shutdown.
 
 Main executing order:
   seed -> graceful stop -> restart -> equal snapshot -> augment -> graceful ->
@@ -291,6 +313,8 @@ startup_failure_only=false
 storage_cas_only=false
 transaction_boundaries_only=false
 transaction_ack_fault_only=false
+transaction_postpublication_fault_only=false
+transaction_ha_inflight_only=false
 with_ha=false
 confirmation=${RECOVERED_PAIR_CONFIRM_DISPOSABLE:-}
 dry_run=false
@@ -325,6 +349,10 @@ while (($#)); do
     --storage-cas-only) storage_cas_only=true; shift ;;
     --transaction-boundaries-only) transaction_boundaries_only=true; shift ;;
     --transaction-ack-fault-only) transaction_ack_fault_only=true; shift ;;
+    --transaction-post-publication-fault-only)
+      transaction_postpublication_fault_only=true; shift ;;
+    --transaction-ha-inflight-only)
+      transaction_ha_inflight_only=true; with_ha=true; shift ;;
     --with-ha) with_ha=true; shift ;;
     --standby-port) standby_port=${2:?missing value for --standby-port}; shift 2 ;;
     --startup-timeout) startup_timeout=${2:?missing value for --startup-timeout}; shift 2 ;;
@@ -371,6 +399,22 @@ require_positive_integer probe-timeout "$probe_timeout"
   die "--transaction-ack-fault-only and --transaction-boundaries-only are mutually exclusive"
 [[ "$transaction_ack_fault_only" != true || "$with_ha" != true ]] ||
   die "--transaction-ack-fault-only and --with-ha are mutually exclusive"
+[[ "$transaction_postpublication_fault_only" != true || "$startup_failure_only" != true ]] ||
+  die "--transaction-post-publication-fault-only and --startup-failure-only are mutually exclusive"
+[[ "$transaction_postpublication_fault_only" != true || "$storage_cas_only" != true ]] ||
+  die "--transaction-post-publication-fault-only and --storage-cas-only are mutually exclusive"
+[[ "$transaction_postpublication_fault_only" != true || "$transaction_boundaries_only" != true ]] ||
+  die "--transaction-post-publication-fault-only and --transaction-boundaries-only are mutually exclusive"
+[[ "$transaction_postpublication_fault_only" != true || "$transaction_ack_fault_only" != true ]] ||
+  die "--transaction-post-publication-fault-only and --transaction-ack-fault-only are mutually exclusive"
+[[ "$transaction_postpublication_fault_only" != true || "$with_ha" != true ]] ||
+  die "--transaction-post-publication-fault-only and --with-ha are mutually exclusive"
+for focused_mode in startup_failure_only storage_cas_only \
+                    transaction_boundaries_only transaction_ack_fault_only \
+                    transaction_postpublication_fault_only; do
+  [[ "$transaction_ha_inflight_only" != true || "${!focused_mode}" != true ]] ||
+    die "--transaction-ha-inflight-only and ${focused_mode//_/-} are mutually exclusive"
+done
 [[ "$pg_host" == 127.0.0.1 ]] || die "PostgreSQL must bind only to 127.0.0.1"
 require_port pg-port "$pg_port"
 require_port transactor-port "$transactor_port"
@@ -1154,6 +1198,9 @@ config_record="$work_root/config.properties"
   printf 'storage.cas.only=%s\n' "$storage_cas_only"
   printf 'transaction.boundaries.only=%s\n' "$transaction_boundaries_only"
   printf 'transaction.ack.fault.only=%s\n' "$transaction_ack_fault_only"
+  printf 'transaction.postpublication.fault.only=%s\n' \
+    "$transaction_postpublication_fault_only"
+  printf 'transaction.ha.inflight.only=%s\n' "$transaction_ha_inflight_only"
   printf 'transaction.ack.fault.timeout.seconds=%s\n' "$ack_fault_timeout"
   printf 'ha.enabled=%s\n' "$with_ha"
   printf 'ha.standby.port=%s\n' "$standby_port"
@@ -1228,6 +1275,9 @@ transport_probe_pid=
 transport_watchdog_pid=
 transport_fd=
 ack_fault_probe_pid=
+ack_fault_probe_starttime=
+ack_fault_probe_paused=false
+ack_fault_probe_expected_argv=()
 ack_fault_fd=
 ha_probe_pid=
 ha_watchdog_pid=
@@ -1305,6 +1355,58 @@ verify_ha_standby_identity() {
   for ((index = 0; index < ${#actual_argv[@]}; index += 1)); do
     [[ "${actual_argv[$index]}" == "${ha_standby_expected_argv[$index]}" ]] || return 1
   done
+}
+
+verify_ack_fault_probe_identity() {
+  local pid=$1
+  local exe
+  local -a actual_argv=()
+  local index
+  process_running "$pid" || return 1
+  [[ "$(process_starttime "$pid")" == "$ack_fault_probe_starttime" ]] || return 1
+  exe=$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)
+  [[ "$exe" == "$java_bin" ]] || return 1
+  mapfile -d '' -t actual_argv <"/proc/$pid/cmdline"
+  [[ "${#actual_argv[@]}" -eq "${#ack_fault_probe_expected_argv[@]}" ]] || return 1
+  for ((index = 0; index < ${#actual_argv[@]}; index += 1)); do
+    [[ "${actual_argv[$index]}" == "${ack_fault_probe_expected_argv[$index]}" ]] ||
+      return 1
+  done
+}
+
+pause_ack_fault_probe() {
+  [[ -n "$ack_fault_probe_pid" ]] || return 1
+  verify_ack_fault_probe_identity "$ack_fault_probe_pid" || return 1
+  kill -STOP "$ack_fault_probe_pid" || return 1
+  local attempt
+  for ((attempt = 0; attempt < 5; attempt += 1)); do
+    if [[ "$(process_state "$ack_fault_probe_pid")" == T ||
+          "$(process_state "$ack_fault_probe_pid")" == t ]]; then
+      ack_fault_probe_paused=true
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+resume_ack_fault_probe() {
+  [[ -n "$ack_fault_probe_pid" ]] || return 0
+  process_running "$ack_fault_probe_pid" || {
+    ack_fault_probe_paused=false
+    return 0
+  }
+  [[ "$ack_fault_probe_paused" == true ]] || return 0
+  verify_ack_fault_probe_identity "$ack_fault_probe_pid" || return 1
+  kill -CONT "$ack_fault_probe_pid" || return 1
+  ack_fault_probe_paused=false
+  local attempt
+  for ((attempt = 0; attempt < 5; attempt += 1)); do
+    [[ "$(process_state "$ack_fault_probe_pid")" != T &&
+       "$(process_state "$ack_fault_probe_pid")" != t ]] && return 0
+    sleep 1
+  done
+  return 1
 }
 
 marker_count() {
@@ -1404,10 +1506,17 @@ stop_ack_fault_probe() {
   fi
   [[ -n "$ack_fault_probe_pid" ]] || return 0
   if process_running "$ack_fault_probe_pid"; then
+    resume_ack_fault_probe || return 1
+    if ((${#ack_fault_probe_expected_argv[@]})); then
+      verify_ack_fault_probe_identity "$ack_fault_probe_pid" || return 1
+    fi
     kill -TERM "$ack_fault_probe_pid" 2>/dev/null || true
   fi
   wait "$ack_fault_probe_pid" 2>/dev/null || true
   ack_fault_probe_pid=
+  ack_fault_probe_starttime=
+  ack_fault_probe_paused=false
+  ack_fault_probe_expected_argv=()
 }
 
 start_ha_watchdog() {
@@ -1989,6 +2098,7 @@ run_ack_fault_probe() {
   case "$mode" in
     recover) marker_prefix=STAGE5-ACK-RECOVER ;;
     audit) marker_prefix=STAGE5-ACK-AUDIT ;;
+    publication-audit) marker_prefix=STAGE5-ACK-POSTPUBLICATION-AUDIT ;;
     *) die "unknown acknowledgement-fault probe mode: $mode" ;;
   esac
   run_candidate_probe "$label" \
@@ -2861,6 +2971,646 @@ if [[ "$transaction_ack_fault_only" == true ]]; then
   echo "Recovered transaction prepublication crash-consistency gate passed"
   echo "one exact owned Transactor was deliberately killed; two restarts stopped gracefully"
   echo "PostgreSQL is shut down; evidence: $work_root"
+  exit 0
+fi
+
+if [[ "$transaction_postpublication_fault_only" == true ]]; then
+  ack_jdbc_url="jdbc:postgresql://$pg_host:$pg_port/$catalog"
+  ack_fifo="$runtime_dir/ack-postpublication-control.fifo"
+  ack_stdout="$logs_dir/ack-postpublication-window.out"
+  ack_stderr="$logs_dir/ack-postpublication-window.err"
+  [[ ! -e "$ack_fifo" ]] || die "post-publication control FIFO already exists"
+
+  current_step=ack-postpublication-transactor-boot-1
+  start_transactor ack-postpublication-1
+  mkfifo -m 600 "$ack_fifo"
+  exec {ack_fault_fd}<>"$ack_fifo"
+  current_step=ack-postpublication-submit-and-block
+  verify_runtime_seal before-ack-postpublication-probe
+  ack_fault_probe_expected_argv=(
+    "$java_bin"
+    -XX:-UsePerfData
+    -Djava.awt.headless=true
+    -Duser.timezone=UTC
+    -Dcom.amazonaws.sdk.disableEc2Metadata=true
+    -Ddatomic.peerConnectionTTLMsec=10000
+    -Ddatomic.txTimeoutMsec=30000
+    -Ddatomic.queryPool=2
+    "-Dlogback.configurationFile=$peer_harness_root/logback-stage2.xml"
+    -cp "$peer_classpath"
+    clojure.main
+    -m stage5.ack-fault-probe
+    publication-window "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password"
+    true file "$ack_fifo"
+  )
+  (
+    exec env --default-signal=INT,QUIT,TERM "${ack_fault_probe_expected_argv[@]}"
+  ) >"$ack_stdout" 2>"$ack_stderr" &
+  ack_fault_probe_pid=$!
+  ack_fault_probe_starttime=$(process_starttime "$ack_fault_probe_pid")
+  [[ -n "$ack_fault_probe_starttime" ]] ||
+    die "could not capture post-publication Peer probe starttime"
+  verify_ack_fault_probe_identity "$ack_fault_probe_pid" ||
+    die "post-publication Peer probe identity differs after launch"
+
+  if ! wait_for_marker "$ack_stdout" 'STAGE5-ACK-BLOCKED ' 60 \
+    "$ack_fault_probe_pid"; then
+    tail -n 100 "$ack_stdout" >&2 || true
+    tail -n 100 "$ack_stderr" >&2 || true
+    die "post-publication probe did not reach its PostgreSQL publication block"
+  fi
+  ack_blocked_marker="$results_dir/ack-postpublication-blocked.result"
+  awk '/^STAGE5-ACK-BLOCKED / {print}' "$ack_stdout" >"$ack_blocked_marker"
+  [[ "$(wc -l <"$ack_blocked_marker")" -eq 1 ]] ||
+    die "post-publication probe emitted a non-unique blocked marker"
+  grep -Fq ':cut :postpublication' "$ack_blocked_marker" &&
+    grep -Fq ':future-done-while-blocked? false' "$ack_blocked_marker" &&
+    grep -Fq ':future-incomplete? true' "$ack_blocked_marker" &&
+    grep -Fq ':peer-state-unchanged? true' "$ack_blocked_marker" &&
+    grep -Fq ':root-row-byte-identical? true' "$ack_blocked_marker" &&
+    grep -Fq ':fault-sentinel-present? false' "$ack_blocked_marker" &&
+    grep -Fq ':orphan-candidate-count 1' "$ack_blocked_marker" &&
+    grep -Fq ':append-prev-matches-baseline-tail? true' "$ack_blocked_marker" &&
+    grep -Fq ':transactor-wait-event-type "Lock"' "$ack_blocked_marker" ||
+    die "post-publication blocked marker omitted a required invariant"
+
+  ack_database_id=$(extract_marker_string "$ack_blocked_marker" database-id)
+  ack_baseline_basis=$(extract_marker_number "$ack_blocked_marker" baseline-basis-t)
+  ack_baseline_sha=$(extract_marker_hash \
+    "$ack_blocked_marker" baseline-canonical-sha256)
+  ack_baseline_root_revision=$(extract_marker_number \
+    "$ack_blocked_marker" baseline-root-revision)
+  ack_baseline_root_sha=$(extract_marker_hash \
+    "$ack_blocked_marker" baseline-root-sha256)
+  ack_holder_backend_pid=$(extract_marker_number \
+    "$ack_blocked_marker" holder-backend-pid)
+  ack_writer_backend_pid=$(extract_marker_number \
+    "$ack_blocked_marker" blocked-backend-pid)
+  [[ "$ack_database_id" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "post-publication database-id has an unsafe shape"
+  ((ack_baseline_basis > 0 && ack_baseline_root_revision >= 0 &&
+    ack_holder_backend_pid > 0 && ack_writer_backend_pid > 0 &&
+    ack_holder_backend_pid != ack_writer_backend_pid)) ||
+    die "post-publication marker has invalid basis or backend identities"
+
+  current_step=ack-postpublication-independent-lock-proof
+  ack_lock_counts=$(
+    "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*) FILTER (WHERE pid=$ack_holder_backend_pid AND usename='$pg_user' AND state='idle in transaction' AND lower(query) LIKE '%for update%'), count(*) FILTER (WHERE pid=$ack_writer_backend_pid AND usename='$pg_user' AND state='active' AND wait_event_type='Lock' AND $ack_holder_backend_pid=ANY(pg_blocking_pids(pid)) AND lower(query) LIKE '%update%datomic_kvs%') FROM pg_stat_activity WHERE pid IN ($ack_holder_backend_pid, $ack_writer_backend_pid);" \
+      2>"$logs_dir/ack-postpublication-lock-proof.err")
+  [[ "$ack_lock_counts" == $'1\t1' ]] ||
+    die "post-publication independent lock proof differs: $ack_lock_counts"
+  printf 'holder-row-count\tblocked-writer-row-count\n%s\n' "$ack_lock_counts" \
+    >"$results_dir/ack-postpublication-lock-proof.tsv"
+
+  current_step=ack-postpublication-freeze-peer
+  pause_ack_fault_probe || die "could not freeze the exact post-publication Peer probe"
+  printf 'pid=%s\nstarttime=%s\nstate=%s\nidentity.verified=true\n' \
+    "$ack_fault_probe_pid" "$ack_fault_probe_starttime" \
+    "$(process_state "$ack_fault_probe_pid")" \
+    >"$results_dir/ack-postpublication-peer-freeze.properties"
+
+  current_step=ack-postpublication-release-root-lock
+  ack_holder_terminated=$(
+    "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT pg_terminate_backend($ack_holder_backend_pid) WHERE EXISTS (SELECT 1 FROM pg_stat_activity h WHERE h.pid=$ack_holder_backend_pid AND h.datname=current_database() AND h.usename='$pg_user' AND h.state='idle in transaction' AND lower(h.query) LIKE '%for update%') AND EXISTS (SELECT 1 FROM pg_stat_activity w WHERE w.pid=$ack_writer_backend_pid AND w.datname=current_database() AND w.usename='$pg_user' AND w.state='active' AND w.wait_event_type='Lock' AND $ack_holder_backend_pid=ANY(pg_blocking_pids(w.pid)) AND lower(w.query) LIKE '%update%datomic_kvs%');" \
+      2>"$logs_dir/ack-postpublication-holder-terminate.err")
+  [[ "$ack_holder_terminated" == t ]] ||
+    die "exact holder backend was not terminated: $ack_holder_terminated"
+
+  current_step=ack-postpublication-observe-durable-root
+  ack_published_root="$results_dir/ack-postpublication-published-root.tsv"
+  : >"$ack_published_root"
+  for ((ack_publish_wait = 0; ack_publish_wait < 30; ack_publish_wait += 1)); do
+    "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT id, rev, COALESCE(map, ''), octet_length(val), encode(val, 'hex') FROM public.datomic_kvs WHERE id='pod-log-tail/$ack_database_id' AND rev > $ack_baseline_root_revision;" \
+      >"$ack_published_root" \
+      2>"$logs_dir/ack-postpublication-root-poll.err"
+    [[ "$(wc -l <"$ack_published_root")" -eq 1 ]] && break
+    sleep 1
+  done
+  [[ "$(wc -l <"$ack_published_root")" -eq 1 ]] ||
+    die "authoritative root did not advance while the Peer was frozen"
+  ack_published_root_revision=$(awk -F $'\t' '{print $2}' "$ack_published_root")
+  [[ "$ack_published_root_revision" =~ ^[0-9]+$ ]] &&
+    ((ack_published_root_revision > ack_baseline_root_revision)) ||
+    die "published root revision is not newer than the baseline"
+  {
+    printf 'baseline.root.revision=%s\n' "$ack_baseline_root_revision"
+    printf 'published.root.revision=%s\n' "$ack_published_root_revision"
+    printf 'baseline.root.sha256=%s\n' "$ack_baseline_root_sha"
+    printf 'published.root.row.sha256=%s\n' "$(sha256_file "$ack_published_root")"
+    printf 'peer.state=%s\n' "$(process_state "$ack_fault_probe_pid")"
+  } >"$results_dir/ack-postpublication-publication.properties"
+  [[ "$(process_state "$ack_fault_probe_pid")" == T ||
+     "$(process_state "$ack_fault_probe_pid")" == t ]] ||
+    die "Peer probe resumed before the Transactor crash"
+
+  current_step=ack-postpublication-crash-transactor
+  verify_transactor_identity "$transactor_pid" ||
+    die "Transactor identity changed before post-publication crash"
+  crash_transactor_for_ack_fault ||
+    die "could not crash the exact Transactor after publication"
+  for ((ack_backend_wait = 0; ack_backend_wait < 10; ack_backend_wait += 1)); do
+    ack_writer_count=$(
+      "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+        -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+        -c "SELECT count(*) FROM pg_stat_activity WHERE pid=$ack_writer_backend_pid;" \
+        2>>"$logs_dir/ack-postpublication-writer-exit.err")
+    [[ "$ack_writer_count" == 0 ]] && break
+    sleep 1
+  done
+  if [[ "$ack_writer_count" != 0 ]]; then
+    ack_writer_terminated=$(
+      "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+        -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid=$ack_writer_backend_pid AND datname=current_database() AND usename='$pg_user';" \
+        2>>"$logs_dir/ack-postpublication-writer-exit.err")
+    [[ "$ack_writer_terminated" == t ]] ||
+      die "published writer backend did not exit after its JVM was killed"
+  fi
+
+  current_step=ack-postpublication-transactor-boot-2
+  start_transactor ack-postpublication-2
+  printf 'PUBLICATION_COMMITTED_TRANSACTOR_RESTARTED\n' >&"$ack_fault_fd"
+  exec {ack_fault_fd}>&-
+  ack_fault_fd=
+  current_step=ack-postpublication-resume-peer
+  resume_ack_fault_probe || die "could not resume the exact post-publication Peer probe"
+
+  if ! wait_for_process_exit "$ack_fault_probe_pid" 150; then
+    tail -n 100 "$ack_stdout" >&2 || true
+    tail -n 100 "$ack_stderr" >&2 || true
+    die "post-publication Peer probe did not finish after Transactor restart"
+  fi
+  set +e
+  wait "$ack_fault_probe_pid"
+  ack_probe_status=$?
+  set -e
+  ack_fault_probe_pid=
+  ack_fault_probe_starttime=
+  ack_fault_probe_paused=false
+  ack_fault_probe_expected_argv=()
+  [[ "$ack_probe_status" -eq 0 ]] || {
+    tail -n 100 "$ack_stdout" >&2 || true
+    tail -n 100 "$ack_stderr" >&2 || true
+    die "post-publication Peer probe failed with status $ack_probe_status"
+  }
+  verify_runtime_seal after-ack-postpublication-probe
+  ack_publication_marker="$results_dir/ack-postpublication-result.result"
+  awk '/^STAGE5-ACK-POSTPUBLICATION-RESULT / {print}' \
+    "$ack_stdout" >"$ack_publication_marker"
+  [[ "$(wc -l <"$ack_publication_marker")" -eq 1 ]] ||
+    die "post-publication probe emitted a non-unique result marker"
+  grep -Fq ':status :passed' "$ack_publication_marker" &&
+    grep -Fq ':authoritative-publication :committed' "$ack_publication_marker" &&
+    grep -Fq ':fault-sentinel-present? true' "$ack_publication_marker" &&
+    grep -Fq ':same-peer-recovered? true' "$ack_publication_marker" &&
+    grep -Fq ':no-duplicate-committed-effect true' "$ack_publication_marker" &&
+    grep -Fq ':transactor-backend-exited? true' "$ack_publication_marker" ||
+    die "post-publication result omitted a required invariant"
+  ack_final_basis=$(extract_marker_number "$ack_publication_marker" final-basis-t)
+  ack_final_sha=$(extract_marker_hash \
+    "$ack_publication_marker" final-canonical-sha256)
+  ack_publication_t=$(extract_marker_number "$ack_publication_marker" publication-t)
+  [[ "$(extract_marker_string "$ack_publication_marker" database-id)" == \
+     "$ack_database_id" ]] ||
+    die "post-publication result changed database identity"
+  ((ack_final_basis >= ack_publication_t &&
+    ack_publication_t > ack_baseline_basis)) ||
+    die "post-publication basis ordering differs"
+  require_log_catchup ack-postpublication-2 "$ack_publication_t"
+  capture_sql_metrics after-ack-postpublication-same-peer
+  ack_same_peer_sql_rows=$last_sql_rows
+  ack_same_peer_sql_bytes=$last_sql_bytes
+  ack_same_peer_sql_revisioned=$last_sql_revisioned
+
+  current_step=ack-postpublication-transactor-stop-2
+  stop_transactor true ||
+    die "same-Peer post-publication Transactor did not stop gracefully"
+  current_step=ack-postpublication-transactor-boot-3
+  start_transactor ack-postpublication-3
+  current_step=ack-postpublication-fresh-peer-audit
+  run_ack_fault_probe ack-postpublication-audit publication-audit \
+    "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" file \
+    "$ack_database_id" "$ack_final_sha" "$ack_final_basis" "$ack_publication_t"
+  ack_audit_marker=$last_marker_file
+  require_log_catchup ack-postpublication-3 "$ack_publication_t"
+  grep -Fq ':status :passed' "$ack_audit_marker" &&
+    grep -Fq ':fault-sentinel-present? true' "$ack_audit_marker" &&
+    grep -Fq ':no-duplicate-committed-effect true' "$ack_audit_marker" &&
+    grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
+    die "fresh post-publication audit omitted a required invariant"
+  [[ "$(extract_marker_string "$ack_audit_marker" database-id)" == \
+     "$ack_database_id" &&
+     "$(extract_marker_number "$ack_audit_marker" final-basis-t)" == \
+     "$ack_final_basis" &&
+     "$(extract_marker_number "$ack_audit_marker" publication-t)" == \
+     "$ack_publication_t" &&
+     "$(extract_marker_hash "$ack_audit_marker" canonical-sha256)" == \
+     "$ack_final_sha" ]] ||
+    die "fresh post-publication audit differs from same-Peer state"
+  capture_sql_metrics after-ack-postpublication-audit
+  ((last_sql_rows >= ack_same_peer_sql_rows &&
+    last_sql_bytes >= ack_same_peer_sql_bytes &&
+    last_sql_revisioned >= ack_same_peer_sql_revisioned)) ||
+    die "PostgreSQL state regressed during fresh post-publication audit"
+  current_step=ack-postpublication-transactor-stop-3
+  stop_transactor true ||
+    die "fresh post-publication audit Transactor did not stop gracefully"
+
+  ack_sessions=$(
+    "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*) FROM pg_stat_activity WHERE datname='$catalog' AND usename='$pg_user';" \
+      2>"$logs_dir/postgres-ack-postpublication-sessions.err")
+  [[ "$ack_sessions" == 0 ]] ||
+    die "post-publication run left $ack_sessions Datomic PostgreSQL sessions"
+  printf 'datomic-user-sessions=%s\n' "$ack_sessions" \
+    >"$results_dir/ack-postpublication-cleanup.properties"
+
+  current_step=postgres-stop-after-ack-postpublication
+  stop_postgres || die "PostgreSQL did not stop after post-publication run"
+  verify_runtime_seal final-after-ack-postpublication
+  port_is_open "$pg_host" "$pg_port" &&
+    die "PostgreSQL port remains occupied after post-publication run"
+  port_is_open "$pg_host" "$transactor_port" &&
+    die "Transactor port remains occupied after post-publication run"
+  {
+    printf 'status=PASS\n'
+    printf 'mode=transaction-post-publication-fault-only\n'
+    printf 'peer.current-repo-build=PASS\n'
+    printf 'peer.origin=PASS\n'
+    printf 'transactor.fresh-runtime-preparation=PASS\n'
+    printf 'candidate.runtime.seal=PASS\n'
+    printf 'postgresql.fresh-catalog=PASS\n'
+    printf 'transaction.root-lock-observed=PASS\n'
+    printf 'transaction.peer-result-incomplete-before-publication=PASS\n'
+    printf 'transaction.peer-frozen-through-publication-and-crash=PASS\n'
+    printf 'transaction.post-publication-pre-result-cut=PASS\n'
+    printf 'transaction.authoritative-publication=PASS\n'
+    printf 'transaction.same-peer-recovery=PASS\n'
+    printf 'transaction.fresh-peer-audit=PASS\n'
+    printf 'transaction.no-duplicate-committed-effect=PASS\n'
+    printf 'transaction.cas-reexecution-guard=PASS\n'
+    printf 'transaction.database.id=%s\n' "$ack_database_id"
+    printf 'transaction.baseline.basis-t=%s\n' "$ack_baseline_basis"
+    printf 'transaction.publication.t=%s\n' "$ack_publication_t"
+    printf 'transaction.final.basis-t=%s\n' "$ack_final_basis"
+    printf 'transaction.baseline.canonical.sha256=%s\n' "$ack_baseline_sha"
+    printf 'transaction.final.canonical.sha256=%s\n' "$ack_final_sha"
+    printf 'transaction.baseline.root.sha256=%s\n' "$ack_baseline_root_sha"
+    printf 'transaction.published.root.row.sha256=%s\n' \
+      "$(sha256_file "$ack_published_root")"
+    printf 'transaction.blocked.result.sha256=%s\n' \
+      "$(sha256_file "$ack_blocked_marker")"
+    printf 'transaction.publication.result.sha256=%s\n' \
+      "$(sha256_file "$ack_publication_marker")"
+    printf 'transaction.audit.result.sha256=%s\n' \
+      "$(sha256_file "$ack_audit_marker")"
+    printf 'postgresql.rows.after-same-peer=%s\n' "$ack_same_peer_sql_rows"
+    printf 'postgresql.val-bytes.after-same-peer=%s\n' "$ack_same_peer_sql_bytes"
+    printf 'postgresql.revisioned-rows.after-same-peer=%s\n' \
+      "$ack_same_peer_sql_revisioned"
+    printf 'postgresql.datomic-user-sessions-after-stop=0\n'
+    printf 'transactor.intentional-sigkill.count=1\n'
+    printf 'transactor.graceful-stop.count=2\n'
+    printf 'transaction.full-licensed-oracle-equality=NOT_RUN\n'
+    printf 'startup.failure=NOT_RUN\n'
+    printf 'stage2.main-path=NOT_RUN\n'
+    printf 'persistent-index=NOT_RUN\n'
+    printf 'transport=NOT_RUN\n'
+    printf 'ha.fencing=NOT_RUN\n'
+    printf 'services.finally-stopped=PASS\n'
+  } >"$work_root/summary.properties"
+  {
+    printf 'status=passed\n'
+    printf 'last.step=complete\n'
+    printf 'services.running=false\n'
+  } >"$work_root/run-status.properties"
+  write_evidence_hashes
+  run_succeeded=true
+  echo "Recovered post-publication/pre-result acknowledgement gate passed"
+  echo "one exact Transactor was killed after durable root advancement"
+  echo "same-Peer and fresh-Peer state contain one committed effect"
+  echo "PostgreSQL is shut down; evidence: $work_root"
+  exit 0
+fi
+
+if [[ "$transaction_ha_inflight_only" == true ]]; then
+  ack_jdbc_url="jdbc:postgresql://$pg_host:$pg_port/$catalog"
+  ack_fifo="$runtime_dir/ha-inflight-control.fifo"
+  ack_stdout="$logs_dir/ha-inflight-window.out"
+  ack_stderr="$logs_dir/ha-inflight-window.err"
+  [[ ! -e "$ack_fifo" ]] || die "HA in-flight control FIFO already exists"
+
+  current_step=ha-inflight-active-boot
+  start_transactor ha-inflight-active
+  mkfifo -m 600 "$ack_fifo"
+  exec {ack_fault_fd}<>"$ack_fifo"
+  current_step=ha-inflight-submit-and-block
+  verify_runtime_seal before-ha-inflight-probe
+  ack_fault_probe_expected_argv=(
+    "$java_bin"
+    -XX:-UsePerfData
+    -Djava.awt.headless=true
+    -Duser.timezone=UTC
+    -Dcom.amazonaws.sdk.disableEc2Metadata=true
+    -Ddatomic.peerConnectionTTLMsec=10000
+    -Ddatomic.txTimeoutMsec=30000
+    -Ddatomic.queryPool=2
+    "-Dlogback.configurationFile=$peer_harness_root/logback-stage7.xml"
+    -cp "$peer_classpath"
+    clojure.main
+    -m stage5.ack-fault-probe
+    ha-takeover-window "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password"
+    true file "$ack_fifo"
+  )
+  (
+    exec env --default-signal=INT,QUIT,TERM "${ack_fault_probe_expected_argv[@]}"
+  ) >"$ack_stdout" 2>"$ack_stderr" &
+  ack_fault_probe_pid=$!
+  ack_fault_probe_starttime=$(process_starttime "$ack_fault_probe_pid")
+  [[ -n "$ack_fault_probe_starttime" ]] ||
+    die "could not capture HA in-flight Peer probe starttime"
+  verify_ack_fault_probe_identity "$ack_fault_probe_pid" ||
+    die "HA in-flight Peer probe identity differs after launch"
+
+  if ! wait_for_marker "$ack_stdout" 'STAGE5-ACK-BLOCKED ' 60 \
+    "$ack_fault_probe_pid"; then
+    tail -n 100 "$ack_stdout" >&2 || true
+    tail -n 100 "$ack_stderr" >&2 || true
+    die "HA in-flight probe did not reach its PostgreSQL publication block"
+  fi
+  ack_blocked_marker="$results_dir/ha-inflight-blocked.result"
+  awk '/^STAGE5-ACK-BLOCKED / {print}' "$ack_stdout" >"$ack_blocked_marker"
+  [[ "$(wc -l <"$ack_blocked_marker")" -eq 1 ]] ||
+    die "HA in-flight probe emitted a non-unique blocked marker"
+  grep -Fq ':cut :ha-takeover' "$ack_blocked_marker" &&
+    grep -Fq ':future-incomplete? true' "$ack_blocked_marker" &&
+    grep -Fq ':peer-state-unchanged? true' "$ack_blocked_marker" &&
+    grep -Fq ':root-row-byte-identical? true' "$ack_blocked_marker" &&
+    grep -Fq ':fault-sentinel-present? false' "$ack_blocked_marker" &&
+    grep -Fq ':orphan-candidate-count 1' "$ack_blocked_marker" &&
+    grep -Fq ':transactor-wait-event-type "Lock"' "$ack_blocked_marker" ||
+    die "HA in-flight blocked marker omitted a required invariant"
+
+  ack_database_id=$(extract_marker_string "$ack_blocked_marker" database-id)
+  ack_baseline_basis=$(extract_marker_number \
+    "$ack_blocked_marker" baseline-basis-t)
+  ack_baseline_sha=$(extract_marker_hash \
+    "$ack_blocked_marker" baseline-canonical-sha256)
+  ack_baseline_root_sha=$(extract_marker_hash \
+    "$ack_blocked_marker" baseline-root-sha256)
+  ack_holder_backend_pid=$(extract_marker_number \
+    "$ack_blocked_marker" holder-backend-pid)
+  ack_writer_backend_pid=$(extract_marker_number \
+    "$ack_blocked_marker" blocked-backend-pid)
+  [[ "$ack_database_id" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "HA in-flight database-id has an unsafe shape"
+  ((ack_baseline_basis > 0 && ack_holder_backend_pid > 0 &&
+    ack_writer_backend_pid > 0 &&
+    ack_holder_backend_pid != ack_writer_backend_pid)) ||
+    die "HA in-flight marker has invalid basis or backend identities"
+
+  current_step=ha-inflight-standby-start
+  standby_rev_before=$(coordination_rev_maybe pod-standby)
+  [[ "$standby_rev_before" =~ ^-?[0-9]+$ ]] ||
+    die "could not read standby revision before HA in-flight start"
+  start_ha_standby ha-inflight-standby "$standby_rev_before"
+
+  current_step=ha-inflight-independent-lock-proof
+  ack_lock_counts=$(
+    "$pg_bin_dir/psql" -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*) FILTER (WHERE pid=$ack_holder_backend_pid AND usename='$pg_user' AND state='idle in transaction' AND lower(query) LIKE '%for update%'), count(*) FILTER (WHERE pid=$ack_writer_backend_pid AND usename='$pg_user' AND state='active' AND wait_event_type='Lock' AND $ack_holder_backend_pid=ANY(pg_blocking_pids(pid)) AND lower(query) LIKE '%update%datomic_kvs%') FROM pg_stat_activity WHERE pid IN ($ack_holder_backend_pid, $ack_writer_backend_pid);" \
+      2>"$logs_dir/ha-inflight-lock-proof.err")
+  [[ "$ack_lock_counts" == $'1\t1' ]] ||
+    die "HA in-flight independent lock proof differs: $ack_lock_counts"
+  printf 'holder-row-count\tblocked-writer-row-count\n%s\n' "$ack_lock_counts" \
+    >"$results_dir/ha-inflight-lock-proof.tsv"
+
+  active_rev_before=$(coordination_rev_maybe pod-coord)
+  [[ "$active_rev_before" =~ ^[0-9]+$ ]] ||
+    die "could not read active revision before HA in-flight SIGSTOP"
+  current_step=ha-inflight-active-stop
+  verify_transactor_identity "$transactor_pid" ||
+    die "HA in-flight active ownership changed before SIGSTOP"
+  kill -STOP "$transactor_pid"
+  transactor_paused=true
+  printf 'paused\n' >"$pause_state_file"
+  for ((stop_attempt = 0; stop_attempt < 5; stop_attempt += 1)); do
+    stopped_state=$(process_state "$transactor_pid")
+    [[ "$stopped_state" == T || "$stopped_state" == t ]] && break
+    sleep 1
+  done
+  [[ "$stopped_state" == T || "$stopped_state" == t ]] ||
+    die "HA in-flight active did not enter stopped state"
+  start_ha_watchdog
+
+  current_step=ha-inflight-standby-promotion
+  if ! wait_for_ha_promotion "$active_rev_before"; then
+    tail -n 120 "$logs_dir/transactor-$ha_standby_label.out" >&2 || true
+    tail -n 120 "$logs_dir/transactor-$ha_standby_label.err" >&2 || true
+    die "HA in-flight standby did not promote"
+  fi
+
+  current_step=ha-inflight-abort-exact-writer
+  ack_backend_terminated=$(
+    "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid=$ack_writer_backend_pid AND datname=current_database() AND usename='$pg_user' AND state='active' AND wait_event_type='Lock' AND $ack_holder_backend_pid=ANY(pg_blocking_pids(pid)) AND lower(query) LIKE '%update%datomic_kvs%';" \
+      2>"$logs_dir/ha-inflight-writer-terminate.err")
+  [[ "$ack_backend_terminated" == t ]] ||
+    die "exact HA in-flight writer was not terminated: $ack_backend_terminated"
+  for ((ack_backend_wait = 0; ack_backend_wait < 10; ack_backend_wait += 1)); do
+    ack_backend_count=$(
+      "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+        -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+        -c "SELECT count(*) FROM pg_stat_activity WHERE pid=$ack_writer_backend_pid;" \
+        2>>"$logs_dir/ha-inflight-writer-exit.err")
+    [[ "$ack_backend_count" == 0 ]] && break
+    sleep 1
+  done
+  [[ "$ack_backend_count" == 0 ]] ||
+    die "HA in-flight writer backend remained present"
+  printf 'blocked-writer-backend-exited=true\ntermination.request.result=true\nholder.pid=%s\nwriter.pid=%s\n' \
+    "$ack_holder_backend_pid" "$ack_writer_backend_pid" \
+    >"$results_dir/ha-inflight-writer-exit.properties"
+
+  printf 'STANDBY_PROMOTED_AND_WRITER_TERMINATED\n' >&"$ack_fault_fd"
+  current_step=ha-inflight-stale-active-resume
+  resume_transactor_owned || die "could not resume HA in-flight stale active"
+  stop_ha_watchdog
+  current_step=ha-inflight-stale-active-fence
+  reap_stale_active_after_fence || {
+    tail -n 160 "$logs_dir/transactor-ha-inflight-active.out" >&2 || true
+    tail -n 160 "$logs_dir/transactor-ha-inflight-active.err" >&2 || true
+    die "HA in-flight stale active did not self-fence"
+  }
+  current_step=ha-inflight-same-peer-result
+  if ! wait_for_process_exit "$ack_fault_probe_pid" 150; then
+    tail -n 120 "$ack_stdout" >&2 || true
+    tail -n 120 "$ack_stderr" >&2 || true
+    die "HA in-flight Peer probe did not finish through promoted standby"
+  fi
+  set +e
+  wait "$ack_fault_probe_pid"
+  ack_probe_status=$?
+  set -e
+  ack_fault_probe_pid=
+  ack_fault_probe_starttime=
+  ack_fault_probe_expected_argv=()
+  exec {ack_fault_fd}>&-
+  ack_fault_fd=
+  [[ "$ack_probe_status" -eq 0 ]] || {
+    tail -n 120 "$ack_stdout" >&2 || true
+    tail -n 120 "$ack_stderr" >&2 || true
+    die "HA in-flight Peer probe failed with status $ack_probe_status"
+  }
+  verify_runtime_seal after-ha-inflight-probe
+  [[ "$(marker_count "$ack_stdout" 'STAGE5-ACK-BLOCKED ')" -eq 1 &&
+     "$(marker_count "$ack_stdout" 'STAGE7-HA-INFLIGHT-RESULT ')" -eq 1 &&
+     "$(marker_count "$ack_stderr" 'STAGE5-ACK-ERROR ')" -eq 0 ]] ||
+    die "HA in-flight marker cardinality differs"
+  ha_inflight_marker="$results_dir/ha-inflight-result.result"
+  awk '/^STAGE7-HA-INFLIGHT-RESULT / {print}' \
+    "$ack_stdout" >"$ha_inflight_marker"
+  grep -Fq ':status :passed' "$ha_inflight_marker" &&
+    grep -Fq ':authoritative-publication :not-committed' "$ha_inflight_marker" &&
+    grep -Fq ':fault-sentinel-absent? true' "$ha_inflight_marker" &&
+    grep -Fq ':state :failed' "$ha_inflight_marker" &&
+    grep -Fq ':anomaly-categories [:cognitect.anomalies/unavailable]' \
+      "$ha_inflight_marker" &&
+    grep -Fq ':same-peer-recovered-through-promoted-endpoint? true' \
+      "$ha_inflight_marker" &&
+    grep -Fq ':recovery-sentinel-present? true' "$ha_inflight_marker" ||
+    die "HA in-flight result omitted a required invariant"
+  [[ "$(extract_marker_string "$ha_inflight_marker" database-id)" == \
+     "$ack_database_id" &&
+     "$(extract_marker_number "$ha_inflight_marker" baseline-basis-t)" == \
+     "$ack_baseline_basis" &&
+     "$(extract_marker_hash "$ha_inflight_marker" baseline-canonical-sha256)" == \
+     "$ack_baseline_sha" &&
+     "$(extract_marker_hash "$ha_inflight_marker" precrash-root-sha256)" == \
+     "$ack_baseline_root_sha" ]] ||
+    die "HA in-flight result differs from its blocked baseline"
+  ack_final_basis=$(extract_marker_number "$ha_inflight_marker" final-basis-t)
+  ack_final_sha=$(extract_marker_hash \
+    "$ha_inflight_marker" final-canonical-sha256)
+  ack_recovery_event_t=$(extract_marker_number \
+    "$ha_inflight_marker" recovery-event-t)
+  ((ack_final_basis > ack_baseline_basis)) ||
+    die "HA in-flight recovery write did not advance basis"
+  [[ "$ack_recovery_event_t" == "$ack_final_basis" ]] ||
+    die "HA in-flight recovery event differs from final basis"
+  capture_sql_metrics after-ha-inflight-same-peer
+  ack_recovery_sql_rows=$last_sql_rows
+  ack_recovery_sql_bytes=$last_sql_bytes
+  ack_recovery_sql_revisioned=$last_sql_revisioned
+  wait_for_ha_standby_continuity ||
+    die "HA in-flight promoted standby did not continue heartbeating"
+
+  current_step=ha-inflight-fresh-peer-audit
+  run_ack_fault_probe ha-inflight-audit audit \
+    "$sql_uri" "$ack_jdbc_url" "$pg_user" "$pg_password" file \
+    "$ack_database_id" "$ack_final_sha" "$ack_final_basis"
+  ack_audit_marker=$last_marker_file
+  require_log_catchup "$ha_standby_label" "$ack_final_basis"
+  grep -Fq ':fault-sentinel-absent? true' "$ack_audit_marker" &&
+    grep -Fq ':recovery-sentinel-present? true' "$ack_audit_marker" &&
+    grep -Fq ':sql-log-root :present' "$ack_audit_marker" ||
+    die "HA in-flight fresh audit omitted a required invariant"
+  [[ "$(extract_marker_string "$ack_audit_marker" database-id)" == \
+     "$ack_database_id" &&
+     "$(extract_marker_number "$ack_audit_marker" final-basis-t)" == \
+     "$ack_final_basis" &&
+     "$(extract_marker_hash "$ack_audit_marker" canonical-sha256)" == \
+     "$ack_final_sha" ]] ||
+    die "HA in-flight fresh audit differs from same-Peer state"
+  capture_sql_metrics after-ha-inflight-audit
+  ((last_sql_rows >= ack_recovery_sql_rows &&
+    last_sql_bytes >= ack_recovery_sql_bytes &&
+    last_sql_revisioned >= ack_recovery_sql_revisioned)) ||
+    die "HA in-flight SQL state regressed during fresh audit"
+  {
+    printf 'active.rev.before=%s\n' "$active_rev_before"
+    printf 'promoted.rev=%s\n' "$ha_promoted_rev"
+    printf 'continued.rev=%s\n' "$ha_final_rev"
+    printf 'promoted.heartbeat.count=%s\n' "$ha_promotion_heartbeat_count"
+    printf 'continued.heartbeat.count=%s\n' "$ha_final_heartbeat_count"
+  } >"$results_dir/ha-inflight-redacted-coordination.properties"
+
+  current_step=ha-inflight-standby-stop
+  stop_ha_standby true || die "HA in-flight promoted standby did not stop gracefully"
+  ack_sessions=$(
+    "$pg_bin_dir/psql" -X -A -t -v ON_ERROR_STOP=1 \
+      -h "$pg_socket_dir" -p "$pg_port" -U "$pg_superuser" -d "$catalog" \
+      -c "SELECT count(*) FROM pg_stat_activity WHERE datname='$catalog' AND usename='$pg_user';" \
+      2>"$logs_dir/ha-inflight-sessions.err")
+  [[ "$ack_sessions" == 0 ]] ||
+    die "HA in-flight run left $ack_sessions Datomic PostgreSQL sessions"
+  printf 'datomic-user-sessions=%s\n' "$ack_sessions" \
+    >"$results_dir/ha-inflight-cleanup.properties"
+
+  current_step=postgres-stop-after-ha-inflight
+  stop_postgres || die "PostgreSQL did not stop after HA in-flight run"
+  verify_runtime_seal final-after-ha-inflight
+  port_is_open "$pg_host" "$pg_port" &&
+    die "PostgreSQL port remains occupied after HA in-flight run"
+  port_is_open "$pg_host" "$transactor_port" &&
+    die "active port remains occupied after HA in-flight run"
+  port_is_open "$pg_host" "$standby_port" &&
+    die "standby port remains occupied after HA in-flight run"
+  {
+    printf 'status=PASS\n'
+    printf 'mode=transaction-ha-inflight-only\n'
+    printf 'peer.current-repo-build=PASS\n'
+    printf 'peer.origin=PASS\n'
+    printf 'transactor.fresh-runtime-preparation=PASS\n'
+    printf 'candidate.runtime.seal=PASS\n'
+    printf 'postgresql.fresh-catalog=PASS\n'
+    printf 'ha.inflight.root-lock-observed=PASS\n'
+    printf 'ha.inflight.future-incomplete-before-takeover=PASS\n'
+    printf 'ha.inflight.standby-promotion=PASS\n'
+    printf 'ha.inflight.exact-writer-abort=PASS\n'
+    printf 'ha.inflight.interrupted-write-absent=PASS\n'
+    printf 'ha.inflight.client-outcome=unavailable\n'
+    printf 'ha.inflight.stale-active-self-fence=PASS\n'
+    printf 'ha.inflight.same-peer-promoted-write=PASS\n'
+    printf 'ha.inflight.fresh-peer-audit=PASS\n'
+    printf 'ha.inflight.database.id=%s\n' "$ack_database_id"
+    printf 'ha.inflight.baseline.basis-t=%s\n' "$ack_baseline_basis"
+    printf 'ha.inflight.final.basis-t=%s\n' "$ack_final_basis"
+    printf 'ha.inflight.baseline.canonical.sha256=%s\n' "$ack_baseline_sha"
+    printf 'ha.inflight.final.canonical.sha256=%s\n' "$ack_final_sha"
+    printf 'ha.inflight.blocked.result.sha256=%s\n' \
+      "$(sha256_file "$ack_blocked_marker")"
+    printf 'ha.inflight.result.sha256=%s\n' \
+      "$(sha256_file "$ha_inflight_marker")"
+    printf 'ha.inflight.audit.result.sha256=%s\n' \
+      "$(sha256_file "$ack_audit_marker")"
+    printf 'postgresql.datomic-user-sessions-after-stop=0\n'
+    printf 'transactor.stale-active-self-fence.count=1\n'
+    printf 'transactor.graceful-stop.count=1\n'
+    printf 'transaction.full-licensed-oracle-equality=NOT_RUN\n'
+    printf 'ha.concurrent-submissions=NOT_RUN\n'
+    printf 'ha.partition-split-brain=NOT_RUN\n'
+    printf 'services.finally-stopped=PASS\n'
+  } >"$work_root/summary.properties"
+  {
+    printf 'status=passed\n'
+    printf 'last.step=complete\n'
+    printf 'services.running=false\n'
+  } >"$work_root/run-status.properties"
+  write_evidence_hashes
+  run_succeeded=true
+  echo "Recovered in-flight transaction-during-takeover gate passed"
+  echo "the interrupted write stayed absent; the same Peer committed through promoted B"
+  echo "stale A self-fenced; PostgreSQL is shut down; evidence: $work_root"
   exit 0
 fi
 

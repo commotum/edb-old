@@ -19,10 +19,17 @@
   through another fresh Peer and verifies the exact final projection.
 
   This probe establishes no-success-before-authoritative-publication for the
-  injected pre-publication crash cut.  It does not establish how a client
-  resolves a crash after publication but before result delivery.
+  injected pre-publication crash cut.  publication-window reuses the same
+  deterministic root lock, but the controller freezes this Peer process,
+  terminates the holder backend to allow publication, observes the root
+  advance, crashes and restarts the Transactor, and only then resumes this
+  process.  The fault transaction combines a unique sentinel with a CAS so a
+  reconnect-side duplicate execution is observable.
 
     clojure.main -m stage5.ack-fault-probe crash-window
+      URI JDBC_URL USER PASSWORD EXPECTED_CREATED EXPECTED_SOURCE_PROTOCOL
+      TOKEN_FILE
+    clojure.main -m stage5.ack-fault-probe publication-window
       URI JDBC_URL USER PASSWORD EXPECTED_CREATED EXPECTED_SOURCE_PROTOCOL
       TOKEN_FILE
     clojure.main -m stage5.ack-fault-probe recover
@@ -31,7 +38,10 @@
       EXPECTED_PRECRASH_ROOT_SHA
     clojure.main -m stage5.ack-fault-probe audit
       URI JDBC_URL USER PASSWORD EXPECTED_SOURCE_PROTOCOL EXPECTED_DATABASE_ID
-      EXPECTED_FINAL_SHA EXPECTED_FINAL_BASIS"
+      EXPECTED_FINAL_SHA EXPECTED_FINAL_BASIS
+    clojure.main -m stage5.ack-fault-probe publication-audit
+      URI JDBC_URL USER PASSWORD EXPECTED_SOURCE_PROTOCOL EXPECTED_DATABASE_ID
+      EXPECTED_FINAL_SHA EXPECTED_FINAL_BASIS EXPECTED_PUBLICATION_T"
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.set :as set]
@@ -51,6 +61,12 @@
 
 (def ^:private blocked-prefix "STAGE5-ACK-BLOCKED ")
 (def ^:private fault-result-prefix "STAGE5-ACK-FAULT-RESULT ")
+(def ^:private publication-result-prefix
+  "STAGE5-ACK-POSTPUBLICATION-RESULT ")
+(def ^:private publication-audit-prefix
+  "STAGE5-ACK-POSTPUBLICATION-AUDIT ")
+(def ^:private ha-inflight-result-prefix
+  "STAGE7-HA-INFLIGHT-RESULT ")
 (def ^:private recover-result-prefix "STAGE5-ACK-RECOVER ")
 (def ^:private audit-prefix "STAGE5-ACK-AUDIT ")
 (def ^:private error-prefix "STAGE5-ACK-ERROR ")
@@ -61,9 +77,14 @@
 (def ^:private failed-future-observation-ms 5000)
 (def ^:private cleanup-timeout-ms 15000)
 (def ^:private expected-kill-token "TRANSACTOR_KILLED")
+(def ^:private expected-ha-takeover-token
+  "STANDBY_PROMOTED_AND_WRITER_TERMINATED")
+(def ^:private expected-publication-token
+  "PUBLICATION_COMMITTED_TRANSACTOR_RESTARTED")
 (def ^:private baseline-id "baseline")
 (def ^:private fault-id "fault-before-publication")
 (def ^:private recovery-id "recovery-after-crash")
+(def ^:private published-kind :stage5-ack/published)
 
 (defn- fail!
   [message data]
@@ -247,6 +268,16 @@
   [db id]
   (boolean (d/entid db [:stage5-ack/id id])))
 
+(defn- publication-tx
+  []
+  [[:db.fn/cas
+    [:stage5-ack/id baseline-id]
+    :stage5-ack/kind
+    :stage5-ack/baseline
+    published-kind]
+   {:stage5-ack/id fault-id
+    :stage5-ack/kind :stage5-ack/fault-after-publication}])
+
 (defn- fact-t
   [db entity-id]
   (let [eid (d/entid db [:stage5-ack/id entity-id])
@@ -273,6 +304,69 @@
     :basis-t (d/basis-t db)
     :database-id (str (.id db))
     :rows (probe-rows db)))
+
+(defn- attribute-history
+  [db entity-id attribute]
+  (->> (d/datoms (d/history db) :eavt entity-id attribute)
+       (map (fn [^Datom datom]
+              [(.v datom) (.added datom) (d/tx->t (.tx datom))]))
+       (sort-by pr-str)
+       vec))
+
+(defn- publication-history!
+  [db expected-publication-t]
+  (let [baseline-eid (d/entid db [:stage5-ack/id baseline-id])
+        fault-eid (d/entid db [:stage5-ack/id fault-id])
+        baseline-kind-history
+        (attribute-history db baseline-eid :stage5-ack/kind)
+        fault-id-history (attribute-history db fault-eid :stage5-ack/id)
+        fault-kind-history (attribute-history db fault-eid :stage5-ack/kind)
+        publication-events
+        (concat
+          (filter (fn [[value _ _]]
+                    (#{:stage5-ack/baseline published-kind} value))
+                  baseline-kind-history)
+          fault-id-history
+          fault-kind-history)
+        publication-ts
+        (->> publication-events
+             (filter (fn [[value added? _]]
+                       (or (and (= value :stage5-ack/baseline) (not added?))
+                           (= value published-kind)
+                           (= value fault-id)
+                           (= value :stage5-ack/fault-after-publication))))
+             (map #(nth % 2))
+             set)]
+    (ensure! (and baseline-eid fault-eid)
+             "Published acknowledgement state is missing an entity"
+             {:baseline-present? (boolean baseline-eid)
+              :fault-present? (boolean fault-eid)})
+    (ensure! (= 3 (count baseline-kind-history))
+             "Baseline kind history contains a duplicate or missing transition"
+             {:history baseline-kind-history})
+    (ensure! (= 1 (count fault-id-history))
+             "Fault identity history contains a duplicate or missing assertion"
+             {:history fault-id-history})
+    (ensure! (= 1 (count fault-kind-history))
+             "Fault kind history contains a duplicate or missing assertion"
+             {:history fault-kind-history})
+    (ensure! (= #{expected-publication-t} publication-ts)
+             "Publication changes do not belong to exactly one transaction"
+             {:actual-publication-ts publication-ts
+              :expected-publication-t expected-publication-t})
+    (ensure! (some #{[:stage5-ack/baseline false expected-publication-t]}
+                   baseline-kind-history)
+             "Publication transaction did not retract the CAS baseline"
+             {:history baseline-kind-history})
+    (ensure! (some #{[published-kind true expected-publication-t]}
+                   baseline-kind-history)
+             "Publication transaction did not assert the CAS result"
+             {:history baseline-kind-history})
+    (sorted-map
+      :baseline-kind baseline-kind-history
+      :fault-id fault-id-history
+      :fault-kind fault-kind-history
+      :publication-t expected-publication-t)))
 
 (defn- require-baseline-state!
   [^Database db expected-database-id expected-basis expected-sha]
@@ -522,14 +616,127 @@
   (println (str prefix (pr-str value)))
   (flush))
 
-(defn- read-kill-token!
-  [token-file]
+(defn- read-control-token!
+  [token-file expected-token]
   (with-open [reader ^BufferedReader (io/reader token-file)]
     (let [token (.readLine reader)]
-      (ensure! (= expected-kill-token token)
+      (ensure! (= expected-token token)
                "Crash-window control token differs"
-               {:actual token :expected expected-kill-token})))
+               {:actual token :expected expected-token})))
   :received)
+
+(defn- unavailable?
+  [^Throwable throwable]
+  (= #{:cognitect.anomalies/unavailable}
+     (set (:anomaly-categories (error-profile throwable)))))
+
+(defn- sync-after-restart!
+  [connection]
+  (let [deadline (deadline-after-ms 90000)]
+    (loop [attempt 1
+           unavailable-count 0
+           timeout-count 0]
+      (ensure! (deadline-open? deadline)
+               "Peer did not synchronize after the Transactor restart"
+               {:attempt-count (dec attempt)
+                :timeout-count timeout-count
+                :unavailable-count unavailable-count})
+      (let [attempt-millis
+            (long (max 1 (min 10000
+                              (quot (remaining-nanos deadline) 1000000))))
+            outcome
+            (try
+              (let [pending ^Future (d/sync connection)]
+                (try
+                  {:db (.get pending attempt-millis TimeUnit/MILLISECONDS)
+                   :status :succeeded}
+                  (catch TimeoutException _
+                    (.cancel pending true)
+                    {:status :timeout})))
+              (catch ExecutionException exception
+                (let [failure (or (.getCause exception) exception)]
+                  (if (unavailable? failure)
+                    {:status :unavailable}
+                    (throw failure))))
+              (catch Throwable failure
+                (if (unavailable? failure)
+                  {:status :unavailable}
+                  (throw failure))))]
+        (case (:status outcome)
+          :succeeded
+          (let [db (:db outcome)]
+            (ensure! (instance? Database db)
+                     "Post-restart sync did not return a Database"
+                     {:actual-class (some-> db class .getName)})
+            {:attempt-count attempt
+             :db db
+             :timeout-count timeout-count
+             :unavailable-count unavailable-count})
+
+          :timeout
+          (recur (inc attempt) unavailable-count (inc timeout-count))
+
+          :unavailable
+          (do
+            (Thread/sleep 100)
+            (recur (inc attempt) (inc unavailable-count) timeout-count)))))))
+
+(defn- publication-future-outcome!
+  [^Future future]
+  (try
+    (let [report (.get future 30000 TimeUnit/MILLISECONDS)]
+      (ensure! (map? report)
+               "Published transaction Future returned a non-report"
+               {:actual-class (some-> report class .getName)})
+      (sorted-map
+        :db-after-basis (some-> report :db-after d/basis-t)
+        :state :returned))
+    (catch TimeoutException _
+      (fail! "Published transaction Future remained ambiguous after recovery"
+             {:observation-milliseconds 30000}))
+    (catch ExecutionException exception
+      (let [failure (or (.getCause exception) exception)]
+        (ensure! (unavailable? failure)
+                 "Published transaction Future failed with a semantic error"
+                 {:error-profile (error-profile failure)})
+        (sorted-map
+          :error-profile (error-profile failure)
+          :state :failed-unavailable)))
+    (catch CancellationException exception
+      (fail! "Published transaction Future was cancelled"
+             {:error-profile (error-profile exception)}))
+    (catch Throwable failure
+      (ensure! (unavailable? failure)
+               "Published transaction Future failed with a semantic error"
+               {:error-profile (error-profile failure)})
+      (sorted-map
+        :error-profile (error-profile failure)
+        :state :failed-unavailable))))
+
+(defn- require-published-state!
+  [^Database db expected-database-id expected-publication-t]
+  (let [rows (probe-rows db)
+        publication-t (fact-t db fault-id)]
+    (ensure! (= expected-database-id (str (.id db)))
+             "Post-publication database identity differs"
+             {:actual (str (.id db)) :expected expected-database-id})
+    (ensure! (= #{[baseline-id published-kind]
+                  [fault-id :stage5-ack/fault-after-publication]}
+                (set (map #(subvec % 0 2) rows)))
+             "Post-publication logical state differs"
+             {:rows rows})
+    (when expected-publication-t
+      (ensure! (= expected-publication-t publication-t)
+               "Publication transaction identity differs"
+               {:actual publication-t :expected expected-publication-t}))
+    (ensure! (<= publication-t (d/basis-t db))
+             "Publication transaction is newer than the database basis"
+             {:basis-t (d/basis-t db) :publication-t publication-t})
+    (let [history (publication-history! db publication-t)]
+      (sorted-map
+        :canonical (canonical-state db)
+        :history history
+        :publication-t publication-t))))
 
 (defn- wait-for-future-terminal!
   [^Future future]
@@ -568,8 +775,8 @@
             :state :pending-then-cancelled))))))
 
 (defn- crash-window!
-  [{:keys [expected-created expected-source-protocol jdbc-url password token-file
-           uri user]}]
+  [{:keys [cut expected-created expected-source-protocol jdbc-url password
+           token-file uri user]}]
   (let [boundary (audit-candidate-boundary! expected-source-protocol)
         created? (boolean
                    (bounded-call! connect-timeout-ms
@@ -613,8 +820,11 @@
           (reset! transaction-future
                   (d/transact-async
                     @peer-connection
-                    [{:stage5-ack/id fault-id
-                      :stage5-ack/kind :stage5-ack/fault-before-publication}]))
+                    (if (= cut :postpublication)
+                      (publication-tx)
+                      [{:stage5-ack/id fault-id
+                        :stage5-ack/kind
+                        :stage5-ack/fault-before-publication}])))
           (let [writer (wait-for-blocking-writer!
                          jdbc-url user password holder-backend-pid)
                 blocked-root (sql-log-root jdbc-url user password database-id)
@@ -649,6 +859,7 @@
                     :blocked-backend-pid (:pid writer)
                     :candidate-boundary boundary
                     :created? created?
+                    :cut cut
                     :database-id database-id
                     :fault-sentinel-present? fault-present?
                     :future-done-while-blocked? false
@@ -665,65 +876,236 @@
                     :transactor-wait-event (:wait-event writer)
                     :transactor-wait-event-type (:wait-event-type writer))]
               (emit-marker! blocked-prefix blocked-evidence)
-              (read-kill-token! token-file)
-              (wait-for-backend-exit!
-                jdbc-url user password (:pid writer))
-              (let [post-kill-locked-root
-                    (sql-log-root jdbc-url user password database-id)]
-                (ensure! (= baseline-root post-kill-locked-root)
-                         "Killed writer changed the root before holder rollback"
-                         {:actual-sha256 (sha256 post-kill-locked-root)
-                          :expected-sha256 baseline-root-sha}))
-              (.rollback ^Connection @holder)
-              (reset! holder-active? false)
-              (.close ^Connection @holder)
-              (reset! holder nil)
-              (let [future-state (wait-for-future-terminal!
-                                   ^Future @transaction-future)
-                    final-root (sql-log-root
-                                 jdbc-url user password database-id)
-                    final-ids (sql-ids jdbc-url user password)
-                    final-db (d/db @peer-connection)
-                    final-canonical (canonical-state final-db)]
-                (ensure! (= baseline-root final-root)
-                         "Authoritative root changed after killed-writer rollback"
-                         {:actual-sha256 (sha256 final-root)
-                          :expected-sha256 baseline-root-sha})
-                (ensure! (= blocked-ids final-ids)
-                         "PostgreSQL KV membership changed after writer death"
-                         {:after-count (count final-ids)
-                          :blocked-count (count blocked-ids)})
-                (ensure! (= baseline-canonical final-canonical)
-                         "Peer basis or projection advanced after writer death"
-                         {:actual-sha256 (sha256 final-canonical)
-                          :expected-sha256 baseline-sha})
-                (ensure! (not (entity-present? final-db fault-id))
-                         "Interrupted transaction sentinel became visible"
-                         {})
-                (sorted-map
-                  :authoritative-publication :not-committed
-                  :baseline-basis-t baseline-basis
-                  :baseline-canonical-sha256 baseline-sha
-                  :baseline-root-revision (:rev baseline-root)
-                  :baseline-root-sha256 baseline-root-sha
-                  :blocked-backend-pid (:pid writer)
-                  :candidate-boundary boundary
-                  :created? created?
-                  :database-id database-id
-                  :fault-sentinel-absent? true
-                  :fault-sentinel-present? false
-                  :future-outcome future-state
-                  :future-done-while-blocked? false
-                  :holder-backend-pid holder-backend-pid
-                  :immutable-orphan-row-count (count orphan-rows)
-                  :immutable-orphan-rows orphan-rows
-                  :no-success-before-authoritative-publication true
-                  :orphan-candidate-count (count orphan-rows)
-                  :peer-basis-unchanged? true
-                  :precrash-root-sha256 baseline-root-sha
-                  :root-row-byte-identical? true
-                  :status :passed
-                  :transactor-backend-exited? true))))))
+              (if (= cut :postpublication)
+                (do
+                  (read-control-token!
+                    token-file expected-publication-token)
+                  ;; The controller terminated this holder backend while this
+                  ;; JVM was stopped, then observed publication, crashed the
+                  ;; writer, and restarted the Transactor.
+                  (reset! holder-active? false)
+                  (try
+                    (.close ^Connection @holder)
+                    (catch Throwable _))
+                  (reset! holder nil)
+                  (wait-for-backend-exit!
+                    jdbc-url user password (:pid writer))
+                  (let [sync-result (sync-after-restart! @peer-connection)
+                        future-outcome
+                        (publication-future-outcome!
+                          ^Future @transaction-future)
+                        final-root
+                        (sql-log-root jdbc-url user password database-id)
+                        final-ids (sql-ids jdbc-url user password)
+                        final-db (:db sync-result)
+                        published
+                        (require-published-state! final-db database-id nil)
+                        publication-t (:publication-t published)
+                        final-canonical (:canonical published)]
+                    (ensure! (and (integer? (:rev final-root))
+                                  (> (:rev final-root) (:rev baseline-root))
+                                  (not= baseline-root final-root))
+                             "Authoritative root did not remain advanced after restart"
+                             {:baseline-revision (:rev baseline-root)
+                              :final-revision (:rev final-root)})
+                    (ensure! (= blocked-ids final-ids)
+                             "PostgreSQL KV membership changed after publication"
+                             {:after-count (count final-ids)
+                              :blocked-count (count blocked-ids)})
+                    (when (= :returned (:state future-outcome))
+                      (ensure! (= publication-t
+                                  (:db-after-basis future-outcome))
+                               "Returned transaction report names another basis"
+                               {:future-outcome future-outcome
+                                :publication-t publication-t}))
+                    (sorted-map
+                      :authoritative-publication :committed
+                      :baseline-basis-t baseline-basis
+                      :baseline-canonical-sha256 baseline-sha
+                      :baseline-root-revision (:rev baseline-root)
+                      :baseline-root-sha256 baseline-root-sha
+                      :blocked-backend-pid (:pid writer)
+                      :candidate-boundary boundary
+                      :created? created?
+                      :database-id database-id
+                      :fault-sentinel-present? true
+                      :final-basis-t (d/basis-t final-db)
+                      :final-canonical-sha256 (sha256 final-canonical)
+                      :final-root-revision (:rev final-root)
+                      :final-root-sha256 (sha256 final-root)
+                      :future-done-while-blocked? false
+                      :future-outcome future-outcome
+                      :holder-backend-pid holder-backend-pid
+                      :no-duplicate-committed-effect true
+                      :publication-history (:history published)
+                      :publication-t publication-t
+                      :same-peer-recovered? true
+                      :status :passed
+                      :sync-attempt-count (:attempt-count sync-result)
+                      :sync-timeout-count (:timeout-count sync-result)
+                      :sync-unavailable-count
+                      (:unavailable-count sync-result)
+                      :transactor-backend-exited? true)))
+                (do
+                  (read-control-token!
+                    token-file
+                    (if (= cut :ha-takeover)
+                      expected-ha-takeover-token
+                      expected-kill-token))
+                  (wait-for-backend-exit!
+                    jdbc-url user password (:pid writer))
+                  (let [post-kill-locked-root
+                        (sql-log-root jdbc-url user password database-id)]
+                    (ensure! (= baseline-root post-kill-locked-root)
+                             "Killed writer changed the root before holder rollback"
+                             {:actual-sha256 (sha256 post-kill-locked-root)
+                              :expected-sha256 baseline-root-sha}))
+                  (.rollback ^Connection @holder)
+                  (reset! holder-active? false)
+                  (.close ^Connection @holder)
+                  (reset! holder nil)
+                  (let [future-state (wait-for-future-terminal!
+                                       ^Future @transaction-future)
+                        final-root (sql-log-root
+                                     jdbc-url user password database-id)
+                        final-ids (sql-ids jdbc-url user password)
+                        final-db (d/db @peer-connection)
+                        final-canonical (canonical-state final-db)]
+                    (ensure! (= baseline-root final-root)
+                             "Authoritative root changed after killed-writer rollback"
+                             {:actual-sha256 (sha256 final-root)
+                              :expected-sha256 baseline-root-sha})
+                    (ensure! (= blocked-ids final-ids)
+                             "PostgreSQL KV membership changed after writer death"
+                             {:after-count (count final-ids)
+                              :blocked-count (count blocked-ids)})
+                    (ensure! (= baseline-canonical final-canonical)
+                             "Peer basis or projection advanced after writer death"
+                             {:actual-sha256 (sha256 final-canonical)
+                              :expected-sha256 baseline-sha})
+                    (ensure! (not (entity-present? final-db fault-id))
+                             "Interrupted transaction sentinel became visible"
+                             {})
+                    (if (= cut :ha-takeover)
+                      (do
+                        (ensure! (= :failed (:state future-state))
+                                 "In-flight takeover Future did not fail terminally"
+                                 {:future-outcome future-state})
+                        (ensure! (= #{:cognitect.anomalies/unavailable}
+                                    (set (get-in future-state
+                                                 [:error-profile
+                                                  :anomaly-categories])))
+                                 "In-flight takeover Future did not fail unavailable"
+                                 {:future-outcome future-state})
+                        (let [sync-result (sync-after-restart!
+                                           @peer-connection)
+                              synced-db (:db sync-result)]
+                          (require-baseline-state!
+                            synced-db database-id baseline-basis baseline-sha)
+                          (let [report
+                                (transact-before!
+                                  @peer-connection
+                                  [{:stage5-ack/id recovery-id
+                                    :stage5-ack/kind
+                                    :stage5-ack/ha-takeover-recovery}]
+                                  :ha-takeover-recovery)
+                                recovered-db (:db-after report)
+                                recovered-root
+                                (sql-log-root
+                                  jdbc-url user password database-id)
+                                recovered-canonical
+                                (canonical-state recovered-db)
+                                recovery-t (fact-t recovered-db recovery-id)]
+                            (ensure! (= baseline-basis
+                                        (d/basis-t (:db-before report)))
+                                     "HA recovery write did not begin at baseline"
+                                     {:actual
+                                      (d/basis-t (:db-before report))
+                                      :expected baseline-basis})
+                            (ensure! (= recovery-t
+                                        (d/basis-t recovered-db))
+                                     "HA recovery write/report basis differs"
+                                     {:event-t recovery-t
+                                      :report-basis
+                                      (d/basis-t recovered-db)})
+                            (ensure! (and (not (entity-present?
+                                                recovered-db fault-id))
+                                          (entity-present?
+                                            recovered-db recovery-id))
+                                     "HA recovery state has the wrong sentinels"
+                                     {})
+                            (ensure! (and
+                                       (integer? (:rev recovered-root))
+                                       (> (:rev recovered-root)
+                                          (:rev baseline-root))
+                                       (not= recovered-root baseline-root))
+                                     "HA recovery write did not advance root"
+                                     {:after-revision (:rev recovered-root)
+                                      :before-revision
+                                      (:rev baseline-root)})
+                            (sorted-map
+                              :authoritative-publication :not-committed
+                              :baseline-basis-t baseline-basis
+                              :baseline-canonical-sha256 baseline-sha
+                              :baseline-root-revision (:rev baseline-root)
+                              :baseline-root-sha256 baseline-root-sha
+                              :blocked-backend-pid (:pid writer)
+                              :candidate-boundary boundary
+                              :created? created?
+                              :database-id database-id
+                              :fault-sentinel-absent? true
+                              :fault-sentinel-present? false
+                              :final-basis-t (d/basis-t recovered-db)
+                              :final-canonical-sha256
+                              (sha256 recovered-canonical)
+                              :final-root-revision (:rev recovered-root)
+                              :final-root-sha256 (sha256 recovered-root)
+                              :future-outcome future-state
+                              :future-done-while-blocked? false
+                              :holder-backend-pid holder-backend-pid
+                              :immutable-orphan-row-count
+                              (count orphan-rows)
+                              :immutable-orphan-rows orphan-rows
+                              :no-success-before-authoritative-publication
+                              true
+                              :orphan-candidate-count (count orphan-rows)
+                              :peer-basis-unchanged-before-recovery? true
+                              :precrash-root-sha256 baseline-root-sha
+                              :recovery-event-t recovery-t
+                              :recovery-sentinel-present? true
+                              :root-row-byte-identical-before-recovery? true
+                              :same-peer-recovered-through-promoted-endpoint?
+                              true
+                              :status :passed
+                              :sync-attempt-count (:attempt-count sync-result)
+                              :sync-timeout-count (:timeout-count sync-result)
+                              :sync-unavailable-count
+                              (:unavailable-count sync-result)
+                              :transactor-backend-exited? true))))
+                      (sorted-map
+                        :authoritative-publication :not-committed
+                        :baseline-basis-t baseline-basis
+                        :baseline-canonical-sha256 baseline-sha
+                        :baseline-root-revision (:rev baseline-root)
+                        :baseline-root-sha256 baseline-root-sha
+                        :blocked-backend-pid (:pid writer)
+                        :candidate-boundary boundary
+                        :created? created?
+                        :database-id database-id
+                        :fault-sentinel-absent? true
+                        :fault-sentinel-present? false
+                        :future-outcome future-state
+                        :future-done-while-blocked? false
+                        :holder-backend-pid holder-backend-pid
+                        :immutable-orphan-row-count (count orphan-rows)
+                        :immutable-orphan-rows orphan-rows
+                        :no-success-before-authoritative-publication true
+                        :orphan-candidate-count (count orphan-rows)
+                        :peer-basis-unchanged? true
+                        :precrash-root-sha256 baseline-root-sha
+                        :root-row-byte-identical? true
+                        :status :passed
+                        :transactor-backend-exited? true)))))))))
       (finally
         (when (and @transaction-future
                    (not (.isDone ^Future @transaction-future)))
@@ -872,6 +1254,45 @@
       (finally
         (release! connection)))))
 
+(defn- publication-audit!
+  [{:keys [expected-database-id expected-final-basis expected-final-sha
+           expected-publication-t expected-source-protocol jdbc-url password
+           uri user]}]
+  (let [boundary (audit-candidate-boundary! expected-source-protocol)
+        connection (connect! uri)]
+    (try
+      (let [db (d/db connection)
+            published
+            (require-published-state!
+              db expected-database-id expected-publication-t)
+            canonical (:canonical published)
+            actual-sha (sha256 canonical)
+            root (sql-log-root jdbc-url user password expected-database-id)]
+        (ensure! (= expected-final-basis (d/basis-t db))
+                 "Fresh publication audit basis differs"
+                 {:actual (d/basis-t db) :expected expected-final-basis})
+        (ensure! (= expected-final-sha actual-sha)
+                 "Fresh publication audit state differs"
+                 {:actual actual-sha :expected expected-final-sha})
+        (ensure! (and (integer? (:rev root)) (not (neg? (:rev root))))
+                 "Fresh publication audit root has an invalid revision"
+                 {:root-revision (:rev root)})
+        (sorted-map
+          :candidate-boundary boundary
+          :canonical-sha256 actual-sha
+          :database-id expected-database-id
+          :fault-sentinel-present? true
+          :final-basis-t expected-final-basis
+          :no-duplicate-committed-effect true
+          :publication-history (:history published)
+          :publication-t expected-publication-t
+          :sql-log-root :present
+          :sql-log-root-revision (:rev root)
+          :sql-log-root-sha256 (sha256 root)
+          :status :passed))
+      (finally
+        (release! connection)))))
+
 (defn- require-uri!
   [uri]
   (ensure! (and (string? uri)
@@ -934,7 +1355,46 @@
                       (empty? extra))
                  "crash-window requires exactly eight arguments"
                  {:argument-count (count args)})
-        {:expected-created (parse-boolean! expected-created)
+        {:cut :prepublication
+         :expected-created (parse-boolean! expected-created)
+         :expected-source-protocol (parse-source-protocol! source-protocol)
+         :jdbc-url (require-jdbc-url! jdbc-url)
+         :mode mode
+         :password password
+         :token-file token-file
+         :uri (require-uri! uri)
+         :user user})
+
+      "publication-window"
+      (let [[_ uri jdbc-url user password expected-created source-protocol
+             token-file & extra] args]
+        (ensure! (and (every? some?
+                             [uri jdbc-url user password expected-created
+                              source-protocol token-file])
+                      (empty? extra))
+                 "publication-window requires exactly eight arguments"
+                 {:argument-count (count args)})
+        {:cut :postpublication
+         :expected-created (parse-boolean! expected-created)
+         :expected-source-protocol (parse-source-protocol! source-protocol)
+         :jdbc-url (require-jdbc-url! jdbc-url)
+         :mode mode
+         :password password
+         :token-file token-file
+         :uri (require-uri! uri)
+         :user user})
+
+      "ha-takeover-window"
+      (let [[_ uri jdbc-url user password expected-created source-protocol
+             token-file & extra] args]
+        (ensure! (and (every? some?
+                             [uri jdbc-url user password expected-created
+                              source-protocol token-file])
+                      (empty? extra))
+                 "ha-takeover-window requires exactly eight arguments"
+                 {:argument-count (count args)})
+        {:cut :ha-takeover
+         :expected-created (parse-boolean! expected-created)
          :expected-source-protocol (parse-source-protocol! source-protocol)
          :jdbc-url (require-jdbc-url! jdbc-url)
          :mode mode
@@ -986,14 +1446,38 @@
          :uri (require-uri! uri)
          :user user})
 
+      "publication-audit"
+      (let [[_ uri jdbc-url user password source-protocol database-id
+             final-sha final-basis publication-t & extra] args]
+        (ensure! (and (every? some?
+                             [uri jdbc-url user password source-protocol
+                              database-id final-sha final-basis publication-t])
+                      (empty? extra))
+                 "publication-audit requires exactly ten arguments"
+                 {:argument-count (count args)})
+        {:expected-database-id database-id
+         :expected-final-basis (parse-long! :expected-final-basis final-basis)
+         :expected-final-sha (parse-sha! :expected-final-sha final-sha)
+         :expected-publication-t
+         (parse-long! :expected-publication-t publication-t)
+         :expected-source-protocol (parse-source-protocol! source-protocol)
+         :jdbc-url (require-jdbc-url! jdbc-url)
+         :mode mode
+         :password password
+         :uri (require-uri! uri)
+         :user user})
+
       (fail! "Unknown Stage 5 acknowledgement-fault mode" {:mode mode}))))
 
 (defn- run-command
   [{:keys [mode] :as command}]
   (case mode
     "crash-window" (crash-window! command)
+    "publication-window" (crash-window! command)
+    "ha-takeover-window" (crash-window! command)
     "recover" (recover! command)
-    "audit" (audit! command)))
+    "audit" (audit! command)
+    "publication-audit" (publication-audit! command)))
 
 (defn- shutdown!
   []
@@ -1014,8 +1498,11 @@
       (emit-marker!
         (case mode
           "crash-window" fault-result-prefix
+          "publication-window" publication-result-prefix
+          "ha-takeover-window" ha-inflight-result-prefix
           "recover" recover-result-prefix
-          "audit" audit-prefix)
+          "audit" audit-prefix
+          "publication-audit" publication-audit-prefix)
         (:returned operation))
       (do
         (binding [*out* *err*]

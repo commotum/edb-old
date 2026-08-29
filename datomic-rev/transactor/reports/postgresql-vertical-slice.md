@@ -40,10 +40,15 @@ the primary PostgreSQL runtime path:
     log-root update is lock-observed, no Peer success is delivered, the owned
     Transactor and its exact blocked SQL session are terminated, the
     interrupted transaction remains absent, and two fresh-process recovery/
-    audit passes preserve the expected state.
+    audit passes preserve the expected state; and
+21. one exact post-publication/pre-result cut in which the Peer is frozen,
+    PostgreSQL durably advances the authoritative root, the owned Transactor is
+    killed before result delivery, and the same Peer plus a fresh Peer recover
+    exactly one committed CAS/sentinel effect with no duplicate execution.
 
 This is a real vertical-slice milestone, not Goal 2 completion. The broader
-failure matrices and remaining HA race/in-flight boundaries remain open.
+licensed-oracle comparison and remaining HA race/in-flight boundaries remain
+open.
 
 ## Repository-owned executing gate
 
@@ -234,8 +239,46 @@ The failed predecessor `-v1` is retained only as diagnostic evidence. It found
 the lock-manager/JVM-lifetime mismatch that required exact blocked-session
 rollback in the corrected cut. The passing row proves no successful Peer result
 for this exact prepublication root-update interruption; it does not prove the
-separate crash window after root publication but before result delivery, nor
-full licensed-oracle transaction equivalence.
+separate crash window after root publication but before result delivery. That
+window is covered by the next checkpoint; full licensed-oracle transaction
+equivalence remains open.
+
+The complementary post-publication/pre-result acknowledgement cut passed at
+`/tmp/datomic-recovered-pair-ack-postpublication-v4`. It uses repository runner
+SHA-256
+`423e1c3e705727eddc2f02b212fc8cc563388706a6389a3a4da5ce39cd9b9dd8`
+and acknowledgement-probe SHA-256
+`d3c8192827d0e8718aa67c1cf39c060e83d9aadfdf319e3c8eec0e2a458295cf`.
+Its self-verifying `evidence.sha256` has SHA-256
+`d8ac5e5314603c1bca54aa8a773d60a7eec136e29066b4d220d110e1591374bf`;
+every entry verifies.
+
+At baseline basis `1001`, the probe submitted one asynchronous CAS plus a
+unique sentinel while the authoritative root writer was blocked. The harness
+proved the Future incomplete, verified the exact Peer PID/start time/argv, and
+froze that Peer with `SIGSTOP`. It then terminated only the recorded PostgreSQL
+holder backend, observed the authoritative root advance from revision `3` to
+`4` while the Peer remained stopped, reverified the exact Transactor identity,
+and killed it with status `137` before result delivery.
+
+After a recovered Transactor restart, the same Peer was resumed. Its bounded
+sync saw 44 exact unavailable outcomes and succeeded on attempt 45; the
+original Future returned a report at basis `1003`. History contained exactly
+one baseline-kind retraction and one published-kind assertion at `t 1003`, and
+the unique fault sentinel existed only at that `t`. The CAS itself is a
+re-execution guard: a second execution would conflict rather than silently
+duplicate the effect. A second recovered Transactor restart and fresh recovered
+Peer reproduced the exact canonical SHA-256
+`ac4cc27c950b957db877cd2c30775e3dbb29b7a31ca3830f0a6c9e2073f12dbe`.
+The post-publication result and fresh-audit result independently hash to
+`69a2eb5cb0bd52c1d458e1224130e0cd5bf1481c20e257c1388f415e0c166e6e`
+and
+`2196976c85a9aaba6f1347b5dfe6fd72e503a0d6929353d2216d4c5619f28dd1`.
+
+All owned processes and Datomic-user PostgreSQL sessions were absent after
+cleanup, PostgreSQL reports `shut down`, and the service ports are closed. The
+run deliberately records full licensed-oracle equivalence as `NOT_RUN`: it
+closes the recovered-pair acknowledgement window, not the separate oracle row.
 
 The transport-only predecessor passed at
 `/tmp/datomic-recovered-pair-transport-v2`. It uses repository runner SHA-256
@@ -547,8 +590,9 @@ and every entry verifies.
 - The fail-stop takeover and stale-active conflict/self-fence row is closed.
   The focused storage gate also closes PostgreSQL index-ref/log-root CAS
   rejection while preserving the winner. The focused transaction gate closes
-  stale-CAS/uniqueness rejection and concurrent accepted ordering. Fault-
-  injected acknowledgement, delayed/partitioned writers, full oracle
+  stale-CAS/uniqueness rejection and concurrent accepted ordering. The paired
+  fault-injected acknowledgement cuts close both sides of durable publication
+  for the recovered pair. Delayed/partitioned writers, full licensed-oracle
   transaction equivalence, and the bounded no-writable-split-brain matrix
   remain open.
 
@@ -579,11 +623,12 @@ CAS/uniqueness rejection, concurrent transaction ordering, persistent-index
 publication, fresh-process adoption, same-connection transport recovery, the
 first recovered-pair takeover/self-fence row, and one focused missing-schema
 startup-failure row. The exact PostgreSQL index-ref and log-root rejection row
-is also closed. The next runtime boundary is fault injection at the durable
-commit/acknowledgement edge, followed by the bounded Stage 1/2 stabilization
-checkpoint. The bounded surface run
+is also closed. Both recovered-pair sides of the durable
+commit/acknowledgement edge are now closed. The next runtime boundary is an
+in-flight transaction during active/standby takeover, interleaved with the
+transaction/transport overlap cohort. The bounded surface run
 separately proves 272/272 effective loads and 247/247 callable/class shapes;
 the protocol family passes a focused fresh recovery, but integrated strict-
 metadata promotion and exact-AOT acceptance remain open. The 117 Stage 2
-overlaps and remaining transaction failure boundary remain required; none
+overlaps and remaining HA failure boundaries remain required; none
 justify another unconstrained source-residual pass.

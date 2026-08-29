@@ -2,8 +2,8 @@
 
 ## Current checkpoint
 
-The current promoted-tree ledger resolves 9 of the 117 shared namespaces. The
-remaining 108 are open. This is a semantic-evidence count, not a count of files
+The current promoted-tree ledger resolves 13 of the 117 shared namespaces. The
+remaining 104 are open. This is a semantic-evidence count, not a count of files
 that merely load.
 
 A fresh whole-cohort source-form run at
@@ -107,6 +107,14 @@ evidence for the cohort:
   `c23915e1406f1fac4046643683d93dc9cf06fee187657761e8f96fa1313b4238`;
 - active/standby takeover and stale-writer fencing: manifest
   `62859ef9ec8e66c43743434ea35974dde6dfd8362ff23cc6226d86721f2edf88`.
+
+The later post-publication/pre-result acknowledgement cut adds manifest
+`d8ac5e5314603c1bca54aa8a773d60a7eec136e29066b4d220d110e1591374bf`.
+It freezes the exact Peer, observes durable authoritative-root advancement,
+kills the exact Transactor before result delivery, then proves same-Peer
+reconnect/retry and fresh-Peer equality with exactly one committed CAS/sentinel
+effect. This is shared live-path evidence for the transaction/transport
+cohort; it is not namespace-wide proof of dormant functions.
 
 The focused SQL gate at `/tmp/datomic-stage2-sql-overlaps-v8` now resolves
 `datomic.kv-sql`, `datomic.kv-sql-ext`, and `datomic.sql`. Four separate
@@ -248,14 +256,90 @@ probe SHA-256 is
 This resolves only `datomic.cache`; `datomic.cache.caffeine` remains its own
 open overlap row.
 
+## Promise overlap checkpoint
+
+`datomic.promise` is now resolved by the independently reviewed four-lane gate
+at `/tmp/datomic-goal3-stage2-promise-v1`. Original Peer, recovered Peer,
+original Transactor, and recovered Transactor emit the same supported-domain
+payload at SHA-256
+`aa2e38f2a9fa23c2e03c887af969b40a77b52c0a3e3d210805ca0e4ed8439b49`.
+The probe covers ordinary and Throwable delivery, `Future`, `IPending`, deref,
+timed get, cancellation, metadata, listeners before and after delivery,
+rejected executors, listener failure, twelve-way delivery contention,
+twenty-listener registration/delivery contention, interruption of a blocked
+waiter, and bounded thread/global-handler cleanup.
+
+Original Peer, original Transactor, and recovered Transactor have byte-exact
+metadata for all four public Vars. Recovered Peer has the expected authored-
+source metadata difference while preserving roots and callable arities. The
+two original artifacts expose the same eleven class roles, 51 methods, and 60
+fields after generated-ID normalization. Four normalized class bodies are
+exact; the seven residuals are bounded to source-versus-AOT locking lowering,
+capture ordering, captured-field clearing, nil placement, and dead verifier
+slots. No unexplained executable behavior remains in the namespace.
+
+Both recovered lanes freshly compile their complete Java closures, stage
+candidate-owned resources, prove the current promise source origin, and exclude
+Peer, Transactor, core2, and Nano implementation archives. All four lanes emit
+exactly two result rows and empty stderr. The fresh evidence manifest verifies
+independently at SHA-256
+`0c4b33d520f7286f8105e54c0aaf13384620f2823088610b7d5548e405833ce4`.
+Runner SHA-256 is
+`22d81537625598097f546b16f2df90d4c7ff21157a9d8484a5b7db31bff7efa8`;
+probe SHA-256 is
+`6cade8a83b0ec3eb027882c8464832305ea0262416e85614daf8fa7e7b205498`.
+
+## Transaction/transport cohort checkpoint
+
+One bounded static pass over the pinned original Peer and Transactor artifacts
+at `/tmp/datomic-stage2-transport-cohort-static-v2` classifies the five-row
+transaction/transport cohort without rebuilding either candidate or creating
+five behavior gates. Its summary SHA-256 is
+`764e1dc988e4df46a08ffde3fd776fb40a13504c58b79589fdb5f301356ed7af`;
+runner SHA-256 is
+`bf9f231db42e9a8739e68c1bd78f45cb9bb28e9b31548e7f3651cdc14545a90e`.
+The run binds both original artifact hashes, the pinned Corretto `javap`, and
+all ten recovered source inputs.
+
+Across `datomic.queue`, `datomic.builtins`, `datomic.reconnector2`,
+`datomic.connector`, and `datomic.artemis-client`, all 261 normalized class
+roles align and all 945 method signatures are exact. There are no Peer-only
+fields. The Transactor artifacts add respectively 3, 6, 3, 7, and 21 fields;
+every one is a compiler-generated static `clojure.lang.Var` constant. Whole-
+body bytecode remains residual and was not normalized into a false exact
+result.
+
+The source/body review plus already banked runtime evidence resolves three
+rows. `datomic.queue` has source-equivalent queue primitives and `queue-seq`;
+its only map-expansion residual is inside `DelayingQueue`, which consumes maps
+created by that same type. The live Peer/Transactor runs exercise clear,
+offer/put, poll/take, Fressian queue sequencing, and ReferenceQueue cleanup.
+`datomic.builtins` has source-equivalent component/retract logic on production
+`IDbImpl`/`IDatum` values, while accepted, rejected, concurrent, and both crash
+cuts exercise CAS. `datomic.reconnector2` has source-equivalent supported
+keyword construction and state-machine bodies; transport, acknowledgement,
+and HA runs exercise repeated unavailable reconnect, successful replacement,
+same-Peer continuation, and shutdown.
+
+The compiler-domain differences are retained: Transactor protocol docs and
+metadata, Clojure 1.9/1.11 sequence-map expansion, locking/`do` lowering,
+capture/clearing order, and dead verifier slots. Synthetic malformed singleton
+sequences can differ, but they are outside the supported queue payload,
+database-datom, and reconnector keyword-pair domains. The detailed ledger now
+records 13 resolved rows.
+
+`datomic.connector` and `datomic.artemis-client` remain open. Their live send,
+wait, failure, reconnect, and shutdown path is strong, and their class/method
+ABI is exact, but administrative requests, temporary queue/stream helpers, and
+RPC-server branches are not yet bounded. The static pass is partial evidence,
+not a promotion for those two rows.
+
 ## Next boundary
 
-Continue the bounded transaction/transport cohort in this order:
-`datomic.promise`, `datomic.queue`,
-`datomic.builtins`, `datomic.reconnector2`, `datomic.connector`, and
-`datomic.artemis-client`. Existing transaction, crash/ack, reconnect, and HA
-evidence prioritizes and partially covers those rows; it does not itself
-resolve any of them. Keep broad `datomic.db`, `datomic.peer`,
+Advance to the in-flight transaction-during-takeover HA cut. Use its live send,
+wait, unavailable, reconnect, result, and shutdown evidence to pull the still-
+open `datomic.connector` and `datomic.artemis-client` rows forward only if it
+bounds their remaining behavior. Keep broad `datomic.db`, `datomic.peer`,
 `datomic.fressian`, and `datomic.error` rows and the other six central-cohort
 rows explicitly partial. Return to a partial row only when a focused dormant-
 branch probe or sealed namespace-wide bytecode relation can close it. Do not

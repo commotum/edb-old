@@ -49,21 +49,26 @@ authoritative sequencing and status record for new work.
   recovered Peer/Transactor round trip through transaction, log, persistent
   indexes, transport interruption, and reconnection works.
 - Stage 1 has a complete 247-source recovery. All 272 effective namespaces load
-  and all 247 callable/root/class shapes agree. Its sole remaining acceptance
-  boundary is the normalized exact-AOT relation for 87 shipped-source
-  namespaces and 3,431 classes, followed by the sealed production wrapper.
-- The exact-AOT candidate-to-candidate relation passes all 3,431 classes. The
-  oracle relations have advanced to a localized generated-class pairing
-  ambiguity. The scanner and JVM verifier are independently green. The wrapper
-  preflight exposed a bounded mutable-temporary-root sealing defect that must be
-  corrected without weakening strict seals for immutable inputs.
-- Nine of 117 Peer/Transactor overlap rows are resolved. `datomic.promise` has
-  a new, unpromoted four-lane probe and runner in the current worktree and must
-  be independently reviewed before its row can be counted as resolved.
-- Stage 5 proves rejected transactions, concurrent monotonic ordering, the
-  prepublication crash boundary, durable recovery, and restart adoption. The
-  post-publication/pre-result acknowledgement window and complete oracle
-  equivalence remain open.
+  and all 247 callable/root/class shapes agree. A fresh production attempt
+  compiled both complete 3,431-class candidate trees, then failed all three
+  exact-AOT relations in the global generated-member pairing search before the
+  scanner or JVM verifier ran. A surgical `G__7081` captured-field
+  classification passes the focused registration corpus, but a bounded full-
+  corpus diagnostic still encountered 1,051 ambiguous nodes in 927 groups and
+  stopped at search index 45 after 1,000 search nodes. Stage 1 is not green;
+  the exact-AOT acceptance gap is frozen rather than allowed to block runtime
+  recovery.
+- Thirteen of 117 Peer/Transactor overlap rows are resolved. The transaction/
+  transport cohort promoted `datomic.queue`, `datomic.builtins`, and
+  `datomic.reconnector2` from one 261-class static pass plus existing live
+  transaction, acknowledgement, reconnect, and HA evidence. `datomic.connector`
+  and `datomic.artemis-client` remain open. The remaining 104 rows are open.
+- Stage 5 proves rejected transactions, concurrent monotonic ordering, both
+  sides of the durable acknowledgement boundary, durable same-Peer recovery,
+  and fresh-Peer restart adoption. The post-publication/pre-result cut passed
+  with exactly one committed CAS/sentinel effect after the Transactor was
+  killed while the Peer was frozen. Complete licensed-oracle equivalence
+  remains open.
 - Stage 7 proves one active-to-standby takeover, same-Peer continuation,
   durable post-takeover write, and stale-primary self-fencing. In-flight,
   concurrent, partition, and split-brain rows remain open.
@@ -82,45 +87,47 @@ After the first bounded checkpoint, use a downstream-pulls-upstream cycle:
 
 This is not calendar-based alternation. Runtime evidence prioritizes Stage 2
 and supplies behavior proof, but it cannot classify dormant code; an exhaustive
-117-row closure remains mandatory. Stage 1 should close once and reopen only
-if a genuine recovery-tool or promoted-source change invalidates it.
+117-row closure remains mandatory. The exact-AOT Stage 1 gap is now parked.
+Reopen it only after runtime recovery has materially advanced and either an
+executable failure implicates recovered source/tool output or an explicit
+acceptance decision makes exact-AOT the highest-value remaining boundary.
+Comparator work is not a prerequisite for acknowledgement, overlap-cohort, or
+HA progress.
 
 ## Stages
 
 ### Stage 1 — Seal the bounded recovery checkpoint
 
-**Status:** In progress
+**Status:** Frozen with an explicit acceptance gap
 
 **Outcome:** The current whole-corpus recovery and the first pending overlap
 row are promoted from promising diagnostics to independently verified,
 resumable evidence.
 
-**Focus:** Resolve the generated-class pairing ambiguity by a principled,
-general rule; correct the wrapper's mutable-root evidence model while retaining
-strict immutable-input policies; rerun clean preflight and the full 87-source,
-3,431-class production comparator/scanner/verifier chain; independently review
-and run the four-lane `datomic.promise` gate, including its concurrency,
-failure, provenance, metadata, and cleanup claims.
+**Focus:** Preserve the compiled 3,431-class diagnostic corpus and the focused
+`G__7081` fix, but do not generalize the comparator, expand its self-test
+matrix, or rerun clean builds for comparator-only changes. The latest
+production comparator failed all three relations before scanner/verifier, so
+do not describe this stage as sealed or green. `datomic.promise` is complete
+and no longer part of this stage's open work.
 
 **Completion signal:** Both oracle exact-AOT relations and candidate
 determinism pass all 3,431 classes; the scanner and JVM verifier pass inside a
-self-sealed production wrapper; no original implementation enters candidate
-runtimes; `datomic.promise` is either resolved with a checked-in focused gate
-or remains explicitly open with a concrete defect; repository reports and
-this plan reflect the observed result.
+self-sealed production wrapper; and no original implementation enters candidate
+runtimes. This signal is currently unsatisfied and intentionally non-blocking.
 
 ### Stage 2 — Close the durable acknowledgement boundary
 
-**Status:** Pending
+**Status:** Recovered-pair boundary green; licensed-oracle row open
 
 **Outcome:** Transaction success is understood and proven across the complete
 publication-to-client-result interval.
 
-**Focus:** Exercise the post-publication/pre-result failure cut alongside the
-already proven prepublication cut; compare accepted and rejected outcomes with
-the licensed oracle where required; prove authoritative root, log, basis, and
-Peer-visible state before and after restart; distinguish permitted orphan
-immutable values from published state.
+**Focus:** Preserve the paired prepublication and post-publication/pre-result
+cuts as the recovered-pair boundary. Compare accepted and rejected outcomes
+with the licensed oracle where required; keep authoritative root, log, basis,
+and Peer-visible state explicit; distinguish permitted orphan immutable values
+from published state.
 
 **Completion signal:** Injected failures cannot report success before durable
 publication; a transaction durably published before acknowledgement has one
@@ -130,19 +137,22 @@ honestly green or a specific semantic blocker is recorded.
 
 ### Stage 3 — Resolve the runtime-pulled shared kernel
 
-**Status:** Pending
+**Status:** Three of five priority rows resolved; interleaved with Stage 4
 
 **Outcome:** The highest-leverage transaction and transport overlaps are
 resolved using the green main path and acknowledgement evidence rather than
 source notation alone.
 
-**Focus:** After `datomic.promise`, prioritize `datomic.queue`,
+**Focus:** Prioritize `datomic.queue`,
 `datomic.builtins`, `datomic.reconnector2`, `datomic.connector`, and
 `datomic.artemis-client`. Pull `datomic.update`, `datomic.log`, `datomic.db`,
 `datomic.fressian`, or `datomic.error` forward when an executable boundary
 implicates them. Attach existing behavior evidence first; add a focused probe
-only for a material uncovered branch. Preserve intentional compiler-lineage or
-product differences explicitly.
+only for a material uncovered branch. Do not create one four-lane mini-project
+per namespace: classify the five rows as one transaction/transport cohort,
+promote only rows already proved across their supported domain, and leave
+dormant uncovered branches explicitly open. Preserve intentional compiler-
+lineage or product differences explicitly.
 
 **Completion signal:** Every row in the prioritized cohort has a source/ABI/
 bytecode classification and sufficient focused behavior evidence; no runtime
@@ -237,7 +247,11 @@ bounding; and all important claims are supported by reproducible evidence.
 
 ## Next direct action
 
-Audit the current exact-AOT wrapper/comparator changes and the unpromoted
-`datomic.promise` gate. Fix only confirmed defects, run fresh isolated evidence
-roots, and close Stage 1 before expanding the HA matrix or beginning lower-
-priority facilities.
+Run the in-flight transaction-during-takeover HA row using the deterministic
+publication mechanism from the acknowledgement cut. Prove the client outcome,
+one authoritative writer, one committed-or-absent effect, monotonic root/basis,
+same-Peer continuation, fresh-Peer equality, stale-primary fencing, and full
+cleanup. Use the result to advance the still-open connector/Artemis and any
+coordination/log/database overlaps it actually implicates. Do not resume
+exact-AOT work or add per-namespace evidence ceremony while the HA boundary can
+still advance.

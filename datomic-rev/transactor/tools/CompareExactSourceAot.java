@@ -65,7 +65,8 @@ public final class CompareExactSourceAot {
   private static final Pattern DOUBLE_ID = Pattern.compile("__(\\d+)");
   private static final Pattern EVAL_ID = Pattern.compile("\\$eval(\\d+)");
   private static final Pattern INST_ID = Pattern.compile("\\$inst_(\\d+)__");
-  private static final Pattern STRUCTURAL_GENSYM_SYMBOL = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$-]*__\\d+__auto__");
+  private static final Pattern STRUCTURAL_GENSYM_SYMBOL = Pattern.compile(
+      "(?:[A-Za-z_$][A-Za-z0-9_$-]*__\\d+__auto__|p\\d+__\\d+#)");
   private static final Pattern STATE_MACHINE_OWNER = Pattern.compile("^(.*\\$state_machine__\\d+__auto____\\d+)(?:\\$.*)?$");
   private static final Pattern CORE_ASYNC_IOC_INVOKE_OWNER = Pattern.compile(
       "^clojure/core/async\\$.*\\$state_machine__\\d+__auto____\\d+\\$fn__\\d+(?:\\$.*)?$");
@@ -111,6 +112,8 @@ public final class CompareExactSourceAot {
       "^((?:(?:inst|statearr|state|seq|i|count|chunk)_|" +
       "(?:tmp|fn|c|a|msg|ex|f|x_amz_content_sha)))(\\d+)$");
   private static final Pattern FIXED_MEMBER_SLOT = Pattern.compile("(?:const__\\d+|__cached_class__\\d+|__site__\\d+|__thunk__\\d+)");
+  private static final Pattern CONST_MEMBER_SLOT = Pattern.compile("const__\\d+");
+  private static final Pattern CAPTURED_STATE_CARRIER = Pattern.compile("state_\\d+");
 
   private static class Failure extends RuntimeException {
     Failure(String message) { super(message); }
@@ -379,6 +382,7 @@ public final class CompareExactSourceAot {
     final List<Insn> insns = new ArrayList<Insn>();
     final List<TryCatchModel> tryCatches = new ArrayList<TryCatchModel>();
     final List<LocalVariableModel> localVariables = new ArrayList<LocalVariableModel>();
+    Set<Integer> controlLabels;
     int maxStack = -1;
     int maxLocals = -1;
 
@@ -463,23 +467,27 @@ public final class CompareExactSourceAot {
     final ClassModel owner;
     final MethodModel method;
     final Insn slotInsn;
+    final Insn invokeInsn;
     final MemberKey stateField;
 
     StateSlotAccess(StateSlotKey key, String kind, ClassModel owner, MethodModel method,
-                    Insn slotInsn, MemberKey stateField) {
+                    Insn slotInsn, Insn invokeInsn, MemberKey stateField) {
       this.key = key; this.kind = kind; this.owner = owner; this.method = method;
-      this.slotInsn = slotInsn; this.stateField = stateField;
+      this.slotInsn = slotInsn; this.invokeInsn = invokeInsn; this.stateField = stateField;
     }
   }
 
   private static final class StateSlotUniverse {
     final Set<StateSlotKey> nodes = new TreeSet<StateSlotKey>();
     final Map<Insn, StateSlotAccess> byInstruction = new IdentityHashMap<Insn, StateSlotAccess>();
+    final Map<Insn, StateSlotAccess> byInvokeInstruction = new IdentityHashMap<Insn, StateSlotAccess>();
     final Map<StateSlotKey, List<StateSlotAccess>> byNode = new TreeMap<StateSlotKey, List<StateSlotAccess>>();
 
     void add(StateSlotAccess access) {
       require(byInstruction.put(access.slotInsn, access) == null,
           "one instruction was classified as more than one state-slot access in " + access.owner.name);
+      require(byInvokeInstruction.put(access.invokeInsn, access) == null,
+          "one invoke was classified as more than one state-slot access in " + access.owner.name);
       nodes.add(access.key);
       byNode.computeIfAbsent(access.key, ignored -> new ArrayList<StateSlotAccess>()).add(access);
     }
@@ -524,14 +532,24 @@ public final class CompareExactSourceAot {
     final ClassModel owner;
     final MethodModel method;
     final boolean boundary;
+    final Set<Integer> boundarySlots;
     final Set<Integer> physicalSlots;
     int instructionOccurrences;
     int frameOccurrences;
     int lvtOccurrences;
     LocalNodeInfo(LocalNodeKey key, ClassModel owner, MethodModel method,
-                  boolean boundary, Set<Integer> physicalSlots) {
+                  boolean boundary, Set<Integer> boundarySlots,
+                  Set<Integer> physicalSlots) {
       this.key = key; this.owner = owner; this.method = method;
-      this.boundary = boundary; this.physicalSlots = physicalSlots;
+      this.boundary = boundary; this.boundarySlots = boundarySlots;
+      this.physicalSlots = physicalSlots;
+    }
+    LocalNodeInfo(LocalNodeKey key, ClassModel owner, MethodModel method,
+                  boolean boundary, Set<Integer> physicalSlots) {
+      this(key, owner, method, boundary,
+          boundary ? Collections.unmodifiableSet(new TreeSet<Integer>(physicalSlots)) :
+              Collections.emptySet(),
+          physicalSlots);
     }
   }
 
@@ -542,6 +560,7 @@ public final class CompareExactSourceAot {
     final Map<Insn, Map<Integer, LocalNodeKey>> frameNodes = new IdentityHashMap<Insn, Map<Integer, LocalNodeKey>>();
     final Map<LocalVariableModel, LocalNodeKey> variableNodes = new IdentityHashMap<LocalVariableModel, LocalNodeKey>();
     final Map<MethodModel, Set<LocalNodeKey>> methodNodes = new IdentityHashMap<MethodModel, Set<LocalNodeKey>>();
+    final Map<MemberKey, Boolean> pureConsumeAccessorCache = new HashMap<MemberKey, Boolean>();
     final Set<String> nonLvtCompilerIds = new TreeSet<String>(numericComparator());
     final Map<String, Integer> autoLocalSuffixOccurrences = new TreeMap<String, Integer>(numericComparator());
     final Map<String, Integer> lvtCompilerIdOccurrences = new TreeMap<String, Integer>(numericComparator());
@@ -556,6 +575,11 @@ public final class CompareExactSourceAot {
       for (ClassModel owner : classes.values()) for (MethodModel method : owner.methods) {
         analyzeLocalMethod(owner, method, result);
       }
+      /* A LocalVariableTable row with no instruction or stack-map-frame
+       * occurrence is debugger metadata, not a def-use graph node.  Preserve
+       * the complete typed row and its multiplicity, but do not make its
+       * compiler-selected physical slot participate in executable pairing. */
+      result.generated.removeIf(key -> debugOnlyLocal(result.info.get(key)));
       result.nonLvtCompilerIds.addAll(nonLvtCompilerIds(classes.values()));
       for (ClassModel owner : classes.values()) for (MethodModel method : owner.methods)
         for (LocalVariableModel variable : method.localVariables) {
@@ -583,6 +607,10 @@ public final class CompareExactSourceAot {
     LocalDef(int id, int slot, String category, boolean boundary) {
       this.id = id; this.slot = slot; this.category = category; this.boundary = boundary;
     }
+  }
+
+  private static boolean debugOnlyLocal(LocalNodeInfo info) {
+    return info != null && info.instructionOccurrences == 0 && info.frameOccurrences == 0;
   }
 
   private static final class LocalUnionFind {
@@ -642,6 +670,7 @@ public final class CompareExactSourceAot {
 
   private static String frameCategory(Object value) {
     if (value instanceof String) return "A";
+    if (value == Opcodes.NULL) return "A";
     if (value == Opcodes.LONG) return "J";
     if (value == Opcodes.DOUBLE) return "D";
     if (value == Opcodes.FLOAT) return "F";
@@ -728,15 +757,33 @@ public final class CompareExactSourceAot {
         String expected = localCategoryForOpcode(instruction.opcode);
         for (int def : reaching) {
           if (!defs.get(def).category.equals(expected)) { unsafe = true; break; }
-          unions.union(reaching.iterator().next(), def);
         }
         if (unsafe) break;
+        /* The renderer deliberately removes a typed load immediately discarded
+         * by POP/POP2.  Such a read still has to be verifier-safe, as checked
+         * above, but it is not a semantic use and must not merge otherwise
+         * independent reaching definitions at a control-flow join. */
+        if (localLoadInsn(instruction) && pureLocalDiscard(code, i)) continue;
+        for (int def : reaching) unions.union(reaching.iterator().next(), def);
         Set<Integer> associated = new TreeSet<Integer>(reaching);
         Integer ownDef = storeDefs.get(instruction);
         if (ownDef != null) { for (int def : reaching) unions.union(ownDef, def); associated.add(ownDef); }
         occurrenceDefs.put(instruction, associated);
-      } else if (localStoreInsn(instruction)) {
-        occurrenceDefs.put(instruction, new TreeSet<Integer>(Collections.singleton(storeDefs.get(instruction))));
+      } else if (localStoreInsn(instruction) &&
+          !localGcLifetimeClearStore(code, i)) {
+        Integer ownDef = storeDefs.get(instruction);
+        Set<Integer> associated = new TreeSet<Integer>(Collections.singleton(ownDef));
+        Insn source = localReferenceMoveSource(code, i);
+        Set<Integer> sourceDefs = source == null ? null : occurrenceDefs.get(source);
+        if (sourceDefs != null) {
+          for (int def : sourceDefs) {
+            if (!defs.get(def).category.equals("A")) { unsafe = true; break; }
+            unions.union(ownDef, def);
+          }
+          if (unsafe) break;
+          associated.addAll(sourceDefs);
+        }
+        occurrenceDefs.put(instruction, associated);
       }
     }
     if (unsafe) return;
@@ -753,7 +800,10 @@ public final class CompareExactSourceAot {
       for (int i = start; i < end; i++) {
         Insn instruction = code.get(i);
         if ((localLoadInsn(instruction) || localStoreInsn(instruction) || instruction.kind.equals("IINC")) &&
-            instruction.args.get(0).equals(variable.index)) linked.addAll(occurrenceDefs.get(instruction));
+            instruction.args.get(0).equals(variable.index)) {
+          Set<Integer> occurrence = occurrenceDefs.get(instruction);
+          if (occurrence != null) linked.addAll(occurrence);
+        }
       }
       /* Actual typed occurrences are the authoritative live-range anchors.
        * A metadata-only LVT row has no executable use to bind.  Give it a
@@ -812,14 +862,18 @@ public final class CompareExactSourceAot {
       List<LocalDef> group = groups.get(root);
       String category = group.get(0).category;
       boolean boundary = false;
+      Set<Integer> boundarySlots = new TreeSet<Integer>();
       Set<Integer> physical = new TreeSet<Integer>();
       for (LocalDef def : group) {
         require(def.category.equals(category), "local web combines incompatible categories in " + owner.name + "." + method.key());
-        boundary |= def.boundary; physical.add(def.slot);
+        boundary |= def.boundary;
+        if (def.boundary) boundarySlots.add(def.slot);
+        physical.add(def.slot);
       }
       LocalNodeKey key = new LocalNodeKey(owner.name, method.name, method.descriptor, ordinal++, category);
       keyByRoot.put(root, key);
-      LocalNodeInfo info = new LocalNodeInfo(key, owner, method, boundary, physical);
+      LocalNodeInfo info = new LocalNodeInfo(key, owner, method, boundary,
+          Collections.unmodifiableSet(boundarySlots), physical);
       target.info.put(key, info);
       target.methodNodes.computeIfAbsent(method, ignored -> new TreeSet<LocalNodeKey>()).add(key);
       if (!boundary) target.generated.add(key);
@@ -830,6 +884,14 @@ public final class CompareExactSourceAot {
       LocalNodeKey key = keyByRoot.get(root);
       target.instructionNodes.put(entry.getKey(), key);
       target.info.get(key).instructionOccurrences++;
+    }
+    /* Keep a GC-clear store renderable as part of the source value's proved
+     * housekeeping idiom without making the clear a def-use occurrence.  This
+     * lets the phase-independent renderer erase its physical slot while the
+     * graph and occurrence counts continue to model only executable values. */
+    for (int i = 0; i < code.size(); i++) if (localGcLifetimeClearStore(code, i)) {
+      LocalNodeKey source = target.instructionNodes.get(code.get(i - 2));
+      if (source != null) target.instructionNodes.put(code.get(i), source);
     }
     for (Map.Entry<LocalVariableModel, Integer> entry : variableDef.entrySet()) {
       LocalNodeKey key = keyByRoot.get(unions.find(entry.getValue()));
@@ -872,6 +934,7 @@ public final class CompareExactSourceAot {
 
   private static final class MemberUniverse {
     final Set<MemberKey> generated = new TreeSet<MemberKey>();
+    final Set<MemberKey> transitionConstants = new TreeSet<MemberKey>();
     static MemberUniverse of(Map<String, ClassModel> classes) {
       MemberUniverse universe = new MemberUniverse();
       /* Spelling is not evidence.  A node is eligible only when its bytecode
@@ -881,11 +944,123 @@ public final class CompareExactSourceAot {
       for (CaptureSpec spec : captureSpecs(classes).values()) for (FieldModel field : spec.fieldsByArgument)
         if (eligibleGeneratedMember(field.access, field.name))
           universe.generated.add(new MemberKey(spec.owner.name, "F", field.name, field.descriptor));
+      universe.generated.addAll(stateMachineGeneratedConstants(classes));
+      universe.transitionConstants.addAll(
+          stateMachineTransitionConstants(classes, universe.generated));
       return universe;
     }
     boolean contains(String owner, String kind, String name, String descriptor) {
       return generated.contains(new MemberKey(owner, kind, name, descriptor));
     }
+  }
+
+  private static boolean eligibleStateMachineGeneratedConstantField(ClassModel owner, FieldModel field) {
+    return stateMachineOwner(owner.name) != null && CONST_MEMBER_SLOT.matcher(field.name).matches() &&
+        field.access == (Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL) &&
+        field.signature == null && field.value == null && field.events.isEmpty();
+  }
+
+  /* These slots are compiler-owned nodes, not authored public state.  Admit a
+   * slot only when its generated state-machine owner and complete write
+   * history prove exactly one <clinit> PUTSTATIC and no other write.  The
+   * initializer instruction graph and every read remain exact inputs to the
+   * member fingerprint.  The whole-original-JAR owner scan separately rejects
+   * outside-cohort references to such compiler-ID-bearing owners. */
+  private static Set<MemberKey> stateMachineGeneratedConstants(Map<String, ClassModel> classes) {
+    Set<MemberKey> result = new TreeSet<MemberKey>();
+    for (ClassModel owner : classes.values()) {
+      Map<MemberKey, FieldModel> candidates = new TreeMap<MemberKey, FieldModel>();
+      for (FieldModel field : owner.fields) if (eligibleStateMachineGeneratedConstantField(owner, field)) {
+        MemberKey key = new MemberKey(owner.name, "F", field.name, field.descriptor);
+        candidates.put(key, field);
+      }
+      if (candidates.isEmpty()) continue;
+      Map<MemberKey, Integer> validInitializers = new TreeMap<MemberKey, Integer>();
+      Set<Insn> validStores = Collections.newSetFromMap(new IdentityHashMap<Insn, Boolean>());
+      for (MethodModel method : owner.methods) {
+        if (!method.name.equals("<clinit>") || !method.descriptor.equals("()V")) continue;
+        for (Insn store : method.insns) {
+          if (!store.is("FIELD", Opcodes.PUTSTATIC)) continue;
+          MemberKey key = new MemberKey(store.owner(), "F", store.memberName(), store.descriptor());
+          if (!candidates.containsKey(key)) continue;
+          validInitializers.merge(key, 1, Integer::sum); validStores.add(store);
+        }
+      }
+      Set<MemberKey> invalid = new HashSet<MemberKey>();
+      for (MethodModel method : owner.methods) for (Insn instruction : method.insns) {
+        if (!instruction.kind.equals("FIELD")) continue;
+        MemberKey key = new MemberKey(instruction.owner(), "F", instruction.memberName(), instruction.descriptor());
+        if (!candidates.containsKey(key)) continue;
+        if (instruction.opcode == Opcodes.GETSTATIC) continue;
+        if (instruction.opcode == Opcodes.PUTSTATIC && validStores.contains(instruction)) continue;
+        invalid.add(key);
+      }
+      for (MemberKey key : candidates.keySet())
+        if (!invalid.contains(key) && Objects.equals(validInitializers.get(key), 1)) result.add(key);
+    }
+    return result;
+  }
+
+  private static Set<MemberKey> boxedLongInitializedConstants(
+      Map<String, ClassModel> classes, Set<MemberKey> generated) {
+    Set<MemberKey> result = new TreeSet<MemberKey>();
+    for (ClassModel owner : classes.values()) for (MethodModel method : owner.methods) {
+      if (!method.name.equals("<clinit>") || !method.descriptor.equals("()V")) continue;
+      for (int i = 0; i + 2 < method.insns.size(); i++) {
+        Insn value = method.insns.get(i), box = method.insns.get(i + 1), store = method.insns.get(i + 2);
+        if (!value.kind.equals("LDC") || !(value.args.get(0) instanceof Long) ||
+            !box.is("METHOD", Opcodes.INVOKESTATIC) || !box.owner().equals("java/lang/Long") ||
+            !box.memberName().equals("valueOf") || !box.descriptor().equals("(J)Ljava/lang/Long;") ||
+            !store.is("FIELD", Opcodes.PUTSTATIC)) continue;
+        MemberKey key = new MemberKey(store.owner(), "F", store.memberName(), store.descriptor());
+        if (generated.contains(key)) result.add(key);
+      }
+    }
+    return result;
+  }
+
+  private static Set<MemberKey> stateMachineTransitionConstants(
+      Map<String, ClassModel> classes, Set<MemberKey> generated) {
+    Set<MemberKey> boxed = boxedLongInitializedConstants(classes, generated);
+    if (boxed.isEmpty()) return Collections.emptySet();
+    Map<MemberKey, Integer> allReads = new TreeMap<MemberKey, Integer>();
+    Map<MemberKey, Integer> transitionReads = new TreeMap<MemberKey, Integer>();
+    for (ClassModel owner : classes.values()) for (MethodModel method : owner.methods)
+      for (Insn instruction : method.insns) {
+        if (!instruction.is("FIELD", Opcodes.GETSTATIC)) continue;
+        MemberKey key = new MemberKey(instruction.owner(), "F", instruction.memberName(), instruction.descriptor());
+        if (boxed.contains(key)) allReads.merge(key, 1, Integer::sum);
+      }
+    StateSlotUniverse slots = stateSlotUniverse(classes);
+    StateSlotKey slotOne;
+    for (Map.Entry<StateSlotKey, List<StateSlotAccess>> entry : slots.byNode.entrySet()) {
+      slotOne = entry.getKey();
+      if (slotOne.index != 1L) continue;
+      for (StateSlotAccess access : entry.getValue()) {
+        if (!access.kind.equals("write")) continue;
+        int slotAt = access.method.insns.indexOf(access.slotInsn);
+        int invokeAt = access.method.insns.indexOf(access.invokeInsn);
+        if (slotAt < 0 || invokeAt <= slotAt + 1 ||
+            !exactInvoke(access.invokeInsn, "clojure/lang/IFn$OLOO",
+                "(Ljava/lang/Object;JLjava/lang/Object;)Ljava/lang/Object;")) continue;
+        Insn value = null;
+        boolean otherSemanticInstruction = false;
+        for (int i = slotAt + 1; i < invokeAt; i++) {
+          Insn instruction = access.method.insns.get(i);
+          if (instruction.kind.equals("LABEL") || instruction.kind.equals("FRAME")) continue;
+          if (value == null && instruction.is("FIELD", Opcodes.GETSTATIC)) value = instruction;
+          else otherSemanticInstruction = true;
+        }
+        if (value == null || otherSemanticInstruction) continue;
+        MemberKey key = new MemberKey(value.owner(), "F", value.memberName(), value.descriptor());
+        if (boxed.contains(key)) transitionReads.merge(key, 1, Integer::sum);
+      }
+    }
+    Set<MemberKey> result = new TreeSet<MemberKey>();
+    for (MemberKey key : boxed)
+      if (allReads.getOrDefault(key, 0) == 0 ||
+          Objects.equals(allReads.get(key), transitionReads.get(key))) result.add(key);
+    return result;
   }
 
   private static boolean eligibleGeneratedMember(int access, String name) {
@@ -894,7 +1069,7 @@ public final class CompareExactSourceAot {
   }
 
   private static String generatedMemberSkeleton(String name) {
-    return FIXED_MEMBER_SLOT.matcher(name).matches() ? name : "<CAPTURE_MEMBER>";
+    return "<GENERATED_MEMBER>";
   }
 
   private static String stateMachineOwner(String className) {
@@ -959,6 +1134,7 @@ public final class CompareExactSourceAot {
   }
 
   private static Set<Integer> stateControlLabels(MethodModel method) {
+    if (method.controlLabels != null) return method.controlLabels;
     Set<Integer> result = new HashSet<Integer>();
     for (Insn instruction : method.insns) {
       if (instruction.kind.equals("JUMP"))
@@ -987,7 +1163,8 @@ public final class CompareExactSourceAot {
     for (String event : method.codeEvents) if (event.startsWith("LVANNOT(")) typedLocalRange = true;
     if (typedLocalRange) for (Insn instruction : method.insns)
       if (instruction.kind.equals("LABEL")) result.add(((LabelRef) instruction.args.get(0)).id);
-    return result;
+    method.controlLabels = Collections.unmodifiableSet(result);
+    return method.controlLabels;
   }
 
   private static int previousStateInstruction(MethodModel method, int before,
@@ -1510,7 +1687,7 @@ public final class CompareExactSourceAot {
     }
     if (machine == null) return null;
     return new StateSlotAccess(new StateSlotKey(machine, slot.longValue()), kind, owner, method,
-        slotInstruction, state.field);
+        slotInstruction, code.get(invokeAt), state.field);
   }
 
   private static boolean constructsClass(ClassModel owner, String target) {
@@ -1794,6 +1971,7 @@ public final class CompareExactSourceAot {
     final Map<String, String> classMapping;
     final MemberUniverse members;
     final Map<MemberKey, MemberKey> memberMapping;
+    final MemberKey highlightedMember;
     final StateSlotUniverse stateSlots;
     final Map<StateSlotKey, StateSlotKey> stateSlotMapping;
     final StateSlotKey highlightedStateSlot;
@@ -1834,8 +2012,20 @@ public final class CompareExactSourceAot {
                Map<StateSlotKey, StateSlotKey> stateSlotMapping, StateSlotKey highlightedStateSlot,
                boolean eraseLocals, LocalUniverse locals,
                Map<LocalNodeKey, LocalNodeKey> localMapping, LocalNodeKey highlightedLocal) {
+      this(maps, classNamespace, classMapping, erase, eraseMembers, members, memberMapping, null,
+          eraseStateSlots, stateSlots, stateSlotMapping, highlightedStateSlot,
+          eraseLocals, locals, localMapping, highlightedLocal);
+    }
+    Normalizer(Map<String, IdMap> maps, Map<String, String> classNamespace, Map<String, String> classMapping,
+               boolean erase, boolean eraseMembers, MemberUniverse members, Map<MemberKey, MemberKey> memberMapping,
+               MemberKey highlightedMember,
+               boolean eraseStateSlots, StateSlotUniverse stateSlots,
+               Map<StateSlotKey, StateSlotKey> stateSlotMapping, StateSlotKey highlightedStateSlot,
+               boolean eraseLocals, LocalUniverse locals,
+               Map<LocalNodeKey, LocalNodeKey> localMapping, LocalNodeKey highlightedLocal) {
       this.maps = maps; this.classNamespace = classNamespace; this.classMapping = classMapping; this.erase = erase;
       this.eraseMembers = eraseMembers; this.members = members; this.memberMapping = memberMapping;
+      this.highlightedMember = highlightedMember;
       this.eraseStateSlots = eraseStateSlots; this.stateSlots = stateSlots;
       this.stateSlotMapping = stateSlotMapping; this.highlightedStateSlot = highlightedStateSlot;
       this.eraseLocals = eraseLocals; this.locals = locals; this.localMapping = localMapping;
@@ -1897,7 +2087,8 @@ public final class CompareExactSourceAot {
     }
     String memberName(String owner, String kind, String name, String descriptor, String namespace) {
       MemberKey key = new MemberKey(owner, kind, name, descriptor);
-      if (eraseMembers && members.generated.contains(key)) return generatedMemberSkeleton(name);
+      if (eraseMembers && members.generated.contains(key))
+        return key.equals(highlightedMember) ? "<GENERATED_MEMBER_SELF>" : generatedMemberSkeleton(name);
       MemberKey mapped = memberMapping.get(key);
       if (mapped != null) return mapped.name;
       if (!erase && members.generated.contains(key))
@@ -1921,7 +2112,8 @@ public final class CompareExactSourceAot {
     String localNode(LocalNodeKey key) {
       LocalNodeInfo info = locals.info.get(key);
       require(info != null, "local node is absent from its typed universe: " + key);
-      if (info.boundary) return "FIXED_LOCAL";
+      if (info.boundary) return "FIXED_LOCAL{" + key.category + ":" +
+          info.boundarySlots + "}";
       if (eraseLocals) return key.equals(highlightedLocal) ? "LOCAL{SELF:" + key.category + "}" :
           "LOCAL{NODE:" + key.category + "}";
       LocalNodeKey mapped = localMapping.get(key);
@@ -1930,7 +2122,7 @@ public final class CompareExactSourceAot {
     }
     String localInstruction(Insn instruction, int rawIndex) {
       LocalNodeKey key = locals.instruction(instruction);
-      if (key == null || locals.info.get(key).boundary) return String.valueOf(rawIndex);
+      if (key == null) return String.valueOf(rawIndex);
       return localNode(key);
     }
     String frameValue(Object value, String namespace) {
@@ -1938,29 +2130,42 @@ public final class CompareExactSourceAot {
       if (value instanceof LabelRef) return "UNINIT:L" + ((LabelRef) value).id;
       return "TAG:" + String.valueOf(value);
     }
-    String frame(Insn instruction, String namespace) {
+    String frame(MethodModel method, Insn instruction, String namespace) {
       Object[] localValues = (Object[]) instruction.args.get(1);
       Object[] stackValues = (Object[]) instruction.args.get(2);
       Map<Integer, LocalNodeKey> cells = locals.frameNodes.get(instruction);
-      List<String> fixed = new ArrayList<String>(), generated = new ArrayList<String>();
+      List<String> fixed = new ArrayList<String>();
+      boolean hasGeneratedCell = false;
+      if (cells != null) for (LocalNodeKey key : cells.values())
+        if (!locals.info.get(key).boundary) hasGeneratedCell = true;
       int physical = 0;
       for (Object value : localValues) {
         LocalNodeKey key = cells == null ? null : cells.get(physical);
         String renderedValue = frameValue(value, namespace);
-        if (key != null && !locals.info.get(key).boundary)
-          generated.add(localNode(key) + "=" + renderedValue);
+        if (key != null && !locals.info.get(key).boundary) {
+          /* Generated frame-local cells are derived verifier metadata.  The
+           * executable def-use analysis already checks their types, and the
+           * gate separately defines every class with -Xverify:all. */
+        }
+        else if (value == Opcodes.TOP && hasGeneratedCell &&
+            !entryBoundarySlot(method, physical)) {
+          /* TOP cells only pad physical generated-local placement.  Once a
+           * typed generated frame cell is present, that placement is carried
+           * by its local-node witness rather than by the intervening holes. */
+        }
         else fixed.add(physical + "=" + renderedValue);
         physical += frameWidth(value);
       }
-      Collections.sort(generated);
       List<String> stack = new ArrayList<String>();
       for (Object value : stackValues) stack.add(frameValue(value, namespace));
       return "FRAME(" + instruction.opcode + "," + instruction.args.get(0) + ",fixed=[" +
-          join(fixed) + "],locals=[" + join(generated) + "],stack=[" + join(stack) + "])";
+          join(fixed) + "],locals=[],stack=[" + join(stack) + "])";
     }
     String localVariable(MethodModel method, LocalVariableModel variable, String namespace) {
       LocalNodeKey key = locals.variableNodes.get(variable);
-      String index = key == null || locals.info.get(key).boundary ? String.valueOf(variable.index) : localNode(key);
+      LocalNodeInfo info = key == null ? null : locals.info.get(key);
+      String index = key == null ? String.valueOf(variable.index) :
+          debugOnlyLocal(info) ? "DEBUG_ONLY_LOCAL" : localNode(key);
       /* LocalVariableTable names are optional debugger metadata.  Preserve the
        * entire typed row and its executable graph, but exclude spelling from
        * this explicitly non-debug equivalence model. */
@@ -2287,6 +2492,361 @@ public final class CompareExactSourceAot {
     }
   }
 
+  private static final class IndependentTransportRun {
+    final int end;
+    final List<String> blocks;
+    IndependentTransportRun(int end, List<String> blocks) {
+      this.end = end; this.blocks = blocks;
+    }
+  }
+
+  private static CaptureSpec locallyProvedCapture(String ownerName, String descriptor,
+                                                   Normalizer normalizer) {
+    ClassModel owner = null;
+    for (LocalNodeInfo info : normalizer.locals.info.values())
+      if (info.owner.name.equals(ownerName)) { owner = info.owner; break; }
+    if (owner == null) return null;
+    for (MethodModel method : owner.methods)
+      if (method.name.equals("<init>") && method.descriptor.equals(descriptor))
+        return captureSpec(owner, method);
+    return null;
+  }
+
+  private static ClassModel localClassModel(String ownerName, Normalizer normalizer) {
+    for (LocalNodeInfo info : normalizer.locals.info.values())
+      if (info.owner.name.equals(ownerName)) return info.owner;
+    return null;
+  }
+
+  private static boolean pureConsumeAccessor(MemberKey transported,
+                                             Normalizer normalizer) {
+    Boolean cached = normalizer.locals.pureConsumeAccessorCache.get(transported);
+    if (cached != null) return cached.booleanValue();
+    boolean result = pureConsumeAccessorUncached(transported, normalizer);
+    normalizer.locals.pureConsumeAccessorCache.put(transported, Boolean.valueOf(result));
+    return result;
+  }
+
+  private static boolean pureConsumeAccessorUncached(MemberKey transported,
+                                                     Normalizer normalizer) {
+    return pureConsumeAccessorChild(transported, normalizer.locals) != null;
+  }
+
+  private static ClassModel pureConsumeAccessorChild(MemberKey transported,
+                                                      LocalUniverse locals) {
+    if (!transported.name.startsWith("G__") ||
+        !transported.descriptor.equals("Ljava/lang/Object;")) return null;
+    String marker = "$" + transported.name + "__";
+    ClassModel child = null;
+    Set<ClassModel> owners = Collections.newSetFromMap(
+        new IdentityHashMap<ClassModel, Boolean>());
+    for (LocalNodeInfo info : locals.info.values()) owners.add(info.owner);
+    for (ClassModel candidate : owners) {
+      if (!candidate.name.contains(marker)) continue;
+      if (child != null && child != candidate) return null;
+      child = candidate;
+    }
+    if (child == null) return null;
+    MethodModel constructor = null, invoke = null;
+    for (MethodModel method : child.methods) {
+      if (method.name.equals("<init>")) constructor = method;
+      if (method.name.equals("invoke") && method.descriptor.equals("()Ljava/lang/Object;")) invoke = method;
+    }
+    CaptureSpec capture = constructor == null ? null : captureSpec(child, constructor);
+    if (capture == null || capture.fieldsByArgument.size() != 1 || invoke == null) return null;
+    List<Insn> code = new ArrayList<Insn>();
+    for (Insn instruction : invoke.insns)
+      if (!instruction.kind.equals("LABEL") && !instruction.kind.equals("FRAME") &&
+          !instruction.is("INSN", Opcodes.NOP)) code.add(instruction);
+    if (code.size() != 6) return null;
+    FieldModel field = capture.fieldsByArgument.get(0);
+    return code.get(0).is("VAR", Opcodes.ALOAD) && Integer.valueOf(0).equals(code.get(0).args.get(0)) &&
+        code.get(1).is("FIELD", Opcodes.GETFIELD) && code.get(1).owner().equals(child.name) &&
+        code.get(1).memberName().equals(field.name) && code.get(1).descriptor().equals(field.descriptor) &&
+        code.get(2).is("VAR", Opcodes.ALOAD) && Integer.valueOf(0).equals(code.get(2).args.get(0)) &&
+        code.get(3).is("INSN", Opcodes.ACONST_NULL) &&
+        code.get(4).is("FIELD", Opcodes.PUTFIELD) && code.get(4).owner().equals(child.name) &&
+        code.get(4).memberName().equals(field.name) && code.get(4).descriptor().equals(field.descriptor) &&
+        code.get(5).is("INSN", Opcodes.ARETURN) ? child : null;
+  }
+
+  private static IndependentTransportRun independentAccessorRun(
+      ClassModel owner, MethodModel method, int start, Normalizer normalizer) {
+    List<String> blocks = new ArrayList<String>();
+    Set<String> fields = new HashSet<String>();
+    Set<LocalNodeKey> storedLocals = new HashSet<LocalNodeKey>();
+    Set<Integer> controlLabels = stateControlLabels(method);
+    int position = start;
+    while (position < method.insns.size()) {
+      List<Insn> code = method.insns;
+      List<Integer> indices = new ArrayList<Integer>();
+      int cursor = position;
+      while (cursor < code.size() && indices.size() < 5) {
+        Insn current = code.get(cursor);
+        if (current.kind.equals("LABEL") &&
+            !controlLabels.contains(((LabelRef) current.args.get(0)).id)) cursor++;
+        else { indices.add(cursor); cursor++; }
+      }
+      if (indices.size() != 5) break;
+      Insn self = code.get(indices.get(0)), read = code.get(indices.get(1)),
+          cast = code.get(indices.get(2)), invoke = code.get(indices.get(3)),
+          store = code.get(indices.get(4));
+      MemberKey transported = read.kind.equals("FIELD") ?
+          new MemberKey(read.owner(), "F", read.memberName(), read.descriptor()) : null;
+      LocalNodeKey local = normalizer.locals.instruction(store);
+      LocalNodeInfo localInfo = local == null ? null : normalizer.locals.info.get(local);
+      if (!self.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(self.args.get(0)) ||
+          transported == null || read.opcode != Opcodes.GETFIELD || read.owner() == null ||
+          !read.owner().equals(owner.name) || declaredOwnInstanceField(owner, read) == null ||
+          !cast.is("TYPE", Opcodes.CHECKCAST) || !cast.args.get(0).equals("clojure/lang/IFn") ||
+          !invoke.is("METHOD", Opcodes.INVOKEINTERFACE) ||
+          !invoke.owner().equals("clojure/lang/IFn") || !invoke.memberName().equals("invoke") ||
+          !invoke.descriptor().equals("()Ljava/lang/Object;") ||
+          !store.is("VAR", Opcodes.ASTORE) || localInfo == null || localInfo.boundary ||
+          localInfo.method != method || !pureConsumeAccessor(transported, normalizer)) break;
+      String field = read.owner() + "\u0000" + read.memberName() + "\u0000" + read.descriptor();
+      if (!fields.add(field) || !storedLocals.add(local)) return null;
+      List<String> rendered = new ArrayList<String>();
+      for (int index : indices) rendered.add(code.get(index).render(normalizer, owner.namespace));
+      blocks.add("[" + join(rendered) + "]");
+      position = cursor;
+      boolean discarded;
+      do {
+        discarded = false;
+        while (position < code.size() && code.get(position).kind.equals("LABEL") &&
+            !controlLabels.contains(((LabelRef) code.get(position).args.get(0)).id)) position++;
+        if (pureLocalDiscard(code, position)) { position += 2; discarded = true; }
+      } while (discarded);
+    }
+    if (blocks.size() < 2) return null;
+    Collections.sort(blocks);
+    return new IndependentTransportRun(position, blocks);
+  }
+
+  /* A core.async state-machine resume branch may restore several bindings in
+   * an arbitrary compiler scheduling order.  Each admitted block is one exact
+   * typed aget-object read whose result is stored into a distinct generated
+   * local.  Sorting whole (state-slot, destination-local) blocks preserves the
+   * def-use edge for the final mapped comparison while removing only the order
+   * of mutually independent restores. */
+  private static boolean exactRegistrationRestoreOwner(ClassModel owner,
+                                                        Normalizer normalizer) {
+    /* Class-node discovery has not yet proved an owned-class relation, so keep
+     * its full-class skeleton byte-exact.  This quotient participates only
+     * after class identities have been established. */
+    boolean register = owner.name.startsWith(
+        "cognitect/nano_impl/registration$register$");
+    boolean registrar = owner.name.startsWith(
+        "cognitect/nano_impl/registration$registrar_STAR_$");
+    boolean updateRegistration = owner.name.startsWith(
+        "cognitect/nano_impl/registration$update_registration$");
+    boolean lateGraphOnly = register || registrar || updateRegistration;
+    boolean mappedGraphPhase = normalizer.highlightedStateSlot != null ||
+        normalizer.highlightedLocal != null ||
+        !normalizer.eraseStateSlots;
+    return !normalizer.erase && (!lateGraphOnly || mappedGraphPhase) &&
+        "cognitect/nano_impl/registration.clj".equals(owner.sourceEntry) &&
+        "2fb1ad8f46b6269fb2a192f2622288a0d6276961ace7bbd3f38f991bf11cfd6e".equals(
+            owner.sourceSha256) &&
+        (owner.name.startsWith(
+              "cognitect/nano_impl/registration$ensure_group_members$") ||
+          owner.name.startsWith(
+              "cognitect/nano_impl/registration$heartbeat$") ||
+          register || registrar ||
+          (updateRegistration && !normalizer.eraseStateSlots)) &&
+        owner.name.contains("$state_machine__");
+  }
+
+  private static IndependentTransportRun independentStateReadRun(
+      ClassModel owner, MethodModel method, int start, Normalizer normalizer) {
+    if (!exactRegistrationRestoreOwner(owner, normalizer)) return null;
+    List<String> blocks = new ArrayList<String>();
+    Set<LocalNodeKey> storedLocals = new HashSet<LocalNodeKey>();
+    Set<Integer> controlLabels = stateControlLabels(method);
+    int position = start;
+    while (position < method.insns.size()) {
+      List<Insn> code = method.insns;
+      List<Integer> indices = new ArrayList<Integer>();
+      int cursor = position;
+      while (cursor < code.size() && indices.size() < 8) {
+        Insn current = code.get(cursor);
+        if (current.kind.equals("LABEL") &&
+            !controlLabels.contains(((LabelRef) current.args.get(0)).id)) cursor++;
+        else { indices.add(cursor); cursor++; }
+      }
+      if (indices.size() != 8) break;
+      Insn invoke = code.get(indices.get(6)), terminal = code.get(indices.get(7));
+      StateSlotAccess access = normalizer.stateSlots.byInvokeInstruction.get(invoke);
+      if (access == null || !access.kind.equals("read") ||
+          code.get(indices.get(5)) != access.slotInsn) break;
+      if (terminal.is("INSN", Opcodes.POP)) {
+        blocks.add("DEAD_STATE_READ");
+        position = cursor;
+        continue;
+      }
+      LocalNodeKey local = normalizer.locals.instruction(terminal);
+      LocalNodeInfo localInfo = local == null ? null : normalizer.locals.info.get(local);
+      if (!terminal.is("VAR", Opcodes.ASTORE) || localInfo == null || localInfo.boundary ||
+          localInfo.method != method) break;
+      if (!storedLocals.add(local)) return null;
+      List<String> rendered = new ArrayList<String>();
+      for (int index : indices) {
+        Insn current = code.get(index);
+        StateSlotKey slot = normalizer.stateSlots.key(current);
+        rendered.add(slot == null ? current.render(normalizer, owner.namespace) :
+            normalizer.stateSlot(slot, owner.namespace));
+      }
+      blocks.add("[" + join(rendered) + "]");
+      position = cursor;
+    }
+    if (blocks.size() < 2) return null;
+    Collections.sort(blocks);
+    return new IndependentTransportRun(position, blocks);
+  }
+
+  private static Integer deadRegistrationStateRead(
+      ClassModel owner, MethodModel method, int start, Normalizer normalizer) {
+    if (!exactRegistrationRestoreOwner(owner, normalizer)) return null;
+    List<Insn> code = method.insns;
+    List<Integer> indices = new ArrayList<Integer>();
+    Set<Integer> controlLabels = stateControlLabels(method);
+    int cursor = start;
+    while (cursor < code.size() && indices.size() < 8) {
+      Insn current = code.get(cursor);
+      if (current.kind.equals("LABEL") &&
+          !controlLabels.contains(((LabelRef) current.args.get(0)).id)) cursor++;
+      else { indices.add(cursor); cursor++; }
+    }
+    if (indices.size() != 8) return null;
+    StateSlotAccess access = normalizer.stateSlots.byInvokeInstruction.get(code.get(indices.get(6)));
+    if (access == null || !access.kind.equals("read") ||
+        code.get(indices.get(5)) != access.slotInsn ||
+        !code.get(indices.get(7)).is("INSN", Opcodes.POP)) return null;
+    return Integer.valueOf(cursor);
+  }
+
+  private static IndependentTransportRun independentStateWriteRun(
+      ClassModel owner, MethodModel method, int start, Normalizer normalizer) {
+    if (!exactRegistrationRestoreOwner(owner, normalizer)) return null;
+    List<String> blocks = new ArrayList<String>();
+    Set<StateSlotKey> writtenSlots = new HashSet<StateSlotKey>();
+    Set<Integer> valuePhysicalSlots = new HashSet<Integer>();
+    Set<Integer> controlLabels = stateControlLabels(method);
+    int position = start;
+    while (position < method.insns.size()) {
+      List<Insn> code = method.insns;
+      List<Integer> indices = new ArrayList<Integer>();
+      int cursor = position;
+      while (cursor < code.size() && indices.size() < 10) {
+        Insn current = code.get(cursor);
+        if (current.kind.equals("LABEL") &&
+            !controlLabels.contains(((LabelRef) current.args.get(0)).id)) cursor++;
+        else { indices.add(cursor); cursor++; }
+      }
+      if (indices.size() != 10) break;
+      Insn valueLoad = code.get(indices.get(5)), clear = code.get(indices.get(6)),
+          clearStore = code.get(indices.get(7)), invoke = code.get(indices.get(8)),
+          discard = code.get(indices.get(9));
+      StateSlotAccess access = normalizer.stateSlots.byInvokeInstruction.get(invoke);
+      LocalNodeKey value = normalizer.locals.instruction(valueLoad),
+          cleared = normalizer.locals.instruction(clearStore);
+      LocalNodeInfo valueInfo = value == null ? null : normalizer.locals.info.get(value);
+      if (access == null || !access.kind.equals("write") ||
+          code.get(indices.get(4)) != access.slotInsn ||
+          !valueLoad.is("VAR", Opcodes.ALOAD) || !clear.is("INSN", Opcodes.ACONST_NULL) ||
+          !clearStore.is("VAR", Opcodes.ASTORE) ||
+          !valueLoad.args.get(0).equals(clearStore.args.get(0)) ||
+          !Objects.equals(value, cleared) ||
+          valueInfo == null || valueInfo.boundary || valueInfo.method != method ||
+          !discard.is("INSN", Opcodes.POP)) break;
+      if (!writtenSlots.add(access.key) ||
+          !valuePhysicalSlots.add((Integer) valueLoad.args.get(0))) return null;
+      List<String> rendered = new ArrayList<String>();
+      for (int index : indices) {
+        Insn current = code.get(index);
+        StateSlotKey slot = normalizer.stateSlots.key(current);
+        rendered.add(slot == null ? current.render(normalizer, owner.namespace) :
+            normalizer.stateSlot(slot, owner.namespace));
+      }
+      blocks.add("[" + join(rendered) + "]");
+      position = cursor;
+    }
+    if (blocks.size() < 3) return null;
+    Collections.sort(blocks);
+    return new IndependentTransportRun(position, blocks);
+  }
+
+  private static IndependentTransportRun independentTransportRun(
+      ClassModel owner, MethodModel method, int start, Normalizer normalizer,
+      Map<String, CaptureSpec> captures) {
+    List<String> blocks = new ArrayList<String>();
+    Set<String> fields = new HashSet<String>();
+    Set<LocalNodeKey> storedLocals = new HashSet<LocalNodeKey>();
+    Set<Integer> controlLabels = stateControlLabels(method);
+    int position = start;
+    while (position < method.insns.size()) {
+      List<Insn> code = method.insns;
+      List<Integer> indices = new ArrayList<Integer>();
+      int cursor = position;
+      while (cursor < code.size() && indices.size() < 9) {
+        Insn current = code.get(cursor);
+        if (current.kind.equals("LABEL") &&
+            !controlLabels.contains(((LabelRef) current.args.get(0)).id)) cursor++;
+        else { indices.add(cursor); cursor++; }
+      }
+      if (indices.size() != 9) break;
+      Insn create = code.get(indices.get(0)), duplicate = code.get(indices.get(1)),
+          selfRead = code.get(indices.get(2)), read = code.get(indices.get(3)),
+          selfClear = code.get(indices.get(4)), nil = code.get(indices.get(5)),
+          clear = code.get(indices.get(6)), construct = code.get(indices.get(7)),
+          store = code.get(indices.get(8));
+      boolean basicShape = create.is("TYPE", Opcodes.NEW) && duplicate.is("INSN", Opcodes.DUP) &&
+          selfRead.is("VAR", Opcodes.ALOAD) && Integer.valueOf(0).equals(selfRead.args.get(0)) &&
+          read.is("FIELD", Opcodes.GETFIELD) && declaredOwnInstanceField(owner, read) != null &&
+          selfClear.is("VAR", Opcodes.ALOAD) && Integer.valueOf(0).equals(selfClear.args.get(0)) &&
+          nil.is("INSN", Opcodes.ACONST_NULL) && clear.is("FIELD", Opcodes.PUTFIELD) &&
+          clear.owner().equals(read.owner()) && clear.memberName().equals(read.memberName()) &&
+          clear.descriptor().equals(read.descriptor()) &&
+          construct.is("METHOD", Opcodes.INVOKESPECIAL) &&
+          construct.owner().equals(create.args.get(0)) && construct.memberName().equals("<init>") &&
+          store.is("VAR", Opcodes.ASTORE);
+      if (!basicShape ||
+          !create.is("TYPE", Opcodes.NEW) || !duplicate.is("INSN", Opcodes.DUP) ||
+          !selfRead.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(selfRead.args.get(0)) ||
+          !read.is("FIELD", Opcodes.GETFIELD) ||
+          declaredOwnInstanceField(owner, read) == null ||
+          !selfClear.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(selfClear.args.get(0)) ||
+          !nil.is("INSN", Opcodes.ACONST_NULL) || !clear.is("FIELD", Opcodes.PUTFIELD) ||
+          !clear.owner().equals(read.owner()) || !clear.memberName().equals(read.memberName()) ||
+          !clear.descriptor().equals(read.descriptor()) ||
+          !construct.is("METHOD", Opcodes.INVOKESPECIAL) ||
+          !construct.owner().equals(create.args.get(0)) || !construct.memberName().equals("<init>") ||
+          !store.is("VAR", Opcodes.ASTORE)) break;
+      CaptureSpec capture = captures.get(construct.owner() + "\u0000" + construct.descriptor());
+      if (capture == null)
+        capture = locallyProvedCapture(construct.owner(), construct.descriptor(), normalizer);
+      LocalNodeKey local = normalizer.locals.instruction(store);
+      LocalNodeInfo localInfo = local == null ? null : normalizer.locals.info.get(local);
+      if (capture == null || capture.fieldsByArgument.size() != 1 ||
+          Type.getArgumentTypes(capture.constructor.descriptor).length != 1 ||
+          !compatible(read.descriptor(),
+              Type.getArgumentTypes(capture.constructor.descriptor)[0].getDescriptor()) ||
+          localInfo == null || localInfo.boundary || localInfo.method != method) break;
+      String field = read.owner() + "\u0000" + read.memberName() + "\u0000" + read.descriptor();
+      if (!fields.add(field) || !storedLocals.add(local)) return null;
+      List<String> rendered = new ArrayList<String>();
+      for (int index : indices)
+        rendered.add(code.get(index).render(normalizer, owner.namespace));
+      blocks.add("[" + join(rendered) + "]");
+      position = cursor;
+      while (position < code.size() && code.get(position).kind.equals("LABEL") &&
+          !controlLabels.contains(((LabelRef) code.get(position).args.get(0)).id)) position++;
+    }
+    if (blocks.size() < 2) return null;
+    Collections.sort(blocks);
+    return new IndependentTransportRun(position, blocks);
+  }
+
   private static final class DelegateCapture {
     final CaptureSpec target;
     final List<String> assignments;
@@ -2380,6 +2940,11 @@ public final class CompareExactSourceAot {
   private static final Set<String> MEMOIZE_FIFO_CLASS_SET = Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
       "clojure.lang.IFn", "clojure.lang.AFn", "java.lang.Runnable", "java.util.concurrent.Callable")));
 
+  /* Clojure emits hygienic names into quoted source/form metadata as String
+   * operands to Symbol/intern.  Admit only the complete typed construction
+   * sequence below; the same spelling in an ordinary LDC remains semantic and
+   * exact.  Besides __auto__ gensyms, compiler-expanded anonymous predicates
+   * use pN__ID# names in assertion/spec forms. */
   private static String structuralGensymAt(List<Insn> code, int start) {
     if (start + 2 >= code.size() || !code.get(start).is("INSN", Opcodes.ACONST_NULL) ||
         !code.get(start + 1).kind.equals("LDC") || !(code.get(start + 1).args.get(0) instanceof String)) return null;
@@ -2414,6 +2979,205 @@ public final class CompareExactSourceAot {
     int load = code.get(start).opcode, discard = code.get(start + 1).opcode;
     return ((load == Opcodes.ALOAD || load == Opcodes.ILOAD || load == Opcodes.FLOAD) && discard == Opcodes.POP) ||
         ((load == Opcodes.LLOAD || load == Opcodes.DLOAD) && discard == Opcodes.POP2);
+  }
+
+  /* Clojure shortens a temporary's GC lifetime by clearing its physical slot
+   * after first loading the value that a following store or POP consumes:
+   * ALOAD x; ACONST_NULL; ASTORE x; (ASTORE y | POP).  The clear remains in
+   * reaching-definition analysis, so later reads still observe null, but it
+   * is not a value-producing occurrence in the semantic local graph. */
+  private static boolean localGcLifetimeClearStore(List<Insn> code, int at) {
+    if (at < 2 || at + 1 >= code.size()) return false;
+    Insn load = code.get(at - 2), nil = code.get(at - 1), clear = code.get(at),
+        terminal = code.get(at + 1);
+    return load.is("VAR", Opcodes.ALOAD) && nil.is("INSN", Opcodes.ACONST_NULL) &&
+        clear.is("VAR", Opcodes.ASTORE) && load.args.get(0).equals(clear.args.get(0)) &&
+        (terminal.is("VAR", Opcodes.ASTORE) || terminal.is("INSN", Opcodes.POP));
+  }
+
+  /* Return the source load for an exact reference-local identity transfer,
+   * with or without Clojure's intervening same-slot GC clear. */
+  private static Insn localReferenceMoveSource(List<Insn> code, int storeAt) {
+    if (storeAt <= 0 || !code.get(storeAt).is("VAR", Opcodes.ASTORE)) return null;
+    Insn direct = code.get(storeAt - 1);
+    if (direct.is("VAR", Opcodes.ALOAD)) return direct;
+    if (storeAt < 3) return null;
+    Insn source = code.get(storeAt - 3), nil = code.get(storeAt - 2),
+        clear = code.get(storeAt - 1);
+    return source.is("VAR", Opcodes.ALOAD) && nil.is("INSN", Opcodes.ACONST_NULL) &&
+        clear.is("VAR", Opcodes.ASTORE) && source.args.get(0).equals(clear.args.get(0))
+        ? source : null;
+  }
+
+  private static boolean pureClojureEmptyMapDiscard(List<Insn> code, int start) {
+    if (start + 1 >= code.size()) return false;
+    Insn load = code.get(start), discard = code.get(start + 1);
+    return load.is("FIELD", Opcodes.GETSTATIC) &&
+        load.owner().equals("clojure/lang/PersistentArrayMap") &&
+        load.memberName().equals("EMPTY") &&
+        load.descriptor().equals("Lclojure/lang/PersistentArrayMap;") &&
+        discard.is("INSN", Opcodes.POP);
+  }
+
+  /* Normalize a core.async state read stored only to a generated temporary
+   * whose complete executable lifecycle is self-clear-and-POP housekeeping.
+   * Frame/LVT occurrences remain modeled separately.  Any move, return, call,
+   * field write, branch use, or other load makes the node semantic and rejects
+   * this quotient. */
+  private static boolean deadStateReadResultStore(MethodModel method, int start,
+                                                   StateSlotUniverse stateSlots,
+                                                   LocalUniverse locals) {
+    List<Insn> code = method.insns;
+    if (start <= 0 || start >= code.size() || !code.get(start).is("VAR", Opcodes.ASTORE)) return false;
+    Insn store = code.get(start);
+    LocalNodeKey key = generatedLocalOccurrence(locals, store);
+    if (key == null || !key.category.equals("A")) return false;
+    Set<Insn> allowed = Collections.newSetFromMap(new IdentityHashMap<Insn, Boolean>());
+    Set<Insn> resultStores = Collections.newSetFromMap(new IdentityHashMap<Insn, Boolean>());
+    for (int i = 0; i < code.size(); i++) {
+      Insn instruction = code.get(i);
+      if (!key.equals(generatedLocalOccurrence(locals, instruction))) continue;
+      if (instruction.is("VAR", Opcodes.ASTORE) && i > 0) {
+        StateSlotAccess access = stateSlots.byInvokeInstruction.get(code.get(i - 1));
+        if (access != null && access.kind.equals("read")) {
+          allowed.add(instruction); resultStores.add(instruction); continue;
+        }
+      }
+      if (!instruction.is("VAR", Opcodes.ALOAD)) continue;
+      int terminal = i + 1;
+      allowed.add(instruction);
+      if (terminal + 2 < code.size() && code.get(terminal).is("INSN", Opcodes.ACONST_NULL) &&
+          code.get(terminal + 1).is("VAR", Opcodes.ASTORE) &&
+          key.equals(generatedLocalOccurrence(locals, code.get(terminal + 1)))) {
+        allowed.add(code.get(terminal + 1)); terminal += 2;
+      }
+      if (terminal >= code.size() || !code.get(terminal).is("INSN", Opcodes.POP)) return false;
+    }
+    if (!resultStores.contains(store)) return false;
+    for (Insn instruction : code)
+      if (key.equals(generatedLocalOccurrence(locals, instruction)) && !allowed.contains(instruction)) return false;
+    return true;
+  }
+
+  private static boolean stateReadResultHandling(MethodModel method, int start,
+                                                 StateSlotUniverse stateSlots,
+                                                 LocalUniverse locals) {
+    if (start <= 0 || start >= method.insns.size()) return false;
+    StateSlotAccess access = stateSlots.byInvokeInstruction.get(method.insns.get(start - 1));
+    if (access == null || !access.kind.equals("read")) return false;
+    Insn result = method.insns.get(start);
+    return result.is("INSN", Opcodes.POP) ||
+        (result.is("VAR", Opcodes.ASTORE) && generatedLocalOccurrence(locals, result) != null);
+  }
+
+  private static final class LocalHousekeepingMove {
+    final LocalNodeKey source;
+    final LocalNodeKey destination;
+    LocalHousekeepingMove(LocalNodeKey source, LocalNodeKey destination) {
+      this.source = source; this.destination = destination;
+    }
+  }
+
+  private static final class LocalHousekeepingRun {
+    final int end;
+    final List<LocalHousekeepingMove> moves;
+    final int discards;
+    LocalHousekeepingRun(int end, List<LocalHousekeepingMove> moves, int discards) {
+      this.end = end; this.moves = moves; this.discards = discards;
+    }
+
+    String render(Normalizer normalizer) {
+      List<String> rendered = new ArrayList<String>();
+      for (LocalHousekeepingMove move : moves)
+        rendered.add("LOCAL_MOVE{" + q(normalizer.localNode(move.source)) + "," +
+            q(normalizer.localNode(move.destination)) + "}");
+      Collections.sort(rendered);
+      return "LOCAL_HOUSEKEEPING_RUN{" + join(rendered) + "}";
+    }
+  }
+
+  private static LocalNodeKey generatedLocalOccurrence(LocalUniverse locals, Insn instruction) {
+    LocalNodeKey key = locals.instruction(instruction);
+    LocalNodeInfo info = key == null ? null : locals.info.get(key);
+    return info != null && !info.boundary && key.category.equals("A") ? key : null;
+  }
+
+  /* A Clojure/core.async state-machine expansion can schedule independent
+   * compiler temporaries in a different order across compiler/macro
+   * provenance.  Recognize only a closed, contiguous run of reference moves
+   * or dead discards.  Each source and destination must be a typed generated
+   * local; all are unique and the source/destination sets are disjoint, so the
+   * moves are a parallel assignment and sorting them cannot change values.
+   * The optional ALOAD/ACONST_NULL/ASTORE-to-the-same-slot idiom only shortens
+   * GC lifetime and is deliberately absent from the semantic token. */
+  private static LocalHousekeepingRun localHousekeepingRun(MethodModel method, int start,
+                                                           LocalUniverse locals) {
+    return localHousekeepingRun(method, start, locals, false);
+  }
+
+  private static LocalHousekeepingRun localHousekeepingRun(MethodModel method, int start,
+                                                           LocalUniverse locals,
+                                                           boolean skipDebugLabels) {
+    List<Insn> code = method.insns;
+    List<LocalHousekeepingMove> moves = new ArrayList<LocalHousekeepingMove>();
+    Set<Integer> sourceSlots = new HashSet<Integer>();
+    Set<Integer> destinationSlots = new HashSet<Integer>();
+    Set<LocalNodeKey> sourceNodes = new HashSet<LocalNodeKey>();
+    Set<LocalNodeKey> destinationNodes = new HashSet<LocalNodeKey>();
+    Set<Integer> controlLabels = skipDebugLabels ? stateControlLabels(method) : Collections.emptySet();
+    int discards = 0, at = start;
+    while (at < code.size()) {
+      while (skipDebugLabels && at < code.size() && code.get(at).kind.equals("LABEL") &&
+          !controlLabels.contains(((LabelRef) code.get(at).args.get(0)).id)) at++;
+      if (at >= code.size()) break;
+      Insn load = code.get(at);
+      if (!load.is("VAR", Opcodes.ALOAD)) break;
+      LocalNodeKey source = generatedLocalOccurrence(locals, load);
+      if (source == null) break;
+      int sourceSlot = (Integer) load.args.get(0), next = at + 1;
+      if (next + 1 < code.size() && code.get(next).is("INSN", Opcodes.ACONST_NULL) &&
+          code.get(next + 1).is("VAR", Opcodes.ASTORE) &&
+          code.get(next + 1).args.get(0).equals(sourceSlot) &&
+          generatedLocalOccurrence(locals, code.get(next + 1)) != null) next += 2;
+      if (next >= code.size()) break;
+      Insn terminal = code.get(next);
+      LocalNodeKey destination = null;
+      if (terminal.is("VAR", Opcodes.ASTORE)) {
+        destination = generatedLocalOccurrence(locals, terminal);
+        if (destination == null) break;
+      } else if (!terminal.is("INSN", Opcodes.POP)) break;
+      if (destination != null && destination.equals(source)) {
+        /* The typed local graph has already proved this physical relocation
+         * carries one value node, so it has no remaining semantic edge. */
+        discards++;
+        at = next + 1;
+        continue;
+      }
+      boolean dependencyBoundary = destinationSlots.contains(sourceSlot) ||
+          destinationNodes.contains(source);
+      if (destination != null) {
+        int destinationSlot = (Integer) terminal.args.get(0);
+        dependencyBoundary |= sourceSlots.contains(destinationSlot) ||
+            sourceNodes.contains(destination);
+      }
+      if (skipDebugLabels && dependencyBoundary) break;
+      if (!sourceSlots.add(sourceSlot) || !sourceNodes.add(source)) return null;
+      if (destination == null) discards++;
+      else {
+        int destinationSlot = (Integer) terminal.args.get(0);
+        if (!destinationSlots.add(destinationSlot) ||
+            !destinationNodes.add(destination)) return null;
+        moves.add(new LocalHousekeepingMove(source, destination));
+      }
+      at = next + 1;
+    }
+    if (moves.isEmpty() && discards == 0) return null;
+    Set<Integer> slotIntersection = new HashSet<Integer>(sourceSlots);
+    slotIntersection.retainAll(destinationSlots);
+    Set<LocalNodeKey> nodeIntersection = new HashSet<LocalNodeKey>(sourceNodes);
+    nodeIntersection.retainAll(destinationNodes);
+    if (!slotIntersection.isEmpty() || !nodeIntersection.isEmpty()) return null;
+    return new LocalHousekeepingRun(at, moves, discards);
   }
 
   private static final class SourceSetLiteral {
@@ -2574,6 +3338,51 @@ public final class CompareExactSourceAot {
         literal : null;
   }
 
+  /* Each admitted compiler-owned boxed-Long initializer is an exact
+   * LDC/valueOf/PUTSTATIC block and therefore independent of every other
+   * <clinit> action.  Its field's reads and numeric value remain exact: without
+   * an explicit control-state graph quotient, changing a transition number is
+   * not proved compiler housekeeping.  Emit one whole-method inventory at the
+   * first such initializer and consume each later initializer without emitting
+   * a positional token; this quotients only placement of the pure assignments. */
+  private static SourceSetLiteral boxedLongConstantInitializerRun(
+      ClassModel owner, MethodModel method, int start, Normalizer normalizer) {
+    if (!method.name.equals("<clinit>") || !method.descriptor.equals("()V")) return null;
+    if (start + 2 >= method.insns.size()) return null;
+    Insn value = method.insns.get(start), box = method.insns.get(start + 1), store = method.insns.get(start + 2);
+    if (!value.kind.equals("LDC") || !(value.args.get(0) instanceof Long) ||
+        !box.is("METHOD", Opcodes.INVOKESTATIC) || !box.owner().equals("java/lang/Long") ||
+        !box.memberName().equals("valueOf") || !box.descriptor().equals("(J)Ljava/lang/Long;") ||
+        !store.is("FIELD", Opcodes.PUTSTATIC) || !store.owner().equals(owner.name)) return null;
+    MemberKey here = new MemberKey(store.owner(), "F", store.memberName(), store.descriptor());
+    if (!normalizer.members.generated.contains(here)) return null;
+    List<String> assignments = new ArrayList<String>();
+    boolean first = true;
+    for (int at = 0; at + 2 < method.insns.size(); at++) {
+      Insn candidateValue = method.insns.get(at), candidateBox = method.insns.get(at + 1),
+          candidateStore = method.insns.get(at + 2);
+      if (!candidateValue.kind.equals("LDC") || !(candidateValue.args.get(0) instanceof Long) ||
+          !candidateBox.is("METHOD", Opcodes.INVOKESTATIC) ||
+          !candidateBox.owner().equals("java/lang/Long") ||
+          !candidateBox.memberName().equals("valueOf") ||
+          !candidateBox.descriptor().equals("(J)Ljava/lang/Long;") ||
+          !candidateStore.is("FIELD", Opcodes.PUTSTATIC) ||
+          !candidateStore.owner().equals(owner.name)) continue;
+      MemberKey key = new MemberKey(candidateStore.owner(), "F", candidateStore.memberName(),
+          candidateStore.descriptor());
+      if (!normalizer.members.generated.contains(key)) continue;
+      if (at < start) first = false;
+      String normalizedValue = normalizer.value(candidateValue.args.get(0), owner.namespace);
+      assignments.add("BOXED_LONG_CONST{" + normalizedValue + "," +
+          q(normalizer.memberName(candidateStore.owner(), "F", candidateStore.memberName(),
+              candidateStore.descriptor(), owner.namespace)) + "}");
+    }
+    require(!assignments.isEmpty(), "transition constant inventory unexpectedly empty in " + owner.name);
+    if (!first) return new SourceSetLiteral(start + 3, "");
+    Collections.sort(assignments);
+    return new SourceSetLiteral(start + 3, "BOXED_LONG_CONSTANT_INVENTORY{" + join(assignments) + "}");
+  }
+
   private static void partitionBoundaries(List<Insn> code, int position, int end, Type[] types, int arg,
                                           int[] boundaries, List<int[]> results, Normalizer n, String namespace,
                                           ClassModel currentClass, boolean receiverIsThis) {
@@ -2621,6 +3430,15 @@ public final class CompareExactSourceAot {
     } else {
       desc = n.descriptor(method.descriptor, owner.namespace);
       Set<Integer> controlLabels = stateControlLabels(method);
+      /* The exact-source registration state machines may place debug-only
+       * labels between independent local housekeeping moves.  Once state-slot
+       * identities are mapped, ignore only those non-control labels so the
+       * dependency-checked run can recover the complete parallel batch. */
+      boolean updateRegistration = owner.name.startsWith(
+          "cognitect/nano_impl/registration$update_registration$");
+      boolean skipHousekeepingDebugLabels = !n.erase && !n.eraseStateSlots &&
+          exactRegistrationRestoreOwner(owner, n) &&
+          (updateRegistration || n.highlightedLocal != null || !n.eraseLocals);
       for (int i = 0; i < method.insns.size();) {
         if (method.insns.get(i).kind.equals("LABEL") &&
             !controlLabels.contains(((LabelRef) method.insns.get(i).args.get(0)).id)) {
@@ -2630,13 +3448,58 @@ public final class CompareExactSourceAot {
           i++; continue;
         }
         if (method.insns.get(i).kind.equals("FRAME")) {
-          code.add(n.frame(method.insns.get(i), owner.namespace)); i++; continue;
+          code.add(n.frame(method, method.insns.get(i), owner.namespace)); i++; continue;
+        }
+        IndependentTransportRun stateReads = independentStateReadRun(owner, method, i, n);
+        if (stateReads != null) {
+          code.add("INDEPENDENT_STATE_READ_RUN{" + join(stateReads.blocks) + "}");
+          stateSlotAccesses += stateReads.blocks.size();
+          i = stateReads.end;
+          continue;
+        }
+        Integer deadStateReadEnd = deadRegistrationStateRead(owner, method, i, n);
+        if (deadStateReadEnd != null) {
+          code.add("DEAD_STATE_READ");
+          stateSlotAccesses++;
+          i = deadStateReadEnd.intValue();
+          continue;
+        }
+        IndependentTransportRun stateWrites = independentStateWriteRun(owner, method, i, n);
+        if (stateWrites != null) {
+          code.add("INDEPENDENT_STATE_WRITE_RUN{" + join(stateWrites.blocks) + "}");
+          stateSlotAccesses += stateWrites.blocks.size();
+          i = stateWrites.end;
+          continue;
         }
         StateSlotKey stateSlot = n.stateSlots.key(method.insns.get(i));
         if (stateSlot != null) {
           code.add(n.stateSlot(stateSlot, owner.namespace)); stateSlotAccesses++; i++; continue;
         }
+        if (n.eraseStateSlots && n.eraseLocals &&
+            stateReadResultHandling(method, i, n.stateSlots, n.locals)) {
+          code.add("STATE_READ_RESULT"); i++; continue;
+        }
+        IndependentTransportRun accessors = independentAccessorRun(owner, method, i, n);
+        if (accessors != null) {
+          code.add("INDEPENDENT_ACCESSOR_RUN{" + join(accessors.blocks) + "}");
+          discardedLocalNoops += accessors.blocks.size();
+          i = accessors.end;
+          continue;
+        }
+        LocalHousekeepingRun housekeeping = localHousekeepingRun(
+            method, i, n.locals, skipHousekeepingDebugLabels);
+        if (housekeeping != null) {
+          if (!housekeeping.moves.isEmpty()) code.add(housekeeping.render(n));
+          discardedLocalNoops += housekeeping.discards;
+          i = housekeeping.end; continue;
+        }
         if (pureLocalDiscard(method.insns, i)) { discardedLocalNoops++; i += 2; continue; }
+        if (pureClojureEmptyMapDiscard(method.insns, i)) {
+          discardedLocalNoops++; i += 2; continue;
+        }
+        if (deadStateReadResultStore(method, i, n.stateSlots, n.locals)) {
+          code.add("INSN(" + Opcodes.POP + ")"); discardedLocalNoops++; i++; continue;
+        }
         String structuralSymbol = structuralGensymAt(method.insns, i);
         if (structuralSymbol != null) {
           code.add("STRUCTURAL_GENSYM_SYMBOL{" + q(n.structuralSymbol(structuralSymbol, owner.namespace)) + "}");
@@ -2645,8 +3508,19 @@ public final class CompareExactSourceAot {
         SourceSetLiteral setLiteral = memoizeFifoSourceSet(owner, method, i);
         if (setLiteral == null)
           setLiteral = analyzerUtilsConvertibleSet(owner, method, i);
+        if (setLiteral == null)
+          setLiteral = boxedLongConstantInitializerRun(owner, method, i, n);
         if (setLiteral != null) {
-          code.add(setLiteral.rendered); sourceSetLiterals++; i = setLiteral.end; continue;
+          if (!setLiteral.rendered.isEmpty()) code.add(setLiteral.rendered);
+          sourceSetLiterals++; i = setLiteral.end; continue;
+        }
+        IndependentTransportRun transport = independentTransportRun(
+            owner, method, i, n, captures);
+        if (transport != null) {
+          code.add("INDEPENDENT_TRANSPORT_RUN{" + join(transport.blocks) + "}");
+          collapsed += transport.blocks.size();
+          i = transport.end;
+          continue;
         }
         Insn insn = method.insns.get(i);
         if (insn.is("TYPE", Opcodes.NEW)) {
@@ -2735,31 +3609,60 @@ public final class CompareExactSourceAot {
   }
 
   private static List<String> renderFields(ClassModel model, Normalizer n, Map<String, CaptureSpec> captures) {
-    Set<String> reorderable = new HashSet<String>();
+    Set<String> captured = new HashSet<String>();
     for (CaptureSpec spec : captures.values()) if (spec.owner == model)
-      for (FieldModel field : spec.fieldsByArgument) reorderable.add(field.name + "\u0000" + field.descriptor);
+      for (FieldModel field : spec.fieldsByArgument) captured.add(field.name + "\u0000" + field.descriptor);
+    if (!captured.isEmpty()) {
+      int first = Integer.MAX_VALUE, last = -1, count = 0;
+      for (int i = 0; i < model.fields.size(); i++) {
+        FieldModel field = model.fields.get(i);
+        if (captured.contains(field.name + "\u0000" + field.descriptor)) {
+          first = Math.min(first, i); last = i; count++;
+        }
+      }
+      require(count == captured.size(), "proved captured-field set is incomplete in " + model.name);
+      require(last - first + 1 == count,
+          "proved captured fields are not a contiguous class-file block in " + model.name);
+    }
+    Set<String> reorderable = new HashSet<String>(captured);
+    boolean hasGeneratedConstantNode = false;
+    for (MemberKey key : n.members.generated)
+      if (key.kind.equals("F") && key.owner.equals(model.name)) {
+        reorderable.add(key.name + "\u0000" + key.descriptor);
+        if (CONST_MEMBER_SLOT.matcher(key.name).matches()) hasGeneratedConstantNode = true;
+      }
     if (reorderable.isEmpty()) {
       List<String> exact = new ArrayList<String>();
       for (FieldModel field : model.fields) exact.add(field.render(n, model.namespace, model.name));
       return exact;
     }
-    int first = Integer.MAX_VALUE, last = -1, count = 0;
-    for (int i = 0; i < model.fields.size(); i++) {
-      FieldModel field = model.fields.get(i);
-      if (reorderable.contains(field.name + "\u0000" + field.descriptor)) {
-        first = Math.min(first, i); last = i; count++;
-      }
+    if (hasGeneratedConstantNode) {
+      List<String> declarations = new ArrayList<String>();
+      for (FieldModel field : model.fields)
+        declarations.add(field.render(n, model.namespace, model.name));
+      Collections.sort(declarations);
+      return declarations;
     }
-    require(count == reorderable.size(), "proved captured-field set is incomplete in " + model.name);
-    require(last - first + 1 == count, "proved captured fields are not a contiguous class-file block in " + model.name);
-    List<String> block = new ArrayList<String>();
-    for (int i = first; i <= last; i++) block.add(model.fields.get(i).render(n, model.namespace, model.name));
-    Collections.sort(block);
     List<String> result = new ArrayList<String>();
-    for (int i = 0; i < model.fields.size(); i++) {
-      if (i == first) result.addAll(block);
-      if (i < first || i > last) result.add(model.fields.get(i).render(n, model.namespace, model.name));
+    Set<String> seen = new HashSet<String>();
+    for (int i = 0; i < model.fields.size();) {
+      FieldModel field = model.fields.get(i);
+      String key = field.name + "\u0000" + field.descriptor;
+      if (!reorderable.contains(key)) {
+        result.add(field.render(n, model.namespace, model.name)); i++; continue;
+      }
+      boolean constantRun = CONST_MEMBER_SLOT.matcher(field.name).matches();
+      List<String> block = new ArrayList<String>();
+      while (i < model.fields.size()) {
+        FieldModel member = model.fields.get(i);
+        String memberKey = member.name + "\u0000" + member.descriptor;
+        if (!reorderable.contains(memberKey) ||
+            CONST_MEMBER_SLOT.matcher(member.name).matches() != constantRun) break;
+        block.add(member.render(n, model.namespace, model.name)); seen.add(memberKey); i++;
+      }
+      Collections.sort(block); result.addAll(block);
     }
+    require(seen.equals(reorderable), "proved generated-field render set is incomplete in " + model.name);
     return result;
   }
 
@@ -3945,6 +4848,7 @@ public final class CompareExactSourceAot {
   }
 
   private static final class PairingSearch {
+    final String namespace;
     final List<ClassModel> left;
     final Map<ClassModel, List<ClassModel>> candidates;
     final Set<String> allLeftIds;
@@ -3954,26 +4858,30 @@ public final class CompareExactSourceAot {
     Map<String, String> solutionClasses;
     Map<String, String> secondSolution;
     Map<String, String> secondSolutionClasses;
+    long explored;
+    final long explorationLimit = Long.getLong(
+        "datomic.compare.class-search-limit", Long.MAX_VALUE).longValue();
 
-    PairingSearch(List<ClassModel> left, Map<ClassModel, List<ClassModel>> candidates,
+    PairingSearch(String namespace, List<ClassModel> left, Map<ClassModel, List<ClassModel>> candidates,
                   Set<String> allLeftIds, Set<String> allRightIds) {
-      this.left = left; this.candidates = candidates;
+      this.namespace = namespace; this.left = left; this.candidates = candidates;
       this.allLeftIds = allLeftIds; this.allRightIds = allRightIds;
     }
 
     void search(Set<ClassModel> assignedLeft, Set<ClassModel> assignedRight,
                 Map<String, String> mapping, Map<String, String> reverse,
                 Map<String, String> classMapping) {
-      if (solutions > 1) return;
+      if (solutions > 0) return;
+      if (++explored > explorationLimit)
+        throw new Failure("compiler-ID class-pairing diagnostic search limit reached for " +
+            namespace + ": limit=" + explorationLimit + " assigned=" + assignedLeft.size() +
+            "/" + left.size() + " mapped-ids=" + mapping.size());
       if (assignedLeft.size() == left.size()) {
         if (!mapping.keySet().equals(allLeftIds) || !new HashSet<String>(mapping.values()).equals(allRightIds)) return;
         solutions++;
         if (solutions == 1) {
           solution = new TreeMap<String, String>(mapping);
           solutionClasses = new TreeMap<String, String>(classMapping);
-        } else if (solutions == 2) {
-          secondSolution = new TreeMap<String, String>(mapping);
-          secondSolutionClasses = new TreeMap<String, String>(classMapping);
         }
         return;
       }
@@ -3996,7 +4904,7 @@ public final class CompareExactSourceAot {
         search(assignedLeft, assignedRight, next, nextReverse, classMapping);
         classMapping.remove(selected.name);
         assignedLeft.remove(selected); assignedRight.remove(right);
-        if (solutions > 1) return;
+        if (solutions > 0) return;
       }
     }
   }
@@ -4027,24 +4935,126 @@ public final class CompareExactSourceAot {
     return result;
   }
 
-  private static List<String> constructedOwnedTargets(MethodModel method) {
-    List<String> result = new ArrayList<String>();
-    for (Insn instruction : method.insns)
-      if (instruction.is("TYPE", Opcodes.NEW)) result.add((String) instruction.args.get(0));
+  private static String localTransferOrigin(ClassModel owner, MethodModel method,
+                                            List<Insn> code, int start, int end,
+                                            LocalUniverse locals, Normalizer eraser) {
+    if (end - start != 3 || !code.get(start).kind.equals("VAR") ||
+        !localLoadInsn(code.get(start)) ||
+        !code.get(start + 1).is("INSN", Opcodes.ACONST_NULL) ||
+        !code.get(start + 2).is("VAR", Opcodes.ASTORE) ||
+        !code.get(start).args.get(0).equals(code.get(start + 2).args.get(0))) return null;
+    LocalNodeKey load = locals.instruction(code.get(start));
+    LocalNodeKey store = locals.instruction(code.get(start + 2));
+    if (load == null || !load.equals(store)) return null;
+    LocalNodeInfo info = locals.info.get(load);
+    if (info == null || info.method != method || info.owner != owner) return null;
+    String node = info.boundary ? "BOUNDARY:" + code.get(start).args.get(0) :
+        "GENERATED:" + load.ordinal + ":" + load.category;
+    return eraser.internal(owner.name, owner.namespace) + "." + eraseIds(method.name) +
+        eraseIds(method.descriptor) + "|" + node;
+  }
+
+  private static Map<MemberKey, String> captureTransferOrigins(
+      Map<String, ClassModel> classes, Map<String, CaptureSpec> captures,
+      LocalUniverse locals, Normalizer eraser) {
+    Map<MemberKey, Set<String>> observed = new TreeMap<MemberKey, Set<String>>();
+    for (ClassModel caller : classes.values()) for (MethodModel method : caller.methods) {
+      for (int start = 0; start + 1 < method.insns.size(); start++) {
+        Insn create = method.insns.get(start);
+        if (!create.is("TYPE", Opcodes.NEW) ||
+            !method.insns.get(start + 1).is("INSN", Opcodes.DUP)) continue;
+        String target = (String) create.args.get(0);
+        for (int end = start + 2; end < method.insns.size(); end++) {
+          Insn construct = method.insns.get(end);
+          if (construct.kind.equals("LABEL") || construct.kind.equals("JUMP") ||
+              construct.kind.equals("TABLESWITCH") || construct.kind.equals("LOOKUPSWITCH")) break;
+          if (!construct.is("METHOD", Opcodes.INVOKESPECIAL) ||
+              !construct.owner().equals(target) || !construct.memberName().equals("<init>")) continue;
+          CaptureSpec spec = captures.get(target + "\u0000" + construct.descriptor());
+          if (spec == null) continue;
+          try {
+            int[] bounds = uniquePartitionBoundaries(method.insns, start + 2, end,
+                Type.getArgumentTypes(spec.constructor.descriptor), eraser,
+                caller.namespace, caller, (method.access & Opcodes.ACC_STATIC) == 0);
+            for (int argument = 0; argument < spec.fieldsByArgument.size(); argument++) {
+              String origin = localTransferOrigin(caller, method, method.insns,
+                  bounds[argument], bounds[argument + 1], locals, eraser);
+              if (origin == null) continue;
+              FieldModel field = spec.fieldsByArgument.get(argument);
+              MemberKey key = new MemberKey(spec.owner.name, "F", field.name, field.descriptor);
+              observed.computeIfAbsent(key, ignored -> new TreeSet<String>()).add(origin);
+            }
+          } catch (Failure unsafeOrAmbiguous) {
+            if (unsafeOrAmbiguous instanceof IncompleteMapping) throw unsafeOrAmbiguous;
+          }
+        }
+      }
+    }
+    Map<MemberKey, String> result = new TreeMap<MemberKey, String>();
+    for (Map.Entry<MemberKey, Set<String>> entry : observed.entrySet())
+      if (entry.getValue().size() == 1) result.put(entry.getKey(), entry.getValue().iterator().next());
     return result;
   }
 
-  /* A singleton full-class skeleton pair is already independently anchored.
-   * Preserve the ordered typed NEW edges in that owner to constrain otherwise
-   * identical generated child classes.  This is graph evidence, not a sort or
-   * arbitrary tie-break: a genuinely symmetric, unreferenced pair remains
-   * ambiguous and is rejected by PairingSearch. */
-  private static void constrainOrderedConstructionGraph(String namespace,
-                                                        Map<String, ClassModel> left,
-                                                        Map<String, ClassModel> right,
-                                                        Map<String, String> anchoredClassPairs,
-                                                        Map<String, String> mapping,
-                                                        Map<String, String> reverse) {
+  private static Map<String, String> transportedOwnedTargets(ClassModel owner,
+                                                              MethodModel method,
+                                                              Map<String, ClassModel> classes,
+                                                              Map<MemberKey, String> origins) {
+    Map<String, List<String>> byRole = new TreeMap<String, List<String>>();
+    List<Insn> code = new ArrayList<Insn>();
+    for (Insn instruction : method.insns)
+      if (!instruction.kind.equals("LABEL") && !instruction.kind.equals("FRAME") &&
+          !instruction.is("INSN", Opcodes.NOP)) code.add(instruction);
+    for (int i = 0; i + 7 < code.size(); i++) {
+      Insn create = code.get(i), duplicate = code.get(i + 1), selfRead = code.get(i + 2),
+          read = code.get(i + 3), selfClear = code.get(i + 4), nil = code.get(i + 5),
+          clear = code.get(i + 6), construct = code.get(i + 7);
+      if (!create.is("TYPE", Opcodes.NEW) || !duplicate.is("INSN", Opcodes.DUP) ||
+          !selfRead.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(selfRead.args.get(0)) ||
+          !read.is("FIELD", Opcodes.GETFIELD) || !read.owner().equals(owner.name) ||
+          !selfClear.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(selfClear.args.get(0)) ||
+          !nil.is("INSN", Opcodes.ACONST_NULL) || !clear.is("FIELD", Opcodes.PUTFIELD) ||
+          !clear.owner().equals(owner.name) || !clear.memberName().equals(read.memberName()) ||
+          !clear.descriptor().equals(read.descriptor()) ||
+          !construct.is("METHOD", Opcodes.INVOKESPECIAL) ||
+          !construct.owner().equals(create.args.get(0)) || !construct.memberName().equals("<init>") ||
+          !classes.containsKey((String) create.args.get(0))) continue;
+      MemberKey transported = new MemberKey(read.owner(), "F", read.memberName(), read.descriptor());
+      String role = eraseIds(read.memberName()) + "\u0000" + eraseIds(read.descriptor()) +
+          "\u0000" + origins.getOrDefault(transported, "NO_UNIQUE_TRANSFER_ORIGIN");
+      byRole.computeIfAbsent(role, ignored -> new ArrayList<String>()).add((String) create.args.get(0));
+    }
+    Map<String, String> unique = new TreeMap<String, String>();
+    for (Map.Entry<String, List<String>> entry : byRole.entrySet())
+      if (entry.getValue().size() == 1) unique.put(entry.getKey(), entry.getValue().get(0));
+    return unique;
+  }
+
+  private static List<String> constructedOwnedTargets(MethodModel method,
+                                                       Map<String, ClassModel> classes) {
+    List<String> result = new ArrayList<String>();
+    for (Insn instruction : method.insns)
+      if (instruction.is("TYPE", Opcodes.NEW) &&
+          classes.containsKey((String) instruction.args.get(0)))
+        result.add((String) instruction.args.get(0));
+    return result;
+  }
+
+  /* A singleton full-class skeleton pair is independently anchored.  Within
+   * such an owner, an exact consume-and-clear construction proves which
+   * generated child transports a uniquely named captured binding.  NEW
+   * ordinal alone is not evidence: Clojure's closure lowering can retain the
+   * same wrapper creation order while permuting the bindings assigned to
+   * those otherwise identical wrappers.  Repeated or one-sided roles remain
+   * unconstrained and must be resolved by the later graph relations. */
+  private static void constrainTransportConstructionGraph(String namespace,
+                                                          Map<String, ClassModel> left,
+                                                          Map<String, ClassModel> right,
+                                                          Map<String, String> anchoredClassPairs,
+                                                          Map<MemberKey, String> leftOrigins,
+                                                          Map<MemberKey, String> rightOrigins,
+                                                          Map<String, String> mapping,
+                                                          Map<String, String> reverse) {
     for (Map.Entry<String, String> pair : anchoredClassPairs.entrySet()) {
       ClassModel leftOwner = left.get(pair.getKey()), rightOwner = right.get(pair.getValue());
       require(leftOwner != null && rightOwner != null,
@@ -4054,22 +5064,28 @@ public final class CompareExactSourceAot {
       for (String methodKey : leftMethods.keySet()) {
         List<MethodModel> aMethods = leftMethods.get(methodKey), bMethods = rightMethods.get(methodKey);
         if (aMethods.size() != 1 || bMethods == null || bMethods.size() != 1) continue;
-        List<String> aTargets = constructedOwnedTargets(aMethods.get(0));
-        List<String> bTargets = constructedOwnedTargets(bMethods.get(0));
-        require(aTargets.size() == bTargets.size(),
-            "ordered construction-edge count differs in anchored class " + leftOwner.name +
-            "." + aMethods.get(0).key());
-        for (int i = 0; i < aTargets.size(); i++) {
-          String aTarget = aTargets.get(i), bTarget = bTargets.get(i);
-          boolean aOwned = left.containsKey(aTarget), bOwned = right.containsKey(bTarget);
-          require(aOwned == bOwned, "ordered construction edge crosses exact-source ownership boundary in " +
-              leftOwner.name + "." + aMethods.get(0).key() + " at NEW ordinal " + i);
-          if (!aOwned) continue;
-          require(eraseIds(aTarget).equals(eraseIds(bTarget)),
-              "ordered construction-edge target shapes differ in " + leftOwner.name +
-              "." + aMethods.get(0).key() + " at NEW ordinal " + i + ": " +
-              aTarget + " vs " + bTarget);
+        Map<String, String> aTargets = transportedOwnedTargets(
+            leftOwner, aMethods.get(0), left, leftOrigins);
+        Map<String, String> bTargets = transportedOwnedTargets(
+            rightOwner, bMethods.get(0), right, rightOrigins);
+        for (String role : aTargets.keySet()) {
+          String aTarget = aTargets.get(role), bTarget = bTargets.get(role);
+          if (bTarget == null || !eraseIds(aTarget).equals(eraseIds(bTarget))) continue;
           constrainIds(namespace, aTarget, bTarget, mapping, reverse);
+        }
+        /* Retain ordinal evidence for residual edges only.  If either endpoint
+         * has already been distinguished by a transport role, compatibility
+         * rejects an inconsistent ordinal pair instead of overwriting the
+         * stronger value-flow constraint. */
+        List<String> aOrdered = constructedOwnedTargets(aMethods.get(0), left);
+        List<String> bOrdered = constructedOwnedTargets(bMethods.get(0), right);
+        require(aOrdered.size() == bOrdered.size(),
+            "owned construction-edge count differs in anchored class " + leftOwner.name +
+            "." + aMethods.get(0).key());
+        for (int i = 0; i < aOrdered.size(); i++) {
+          String aTarget = aOrdered.get(i), bTarget = bOrdered.get(i);
+          if (compatibleConstraint(aTarget, bTarget, mapping, reverse))
+            constrainIds(namespace, aTarget, bTarget, mapping, reverse);
         }
       }
     }
@@ -4093,6 +5109,10 @@ public final class CompareExactSourceAot {
           true, rightLocals, Collections.emptyMap(), null);
       Map<String, List<ClassModel>> leftSkeletons = skeletonGroups(namespace, l.get(namespace), leftEraser, activeLeft);
       Map<String, List<ClassModel>> rightSkeletons = skeletonGroups(namespace, r.get(namespace), rightEraser, activeRight);
+      Map<MemberKey, String> leftTransferOrigins = captureTransferOrigins(
+          left, activeLeft, leftLocals, leftEraser);
+      Map<MemberKey, String> rightTransferOrigins = captureTransferOrigins(
+          right, activeRight, rightLocals, rightEraser);
       String skeletonDiagnostic = skeletonDifferenceDiagnostic(leftSkeletons, rightSkeletons, rightEraser, activeRight);
       require(leftSkeletons.keySet().equals(rightSkeletons.keySet()),
           "ID-placeholder full-class skeleton sets differ for " + namespace + ": left-only=" +
@@ -4108,6 +5128,8 @@ public final class CompareExactSourceAot {
       Map<String, String> initialClasses = new HashMap<String, String>();
       for (String skeleton : leftSkeletons.keySet()) {
         List<ClassModel> leftGroup = leftSkeletons.get(skeleton), rightGroup = rightSkeletons.get(skeleton);
+        Collections.sort(leftGroup, (a, b) -> a.name.compareTo(b.name));
+        Collections.sort(rightGroup, (a, b) -> a.name.compareTo(b.name));
         require(leftGroup.size() == rightGroup.size(), "ID-placeholder skeleton multiplicity differs for " + namespace + ": " + leftGroup.size() + " vs " + rightGroup.size());
         if (leftGroup.size() == 1) {
           constrainIds(namespace, leftGroup.get(0).name, rightGroup.get(0).name, initial, initialReverse);
@@ -4116,16 +5138,47 @@ public final class CompareExactSourceAot {
           for (ClassModel leftClass : leftGroup) { searchLeft.add(leftClass); candidates.put(leftClass, rightGroup); }
         }
       }
+      Collections.sort(searchLeft, (a, b) -> a.name.compareTo(b.name));
       Set<String> leftClassIds = ownedClassIds(l.get(namespace)), rightClassIds = ownedClassIds(r.get(namespace));
       Map<String, ClassModel> namespaceLeft = indexClasses(l.get(namespace));
       Map<String, ClassModel> namespaceRight = indexClasses(r.get(namespace));
-      constrainOrderedConstructionGraph(namespace, namespaceLeft, namespaceRight, initialClasses,
-          initial, initialReverse);
-      PairingSearch search = new PairingSearch(searchLeft, candidates, leftClassIds, rightClassIds);
+      Map<String, String> transportAnchors = new HashMap<String, String>(initialClasses);
+      boolean transportChanged;
+      do {
+        int anchorsBefore = transportAnchors.size(), idsBefore = initial.size();
+        Set<String> anchoredRight = new HashSet<String>(transportAnchors.values());
+        for (ClassModel candidateLeft : searchLeft) {
+          if (transportAnchors.containsKey(candidateLeft.name)) continue;
+          List<ClassModel> viable = new ArrayList<ClassModel>();
+          for (ClassModel candidateRight : candidates.get(candidateLeft))
+            if (!anchoredRight.contains(candidateRight.name) &&
+                compatibleConstraint(candidateLeft.name, candidateRight.name,
+                    initial, initialReverse)) viable.add(candidateRight);
+          if (viable.size() == 1) {
+            transportAnchors.put(candidateLeft.name, viable.get(0).name);
+            anchoredRight.add(viable.get(0).name);
+          }
+        }
+        constrainTransportConstructionGraph(namespace, namespaceLeft, namespaceRight,
+            transportAnchors, leftTransferOrigins, rightTransferOrigins,
+            initial, initialReverse);
+        transportChanged = transportAnchors.size() != anchorsBefore || initial.size() != idsBefore;
+      } while (transportChanged);
+      PairingSearch search = new PairingSearch(namespace, searchLeft, candidates,
+          leftClassIds, rightClassIds);
       search.search(new HashSet<ClassModel>(), new HashSet<ClassModel>(), initial, initialReverse, initialClasses);
-      require(search.solutions == 1, "compiler-ID full-cohort pairing is " +
-          (search.solutions == 0 ? "incomplete/conflicting" : "ambiguous") + " for " + namespace +
-          ": solutions-observed=" + search.solutions + " " + pairingAmbiguityDiagnostic(search));
+      require(search.solutions >= 1, "compiler-ID full-cohort pairing is incomplete/conflicting for " +
+          namespace + ": solutions-observed=" + search.solutions + " " +
+          pairingAmbiguityDiagnostic(search));
+      /* More than one solution here is an automorphism of complete, identical
+       * ID-placeholder class skeleton groups.  Accept one full bijection as a
+       * witness; every selected pair is still checked by the later member,
+       * state-slot, local-node, and whole normalized class relations.  The
+       * whole-original-JAR scan performed before these relations separately
+       * rejects references to compiler-ID-bearing cohort classes from outside
+       * this closed graph. */
+      require(search.solution != null && search.solutionClasses != null,
+          "compiler-ID pairing search recorded no complete witness for " + namespace);
       Map<String, String> proved = new TreeMap<String, String>(search.solution);
       Map<String, String> provedReverse = new HashMap<String, String>();
       for (Map.Entry<String, String> entry : proved.entrySet()) provedReverse.put(entry.getValue(), entry.getKey());
@@ -4252,6 +5305,47 @@ public final class CompareExactSourceAot {
     throw new Failure("generated method declaration disappeared: " + key);
   }
 
+  private static final class MemberContextStream {
+    final List<String> events = new ArrayList<String>();
+    final Map<Insn, Integer> positions = new IdentityHashMap<Insn, Integer>();
+  }
+
+  private static MemberContextStream memberContextStream(ClassModel owner, MethodModel method,
+                                                          Normalizer eraser) {
+    MemberContextStream result = new MemberContextStream();
+    for (int i = 0; i < method.insns.size();) {
+      Insn instruction = method.insns.get(i);
+      if (instruction.kind.equals("LABEL") || instruction.kind.equals("FRAME")) { i++; continue; }
+      String event;
+      StateSlotKey stateSlot = eraser.stateSlots.key(instruction);
+      if (stateSlot != null) event = eraser.stateSlot(stateSlot, owner.namespace);
+      else if (eraser.eraseStateSlots && eraser.eraseLocals &&
+          stateReadResultHandling(method, i, eraser.stateSlots, eraser.locals))
+        event = "STATE_READ_RESULT";
+      else {
+        LocalHousekeepingRun housekeeping = localHousekeepingRun(method, i, eraser.locals);
+        if (housekeeping != null) {
+          event = housekeeping.moves.isEmpty() ? "LOCAL_HOUSEKEEPING_DISCARD" :
+              housekeeping.render(eraser);
+          result.events.add(event); i = housekeeping.end; continue;
+        }
+        if (pureLocalDiscard(method.insns, i)) {
+          result.events.add("LOCAL_DISCARD"); i += 2; continue;
+        }
+        if (pureClojureEmptyMapDiscard(method.insns, i)) {
+          result.events.add("CLOJURE_EMPTY_MAP_DISCARD"); i += 2; continue;
+        }
+        if (instruction.kind.equals("JUMP") || instruction.kind.equals("TABLESWITCH") ||
+            instruction.kind.equals("LOOKUPSWITCH"))
+          event = "CONTROL{" + instruction.kind + "," + instruction.opcode + "}";
+        else event = instruction.render(eraser, owner.namespace);
+      }
+      int position = result.events.size();
+      result.events.add(event); result.positions.put(instruction, position); i++;
+    }
+    return result;
+  }
+
   private static Map<MemberKey, List<String>> memberUseContexts(Map<String, ClassModel> classes,
                                                                  MemberUniverse universe,
                                                                  Normalizer eraser,
@@ -4265,20 +5359,316 @@ public final class CompareExactSourceAot {
       String source = eraser.internal(owner.name, owner.namespace) + "." +
           eraser.memberName(owner.name, "M", method.name, method.descriptor, owner.namespace) +
           eraser.descriptor(method.descriptor, owner.namespace);
+      String methodShape = sha256(rendered.text);
+      MemberContextStream contextStream = memberContextStream(owner, method, eraser);
       for (int i = 0; i < method.insns.size(); i++) {
         Insn insn = method.insns.get(i);
         if (!(insn.kind.equals("FIELD") || insn.kind.equals("METHOD"))) continue;
         MemberKey target = new MemberKey(insn.owner(), insn.kind.equals("FIELD") ? "F" : "M",
             insn.memberName(), insn.descriptor());
         if (!universe.generated.contains(target)) continue;
+        if (CONST_MEMBER_SLOT.matcher(target.name).matches() &&
+            insn.opcode == Opcodes.PUTSTATIC && i >= 2) {
+          Insn value = method.insns.get(i - 2), box = method.insns.get(i - 1);
+          if (value.kind.equals("LDC") && value.args.get(0) instanceof Long &&
+              box.is("METHOD", Opcodes.INVOKESTATIC) && box.owner().equals("java/lang/Long") &&
+              box.memberName().equals("valueOf") && box.descriptor().equals("(J)Ljava/lang/Long;")) {
+            String normalizedValue = eraser.value(value.args.get(0), owner.namespace);
+            result.get(target).add(source + "|BOXED_LONG_INIT=" + normalizedValue);
+            continue;
+          }
+        }
+        Integer position = contextStream.positions.get(insn);
+        require(position != null, "generated member use disappeared from typed context stream: " + target);
         List<String> window = new ArrayList<String>();
-        for (int j = Math.max(0, i - 4); j <= Math.min(method.insns.size() - 1, i + 4); j++)
-          window.add((j - i) + ":" + method.insns.get(j).render(eraser, owner.namespace));
-        result.get(target).add(source + "|at=" + i + "|opcode=" + insn.opcode + "|window=" + join(window));
+        for (int j = Math.max(0, position - 4);
+             j <= Math.min(contextStream.events.size() - 1, position + 4); j++)
+          window.add((j - position) + ":" + contextStream.events.get(j));
+        /* Candidate partition only.  This window contains typed erased events,
+         * never raw state/local/debug identities.  MemberPairingSearch still
+         * tests every proposed bijection against the complete rendered class. */
+        result.get(target).add(source + "|method-shape=" + methodShape + "|opcode=" +
+            insn.opcode + "|context=" + join(window));
       }
     }
     for (List<String> contexts : result.values()) Collections.sort(contexts);
     return result;
+  }
+
+  private static String memberAlignmentMethodKey(ClassModel owner, MethodModel method,
+                                                 Normalizer normalizer) {
+    return method.access + "|" +
+        normalizer.memberName(owner.name, "M", method.name, method.descriptor, owner.namespace) +
+        normalizer.descriptor(method.descriptor, owner.namespace);
+  }
+
+  private static Map<Integer, MemberKey> positionedGeneratedMembers(ClassModel owner,
+                                                                    MethodModel method,
+                                                                    MemberUniverse universe,
+                                                                    MemberContextStream stream) {
+    Map<Integer, MemberKey> result = new TreeMap<Integer, MemberKey>();
+    for (Insn instruction : method.insns) {
+      if (!(instruction.kind.equals("FIELD") || instruction.kind.equals("METHOD"))) continue;
+      MemberKey key = new MemberKey(instruction.owner(),
+          instruction.kind.equals("FIELD") ? "F" : "M",
+          instruction.memberName(), instruction.descriptor());
+      if (!universe.generated.contains(key)) continue;
+      Integer position = stream.positions.get(instruction);
+      if (position != null)
+        require(result.put(position, key) == null,
+            "two generated member events share one typed stream position in " + owner.name +
+            "." + method.key());
+    }
+    return result;
+  }
+
+  private static Map<MemberKey, Map<MemberKey, Integer>> alignedMemberAccessScores(
+      Map<String, ClassModel> left, Map<String, ClassModel> right,
+      Map<String, String> classPairs, MemberUniverse leftMembers,
+      MemberUniverse rightMembers, Normalizer leftEraser, Normalizer rightEraser) {
+    Map<MemberKey, Map<MemberKey, Integer>> result =
+        new TreeMap<MemberKey, Map<MemberKey, Integer>>();
+    for (ClassModel leftOwner : left.values()) {
+      ClassModel rightOwner = right.get(classPairs.get(leftOwner.name));
+      require(rightOwner != null, "member-alignment class pair is absent: " + leftOwner.name);
+      Map<String, MethodModel> rightMethods = new HashMap<String, MethodModel>();
+      for (MethodModel method : rightOwner.methods)
+        if (!method.name.equals("<init>"))
+          require(rightMethods.put(memberAlignmentMethodKey(rightOwner, method, rightEraser), method) == null,
+              "member-alignment right method key collision in " + rightOwner.name);
+      for (MethodModel leftMethod : leftOwner.methods) {
+        if (leftMethod.name.equals("<init>")) continue;
+        MethodModel rightMethod = rightMethods.get(
+            memberAlignmentMethodKey(leftOwner, leftMethod, leftEraser));
+        if (rightMethod == null) continue;
+        MemberContextStream leftStream = memberContextStream(leftOwner, leftMethod, leftEraser);
+        MemberContextStream rightStream = memberContextStream(rightOwner, rightMethod, rightEraser);
+        if (!leftStream.events.equals(rightStream.events)) continue;
+        Map<Integer, MemberKey> leftAt = positionedGeneratedMembers(
+            leftOwner, leftMethod, leftMembers, leftStream);
+        Map<Integer, MemberKey> rightAt = positionedGeneratedMembers(
+            rightOwner, rightMethod, rightMembers, rightStream);
+        for (Integer position : leftAt.keySet()) {
+          MemberKey rightKey = rightAt.get(position);
+          if (rightKey == null) continue;
+          result.computeIfAbsent(leftAt.get(position), ignored ->
+              new TreeMap<MemberKey, Integer>()).merge(rightKey, 1, Integer::sum);
+        }
+      }
+    }
+    return result;
+  }
+
+  private static boolean uniqueCapturedStateCarrier(MemberKey selected,
+                                                     Map<String, CaptureSpec> activeCaptures) {
+    if (!selected.kind.equals("F") ||
+        !selected.descriptor.equals("Ljava/lang/Object;") ||
+        !CAPTURED_STATE_CARRIER.matcher(selected.name).matches() ||
+        stateMachineOwner(selected.owner) == null) return false;
+    int carriers = 0;
+    boolean selectedPresent = false;
+    for (CaptureSpec spec : activeCaptures.values()) {
+      if (!spec.owner.name.equals(selected.owner)) continue;
+      for (FieldModel field : spec.fieldsByArgument) {
+        if (field.descriptor.equals("Ljava/lang/Object;") &&
+            CAPTURED_STATE_CARRIER.matcher(field.name).matches()) carriers++;
+        if (field.name.equals(selected.name) && field.descriptor.equals(selected.descriptor))
+          selectedPresent = true;
+      }
+    }
+    return selectedPresent && carriers == 1;
+  }
+
+  private static String capturedFieldRole(MemberKey selected,
+                                          Map<String, ClassModel> classes,
+                                          Normalizer eraser) {
+    ClassModel selectedOwner = classes.get(selected.owner);
+    require(selectedOwner != null, "captured field owner is absent: " + selected);
+    if (selected.name.startsWith("G__") && exactRegistrationStateMachine(selectedOwner)) {
+      String marker = "$" + selected.name + "__";
+      List<ClassModel> children = new ArrayList<ClassModel>();
+      for (ClassModel model : classes.values())
+        if (model.namespace.equals(selectedOwner.namespace) &&
+            model.name.contains(marker)) children.add(model);
+      require(children.size() == 1,
+          "captured G field lacks a unique generated child-class anchor: " + selected +
+          " children=" + children.size());
+      ClassModel child = children.get(0);
+      return "PAIRED_CHILD{" + q(eraser.internal(child.name, child.namespace)) + "}";
+    }
+    Set<String> childConsumers = new TreeSet<String>();
+    for (ClassModel owner : classes.values()) for (MethodModel method : owner.methods) {
+      List<Insn> code = new ArrayList<Insn>();
+      for (Insn instruction : method.insns)
+        if (!instruction.kind.equals("LABEL") && !instruction.kind.equals("FRAME") &&
+            !instruction.is("INSN", Opcodes.NOP)) code.add(instruction);
+      for (int i = 0; i + 7 < code.size(); i++) {
+        Insn create = code.get(i), duplicate = code.get(i + 1), selfRead = code.get(i + 2),
+            read = code.get(i + 3), selfClear = code.get(i + 4), nil = code.get(i + 5),
+            clear = code.get(i + 6), construct = code.get(i + 7);
+        if (!create.is("TYPE", Opcodes.NEW) || !duplicate.is("INSN", Opcodes.DUP) ||
+            !selfRead.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(selfRead.args.get(0)) ||
+            !read.is("FIELD", Opcodes.GETFIELD) || !read.owner().equals(selected.owner) ||
+            !read.memberName().equals(selected.name) || !read.descriptor().equals(selected.descriptor) ||
+            !selfClear.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(selfClear.args.get(0)) ||
+            !nil.is("INSN", Opcodes.ACONST_NULL) || !clear.is("FIELD", Opcodes.PUTFIELD) ||
+            !clear.owner().equals(selected.owner) || !clear.memberName().equals(selected.name) ||
+            !clear.descriptor().equals(selected.descriptor) ||
+            !construct.is("METHOD", Opcodes.INVOKESPECIAL) ||
+            !construct.owner().equals(create.args.get(0)) || !construct.memberName().equals("<init>"))
+          continue;
+        String child = (String) create.args.get(0);
+        if (classes.containsKey(child)) childConsumers.add(child);
+      }
+    }
+    require(childConsumers.size() <= 1,
+        "captured field feeds several generated child classes: " + selected + " -> " + childConsumers);
+    if (childConsumers.size() == 1) {
+      String child = childConsumers.iterator().next();
+      return "CONSUMED_BY_CHILD{" + q(eraser.internal(child,
+          classes.get(child).namespace)) + "}";
+    }
+    Set<Long> stateArrayIndices = new TreeSet<Long>();
+    for (ClassModel owner : classes.values()) for (MethodModel method : owner.methods) {
+      List<Insn> code = new ArrayList<Insn>();
+      for (Insn instruction : method.insns)
+        if (!instruction.kind.equals("LABEL") && !instruction.kind.equals("FRAME") &&
+            !instruction.is("INSN", Opcodes.NOP)) code.add(instruction);
+      for (int i = 0; i + 10 < code.size(); i++) {
+        Long index = pushedLong(code.get(i + 4));
+        Insn selfRead = code.get(i + 5), read = code.get(i + 6),
+            selfClear = code.get(i + 7), nil = code.get(i + 8),
+            clear = code.get(i + 9), invoke = code.get(i + 10);
+        if (index == null || !selfRead.is("VAR", Opcodes.ALOAD) ||
+            !Integer.valueOf(0).equals(selfRead.args.get(0)) ||
+            !read.is("FIELD", Opcodes.GETFIELD) || !read.owner().equals(selected.owner) ||
+            !read.memberName().equals(selected.name) || !read.descriptor().equals(selected.descriptor) ||
+            !selfClear.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(selfClear.args.get(0)) ||
+            !nil.is("INSN", Opcodes.ACONST_NULL) || !clear.is("FIELD", Opcodes.PUTFIELD) ||
+            !clear.owner().equals(selected.owner) || !clear.memberName().equals(selected.name) ||
+            !clear.descriptor().equals(selected.descriptor) ||
+            !invoke.is("METHOD", Opcodes.INVOKEINTERFACE) ||
+            !invoke.owner().equals("clojure/lang/IFn$OLOO") ||
+            !invoke.memberName().equals("invokePrim") ||
+            !invoke.descriptor().equals(
+                "(Ljava/lang/Object;JLjava/lang/Object;)Ljava/lang/Object;")) continue;
+        stateArrayIndices.add(index);
+      }
+    }
+    require(stateArrayIndices.size() <= 1,
+        "captured field writes several exact state-array indices: " + selected + " -> " +
+        stateArrayIndices);
+    if (stateArrayIndices.size() == 1)
+      return "STATE_ARRAY_WRITE{" + stateArrayIndices.iterator().next() + "}";
+    return "UNNAMED_CAPTURE";
+  }
+
+  private static List<String> constructTokensContaining(String text, String marker) {
+    List<String> result = new ArrayList<String>();
+    for (int start = text.indexOf("CONSTRUCT{"); start >= 0;
+         start = text.indexOf("CONSTRUCT{", start + 1)) {
+      int depth = 0, end = -1;
+      for (int i = start; i < text.length(); i++) {
+        char c = text.charAt(i);
+        if (c == '{') depth++;
+        else if (c == '}' && --depth == 0) { end = i + 1; break; }
+      }
+      require(end >= 0, "unterminated rendered CONSTRUCT token");
+      String token = text.substring(start, end);
+      if (token.contains(marker)) result.add(token);
+    }
+    return result;
+  }
+
+  /* The active-capture proof already establishes one trivial all-field
+   * constructor, a unique safe argument partition at every admitted use site,
+   * and complete outside-cohort construction closure.  Individualize one
+   * field while every peer remains erased and fingerprint only the resulting
+   * CONSTRUCT assignment token.  This captures the value entering the field
+   * without importing unrelated instructions from its owner or caller. */
+  private static String capturedConstructionFingerprint(MemberKey selected,
+                                                        Map<String, ClassModel> classes,
+                                                        Normalizer eraser,
+                                                        Map<String, CaptureSpec> activeCaptures) {
+    Normalizer highlighter = new Normalizer(eraser.maps, eraser.classNamespace,
+        eraser.classMapping, eraser.erase, true, eraser.members,
+        Collections.emptyMap(), selected,
+        eraser.eraseStateSlots, eraser.stateSlots, Collections.emptyMap(), null,
+        eraser.eraseLocals, eraser.locals, Collections.emptyMap(), null);
+    List<String> assignments = new ArrayList<String>();
+    String marker = q("<GENERATED_MEMBER_SELF>");
+    for (ClassModel owner : classes.values()) {
+      for (MethodModel method : owner.methods) {
+        boolean constructs = false;
+        for (Insn instruction : method.insns)
+          if (selected.kind.equals("F") && instruction.kind.equals("METHOD") &&
+            instruction.opcode == Opcodes.INVOKESPECIAL && instruction.memberName().equals("<init>") &&
+            instruction.owner().equals(selected.owner) &&
+            activeCaptures.containsKey(selected.owner + "\u0000" + instruction.descriptor()))
+            constructs = true;
+        if (!constructs) continue;
+        RenderedMethod rendered = renderMethod(owner, method, highlighter, activeCaptures);
+        String source = highlighter.internal(owner.name, owner.namespace) + "." +
+            highlighter.memberName(owner.name, "M", method.name, method.descriptor, owner.namespace) +
+            highlighter.descriptor(method.descriptor, owner.namespace);
+        for (String token : constructTokensContaining(rendered.text, marker))
+          assignments.add(source + "|" + token);
+      }
+    }
+    Collections.sort(assignments);
+    require(!assignments.isEmpty(),
+        "highlighted capture member has no proved construction assignment: " + selected);
+    return sha256(join(assignments));
+  }
+
+  private static boolean activeCapturedMember(MemberKey selected,
+                                              Map<String, CaptureSpec> activeCaptures) {
+    if (!selected.kind.equals("F")) return false;
+    for (CaptureSpec spec : activeCaptures.values()) {
+      if (!spec.owner.name.equals(selected.owner)) continue;
+      for (FieldModel field : spec.fieldsByArgument)
+        if (field.name.equals(selected.name) && field.descriptor.equals(selected.descriptor))
+          return true;
+    }
+    return false;
+  }
+
+  /* This broader individualized neighborhood is a search-order hint only.
+   * Unlike the primary construction fingerprint, inequality here never
+   * excludes a pairing: unrelated AOT variation in the same class can perturb
+   * the hash. */
+  private static String memberPairingHint(MemberKey selected,
+                                          Map<String, ClassModel> classes,
+                                          Normalizer eraser,
+                                          Map<String, CaptureSpec> activeCaptures,
+                                          Map<MemberKey, List<String>> useContexts) {
+    if (!activeCapturedMember(selected, activeCaptures))
+      return sha256(join(useContexts.get(selected)));
+    Normalizer highlighter = new Normalizer(eraser.maps, eraser.classNamespace,
+        eraser.classMapping, eraser.erase, true, eraser.members,
+        Collections.emptyMap(), selected,
+        eraser.eraseStateSlots, eraser.stateSlots, Collections.emptyMap(), null,
+        eraser.eraseLocals, eraser.locals, Collections.emptyMap(), null);
+    List<String> neighborhood = new ArrayList<String>();
+    for (ClassModel owner : classes.values()) {
+      boolean relevant = owner.name.equals(selected.owner);
+      for (MethodModel method : owner.methods) for (Insn instruction : method.insns) {
+        if (instruction.kind.equals("FIELD") && instruction.owner().equals(selected.owner) &&
+            instruction.memberName().equals(selected.name) &&
+            instruction.descriptor().equals(selected.descriptor)) relevant = true;
+        if (instruction.kind.equals("METHOD") && instruction.opcode == Opcodes.INVOKESPECIAL &&
+            instruction.memberName().equals("<init>") && instruction.owner().equals(selected.owner) &&
+            activeCaptures.containsKey(selected.owner + "\u0000" + instruction.descriptor()))
+          relevant = true;
+      }
+      if (relevant) {
+        RenderedClass rendered = renderClass(owner, highlighter, activeCaptures);
+        neighborhood.add(rendered.name + "=" + sha256(rendered.text));
+      }
+    }
+    Collections.sort(neighborhood);
+    require(!neighborhood.isEmpty(), "captured member search hint has no neighborhood: " + selected);
+    return sha256(join(neighborhood));
   }
 
   private static String generatedMemberFingerprint(MemberKey key, Map<String, ClassModel> classes,
@@ -4289,6 +5679,25 @@ public final class CompareExactSourceAot {
     String declaration;
     if (key.kind.equals("F")) declaration = findField(owner, key).render(eraser, owner.namespace, owner.name);
     else declaration = renderMethod(owner, findMethod(owner, key), eraser, activeCaptures).text;
+    String varBinding = owner.varBindings == null ? null :
+        owner.varBindings.get(key.name + "\u0000" + key.descriptor);
+    if (varBinding != null)
+      return key.kind + "|owner=" + eraser.internal(owner.name, owner.namespace) +
+          "|decl=" + declaration + "|constant-var-binding=" + q(varBinding);
+    boolean capturedField = false;
+    for (CaptureSpec spec : activeCaptures.values()) {
+      if (!spec.owner.name.equals(key.owner)) continue;
+      for (FieldModel field : spec.fieldsByArgument)
+        if (field.name.equals(key.name) && field.descriptor.equals(key.descriptor)) capturedField = true;
+    }
+    if (capturedField) {
+      if (uniqueCapturedStateCarrier(key, activeCaptures))
+        return key.kind + "|owner=" + eraser.internal(owner.name, owner.namespace) +
+            "|decl=" + declaration + "|captured-state-carrier=UNIQUE";
+      return key.kind + "|owner=" + eraser.internal(owner.name, owner.namespace) +
+          "|decl=" + declaration + "|captured-role=" +
+          capturedFieldRole(key, classes, eraser);
+    }
     return key.kind + "|owner=" + eraser.internal(owner.name, owner.namespace) + "|decl=" + declaration +
         "|uses=[" + join(useContexts.get(key)) + "]";
   }
@@ -4296,7 +5705,31 @@ public final class CompareExactSourceAot {
   private static final class MemberPairingProblem {
     final Map<MemberKey, MemberKey> fixed = new TreeMap<MemberKey, MemberKey>();
     final Map<MemberKey, List<MemberKey>> choices = new TreeMap<MemberKey, List<MemberKey>>();
+    final Map<MemberKey, List<MemberKey>> preferredChoices = new TreeMap<MemberKey, List<MemberKey>>();
     final Set<MemberKey> allRight = new TreeSet<MemberKey>();
+  }
+
+  private static String fingerprintGroupDifference(Map<String, List<MemberKey>> selected,
+                                                   Set<String> other,
+                                                   int limit) {
+    List<String> result = new ArrayList<String>();
+    for (String fingerprint : selected.keySet()) {
+      if (other.contains(fingerprint)) continue;
+      result.add("fingerprint=" + sha256(fingerprint) + " members=" + selected.get(fingerprint));
+      if (result.size() == limit) break;
+    }
+    return result.toString();
+  }
+
+  private static String stateSlotFingerprintGroupDifference(
+      Map<String, List<StateSlotKey>> selected, Set<String> other, int limit) {
+    List<String> result = new ArrayList<String>();
+    for (String fingerprint : selected.keySet()) {
+      if (other.contains(fingerprint)) continue;
+      result.add("fingerprint=" + sha256(fingerprint) + " slots=" + selected.get(fingerprint));
+      if (result.size() == limit) break;
+    }
+    return result.toString();
   }
 
   private static MemberPairingProblem deriveMemberProblem(Map<String, ClassModel> left,
@@ -4320,6 +5753,8 @@ public final class CompareExactSourceAot {
         true, rightLocals, Collections.emptyMap(), null);
     Map<MemberKey, List<String>> leftUses = memberUseContexts(left, leftMembers, leftEraser, activeLeft);
     Map<MemberKey, List<String>> rightUses = memberUseContexts(right, rightMembers, rightEraser, activeRight);
+    Map<MemberKey, Map<MemberKey, Integer>> alignmentScores = alignedMemberAccessScores(
+        left, right, classPairs, leftMembers, rightMembers, leftEraser, rightEraser);
     Map<String, List<MemberKey>> leftGroups = new TreeMap<String, List<MemberKey>>();
     Map<String, List<MemberKey>> rightGroups = new TreeMap<String, List<MemberKey>>();
     for (MemberKey key : leftMembers.generated)
@@ -4328,10 +5763,12 @@ public final class CompareExactSourceAot {
       rightGroups.computeIfAbsent(generatedMemberFingerprint(key, right, rightEraser, activeRight, rightUses), ignored -> new ArrayList<MemberKey>()).add(key);
     require(leftGroups.keySet().equals(rightGroups.keySet()),
         "generated member-node fingerprint sets differ: left=" + leftMembers.generated.size() + " right=" + rightMembers.generated.size() +
-        " left-only=" + firstValues(difference(leftGroups.keySet(), rightGroups.keySet()), 3) +
-        " right-only=" + firstValues(difference(rightGroups.keySet(), leftGroups.keySet()), 3));
+        " left-only=" + fingerprintGroupDifference(leftGroups, rightGroups.keySet(), 5) +
+        " right-only=" + fingerprintGroupDifference(rightGroups, leftGroups.keySet(), 5));
     MemberPairingProblem result = new MemberPairingProblem();
     Set<MemberKey> rightMapped = new HashSet<MemberKey>();
+    Map<MemberKey, String> leftHints = new HashMap<MemberKey, String>();
+    Map<MemberKey, String> rightHints = new HashMap<MemberKey, String>();
     for (String fingerprint : leftGroups.keySet()) {
       List<MemberKey> a = leftGroups.get(fingerprint), b = rightGroups.get(fingerprint);
       require(a.size() == b.size(), "generated member-node fingerprint multiplicity differs: " + a + " vs " + b);
@@ -4347,7 +5784,41 @@ public final class CompareExactSourceAot {
         result.fixed.put(a.get(0), b.get(0));
         require(rightMapped.add(b.get(0)), "generated member-node graph mapping is not injective: " + b.get(0));
       } else {
-        for (MemberKey leftKey : a) result.choices.put(leftKey, new ArrayList<MemberKey>(b));
+        /* Typed same-position access scores, then individualized-neighborhood
+         * equality, define only a preferred search phase.  The complete phase
+         * below retains every primary-graph candidate. */
+        for (MemberKey leftKey : a) {
+          String leftHint = leftHints.computeIfAbsent(leftKey, ignored ->
+              memberPairingHint(leftKey, left, leftEraser, activeLeft, leftUses));
+          Map<MemberKey, Integer> scores = alignmentScores.getOrDefault(
+              leftKey, Collections.emptyMap());
+          List<MemberKey> ordered = new ArrayList<MemberKey>(b);
+          Collections.sort(ordered, (first, second) -> {
+            int scoreOrder = Integer.compare(scores.getOrDefault(second, 0),
+                scores.getOrDefault(first, 0));
+            if (scoreOrder != 0) return scoreOrder;
+            boolean firstMatch = leftHint.equals(rightHints.computeIfAbsent(first, ignored ->
+                memberPairingHint(first, right, rightEraser, activeRight, rightUses)));
+            boolean secondMatch = leftHint.equals(rightHints.computeIfAbsent(second, ignored ->
+                memberPairingHint(second, right, rightEraser, activeRight, rightUses)));
+            int matchOrder = Boolean.compare(secondMatch, firstMatch);
+            return matchOrder != 0 ? matchOrder : first.compareTo(second);
+          });
+          result.choices.put(leftKey, ordered);
+          List<MemberKey> preferred = new ArrayList<MemberKey>();
+          int bestScore = 0;
+          for (MemberKey candidate : ordered)
+            bestScore = Math.max(bestScore, scores.getOrDefault(candidate, 0));
+          for (MemberKey candidate : ordered) {
+            if (bestScore > 0 && scores.getOrDefault(candidate, 0) == bestScore)
+              preferred.add(candidate);
+            else if (bestScore == 0 && leftHint.equals(rightHints.computeIfAbsent(candidate, ignored ->
+                memberPairingHint(candidate, right, rightEraser, activeRight, rightUses))))
+              preferred.add(candidate);
+          }
+          result.preferredChoices.put(leftKey,
+              preferred.isEmpty() ? new ArrayList<MemberKey>(ordered) : preferred);
+        }
         result.allRight.addAll(b);
       }
     }
@@ -4372,6 +5843,8 @@ public final class CompareExactSourceAot {
     long explored;
     String lastMismatch = "no complete witness evaluated";
     Map<MemberKey, MemberKey> solution;
+    final long explorationLimit = Long.getLong(
+        "datomic.compare.member-search-limit", Long.MAX_VALUE).longValue();
 
     MemberPairingSearch(String label, Map<String, ClassModel> left, Map<String, RenderedClass> rightRendered,
                         Map<String, IdMap> idMaps, Map<String, String> classPairs,
@@ -4408,8 +5881,13 @@ public final class CompareExactSourceAot {
     }
 
     boolean search(int index, Map<MemberKey, MemberKey> mapping, Set<MemberKey> usedRight,
-                   Set<String> validated) {
+                   Set<String> validated, boolean preferredOnly) {
       explored++;
+      if (explored > explorationLimit)
+        throw new Failure("generated member-node diagnostic search limit reached in " + label +
+            ": limit=" + explorationLimit + " index=" + index +
+            " problem=" + memberProblemDiagnostic(problem) +
+            " last-mismatch=" + lastMismatch);
       if (!validateReady(mapping, validated)) return false;
       if (index == order.size()) {
         if (validated.size() != left.size()) {
@@ -4420,11 +5898,13 @@ public final class CompareExactSourceAot {
         return true;
       }
       MemberKey selected = order.get(index);
-      for (MemberKey candidate : problem.choices.get(selected)) {
+      List<MemberKey> candidates = preferredOnly ? problem.preferredChoices.get(selected) :
+          problem.choices.get(selected);
+      for (MemberKey candidate : candidates) {
         if (!usedRight.add(candidate)) continue;
         mapping.put(selected, candidate);
         Set<String> nextValidated = new HashSet<String>(validated);
-        if (search(index + 1, mapping, usedRight, nextValidated)) return true;
+        if (search(index + 1, mapping, usedRight, nextValidated, preferredOnly)) return true;
         mapping.remove(selected); usedRight.remove(candidate);
       }
       return false;
@@ -4433,7 +5913,13 @@ public final class CompareExactSourceAot {
     Map<MemberKey, MemberKey> solve() {
       Map<MemberKey, MemberKey> initial = new TreeMap<MemberKey, MemberKey>(problem.fixed);
       Set<MemberKey> used = new HashSet<MemberKey>(problem.fixed.values());
-      require(search(0, initial, used, new HashSet<String>()),
+      boolean found = search(0, initial, used, new HashSet<String>(), true);
+      if (!found) {
+        lastMismatch = "preferred neighborhood phase found no complete witness; " + lastMismatch;
+        found = search(0, new TreeMap<MemberKey, MemberKey>(problem.fixed),
+            new HashSet<MemberKey>(problem.fixed.values()), new HashSet<String>(), false);
+      }
+      require(found,
           "no complete generated member-node graph isomorphism in " + label +
           ": explored=" + explored + " last-mismatch=" + lastMismatch);
       require(solution.size() == leftMembers.generated.size() && new HashSet<MemberKey>(solution.values()).size() == solution.size(),
@@ -4442,9 +5928,130 @@ public final class CompareExactSourceAot {
     }
   }
 
+  private static String memberProblemDiagnostic(MemberPairingProblem problem) {
+    Map<String, List<MemberKey>> groups = new TreeMap<String, List<MemberKey>>();
+    Map<String, List<MemberKey>> candidates = new TreeMap<String, List<MemberKey>>();
+    for (Map.Entry<MemberKey, List<MemberKey>> entry : problem.choices.entrySet()) {
+      List<String> rendered = new ArrayList<String>();
+      for (MemberKey candidate : entry.getValue()) rendered.add(candidate.toString());
+      String signature = join(rendered);
+      groups.computeIfAbsent(signature, ignored -> new ArrayList<MemberKey>()).add(entry.getKey());
+      candidates.put(signature, entry.getValue());
+    }
+    List<String> descriptions = new ArrayList<String>();
+    for (String signature : groups.keySet()) {
+      descriptions.add("size=" + groups.get(signature).size() + " left=" + groups.get(signature) +
+          " right=" + candidates.get(signature));
+      if (descriptions.size() == 12) break;
+    }
+    return "fixed=" + problem.fixed.size() + " ambiguous-nodes=" + problem.choices.size() +
+        " groups=" + groups.size() + " first-groups=" + descriptions;
+  }
+
   private static Map<StateSlotKey, StateSlotKey> identityStateSlotMap(StateSlotUniverse universe) {
     Map<StateSlotKey, StateSlotKey> result = new TreeMap<StateSlotKey, StateSlotKey>();
     for (StateSlotKey key : universe.nodes) result.put(key, key);
+    return result;
+  }
+
+  private static LocalNodeKey stateSlotWriteValueLocal(StateSlotKey selected,
+                                                        StateSlotUniverse slots,
+                                                        LocalUniverse locals) {
+    LocalNodeKey result = null;
+    boolean found = false;
+    for (StateSlotAccess access : slots.byNode.get(selected)) {
+      if (!access.kind.equals("write")) continue;
+      List<Insn> code = access.method.insns;
+      int at = code.indexOf(access.invokeInsn) - 1;
+      List<Insn> prior = new ArrayList<Insn>();
+      while (at >= 0 && prior.size() < 3) {
+        Insn instruction = code.get(at--);
+        if (instruction.kind.equals("LABEL")) continue;
+        prior.add(instruction);
+      }
+      if (prior.size() != 3 || !prior.get(0).is("VAR", Opcodes.ASTORE) ||
+          !prior.get(1).is("INSN", Opcodes.ACONST_NULL) ||
+          !prior.get(2).is("VAR", Opcodes.ALOAD) ||
+          !prior.get(0).args.get(0).equals(prior.get(2).args.get(0))) return null;
+      LocalNodeKey value = locals.instruction(prior.get(2));
+      LocalNodeInfo info = value == null ? null : locals.info.get(value);
+      if (info == null || info.boundary || !locals.generated.contains(value)) return null;
+      if (found && !result.equals(value)) return null;
+      result = value;
+      found = true;
+    }
+    return found ? result : null;
+  }
+
+  private static boolean exactRegistrationStateMachine(ClassModel owner) {
+    if (owner == null || !"cognitect/nano_impl/registration.clj".equals(owner.sourceEntry) ||
+        !"2fb1ad8f46b6269fb2a192f2622288a0d6276961ace7bbd3f38f991bf11cfd6e".equals(
+            owner.sourceSha256) || !owner.name.contains("$state_machine__")) return false;
+    return owner.name.startsWith("cognitect/nano_impl/registration$ensure_group_members$") ||
+        owner.name.startsWith("cognitect/nano_impl/registration$heartbeat$") ||
+        owner.name.startsWith("cognitect/nano_impl/registration$register$") ||
+        owner.name.startsWith("cognitect/nano_impl/registration$registrar_STAR_$") ||
+        owner.name.startsWith("cognitect/nano_impl/registration$update_registration$");
+  }
+
+  private static Map<MemberKey, StateSlotKey> registrationAccessorStateEdges(
+      Map<String, ClassModel> classes, StateSlotUniverse slots, LocalUniverse locals) {
+    Map<LocalNodeKey, MemberKey> fieldByLocal = new TreeMap<LocalNodeKey, MemberKey>();
+    Set<LocalNodeKey> conflictingFields = new HashSet<LocalNodeKey>();
+    for (ClassModel owner : classes.values()) {
+      if (!exactRegistrationStateMachine(owner)) continue;
+      for (MethodModel method : owner.methods) {
+        Set<Integer> controlLabels = stateControlLabels(method);
+        for (int start = 0; start < method.insns.size(); start++) {
+          List<Integer> indices = new ArrayList<Integer>();
+          int cursor = start;
+          while (cursor < method.insns.size() && indices.size() < 5) {
+            Insn current = method.insns.get(cursor);
+            if (current.kind.equals("LABEL") &&
+                !controlLabels.contains(((LabelRef) current.args.get(0)).id)) cursor++;
+            else { indices.add(cursor); cursor++; }
+          }
+          if (indices.size() != 5) continue;
+          Insn self = method.insns.get(indices.get(0)), read = method.insns.get(indices.get(1)),
+              cast = method.insns.get(indices.get(2)), invoke = method.insns.get(indices.get(3)),
+              store = method.insns.get(indices.get(4));
+          if (!self.is("VAR", Opcodes.ALOAD) || !Integer.valueOf(0).equals(self.args.get(0)) ||
+              !read.is("FIELD", Opcodes.GETFIELD) || !read.owner().equals(owner.name) ||
+              declaredOwnInstanceField(owner, read) == null ||
+              !cast.is("TYPE", Opcodes.CHECKCAST) || !cast.args.get(0).equals("clojure/lang/IFn") ||
+              !invoke.is("METHOD", Opcodes.INVOKEINTERFACE) ||
+              !invoke.owner().equals("clojure/lang/IFn") || !invoke.memberName().equals("invoke") ||
+              !invoke.descriptor().equals("()Ljava/lang/Object;") ||
+              !store.is("VAR", Opcodes.ASTORE)) continue;
+          MemberKey field = new MemberKey(read.owner(), "F", read.memberName(), read.descriptor());
+          LocalNodeKey local = locals.instruction(store);
+          LocalNodeInfo info = local == null ? null : locals.info.get(local);
+          if (info == null || info.boundary || pureConsumeAccessorChild(field, locals) == null) continue;
+          MemberKey prior = fieldByLocal.putIfAbsent(local, field);
+          if (prior != null && !prior.equals(field)) conflictingFields.add(local);
+        }
+      }
+    }
+    for (LocalNodeKey key : conflictingFields) fieldByLocal.remove(key);
+
+    Map<LocalNodeKey, StateSlotKey> slotByLocal = new TreeMap<LocalNodeKey, StateSlotKey>();
+    Set<LocalNodeKey> conflictingSlots = new HashSet<LocalNodeKey>();
+    for (StateSlotKey slot : slots.nodes) {
+      ClassModel machine = classes.get(slot.machineOwner);
+      if (!exactRegistrationStateMachine(machine)) continue;
+      LocalNodeKey local = stateSlotWriteValueLocal(slot, slots, locals);
+      if (local == null) continue;
+      StateSlotKey prior = slotByLocal.putIfAbsent(local, slot);
+      if (prior != null && !prior.equals(slot)) conflictingSlots.add(local);
+    }
+    for (LocalNodeKey key : conflictingSlots) slotByLocal.remove(key);
+
+    Map<MemberKey, StateSlotKey> result = new TreeMap<MemberKey, StateSlotKey>();
+    for (Map.Entry<LocalNodeKey, MemberKey> entry : fieldByLocal.entrySet()) {
+      StateSlotKey slot = slotByLocal.get(entry.getKey());
+      if (slot != null) require(result.put(entry.getValue(), slot) == null,
+          "registration accessor field reaches more than one unique state slot: " + entry.getValue());
+    }
     return result;
   }
 
@@ -4498,15 +6105,30 @@ public final class CompareExactSourceAot {
     for (MemberKey key : rightMembers.generated) rightMembersIdentity.put(key, key);
     Map<String, String> rightClasses = identityClassMap(right);
     Map<String, IdMap> rightIds = identityIdMaps(right);
+    Map<MemberKey, StateSlotKey> leftAccessorEdges = registrationAccessorStateEdges(
+        left, leftSlots, leftLocals);
+    Map<MemberKey, StateSlotKey> rightAccessorEdges = registrationAccessorStateEdges(
+        right, rightSlots, rightLocals);
+    Map<StateSlotKey, StateSlotKey> accessorFixed = new TreeMap<StateSlotKey, StateSlotKey>();
+    for (Map.Entry<MemberKey, StateSlotKey> entry : leftAccessorEdges.entrySet()) {
+      MemberKey mappedField = memberPairs.get(entry.getKey());
+      StateSlotKey mappedSlot = mappedField == null ? null : rightAccessorEdges.get(mappedField);
+      if (mappedSlot != null) accessorFixed.put(entry.getValue(), mappedSlot);
+    }
+    require(new HashSet<StateSlotKey>(accessorFixed.values()).size() == accessorFixed.size(),
+        "mapped registration accessor-state edges are not injective: " + accessorFixed);
+    Set<StateSlotKey> accessorFixedRight = new HashSet<StateSlotKey>(accessorFixed.values());
     Map<String, List<StateSlotKey>> leftGroups = new TreeMap<String, List<StateSlotKey>>();
     Map<String, List<StateSlotKey>> rightGroups = new TreeMap<String, List<StateSlotKey>>();
     for (StateSlotKey key : leftSlots.nodes) {
+      if (accessorFixed.containsKey(key)) continue;
       require(left.containsKey(key.machineOwner), "state-slot machine owner is absent from left cohort: " + key);
       String fingerprint = stateSlotFingerprint(key, left, idMaps, classPairs, leftMembers, memberPairs,
           leftSlots, leftLocals, leftCaptures);
       leftGroups.computeIfAbsent(fingerprint, ignored -> new ArrayList<StateSlotKey>()).add(key);
     }
     for (StateSlotKey key : rightSlots.nodes) {
+      if (accessorFixedRight.contains(key)) continue;
       require(right.containsKey(key.machineOwner), "state-slot machine owner is absent from right cohort: " + key);
       String fingerprint = stateSlotFingerprint(key, right, rightIds, rightClasses, rightMembers,
           rightMembersIdentity, rightSlots, rightLocals, rightCaptures);
@@ -4514,10 +6136,11 @@ public final class CompareExactSourceAot {
     }
     require(leftGroups.keySet().equals(rightGroups.keySet()),
         "typed state-slot fingerprint sets differ: left=" + leftSlots.nodes.size() + " right=" + rightSlots.nodes.size() +
-        " left-only=" + firstValues(difference(leftGroups.keySet(), rightGroups.keySet()), 3) +
-        " right-only=" + firstValues(difference(rightGroups.keySet(), leftGroups.keySet()), 3));
+        " left-only=" + stateSlotFingerprintGroupDifference(leftGroups, rightGroups.keySet(), 3) +
+        " right-only=" + stateSlotFingerprintGroupDifference(rightGroups, leftGroups.keySet(), 3));
     StateSlotPairingProblem result = new StateSlotPairingProblem();
-    Set<StateSlotKey> fixedRight = new HashSet<StateSlotKey>();
+    result.fixed.putAll(accessorFixed);
+    Set<StateSlotKey> fixedRight = new HashSet<StateSlotKey>(accessorFixed.values());
     for (String fingerprint : leftGroups.keySet()) {
       List<StateSlotKey> a = leftGroups.get(fingerprint), b = rightGroups.get(fingerprint);
       require(a.size() == b.size(), "typed state-slot fingerprint multiplicity differs: " + a + " vs " + b);
@@ -4533,7 +6156,8 @@ public final class CompareExactSourceAot {
         result.fixed.put(a.get(0), b.get(0));
         require(fixedRight.add(b.get(0)), "typed state-slot fixed mapping is not injective: " + b.get(0));
       } else {
-        for (StateSlotKey key : a) result.choices.put(key, new ArrayList<StateSlotKey>(b));
+        for (StateSlotKey key : a)
+          result.choices.put(key, new ArrayList<StateSlotKey>(b));
         result.allRight.addAll(b);
       }
     }
@@ -4559,6 +6183,8 @@ public final class CompareExactSourceAot {
     long explored;
     String lastMismatch = "no complete witness evaluated";
     Map<StateSlotKey, StateSlotKey> solution;
+    final long explorationLimit = Long.getLong(
+        "datomic.compare.state-search-limit", Long.MAX_VALUE).longValue();
 
     StateSlotPairingSearch(String label, Map<String, ClassModel> left,
                            Map<String, RenderedClass> rightRendered,
@@ -4572,6 +6198,7 @@ public final class CompareExactSourceAot {
       this.memberPairs = memberPairs; this.leftSlots = leftSlots; this.leftLocals = leftLocals;
       this.leftCaptures = leftCaptures;
       this.problem = problem; this.order = new ArrayList<StateSlotKey>(problem.choices.keySet());
+      Collections.sort(this.order);
     }
 
     boolean validateReady(Map<StateSlotKey, StateSlotKey> mapping, Set<String> validated) {
@@ -4601,6 +6228,10 @@ public final class CompareExactSourceAot {
     boolean search(int index, Map<StateSlotKey, StateSlotKey> mapping,
                    Set<StateSlotKey> usedRight, Set<String> validated) {
       explored++;
+      if (explored > explorationLimit)
+        throw new Failure("typed state-slot diagnostic search limit reached in " + label +
+            ": limit=" + explorationLimit + " index=" + index +
+            " last-mismatch=" + lastMismatch);
       if (!validateReady(mapping, validated)) return false;
       if (index == order.size()) {
         if (validated.size() != left.size()) {
@@ -4667,6 +6298,33 @@ public final class CompareExactSourceAot {
     final Set<LocalNodeKey> allRight = new TreeSet<LocalNodeKey>();
   }
 
+  private static String localFingerprintGroupDifference(
+      Map<String, List<LocalNodeKey>> groups, Set<String> other,
+      LocalUniverse locals, int limit) {
+    List<String> result = new ArrayList<String>();
+    for (Map.Entry<String, List<LocalNodeKey>> entry : groups.entrySet()) {
+      if (other.contains(entry.getKey())) continue;
+      List<String> nodes = new ArrayList<String>();
+      for (LocalNodeKey key : entry.getValue()) {
+        LocalNodeInfo info = locals.info.get(key);
+        List<String> instructions = new ArrayList<String>();
+        for (int i = 0; i < info.method.insns.size(); i++) {
+          Insn instruction = info.method.insns.get(i);
+          if (key.equals(locals.instruction(instruction))) {
+            instructions.add(i + ":" + instruction.kind + ":" + instruction.opcode +
+                ":" + instruction.args);
+          }
+        }
+        nodes.add(key + " physical=" + info.physicalSlots + " occurrences=" +
+            info.instructionOccurrences + "/" + info.frameOccurrences + "/" +
+            info.lvtOccurrences + " instructions=" + instructions);
+      }
+      result.add("sha256=" + sha256(entry.getKey()) + " nodes=" + nodes);
+      if (result.size() == limit) break;
+    }
+    return result.toString();
+  }
+
   private static LocalPairingProblem deriveLocalProblem(Map<String, ClassModel> left,
                                                          Map<String, ClassModel> right,
                                                          Map<String, IdMap> idMaps,
@@ -4701,8 +6359,9 @@ public final class CompareExactSourceAot {
     require(leftGroups.keySet().equals(rightGroups.keySet()),
         "typed local def-use fingerprint sets differ: left=" + leftLocals.generated.size() +
         " right=" + rightLocals.generated.size() + " left-only=" +
-        firstValues(difference(leftGroups.keySet(), rightGroups.keySet()), 3) + " right-only=" +
-        firstValues(difference(rightGroups.keySet(), leftGroups.keySet()), 3));
+        localFingerprintGroupDifference(leftGroups, rightGroups.keySet(), leftLocals, 3) +
+        " right-only=" +
+        localFingerprintGroupDifference(rightGroups, leftGroups.keySet(), rightLocals, 3));
     LocalPairingProblem result = new LocalPairingProblem();
     Set<LocalNodeKey> fixedRight = new HashSet<LocalNodeKey>();
     for (String fingerprint : leftGroups.keySet()) {
@@ -5181,20 +6840,164 @@ public final class CompareExactSourceAot {
     test(rows, "side-effect-call-rejected", () -> require(safeBlock(Collections.singletonList(new Insn("METHOD", Opcodes.INVOKESTATIC, "x", "y", "()Ljava/lang/Object;", false)), 0, 1, "Ljava/lang/Object;", identity, "test", safeOwner, false) == null, "method call accepted"));
     test(rows, "inconsistent-clear-rejected", () -> require(safeBlock(Arrays.asList(new Insn("VAR", Opcodes.ALOAD, 1), new Insn("INSN", Opcodes.ACONST_NULL), new Insn("VAR", Opcodes.ASTORE, 2)), 0, 3, "Ljava/lang/Object;", identity, "test", safeOwner, false) == null, "different slot clear accepted"));
     test(rows, "string-ldc-never-normalized", () -> { Map<String, String> proof = Collections.singletonMap("10", "20"); IdMap map = new IdMap("test", set("10"), set("20"), proof); Normalizer normalizer = new Normalizer(Collections.singletonMap("test", map), Collections.emptyMap()); require(normalizer.value("literal__10", "test").contains(q("literal__10")), "semantic string was normalized"); });
+    test(rows, "sharp-predicate-typed-symbol-normalized", () -> {
+      List<Insn> code = Arrays.asList(
+          new Insn("INSN", Opcodes.ACONST_NULL),
+          new Insn("LDC", Opcodes.LDC, "p1__10#"),
+          new Insn("METHOD", Opcodes.INVOKESTATIC, "clojure/lang/Symbol", "intern",
+              "(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Symbol;", false));
+      require(Objects.equals(structuralGensymAt(code, 0), "p1__10#"),
+          "typed sharp predicate symbol was not recognized");
+      Map<String, String> proof = Collections.singletonMap("10", "20");
+      IdMap map = new IdMap("test", set("10"), set("20"), proof);
+      Normalizer normalizer = new Normalizer(Collections.singletonMap("test", map), Collections.emptyMap());
+      require(normalizer.structuralSymbol("p1__10#", "test").equals("p1__20#"),
+          "typed sharp predicate symbol did not follow the proved ID map");
+    });
+    test(rows, "sharp-predicate-ordinary-ldc-remains-exact", () -> {
+      List<Insn> code = Collections.singletonList(new Insn("LDC", Opcodes.LDC, "p1__10#"));
+      require(structuralGensymAt(code, 0) == null,
+          "untyped sharp predicate string was admitted as a structural symbol");
+      Map<String, String> proof = Collections.singletonMap("10", "20");
+      IdMap map = new IdMap("test", set("10"), set("20"), proof);
+      Normalizer normalizer = new Normalizer(Collections.singletonMap("test", map), Collections.emptyMap());
+      require(normalizer.value("p1__10#", "test").contains(q("p1__10#")),
+          "ordinary sharp predicate string was normalized");
+    });
+    test(rows, "sharp-predicate-wrong-symbol-call-rejected", () -> {
+      List<Insn> code = Arrays.asList(
+          new Insn("INSN", Opcodes.ACONST_NULL),
+          new Insn("LDC", Opcodes.LDC, "p1__10#"),
+          new Insn("METHOD", Opcodes.INVOKESTATIC, "clojure/lang/Symbol", "intern",
+              "(Ljava/lang/String;)Lclojure/lang/Symbol;", false));
+      require(structuralGensymAt(code, 0) == null,
+          "wrong Symbol/intern descriptor was admitted");
+    });
+    test(rows, "dead-clojure-empty-map-load-recognized", () -> {
+      List<Insn> code = Arrays.asList(
+          new Insn("FIELD", Opcodes.GETSTATIC, "clojure/lang/PersistentArrayMap", "EMPTY",
+              "Lclojure/lang/PersistentArrayMap;"),
+          new Insn("INSN", Opcodes.POP));
+      require(pureClojureEmptyMapDiscard(code, 0),
+          "exact PersistentArrayMap.EMPTY/POP pair was not recognized");
+    });
+    test(rows, "other-static-field-discard-remains-exact", () -> {
+      List<Insn> code = Arrays.asList(
+          new Insn("FIELD", Opcodes.GETSTATIC, "test/Holder", "EMPTY", "Ljava/lang/Object;"),
+          new Insn("INSN", Opcodes.POP));
+      require(!pureClojureEmptyMapDiscard(code, 0),
+          "arbitrary static-field discard entered the bounded quotient");
+    });
+    test(rows, "clojure-empty-map-load-without-discard-remains-exact", () -> {
+      List<Insn> code = Collections.singletonList(
+          new Insn("FIELD", Opcodes.GETSTATIC, "clojure/lang/PersistentArrayMap", "EMPTY",
+              "Lclojure/lang/PersistentArrayMap;"));
+      require(!pureClojureEmptyMapDiscard(code, 0),
+          "live PersistentArrayMap.EMPTY load entered the dead-load quotient");
+    });
     test(rows, "const-member-name-never-normalized", () -> { Map<String, String> proof = Collections.singletonMap("10", "20"); IdMap map = new IdMap("test", set("10"), set("20"), proof); Normalizer normalizer = new Normalizer(Collections.singletonMap("test", map), Collections.emptyMap()); require(normalizer.known("const__10", "test").equals("const__10"), "constant-slot member name was normalized"); });
     test(rows, "nan-payload-bits-preserved", () -> { Normalizer normalizer = new Normalizer(Collections.emptyMap(), Collections.emptyMap()); Float a = Float.intBitsToFloat(0x7fc00001), b = Float.intBitsToFloat(0x7fc00002); require(!normalizer.value(a, "test").equals(normalizer.value(b, "test")), "distinct NaN payloads collapsed"); });
     test(rows, "end-to-end-captured-permutation-accepted", () -> {
       ComparisonResult result = compare("synthetic-permutation", syntheticCaptureCohort("10", false), syntheticCaptureCohort("20", true), new ArrayList<String>(), new ArrayList<String>());
       require(result.classes == 2 && result.useSitesLeft == 1 && result.useSitesRight == 1, "unexpected synthetic comparison counts");
     });
+    test(rows, "unique-captured-state-carrier-recognized", () -> {
+      ClassModel owner = basicClass(
+          "test/go$fn__1$state_machine__2__auto____3$fn__4", "test");
+      FieldModel state = new FieldModel(); state.name = "state_5";
+      state.descriptor = "Ljava/lang/Object;"; state.access = Opcodes.ACC_FINAL;
+      FieldModel value = new FieldModel(); value.name = "value";
+      value.descriptor = "Ljava/lang/Object;"; value.access = Opcodes.ACC_FINAL;
+      MethodModel constructor = basicMethod("<init>",
+          "(Ljava/lang/Object;Ljava/lang/Object;)V", Opcodes.ACC_PUBLIC);
+      CaptureSpec spec = new CaptureSpec(owner, constructor, Arrays.asList(state, value));
+      Map<String, CaptureSpec> captures = Collections.singletonMap(spec.key(), spec);
+      require(uniqueCapturedStateCarrier(
+          new MemberKey(owner.name, "F", state.name, state.descriptor), captures),
+          "unique typed state carrier was not recognized");
+    });
+    test(rows, "multiple-captured-state-carriers-rejected", () -> {
+      ClassModel owner = basicClass(
+          "test/go$fn__1$state_machine__2__auto____3$fn__4", "test");
+      FieldModel first = new FieldModel(); first.name = "state_5";
+      first.descriptor = "Ljava/lang/Object;"; first.access = Opcodes.ACC_FINAL;
+      FieldModel second = new FieldModel(); second.name = "state_6";
+      second.descriptor = "Ljava/lang/Object;"; second.access = Opcodes.ACC_FINAL;
+      MethodModel constructor = basicMethod("<init>",
+          "(Ljava/lang/Object;Ljava/lang/Object;)V", Opcodes.ACC_PUBLIC);
+      CaptureSpec spec = new CaptureSpec(owner, constructor, Arrays.asList(first, second));
+      Map<String, CaptureSpec> captures = Collections.singletonMap(spec.key(), spec);
+      require(!uniqueCapturedStateCarrier(
+          new MemberKey(owner.name, "F", first.name, first.descriptor), captures),
+          "ambiguous state carriers were admitted");
+    });
+    test(rows, "ordinary-captured-G-field-needs-no-child-anchor", () -> {
+      ClassModel owner = basicClass("test/Outer__1", "test");
+      FieldModel field = syntheticField("G__2", "Ljava/lang/Object;", Opcodes.ACC_PUBLIC);
+      owner.fields.add(field);
+      Map<String, ClassModel> classes = singletonCohort(owner);
+      Normalizer eraser = new Normalizer(Collections.emptyMap(), classNamespaces(classes),
+          identityClassMap(classes), true);
+      String role = capturedFieldRole(
+          new MemberKey(owner.name, "F", field.name, field.descriptor), classes, eraser);
+      require(role.equals("UNNAMED_CAPTURE"),
+          "ordinary captured G field was forced into a child-class role: " + role);
+    });
+    testFailure(rows, "registration-captured-G-field-still-requires-child-anchor", () -> {
+      ClassModel owner = basicClass(
+          "cognitect/nano_impl/registration$heartbeat$fn__1$" +
+              "state_machine__5842__auto____2$fn__3",
+          "cognitect.nano-impl.registration");
+      owner.sourceEntry = "cognitect/nano_impl/registration.clj";
+      owner.sourceSha256 =
+          "2fb1ad8f46b6269fb2a192f2622288a0d6276961ace7bbd3f38f991bf11cfd6e";
+      FieldModel field = syntheticField("G__4", "Ljava/lang/Object;", Opcodes.ACC_PUBLIC);
+      owner.fields.add(field);
+      Map<String, ClassModel> classes = singletonCohort(owner);
+      Normalizer eraser = new Normalizer(Collections.emptyMap(), classNamespaces(classes),
+          identityClassMap(classes), true);
+      capturedFieldRole(new MemberKey(owner.name, "F", field.name, field.descriptor),
+          classes, eraser);
+    });
     test(rows, "typed-class-reference-order-disambiguates-identical-children", () -> compare(
         "synthetic-class-graph",
         syntheticClassGraphCohort("1", "2", "3"),
         syntheticClassGraphCohort("10", "20", "30"),
         new ArrayList<String>(), new ArrayList<String>()));
-    testFailure(rows, "end-to-end-id-ambiguity-rejected", () -> compare("synthetic-ambiguity", syntheticAmbiguousCohort("1", "2"), syntheticAmbiguousCohort("10", "20"), new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "end-to-end-id-automorphism-accepted", () -> compare("synthetic-automorphism", syntheticAmbiguousCohort("1", "2"), syntheticAmbiguousCohort("10", "20"), new ArrayList<String>(), new ArrayList<String>()));
     testFailure(rows, "end-to-end-id-conflict-rejected", () -> compare("synthetic-conflict", syntheticConflictingCohort("1", "1"), syntheticConflictingCohort("10", "20"), new ArrayList<String>(), new ArrayList<String>()));
     testFailure(rows, "end-to-end-const-member-swap-rejected", () -> compare("synthetic-const-swap", syntheticConstCohort("const__0"), syntheticConstCohort("const__1"), new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "proved-state-machine-boxed-long-slots-may-map", () -> compare(
+        "candidate-a--candidate-b",
+        syntheticStateMachineLongConstantCohort(false, false),
+        syntheticStateMachineLongConstantCohort(true, false),
+        new ArrayList<String>(), new ArrayList<String>()));
+    testFailure(rows, "state-machine-boxed-long-value-change-rejected", () -> compare(
+        "candidate-a--candidate-b",
+        syntheticStateMachineLongConstantCohort(false, false),
+        syntheticStateMachineLongConstantCohort(true, true),
+        new ArrayList<String>(), new ArrayList<String>()));
+    testFailure(rows, "unmapped-state-transition-label-number-change-rejected", () -> compare(
+        "candidate-a--candidate-b",
+        syntheticTransitionConstantCohort(7L, false, false),
+        syntheticTransitionConstantCohort(99L, false, false),
+        new ArrayList<String>(), new ArrayList<String>()));
+    testFailure(rows, "unmapped-state-transition-label-with-metadata-number-change-rejected", () -> compare(
+        "candidate-a--candidate-b",
+        syntheticTransitionConstantCohort(7L, false, true),
+        syntheticTransitionConstantCohort(99L, false, true),
+        new ArrayList<String>(), new ArrayList<String>()));
+    testFailure(rows, "boxed-long-with-nontransition-read-stays-exact", () -> compare(
+        "candidate-a--candidate-b",
+        syntheticTransitionConstantCohort(7L, true, false),
+        syntheticTransitionConstantCohort(99L, true, false),
+        new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "dead-state-read-result-store-normalized", () ->
+        require(syntheticDeadStateReadResultStore(false),
+            "closed state-read result lifecycle was not recognized"));
+    test(rows, "state-read-result-semantic-use-not-normalized", () ->
+        require(!syntheticDeadStateReadResultStore(true),
+            "semantic state-read result use was discarded"));
     test(rows, "typed-state-slot-remap-accepted", () -> {
       ComparisonResult result = compare("candidate-a--candidate-b",
           syntheticStateSlotCohort(new long[] {10}, new long[] {10}, 77L, true),
@@ -5234,6 +7037,60 @@ public final class CompareExactSourceAot {
         syntheticObjectLocalCohort(2, 3, false, false),
         syntheticObjectLocalCohort(5, 7, false, true),
         new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "independent-generated-local-moves-may-be-rescheduled", () -> compare(
+        "candidate-a--candidate-b",
+        syntheticLocalHousekeepingCohort(false, true),
+        syntheticLocalHousekeepingCohort(true, true),
+        new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "independent-generated-local-moves-without-clears-may-be-rescheduled", () -> compare(
+        "candidate-a--candidate-b",
+        syntheticLocalHousekeepingCohort(false, false),
+        syntheticLocalHousekeepingCohort(true, false),
+        new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "chained-generated-local-relocations-collapse-to-one-node", () -> {
+      Map<String, ClassModel> cohort = syntheticDependentLocalHousekeepingCohort();
+      StateSlotUniverse slots = stateSlotUniverse(cohort);
+      LocalUniverse locals = LocalUniverse.of(cohort, slots);
+      MethodModel method = cohort.values().iterator().next().methods.get(0);
+      LocalHousekeepingRun run = localHousekeepingRun(method, 4, locals);
+      require(run != null && run.end == 8 && run.moves.isEmpty() && run.discards == 2,
+          "proved reference-local relocation chain was not reduced to no-op housekeeping");
+    });
+    test(rows, "reference-local-relocation-rejects-primitive-transfer", () -> {
+      List<Insn> code = Arrays.asList(
+          new Insn("VAR", Opcodes.ILOAD, 1), new Insn("VAR", Opcodes.ISTORE, 2));
+      require(localReferenceMoveSource(code, 1) == null,
+          "primitive local transfer entered the reference relocation quotient");
+    });
+    test(rows, "same-slot-gc-clear-recognized", () -> {
+      List<Insn> code = Arrays.asList(
+          new Insn("VAR", Opcodes.ALOAD, 3), new Insn("INSN", Opcodes.ACONST_NULL),
+          new Insn("VAR", Opcodes.ASTORE, 3), new Insn("INSN", Opcodes.POP));
+      require(localGcLifetimeClearStore(code, 2), "exact same-slot GC clear was not recognized");
+    });
+    test(rows, "different-slot-gc-clear-rejected", () -> {
+      List<Insn> code = Arrays.asList(
+          new Insn("VAR", Opcodes.ALOAD, 3), new Insn("INSN", Opcodes.ACONST_NULL),
+          new Insn("VAR", Opcodes.ASTORE, 4), new Insn("INSN", Opcodes.POP));
+      require(!localGcLifetimeClearStore(code, 2),
+          "different-slot store entered the GC-clear quotient");
+    });
+    test(rows, "registration-state-write-batch-uses-physical-independence", () -> {
+      IndependentTransportRun run = syntheticRegistrationStateWriteRun(false);
+      require(run != null && run.end == 30 && run.blocks.size() == 3,
+          "distinct physical value slots were not admitted as an independent write batch");
+    });
+    test(rows, "registration-state-write-batch-repeated-slot-rejected", () ->
+        require(syntheticRegistrationStateWriteRun(true) == null,
+            "repeated physical value slot was admitted as an independent write batch"));
+    test(rows, "registration-accessor-state-edge-extracted", () -> {
+      Map<MemberKey, StateSlotKey> edges = syntheticRegistrationAccessorStateEdges(false);
+      require(edges.size() == 1 && edges.values().iterator().next().index == 10L,
+          "unique pure accessor-to-state-slot edge was not extracted: " + edges);
+    });
+    test(rows, "registration-accessor-state-edge-conflict-rejected", () ->
+        require(syntheticRegistrationAccessorStateEdges(true).isEmpty(),
+            "one accessor local was allowed to fix two state slots"));
     testFailure(rows, "typed-local-iinc-semantic-change-rejected", () -> compare("candidate-a--candidate-b",
         syntheticIincCohort(1, 1), syntheticIincCohort(4, 2),
         new ArrayList<String>(), new ArrayList<String>()));
@@ -5707,6 +7564,17 @@ public final class CompareExactSourceAot {
         new ArrayList<String>(), new ArrayList<String>()));
     testFailure(rows, "frame-null-retained", () -> compare("candidate-a--candidate-b",
         syntheticFrameCohort(Opcodes.NULL), syntheticFrameCohort(),
+        new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "generated-null-frame-local-may-relocate", () -> compare(
+        "candidate-a--candidate-b", syntheticNullFrameLocalCohort(2),
+        syntheticNullFrameLocalCohort(5), new ArrayList<String>(), new ArrayList<String>()));
+    test(rows, "generated-frame-local-cell-count-is-derived", () -> compare(
+        "candidate-a--candidate-b", syntheticGeneratedFrameMetadataCohort(true),
+        syntheticGeneratedFrameMetadataCohort(false),
+        new ArrayList<String>(), new ArrayList<String>()));
+    testFailure(rows, "frame-stack-type-remains-exact", () -> compare(
+        "candidate-a--candidate-b", syntheticFrameStackCohort(Opcodes.NULL),
+        syntheticFrameStackCohort(Opcodes.INTEGER),
         new ArrayList<String>(), new ArrayList<String>()));
     testFailure(rows, "frame-uninitialized-this-retained", () -> compare("candidate-a--candidate-b",
         syntheticFrameCohort(Opcodes.UNINITIALIZED_THIS), syntheticFrameCohort(),
@@ -6454,6 +8322,41 @@ public final class CompareExactSourceAot {
     Map<String, ClassModel> result = new TreeMap<String, ClassModel>(); result.put(model.name, model); return result;
   }
 
+  private static void syntheticBoxedLongInitializer(MethodModel clinit, String owner,
+                                                     String field, long value) {
+    clinit.insns.add(new Insn("LDC", Opcodes.LDC, Long.valueOf(value)));
+    clinit.insns.add(new Insn("METHOD", Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
+        "(J)Ljava/lang/Long;", false));
+    clinit.insns.add(new Insn("FIELD", Opcodes.PUTSTATIC, owner, field, "Ljava/lang/Object;"));
+  }
+
+  private static Map<String, ClassModel> syntheticStateMachineLongConstantCohort(
+      boolean permuted, boolean semanticChange) {
+    String owner = "test/fn__1$state_machine__2__auto____3$fn__4";
+    ClassModel model = basicClass(owner, "test");
+    model.fields.add(syntheticField("const__1", "Ljava/lang/Object;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL));
+    model.fields.add(syntheticField("const__2", "Ljava/lang/Object;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL));
+    MethodModel clinit = basicMethod("<clinit>", "()V", Opcodes.ACC_STATIC);
+    clinit.codeEvents.add("CODE");
+    syntheticBoxedLongInitializer(clinit, owner, "const__1", permuted ? 9L : 7L);
+    syntheticBoxedLongInitializer(clinit, owner, "const__2", permuted ? 7L : 9L);
+    clinit.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(clinit);
+    MethodModel read = basicMethod("read", "()Ljava/lang/Object;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+    read.codeEvents.add("CODE");
+    String selected = permuted && !semanticChange ? "const__2" : "const__1";
+    read.insns.add(new Insn("FIELD", Opcodes.GETSTATIC, owner, selected, "Ljava/lang/Object;"));
+    read.insns.add(new Insn("INSN", Opcodes.ARETURN));
+    model.methods.add(read);
+    Map<String, ClassModel> result = singletonCohort(model);
+    ClassModel machine = basicClass("test/fn__1$state_machine__2__auto____3", "test");
+    result.put(machine.name, machine);
+    return result;
+  }
+
   private static FieldModel syntheticField(String name, String descriptor, int access) {
     FieldModel field = new FieldModel(); field.name = name; field.descriptor = descriptor; field.access = access;
     return field;
@@ -6484,6 +8387,201 @@ public final class CompareExactSourceAot {
     method.insns.add(new Insn("INSN", Opcodes.ARETURN));
     model.methods.add(method);
     return singletonCohort(model);
+  }
+
+  private static void syntheticLocalMove(MethodModel method, int source, int destination,
+                                         boolean clearSource) {
+    method.insns.add(new Insn("VAR", Opcodes.ALOAD, source));
+    if (clearSource) {
+      method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+      method.insns.add(new Insn("VAR", Opcodes.ASTORE, source));
+    }
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, destination));
+  }
+
+  private static Map<String, ClassModel> syntheticLocalHousekeepingCohort(boolean reversed,
+                                                                          boolean clearSources) {
+    ClassModel model = basicClass("test/LocalHousekeeping", "test");
+    MethodModel method = basicMethod("move", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+    method.codeEvents.add("CODE");
+    method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, 1));
+    method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, 2));
+    if (reversed) {
+      syntheticLocalMove(method, 2, 4, clearSources);
+      syntheticLocalMove(method, 1, 3, clearSources);
+    } else {
+      syntheticLocalMove(method, 1, 3, clearSources);
+      syntheticLocalMove(method, 2, 4, clearSources);
+    }
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(method);
+    return singletonCohort(model);
+  }
+
+  private static Map<String, ClassModel> syntheticDependentLocalHousekeepingCohort() {
+    ClassModel model = basicClass("test/DependentLocalHousekeeping", "test");
+    MethodModel method = basicMethod("move", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+    method.codeEvents.add("CODE");
+    method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, 1));
+    method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, 2));
+    syntheticLocalMove(method, 1, 2, false);
+    syntheticLocalMove(method, 2, 3, false);
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(method);
+    return singletonCohort(model);
+  }
+
+  private static IndependentTransportRun syntheticRegistrationStateWriteRun(
+      boolean repeatPhysicalSlot) {
+    String ownerName = "cognitect/nano_impl/registration$heartbeat$fn__1$" +
+        "state_machine__5842__auto____2$fn__3";
+    ClassModel owner = basicClass(ownerName, "cognitect.nano-impl.registration");
+    owner.sourceEntry = "cognitect/nano_impl/registration.clj";
+    owner.sourceSha256 =
+        "2fb1ad8f46b6269fb2a192f2622288a0d6276961ace7bbd3f38f991bf11cfd6e";
+    MethodModel method = basicMethod("invoke", "()Ljava/lang/Object;", Opcodes.ACC_PUBLIC);
+    method.codeEvents.add("CODE");
+    owner.methods.add(method);
+
+    StateSlotUniverse slots = new StateSlotUniverse();
+    LocalUniverse locals = new LocalUniverse();
+    LocalNodeKey value = new LocalNodeKey(ownerName, method.name, method.descriptor, 0, "A");
+    Set<Integer> physicalSlots = repeatPhysicalSlot
+        ? Collections.singleton(1)
+        : new TreeSet<Integer>(Arrays.asList(1, 2, 3));
+    LocalNodeInfo info = new LocalNodeInfo(value, owner, method, false,
+        Collections.unmodifiableSet(physicalSlots));
+    locals.generated.add(value); locals.info.put(value, info);
+    locals.methodNodes.put(method, Collections.singleton(value));
+
+    for (int block = 0; block < 3; block++) {
+      int physicalSlot = repeatPhysicalSlot ? 1 : block + 1;
+      method.insns.add(new Insn("FIELD", Opcodes.GETSTATIC, ownerName, "aset",
+          "Lclojure/lang/Var;"));
+      method.insns.add(new Insn("METHOD", Opcodes.INVOKEVIRTUAL, "clojure/lang/Var",
+          "getRawRoot", "()Ljava/lang/Object;", false));
+      method.insns.add(new Insn("TYPE", Opcodes.CHECKCAST, "clojure/lang/IFn$OLOO"));
+      method.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+      Insn slot = new Insn("LDC", Opcodes.LDC, Long.valueOf(10 + block));
+      method.insns.add(slot);
+      Insn load = new Insn("VAR", Opcodes.ALOAD, physicalSlot);
+      method.insns.add(load);
+      method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+      Insn clear = new Insn("VAR", Opcodes.ASTORE, physicalSlot);
+      method.insns.add(clear);
+      Insn invoke = new Insn("METHOD", Opcodes.INVOKEINTERFACE,
+          "clojure/lang/IFn$OLOO", "invokePrim",
+          "(Ljava/lang/Object;JLjava/lang/Object;)Ljava/lang/Object;", true);
+      method.insns.add(invoke);
+      method.insns.add(new Insn("INSN", Opcodes.POP));
+      slots.add(new StateSlotAccess(new StateSlotKey(ownerName, 10 + block), "write",
+          owner, method, slot, invoke, null));
+      locals.instructionNodes.put(load, value);
+      locals.instructionNodes.put(clear, value);
+      info.instructionOccurrences += 2;
+    }
+
+    Map<String, ClassModel> classes = singletonCohort(owner);
+    Map<LocalNodeKey, LocalNodeKey> localIdentity = new TreeMap<LocalNodeKey, LocalNodeKey>();
+    localIdentity.put(value, value);
+    Normalizer normalizer = new Normalizer(Collections.emptyMap(), classNamespaces(classes),
+        identityClassMap(classes), false, false, new MemberUniverse(),
+        Collections.emptyMap(), false, slots, identityStateSlotMap(slots), null,
+        false, locals, localIdentity, null);
+    return independentStateWriteRun(owner, method, 0, normalizer);
+  }
+
+  private static Map<MemberKey, StateSlotKey> syntheticRegistrationAccessorStateEdges(
+      boolean conflictingSlot) {
+    String machineName = "cognitect/nano_impl/registration$heartbeat$fn__1$" +
+        "state_machine__5842__auto____2$fn__3";
+    ClassModel machine = basicClass(machineName, "cognitect.nano-impl.registration");
+    machine.sourceEntry = "cognitect/nano_impl/registration.clj";
+    machine.sourceSha256 =
+        "2fb1ad8f46b6269fb2a192f2622288a0d6276961ace7bbd3f38f991bf11cfd6e";
+    FieldModel accessorField = syntheticField("G__10", "Ljava/lang/Object;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL);
+    machine.fields.add(accessorField);
+    MethodModel invoke = basicMethod("invoke", "()Ljava/lang/Object;", Opcodes.ACC_PUBLIC);
+    invoke.codeEvents.add("CODE");
+    Insn accessorStore = null;
+    invoke.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    invoke.insns.add(new Insn("FIELD", Opcodes.GETFIELD, machineName, accessorField.name,
+        accessorField.descriptor));
+    invoke.insns.add(new Insn("TYPE", Opcodes.CHECKCAST, "clojure/lang/IFn"));
+    invoke.insns.add(new Insn("METHOD", Opcodes.INVOKEINTERFACE, "clojure/lang/IFn",
+        "invoke", "()Ljava/lang/Object;", true));
+    accessorStore = new Insn("VAR", Opcodes.ASTORE, 1);
+    invoke.insns.add(accessorStore);
+    machine.methods.add(invoke);
+
+    StateSlotUniverse slots = new StateSlotUniverse();
+    LocalUniverse locals = new LocalUniverse();
+    LocalNodeKey value = new LocalNodeKey(machineName, invoke.name, invoke.descriptor, 0, "A");
+    LocalNodeInfo valueInfo = new LocalNodeInfo(value, machine, invoke, false,
+        Collections.singleton(1));
+    locals.generated.add(value); locals.info.put(value, valueInfo);
+    locals.methodNodes.put(invoke, Collections.singleton(value));
+    locals.instructionNodes.put(accessorStore, value);
+
+    int writes = conflictingSlot ? 2 : 1;
+    for (int index = 0; index < writes; index++) {
+      Insn slot = new Insn("LDC", Opcodes.LDC, Long.valueOf(10 + index));
+      Insn load = new Insn("VAR", Opcodes.ALOAD, 1);
+      Insn clear = new Insn("VAR", Opcodes.ASTORE, 1);
+      Insn stateInvoke = new Insn("METHOD", Opcodes.INVOKEINTERFACE,
+          "clojure/lang/IFn$OLOO", "invokePrim",
+          "(Ljava/lang/Object;JLjava/lang/Object;)Ljava/lang/Object;", true);
+      invoke.insns.add(slot); invoke.insns.add(load);
+      invoke.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+      invoke.insns.add(clear); invoke.insns.add(stateInvoke);
+      invoke.insns.add(new Insn("INSN", Opcodes.POP));
+      slots.add(new StateSlotAccess(new StateSlotKey(machineName, 10 + index), "write",
+          machine, invoke, slot, stateInvoke, null));
+      locals.instructionNodes.put(load, value);
+      locals.instructionNodes.put(clear, value);
+    }
+    invoke.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    invoke.insns.add(new Insn("INSN", Opcodes.ARETURN));
+
+    String childName = "cognitect/nano_impl/registration$heartbeat$fn__1$G__10__11";
+    ClassModel child = basicClass(childName, "cognitect.nano-impl.registration");
+    FieldModel captured = syntheticField("captured", "Ljava/lang/Object;", Opcodes.ACC_PUBLIC);
+    child.fields.add(captured);
+    MethodModel constructor = basicMethod("<init>", "(Ljava/lang/Object;)V", Opcodes.ACC_PUBLIC);
+    constructor.codeEvents.add("CODE");
+    constructor.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    constructor.insns.add(new Insn("METHOD", Opcodes.INVOKESPECIAL, "java/lang/Object",
+        "<init>", "()V", false));
+    constructor.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    constructor.insns.add(new Insn("VAR", Opcodes.ALOAD, 1));
+    constructor.insns.add(new Insn("FIELD", Opcodes.PUTFIELD, childName, captured.name,
+        captured.descriptor));
+    constructor.insns.add(new Insn("INSN", Opcodes.RETURN));
+    child.methods.add(constructor);
+    MethodModel childInvoke = basicMethod("invoke", "()Ljava/lang/Object;", Opcodes.ACC_PUBLIC);
+    childInvoke.codeEvents.add("CODE");
+    childInvoke.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    childInvoke.insns.add(new Insn("FIELD", Opcodes.GETFIELD, childName, captured.name,
+        captured.descriptor));
+    childInvoke.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    childInvoke.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    childInvoke.insns.add(new Insn("FIELD", Opcodes.PUTFIELD, childName, captured.name,
+        captured.descriptor));
+    childInvoke.insns.add(new Insn("INSN", Opcodes.ARETURN));
+    child.methods.add(childInvoke);
+    LocalNodeKey childWitness = new LocalNodeKey(childName, childInvoke.name,
+        childInvoke.descriptor, 0, "A");
+    locals.info.put(childWitness, new LocalNodeInfo(childWitness, child, childInvoke, true,
+        Collections.singleton(0)));
+
+    Map<String, ClassModel> classes = new TreeMap<String, ClassModel>();
+    classes.put(machine.name, machine); classes.put(child.name, child);
+    return registrationAccessorStateEdges(classes, slots, locals);
   }
 
   private static Map<String, ClassModel> syntheticBoundaryCohort(boolean instance, boolean swapped) {
@@ -6519,6 +8617,51 @@ public final class CompareExactSourceAot {
     MethodModel method = basicMethod("run", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
     method.codeEvents.add("CODE");
     method.insns.add(new Insn("FRAME", -1, Opcodes.F_NEW, locals, new Object[0]));
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(method);
+    return singletonCohort(model);
+  }
+
+  private static Map<String, ClassModel> syntheticNullFrameLocalCohort(int slot) {
+    ClassModel model = basicClass("test/NullFrameLocal", "test");
+    MethodModel method = basicMethod("run", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+    method.codeEvents.add("CODE");
+    method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, slot));
+    Object[] frameLocals = new Object[slot + 1];
+    Arrays.fill(frameLocals, Opcodes.TOP);
+    frameLocals[slot] = Opcodes.NULL;
+    method.insns.add(new Insn("FRAME", -1, Opcodes.F_NEW, frameLocals, new Object[0]));
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(method);
+    return singletonCohort(model);
+  }
+
+  private static Map<String, ClassModel> syntheticGeneratedFrameMetadataCohort(
+      boolean includeSecondCell) {
+    ClassModel model = basicClass("test/GeneratedFrameMetadata", "test");
+    MethodModel method = basicMethod("run", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+    method.codeEvents.add("CODE");
+    method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, 1));
+    method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+    method.insns.add(new Insn("VAR", Opcodes.ASTORE, 2));
+    Object[] frameLocals = includeSecondCell
+        ? new Object[] {Opcodes.TOP, Opcodes.NULL, Opcodes.NULL}
+        : new Object[] {Opcodes.TOP, Opcodes.NULL};
+    method.insns.add(new Insn("FRAME", -1, Opcodes.F_NEW, frameLocals, new Object[0]));
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(method);
+    return singletonCohort(model);
+  }
+
+  private static Map<String, ClassModel> syntheticFrameStackCohort(Object stackValue) {
+    ClassModel model = basicClass("test/FrameStack", "test");
+    MethodModel method = basicMethod("run", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+    method.codeEvents.add("CODE");
+    method.insns.add(new Insn("FRAME", -1, Opcodes.F_NEW, new Object[0],
+        new Object[] {stackValue}));
+    method.insns.add(new Insn("INSN", Opcodes.POP));
     method.insns.add(new Insn("INSN", Opcodes.RETURN));
     model.methods.add(method);
     return singletonCohort(model);
@@ -6657,6 +8800,92 @@ public final class CompareExactSourceAot {
     method.insns.add(new Insn("INSN", Opcodes.POP));
   }
 
+  private static Map<String, ClassModel> syntheticTransitionConstantCohort(
+      long label, boolean extraRead, boolean metadataBetweenSlotAndValue) {
+    String owner = "test/Fn__10$state_machine__10__auto____10";
+    ClassModel model = basicClass(owner, "test");
+    model.fields.add(syntheticField("state", "Ljava/lang/Object;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL));
+    model.fields.add(syntheticField("aget", "Lclojure/lang/Var;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL));
+    model.fields.add(syntheticField("aset", "Lclojure/lang/Var;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL));
+    model.fields.add(syntheticField("const__1", "Ljava/lang/Object;",
+        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL));
+    MethodModel constructor = basicMethod("<init>", "(Ljava/lang/Object;)V", Opcodes.ACC_PUBLIC);
+    constructor.codeEvents.add("CODE");
+    constructor.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    constructor.insns.add(new Insn("METHOD", Opcodes.INVOKESPECIAL,
+        "java/lang/Object", "<init>", "()V", false));
+    constructor.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    constructor.insns.add(new Insn("VAR", Opcodes.ALOAD, 1));
+    constructor.insns.add(new Insn("FIELD", Opcodes.PUTFIELD,
+        owner, "state", "Ljava/lang/Object;"));
+    constructor.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(constructor);
+    MethodModel clinit = basicMethod("<clinit>", "()V", Opcodes.ACC_STATIC);
+    clinit.codeEvents.add("CODE");
+    syntheticVarBinding(clinit, owner, "aget", "aget-object");
+    syntheticVarBinding(clinit, owner, "aset", "aset-object");
+    syntheticBoxedLongInitializer(clinit, owner, "const__1", label);
+    clinit.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(clinit);
+    MethodModel method = basicMethod("transition", "()V", Opcodes.ACC_PUBLIC);
+    method.codeEvents.add("CODE");
+    syntheticStateRead(method, owner, 0L);
+    method.insns.add(new Insn("FIELD", Opcodes.GETSTATIC, owner, "aset", "Lclojure/lang/Var;"));
+    method.insns.add(new Insn("METHOD", Opcodes.INVOKEVIRTUAL, "clojure/lang/Var", "getRawRoot",
+        "()Ljava/lang/Object;", false));
+    method.insns.add(new Insn("TYPE", Opcodes.CHECKCAST, "clojure/lang/IFn$OLOO"));
+    method.insns.add(new Insn("VAR", Opcodes.ALOAD, 0));
+    method.insns.add(new Insn("FIELD", Opcodes.GETFIELD, owner, "state", "Ljava/lang/Object;"));
+    method.insns.add(new Insn("INSN", Opcodes.LCONST_1));
+    if (metadataBetweenSlotAndValue)
+      method.insns.add(new Insn("LABEL", -1, new LabelRef(1000)));
+    method.insns.add(new Insn("FIELD", Opcodes.GETSTATIC, owner, "const__1", "Ljava/lang/Object;"));
+    method.insns.add(new Insn("METHOD", Opcodes.INVOKEINTERFACE, "clojure/lang/IFn$OLOO", "invokePrim",
+        "(Ljava/lang/Object;JLjava/lang/Object;)Ljava/lang/Object;", true));
+    method.insns.add(new Insn("INSN", Opcodes.POP));
+    if (extraRead) {
+      method.insns.add(new Insn("FIELD", Opcodes.GETSTATIC, owner, "const__1", "Ljava/lang/Object;"));
+      method.insns.add(new Insn("INSN", Opcodes.POP));
+    }
+    method.insns.add(new Insn("INSN", Opcodes.RETURN));
+    model.methods.add(method);
+    return singletonCohort(model);
+  }
+
+  private static boolean syntheticDeadStateReadResultStore(boolean semanticUse) {
+    ClassModel owner = basicClass("test/DeadStateRead", "test");
+    MethodModel method = basicMethod("read", "()Ljava/lang/Object;", Opcodes.ACC_PUBLIC);
+    Insn slot = new Insn("INSN", Opcodes.LCONST_1);
+    Insn invoke = new Insn("METHOD", Opcodes.INVOKEINTERFACE, "clojure/lang/IFn$OLO",
+        "invokePrim", "(Ljava/lang/Object;J)Ljava/lang/Object;", true);
+    Insn store = new Insn("VAR", Opcodes.ASTORE, 1);
+    Insn load = new Insn("VAR", Opcodes.ALOAD, 1);
+    method.insns.add(slot); method.insns.add(invoke); method.insns.add(store); method.insns.add(load);
+    Insn clear = null;
+    if (semanticUse) method.insns.add(new Insn("INSN", Opcodes.ARETURN));
+    else {
+      method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+      clear = new Insn("VAR", Opcodes.ASTORE, 1); method.insns.add(clear);
+      method.insns.add(new Insn("INSN", Opcodes.POP));
+      method.insns.add(new Insn("INSN", Opcodes.ACONST_NULL));
+      method.insns.add(new Insn("INSN", Opcodes.ARETURN));
+    }
+    owner.methods.add(method);
+    StateSlotUniverse slots = new StateSlotUniverse();
+    slots.add(new StateSlotAccess(new StateSlotKey("test/Machine", 1L), "read", owner,
+        method, slot, invoke, null));
+    LocalUniverse locals = new LocalUniverse();
+    LocalNodeKey key = new LocalNodeKey(owner.name, method.name, method.descriptor, 1, "A");
+    LocalNodeInfo info = new LocalNodeInfo(key, owner, method, false, Collections.singleton(1));
+    locals.generated.add(key); locals.info.put(key, info); locals.methodNodes.put(method, Collections.singleton(key));
+    locals.instructionNodes.put(store, key); locals.instructionNodes.put(load, key);
+    if (clear != null) locals.instructionNodes.put(clear, key);
+    return deadStateReadResultStore(method, 2, slots, locals);
+  }
+
   private static Map<String, ClassModel> syntheticStateSlotCohort(long[] firstSlots, long[] secondSlots,
                                                                   long ordinaryLong, boolean finalValue) {
     String owner = "test/Fn__10$state_machine__10__auto____10";
@@ -6727,8 +8956,13 @@ public final class CompareExactSourceAot {
     List<String> localRows = new ArrayList<String>();
     List<String> comparisonRows = new ArrayList<String>();
     List<String> externalRows = new ArrayList<String>();
-    List<String> requestedRelations = Arrays.asList(
+    List<String> allRequestedRelations = Arrays.asList(
         "candidate-a--candidate-b", "candidate-a--original", "candidate-b--original");
+    String diagnosticRelation = System.getProperty("datomic.compare.diagnostic-relation");
+    require(diagnosticRelation == null || allRequestedRelations.contains(diagnosticRelation),
+        "unknown diagnostic relation: " + diagnosticRelation);
+    List<String> requestedRelations = diagnosticRelation == null ? allRequestedRelations :
+        Collections.singletonList(diagnosticRelation);
     List<RelationOutcome> relationOutcomes = new ArrayList<RelationOutcome>();
     int status = 0;
     Throwable unexpectedFailure = null;
@@ -6752,7 +8986,7 @@ public final class CompareExactSourceAot {
       for (CaptureSpec spec : candidateBOriginalCaptures.right.values()) generatedOwnedClasses.add(spec.owner.name);
       externalRows.addAll(externalOriginalUses(Path.of(args[2]), ownership.keySet(), generatedOwnedClasses));
       require(externalRows.isEmpty(), "compiler-ID-bearing owned classes have references outside the exact-source cohort: " + externalRows.subList(0, Math.min(5, externalRows.size())));
-      List<RelationSpec> relations = Arrays.asList(
+      List<RelationSpec> allRelations = Arrays.asList(
           new RelationSpec("candidate-a--candidate-b", evidence -> compare(
               "candidate-a--candidate-b", candidateA, candidateB,
               evidence.mappingRows, evidence.captureRows, evidence.classRows,
@@ -6765,6 +8999,10 @@ public final class CompareExactSourceAot {
               "candidate-b--original", candidateB, original,
               evidence.mappingRows, evidence.captureRows, evidence.classRows,
               evidence.memberRows, evidence.stateSlotRows, evidence.localRows)));
+      List<RelationSpec> relations = new ArrayList<RelationSpec>();
+      for (RelationSpec relation : allRelations)
+        if (diagnosticRelation == null || relation.label.equals(diagnosticRelation))
+          relations.add(relation);
       require(requestedRelations.equals(relationLabels(relations)),
           "relation driver request order differs from the fixed three-relation boundary");
       RelationRun relationRun = runRelations(relations);
@@ -6823,12 +9061,12 @@ public final class CompareExactSourceAot {
     List<String> summary = new ArrayList<String>();
     summary.add("status\t" + (status == 0 ? "PASS" : "FAIL"));
     summary.add("model\tcomplete ABI/instructions and expanded stack-map frame values recorded; max stack/locals are verifier-derived and excluded");
-    summary.add("compiler_id_policy\texact owned-class-node pairing; numeric consistency checked per fresh-JVM namespace compile unit; no rank/common-ID inference; member names and semantic strings exact");
+    summary.add("compiler_id_policy\tcomplete bijective owned-class graph witness; equivalent full-skeleton automorphisms allowed; numeric consistency checked per fresh-JVM namespace compile unit; no rank/common-ID inference; member names and semantic strings exact");
     summary.add("capture_policy\tpair-specific changed constructors only; exact assignments; uniquely partitioned independent loads/constants/own-field clears; ambiguity fails");
     summary.add("outside_cohort_policy\tall references to compiler-ID-bearing owned classes and normalized-constructor owners scanned in the original artifact");
     summary.add("full_runtime_boundary_scan\tNOT_RUN_BY_COMPARATOR; separate acceptance blocker");
     summary.add("explicit_jvm_verification\tNOT_RUN_BY_COMPARATOR; separate acceptance blocker");
-    summary.add("comparisons.requested\t3");
+    summary.add("comparisons.requested\t" + requestedRelations.size());
     summary.add("comparisons.recorded\t" + relationOutcomes.size());
     summary.add("comparisons.passed\t" + relationOutcomes.stream().filter(RelationOutcome::passed).count());
     summary.add("comparisons.failed\t" + relationOutcomes.stream().filter(outcome -> !outcome.passed()).count());
