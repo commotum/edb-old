@@ -1,6 +1,8 @@
-Yes—this goal makes much more sense of the recovery work.
+# Rust port readiness and roadmap
 
-Assuming you want a native Rust implementation preserving Datomic’s core semantics and architecture, rather than an immediately drop-in wire-compatible replacement, we are ready to begin now.
+The intended outcome is a native Rust implementation preserving Datomic's core
+semantics and architecture, rather than an immediately drop-in wire-compatible
+replacement. The project is ready to begin now.
 
 We are not ready to port the entire system blindly. We are ready to build the first Rust vertical slice while extracting precise contracts from the recovered implementation.
 
@@ -8,23 +10,33 @@ We are not ready to port the entire system blindly. We are ready to build the fi
 
 | Area | Readiness | What we have |
 |---|---|---|
-| Recovered implementation | High | Complete Peer and Transactor source corpus |
-| Executable oracle | High | Runnable recovered PostgreSQL system without original fallback |
-| Core architecture | High | Transaction, log, index, restart, cache, and HA flows mapped |
-| Source navigation | High | Namespace, call, dependency, and subsystem indexes |
+| Recovered implementation | High | Complete recovered Peer and Transactor source corpus |
+| Executable oracle | Needs rebuilding | The broad recovery runner was intentionally removed; its proof remains in Git history |
+| Core architecture | Medium-high | Central flows are known and visible in source, but the old generated handoff was removed |
+| Source navigation | Medium | Organized namespaces and reusable analysis tools remain; campaign-generated indexes do not |
 | Language-neutral specification | Medium-low | Knowledge exists, but much remains embedded in Clojure |
-| Portable golden fixtures | Medium-low | Many probes exist, but they were built as validation gates rather than a Rust conformance suite |
+| Portable golden fixtures | Low | No active conformance fixtures; they must be written around Rust-facing questions |
 | Storage-format compatibility | Low-medium | Implementations are recovered, but formats need explicit documentation and fixtures |
 | Transport compatibility | Low | Artemis/Fressian protocol has not been packaged as a standalone compatibility specification |
 | Rust design | Not started | We still need to decide what is invariant versus JVM/Clojure machinery |
 
-The key assets are the [architecture handoff](/home/jake/Developer/atomic/datomic-rev/transactor/reports/recovered-system-architecture.md:31), [Peer source guide](/home/jake/Developer/atomic/datomic-rev/reports/source-guide.md:44), and the working recovered system. Goal 4 itself is now complete at its PostgreSQL boundary.
+The key active asset is now the recovered source itself. Recovery plans,
+reports, generated indexes, large validation runners, packaged resources, and
+compiled artifacts were deliberately removed so they cannot dictate the Rust
+project by accident. The last pre-clean state is Git commit
+`b8ebb1af74e6357d8242b2713af92f98d9e20e3a`; use it only to answer a narrow,
+identified historical question.
 
 The readiness labels are not completion percentages:
 
 - **High** means there is enough trustworthy material to use this area while
   beginning the Rust implementation. It does not mean every optional feature
   or obscure branch is understood.
+- **Medium-high** means the important model is understood, but some of its
+  convenient explanatory scaffolding was intentionally removed and must now be
+  rebuilt around the port.
+- **Medium** means the raw material and ordinary tools are present, but a new
+  reader must still trace and organize the relevant source.
 - **Medium-low** means useful evidence exists, but it has not yet been turned
   into the small, precise contracts that a new implementation can follow.
 - **Low-medium** means we can see the implementation and broad design, but
@@ -75,8 +87,11 @@ the service.
 **Clojure** is a Lisp-family language. Its code is written as nested lists,
 vectors, maps, and symbols. A Clojure **namespace** is roughly comparable to a
 module in Rust: it groups related names and controls what code is imported.
-The recovered source can be loaded and executed without silently loading the
-original Peer or Transactor implementation JARs.
+The recovery campaign previously demonstrated that this source could be loaded
+and executed without silently loading the original Peer or Transactor
+implementation JARs. That was an important provenance check, but the active
+tree no longer includes the dependency closure, resources, build scripts, or
+runner needed to repeat it directly.
 
 That last property is called **no original fallback**. It means a missing or
 broken recovered function cannot accidentally appear to work because the JVM
@@ -84,10 +99,11 @@ found the licensed original class somewhere else on its classpath. A
 **classpath** is the ordered list of JARs and directories from which the JVM
 loads code.
 
-The recovered Peer and Transactor also run together against PostgreSQL across
-the important transaction, log, index, restart, acknowledgement, and bounded
-high-availability paths. This is important because a pile of source files is
-not useful for a port unless those files form a working system.
+Before the clean, the recovered Peer and Transactor also ran together against
+PostgreSQL across transaction, log, index, restart, acknowledgement, and
+bounded high-availability paths. That historical result gives us confidence
+that the corpus describes a coherent system. It is not a claim that the
+trimmed repository is currently runnable.
 
 #### What this does not give us
 
@@ -130,7 +146,7 @@ files before the program starts. Exact AOT parity asks whether newly compiled
 class bytes match the original class bytes. That is useful forensic evidence,
 but it is not a prerequisite for expressing the same behavior in Rust.
 
-### Executable oracle — High
+### Executable oracle — Needs rebuilding
 
 #### What this area means
 
@@ -147,33 +163,38 @@ A **datom** is Datomic's atomic fact. Conceptually it contains an entity, an
 attribute, a value, a transaction, and whether the fact was added or retracted.
 It is the small unit from which Datomic database state is built.
 
-The recovered system is useful as an oracle because it is runnable and because
-its candidate runtime excludes the original implementation. We can compare a
-Rust result to the recovered behavior without depending on our memory of how
-Datomic is supposed to work.
+The recovered implementation can become a useful oracle because the recovery
+campaign proved it could run without original-implementation fallback. To use
+it now, however, we must build a fresh, narrow runner around the particular
+behavior being specified.
 
 #### What we have
 
-We have a complete recovered Peer/Transactor pair running over PostgreSQL, plus
-focused probes for transactions, query behavior, storage compare-and-swap,
-publication failures, acknowledgement failures, restart, index adoption,
-transport recovery, and high availability.
+We have the recovered Peer/Transactor source and historical proof that the pair
+ran over PostgreSQL. The deleted pre-clean tree also contains focused probes
+for transactions, query behavior, storage compare-and-swap, publication and
+acknowledgement failures, restart, index adoption, transport recovery, and high
+availability.
+
+Those probes are not active dependencies of the Rust project. If one contains
+an observation needed for a fixture, inspect or recover that one case from Git
+history rather than reviving the old campaign harness.
 
 **PostgreSQL** is the relational database used as durable storage in the
 supported recovered configuration. "Durable" means the authoritative data is
 expected to survive process restarts and machine failures once PostgreSQL has
 committed it.
 
-The existing probes already demonstrate both successful and failing paths. In
-several cases they record the exact database basis, SQL state, canonical
-hashes, transaction outcomes, process state, and cleanup behavior.
+The active tree contains no runnable oracle or saved probe output. This is an
+intentional cost of the clean, and rebuilding a small oracle is now prerequisite
+work for differential testing.
 
 #### What is still missing for Rust
 
-The oracle is currently optimized for proving broad gates, not for answering
-thousands of small porting questions. A **gate** is a pass/fail validation
-boundary, often covering an entire operational scenario. A Rust port needs a
-smaller and more convenient oracle interface.
+The deleted oracle was optimized for proving broad recovery gates, not for
+answering thousands of small porting questions. A **gate** is a pass/fail
+validation boundary, often covering an entire operational scenario. The Rust
+port needs a new, smaller oracle interface.
 
 We need an oracle adapter that can:
 
@@ -197,7 +218,7 @@ We also need the oracle runner to be versioned. If a recovered-source change
 changes an expected result, we should know whether the semantic contract
 changed or whether only the test formatting changed.
 
-### Core architecture — High
+### Core architecture — Medium-high
 
 #### What this area means
 
@@ -229,8 +250,8 @@ PostgreSQL, and eventually advances the Peer's database value.
 
 #### What we have
 
-The architecture report maps the central PostgreSQL state model and transaction
-spine, including:
+The recovered source and the study summarized in this document expose the
+central PostgreSQL state model and transaction spine, including:
 
 - transaction submission and local Peer backpressure;
 - message admission and result correlation;
@@ -283,7 +304,7 @@ such as Clojure persistent maps, JDBC, or Artemis.
 Rust should preserve a good strategy while being free to choose a better Rust
 mechanism.
 
-### Source navigation — High
+### Source navigation — Medium
 
 #### What this area means
 
@@ -317,17 +338,15 @@ is dynamically typed and performs more decisions at runtime.
 
 #### What we have
 
-The repository has namespace, definition, call, reference, keyword, string,
-class-closure, and dependency indexes, plus a curated Peer source guide and a
-cross-system architecture report.
+The source is separated into Peer and Transactor trees and organized by
+Clojure namespace and Java package. Ordinary text search works well, and the
+handwritten Peer Java boundary has a retained manifest.
 
-The guide already provides narrow reading routes for connection creation,
-transaction submission, query evaluation, persisted index adoption, and backup
-and restore. The architecture report adds the recovered Transactor half of the
-transaction and operational flows.
-
-This is enough to locate the code behind most core questions without reading
-hundreds of files sequentially.
+The old analyzer and its generated call, reference, keyword, class-closure,
+and dependency indexes were removed. So were the curated recovery guide and
+architecture handoff. They were useful products of the recovery campaign, but
+retaining them would encourage a new agent to inherit that campaign's
+categories instead of building the conceptual map needed by the Rust port.
 
 #### What is still missing for Rust
 
@@ -434,7 +453,7 @@ This area is medium-low because the knowledge is available, but extracting it
 is real work. We should do that extraction incrementally alongside Rust rather
 than attempt to write a perfect specification of all Datomic features first.
 
-### Portable golden fixtures — Medium-low
+### Portable golden fixtures — Low
 
 #### What this area means
 
@@ -467,15 +486,16 @@ Datomic-shaped data, although JSON can be useful for wider tooling support.
 
 #### What we have
 
-The repository has many focused probes and large verified evidence manifests.
-A **probe** is a small program that exercises a particular behavior and records
-what happened. These probes cover valuable boundaries including transaction
-rejection, ordering, acknowledgement failures, restart, persistent indexing,
-transport recovery, and HA takeover.
+The active repository has no golden fixtures. The recovery campaign once had
+many focused probes and large evidence manifests, but they were broad proof
+artifacts rather than a catalog of small, independent semantic examples. They
+were removed to prevent recovery-specific acceptance rules from becoming the
+port's test design by default.
 
-Their results are trustworthy evidence, but most were designed to answer a
-question such as "did the complete failure scenario pass?" They were not
-designed as a catalog of small independent semantic examples.
+A **probe** is a small program that exercises a particular behavior and records
+what happened. Historical probes can still be inspected at the pre-clean
+commit when a specific transaction, restart, indexing, transport, or takeover
+case needs provenance.
 
 #### What is still missing for Rust
 
@@ -509,9 +529,8 @@ fixture
 
 The first suite should emphasize the semantic kernel: values, datom ordering,
 schema, temporary IDs, uniqueness/upsert, transaction application, immutable
-database snapshots, and basic queries. Operational HA fixtures can remain in
-their existing integration gates until the Rust implementation reaches that
-layer.
+database snapshots, and basic queries. Operational HA fixtures should be
+created later, when the Rust implementation reaches that layer.
 
 ### Storage-format compatibility — Low-medium
 
@@ -701,8 +720,8 @@ Rust should normally preserve the left column and reconsider the right column.
 #### What we have
 
 We have enough information to identify the core invariants and the major state
-machines. We also have an executable oracle against which Rust behavior can be
-tested.
+machines. A new executable oracle must be built before Rust behavior can be
+differentially tested.
 
 The architecture suggests useful Rust directions, such as:
 
@@ -863,7 +882,9 @@ expected query results
 
 The Rust implementation should consume the same fixture and emit canonical EDN or JSON for comparison.
 
-The existing probes are valuable raw material, but they need conversion from “gate passed” into small, readable conformance cases.
+Historical probes may be useful evidence for individual cases, but the new
+fixtures should be designed from the contract outward rather than converted
+wholesale from “gate passed” recovery checks.
 
 ### 4. Index semantics
 
@@ -1018,6 +1039,6 @@ We have completed enough reverse engineering to start the Rust implementation. I
 - not yet ready for wire-compatible Peer/Transactor interoperability;
 - far from a complete drop-in replacement.
 
-The next goal should no longer be “recover more Datomic.” It should be:
+The next phase is no longer “recover more Datomic.” It is:
 
 > Convert the recovered PostgreSQL core into a language-neutral executable specification, then implement and differentially validate a Rust semantic kernel beginning with values, schema, immutable indexes, transactions, and Database snapshots.

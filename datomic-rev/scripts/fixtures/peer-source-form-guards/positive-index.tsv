@@ -1,3 +1,0 @@
-namespace	source_path
-fixture.location	datomic/location.clj
-datomic.kv-store	datomic/kv_store.clj

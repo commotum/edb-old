@@ -1,3 +1,0 @@
-role	bytes	sha256	artifact
-transactor	12689398	d90819b57e2138085ddc26c93314f953c2cd776d1d1aa8b43a6bec1e475d3692	datomic-transactor-pro-1.0.7277.jar
-peer	6801387	cb55c9d01e155f9965e3332cd8ef70be42cdefacb50c072076e9ecf22b9a23ba	peer-1.0.7277.jar

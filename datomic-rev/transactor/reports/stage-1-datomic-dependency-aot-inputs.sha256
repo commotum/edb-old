@@ -1,8 +1,0 @@
-ea3c508c09d0ee1f9c2ef0b0abe42a784c6e3490ff2f9129f2c2ff0a9587682f  /home/jake/Developer/atomic/datomic-rev/transactor/scripts/compile_aligned_clojure_source.clj
-b948617a25b2596ff937ace0deb23ed4624d3a9a6790fb836674a06626429752  /home/jake/Developer/atomic/datomic-rev/scripts/emit_namespace_surface.clj
-ec0146c5ff7d690e117c341b6eaec146e83ca41bca3963711d7212284c200eb9  /home/jake/Developer/atomic/datomic-rev/transactor/scripts/recover-bundled-sources.sh
-9b1315ee8984c6440bf399b05a094a04bb49d47170ca9ce1e90513c73ed690a2  /home/jake/Developer/atomic/datomic-rev/transactor/scripts/validate_bundled_sources.clj
-bcfde66fb27eb8d109be72b2fc96fb159095719bde68958f1e3c079f23a20bc5  /home/jake/Developer/atomic/datomic-rev/transactor/tools/MapBundledSources.java
-fc7ff1b6610d0e3494a75cc11ef81810bda402ac157012fe4e3b899586cf4133  /home/jake/Developer/datomic/datomic-pro-1.0.7277/lib/clojure-1.11.4.jar
-67ec898eb55c66a957a55279dd85d1376bb994bd87668b2b0de1eb3b97e8aae0  /home/jake/Developer/datomic/datomic-pro-1.0.7277/lib/spec.alpha-0.3.218.jar
-06eea8c070bbe45c158567e443439681bc8c46e9123414f81bfa32ba42d6cbc8  /home/jake/Developer/datomic/datomic-pro-1.0.7277/lib/core.specs.alpha-0.2.62.jar

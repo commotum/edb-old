@@ -1,2 +1,0 @@
-datomic/query/support__init
-datomic/specs__init

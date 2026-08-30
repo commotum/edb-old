@@ -1,2 +1,0 @@
-namespace	source_path
-datomic.kv-store	datomic/kv_store.clj

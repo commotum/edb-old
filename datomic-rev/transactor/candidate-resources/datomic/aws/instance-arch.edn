@@ -1,3 +1,0 @@
-;; Stage 1 non-production placeholder: AWS instance architecture discovery is deferred.
-;; This empty map exists only so recovered namespaces can be loaded and compared.
-{}
