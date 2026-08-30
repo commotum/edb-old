@@ -118,6 +118,9 @@ subsystem map, generated-source cautions, and conservative navigation pass.
 - `transactor/` — all recovered Transactor Clojure/Java sources, isolated
   structural construction, the recovered-pair PostgreSQL runner, focused
   probes, and reports that bind runtime claims to recovered source.
+- `transactor/reports/recovered-system-architecture.md` — the state-transition
+  teaching map for the recovered pair, with source anchors, retained runtime
+  evidence, and rolling optional-scope classifications.
 
 ## Reproduce the final Clojure recovery
 
@@ -290,6 +293,13 @@ The recovered-Peer/recovered-Transactor gate is separate:
 ```bash
 transactor/scripts/validate-postgresql-vertical-slice.sh --help
 ```
+
+Interpret its startup signals in layers: `System started` means lifecycle work
+was scheduled; an owned PID plus an open service port means coordination-backed
+transport is serving; only a successful recovered-Peer workload proves
+database/log initialization and end-to-end readiness. The source map for those
+transitions is
+[`transactor/reports/recovered-system-architecture.md`](transactor/reports/recovered-system-architecture.md).
 
 It rebuilds and verifies current candidate inputs, removes licensed JKS
 resources from the Peer runtime derivative, supports a no-service preflight,

@@ -26,6 +26,13 @@ The primary entry point is:
 transactor/scripts/validate-postgresql-vertical-slice.sh --help
 ```
 
+Its readiness signals are deliberately layered: `System started` proves only
+that lifecycle work was scheduled; an exact owned PID plus an open port proves
+coordination-backed service readiness; successful recovered-Peer work proves
+database/log initialization and end-to-end readiness. See
+`reports/recovered-system-architecture.md` for the state transitions and source
+anchors.
+
 It reconstructs both candidate classpaths from current source, verifies their
 origins and seals, provisions a fresh disposable PostgreSQL catalog, and can run
 the complete seed/restart/index/transport/HA path or one focused boundary. The
@@ -41,6 +48,8 @@ lineage, all owned sessions reach zero, and every port closes. This claim is
 deliberately bounded to credential-scoped PostgreSQL reachability; arbitrary
 packet loss/reordering and universal multi-node topology are not claimed. See
 `reports/postgresql-vertical-slice.md` for the complete evidence boundary.
+That teaching map grows one operational slice at a time and includes the
+rolling optional-scope classifications.
 
 The sections below preserve the recovery chronology and rejected intermediate
 boundaries. Statements such as “blocked,” “not promoted,” or “remains open” in

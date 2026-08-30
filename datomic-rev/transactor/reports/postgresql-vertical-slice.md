@@ -262,7 +262,7 @@ published database basis or root. The normal accepted CAS returned at basis
 to 4. This is a normal-path observation, not proof against a crash between
 durable publication and acknowledgement.
 
-After graceful restart, a fresh recovered Peer reproduced database id, basis
+After a bounded `SIGINT` stop and restart, a fresh recovered Peer reproduced database id, basis
 `1017`, and canonical transaction-projection SHA-256
 `f5d50940a93d012606e45a840ddf1104d7c05f0be373d082822f07515f9194b9`.
 The fresh Transactor adopted 8,044 log bytes through `tail-t 1017`; PostgreSQL
@@ -663,11 +663,14 @@ and every entry verifies.
 
 ## Honest boundary
 
-- The HA gate proves three bounded graceful `SIGINT` shutdowns plus one
+- The HA gate proves three bounded `SIGINT`-only process stops plus one
   conflict-driven stale-active self-fence, exact PID/argv/start-time ownership,
   closed ports, and final PostgreSQL shutdown. The separate missing-schema
   gate proves bounded injected-startup cleanup while the candidate remains
   owned, PostgreSQL remains responsive, and the service port never opens.
+  The runner's `graceful` field means exit within 20 seconds without TERM/KILL
+  escalation; it is not an application-level orderly-drain assertion, and PID
+  files remain as stale text after their recorded processes are absent.
 - The v5 request at `t 1066`, PostgreSQL growth, and zero-replay fresh restart
   prove persistent-index scheduling, publication, and root adoption for the
   deterministic recovered-pair workload. Automatic threshold scheduling and
