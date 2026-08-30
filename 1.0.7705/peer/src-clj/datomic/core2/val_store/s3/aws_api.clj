@@ -1490,24 +1490,23 @@
       '->ValStore
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__22526]
-       (let [map__22527 p__22526
-             map__22527 (if (seq? map__22527)
-                          (if (next map__22527)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22527))
-                            (if (seq map__22527) (first map__22527) {}))
-                          map__22527)
-             bucket (get map__22527 :bucket)
-             client (get map__22527 :client)
-             prefix (get map__22527 :prefix)]
-         (when-not (and bucket client prefix)
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str (clojure.core/list 'and 'bucket 'client 'prefix))))))
-         (->ValStore client bucket prefix)))))
+  (defn create
+    ([p__22526]
+      (let [map__22527 p__22526
+            map__22527 (if (seq? map__22527)
+                         (if (next map__22527)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22527))
+                           (if (seq map__22527) (first map__22527) {}))
+                         map__22527)
+            bucket (get map__22527 :bucket)
+            client (get map__22527 :client)
+            prefix (get map__22527 :prefix)]
+        (when-not (and bucket client prefix)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list 'and 'bucket 'client 'prefix))))))
+        (->ValStore client bucket prefix))))
   (reset-meta!
     #'create
     (assoc

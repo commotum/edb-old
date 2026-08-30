@@ -37,7 +37,7 @@
   (reset-meta!
     #'pod->catalog
     (assoc {:arglists (clojure.core/list ['pod]), :column (int 1)} :name 'pod->catalog :ns *ns*))
-  (def valid-db-name? (fn valid_db_name_QMARK_ ([db_name] (not (re-find #"[\"*:=/?]" db_name)))))
+  (defn valid-db-name? ([db_name] (not (re-find #"[\"*:=/?]" db_name))))
   (reset-meta!
     #'valid-db-name?
     (assoc
@@ -64,21 +64,20 @@
       'get-catalog
       :ns
       *ns*))
-  (def put-catalog
-   (fn put_catalog
-     ([cluster catalog_map]
-       (when-not (nil? (cluster/dbId cluster))
-         (throw
-           (java.lang.AssertionError.
-             (str
-               "Assert failed: "
-               (pr-str (clojure.core/list 'nil? (clojure.core/list 'cluster/dbId 'cluster)))))))
-       (let [current_rev (:datomic/rev catalog_map)
-             next_rev (if current_rev (inc current_rev) 0)
-             catalog (dissoc catalog_map :datomic/rev)
-             pod (deref
-                   (cluster/update-pod cluster "pod-catalog" next_rev nil (io/clj->bbuf catalog)))]
-         (if (:failed pod) pod (pod->catalog pod))))))
+  (defn put-catalog
+    ([cluster catalog_map]
+      (when-not (nil? (cluster/dbId cluster))
+        (throw
+          (java.lang.AssertionError.
+            (str
+              "Assert failed: "
+              (pr-str (clojure.core/list 'nil? (clojure.core/list 'cluster/dbId 'cluster)))))))
+      (let [current_rev (:datomic/rev catalog_map)
+            next_rev (if current_rev (inc current_rev) 0)
+            catalog (dissoc catalog_map :datomic/rev)
+            pod (deref
+                  (cluster/update-pod cluster "pod-catalog" next_rev nil (io/clj->bbuf catalog)))]
+        (if (:failed pod) pod (pod->catalog pod)))))
   (reset-meta!
     #'put-catalog
     (assoc
@@ -110,26 +109,25 @@
   (reset-meta!
     #'db-ids
     (assoc {:arglists (clojure.core/list ['catalog]), :column (int 1)} :name 'db-ids :ns *ns*))
-  (def db-id->db-name
-   (fn db_id__GT_db_name
-     ([catalog db_id]
-       (let [inverted (reduce
-                        (fn fn__16755
-                          ([m p__16754]
-                            (let [vec__16756 p__16754
-                                  k (nth vec__16756 (int 0) nil)
-                                  map__16759 (nth vec__16756 (int 1) nil)
-                                  map__16759 (if (seq? map__16759)
-                                               (if (next map__16759)
-                                                 (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                   (to-array map__16759))
-                                                 (if (seq map__16759) (first map__16759) {}))
-                                               map__16759)
-                                  db_id (get map__16759 :db-id)]
-                              (if db_id (assoc m db_id k) m))))
-                        {}
-                        catalog)]
-         (get inverted db_id)))))
+  (defn db-id->db-name
+    ([catalog db_id]
+      (let [inverted (reduce
+                       (fn fn__16755
+                         ([m p__16754]
+                           (let [vec__16756 p__16754
+                                 k (nth vec__16756 (int 0) nil)
+                                 map__16759 (nth vec__16756 (int 1) nil)
+                                 map__16759 (if (seq? map__16759)
+                                              (if (next map__16759)
+                                                (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                  (to-array map__16759))
+                                                (if (seq map__16759) (first map__16759) {}))
+                                              map__16759)
+                                 db_id (get map__16759 :db-id)]
+                             (if db_id (assoc m db_id k) m))))
+                       {}
+                       catalog)]
+        (get inverted db_id))))
   (reset-meta!
     #'db-id->db-name
     (assoc
@@ -138,7 +136,7 @@
       'db-id->db-name
       :ns
       *ns*))
-  (def db-name->db-id (fn db_name__GT_db_id ([catalog db_name] (get-in catalog [db_name :db-id]))))
+  (defn db-name->db-id ([catalog db_name] (get-in catalog [db_name :db-id])))
   (reset-meta!
     #'db-name->db-id
     (assoc
@@ -223,22 +221,21 @@
       'update-succeeded?
       :ns
       *ns*))
-  (def conflict-check-fn
-   (fn conflict_check_fn
-     ([db_name db_id]
-       (fn fn__16773
-         ([catalog]
-           (let [temp__5802__auto__ (db-name->db-id catalog db_name)]
-             (cond
-               temp__5802__auto__ (let [existing_id temp__5802__auto__]
-                                    (if (or (not db_id) (= db_id existing_id))
-                                      {:exists db_name}
-                                      {:name-conflict db_name}))
-               (and db_id (contains? (db-ids catalog) db_id)) (do
-                                                                {:id-conflict
-                                                                 (db-id->db-name
-                                                                   catalog
-                                                                   db_id)}))))))))
+  (defn conflict-check-fn
+    ([db_name db_id]
+      (fn fn__16773
+        ([catalog]
+          (let [temp__5802__auto__ (db-name->db-id catalog db_name)]
+            (cond
+              temp__5802__auto__ (let [existing_id temp__5802__auto__]
+                                   (if (or (not db_id) (= db_id existing_id))
+                                     {:exists db_name}
+                                     {:name-conflict db_name}))
+              (and db_id (contains? (db-ids catalog) db_id)) (do
+                                                               {:id-conflict
+                                                                (db-id->db-name
+                                                                  catalog
+                                                                  db_id)})))))))
   (reset-meta!
     #'conflict-check-fn
     (assoc
@@ -247,13 +244,12 @@
       'conflict-check-fn
       :ns
       *ns*))
-  (def add-database
-   (fn add_database
-     ([catalog db_name db_id]
-       (when-not db_name
-         (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-name)))))
-       (when-not db_id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-id)))))
-       (update (assoc catalog db_name {:db-id db_id}) :datomic/deleted (fnil disj #{}) db_id))))
+  (defn add-database
+    ([catalog db_name db_id]
+      (when-not db_name
+        (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-name)))))
+      (when-not db_id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-id)))))
+      (update (assoc catalog db_name {:db-id db_id}) :datomic/deleted (fnil disj #{}) db_id)))
   (reset-meta!
     #'add-database
     (assoc
@@ -262,29 +258,28 @@
       'add-database
       :ns
       *ns*))
-  (def create-database*
-   (fn create_database_STAR_
-     ([cluster p__16781]
-       (let [map__16782 p__16781
-             map__16782 (if (seq? map__16782)
-                          (if (next map__16782)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16782))
-                            (if (seq map__16782) (first map__16782) {}))
-                          map__16782)
-             db_name (get map__16782 :db-name)
-             db_id (get map__16782 :db-id)]
-         (when-not db_name
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-name)))))
-         (if (valid-db-name? db_name)
-           (let [assigned_db_id (or db_id (str db_name "-" (java.util.UUID/randomUUID)))
-                 resp (update-catalog
-                        cluster
-                        (conflict-check-fn db_name db_id)
-                        (fn fn__16783
-                          ([p1__16780#] (add-database p1__16780# db_name assigned_db_id))))]
-             (if (update-succeeded? resp) {:created db_name, :db-id assigned_db_id} resp))
-           {:invalid-db-name db_name})))))
+  (defn create-database*
+    ([cluster p__16781]
+      (let [map__16782 p__16781
+            map__16782 (if (seq? map__16782)
+                         (if (next map__16782)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16782))
+                           (if (seq map__16782) (first map__16782) {}))
+                         map__16782)
+            db_name (get map__16782 :db-name)
+            db_id (get map__16782 :db-id)]
+        (when-not db_name
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-name)))))
+        (if (valid-db-name? db_name)
+          (let [assigned_db_id (or db_id (str db_name "-" (java.util.UUID/randomUUID)))
+                resp (update-catalog
+                       cluster
+                       (conflict-check-fn db_name db_id)
+                       (fn fn__16783
+                         ([p1__16780#] (add-database p1__16780# db_name assigned_db_id))))]
+            (if (update-succeeded? resp) {:created db_name, :db-id assigned_db_id} resp))
+          {:invalid-db-name db_name}))))
   (reset-meta!
     #'create-database*
     (assoc
@@ -293,8 +288,7 @@
       'create-database*
       :ns
       *ns*))
-  (def create-database
-   (fn create_database ([system_cluster desc] (create-database* system_cluster desc))))
+  (defn create-database ([system_cluster desc] (create-database* system_cluster desc)))
   (reset-meta!
     #'create-database
     (assoc
@@ -303,9 +297,8 @@
       'create-database
       :ns
       *ns*))
-  (def rename
-   (fn rename
-     ([catalog db_name new_name] (dissoc (assoc catalog new_name (get catalog db_name)) db_name))))
+  (defn rename
+    ([catalog db_name new_name] (dissoc (assoc catalog new_name (get catalog db_name)) db_name)))
   (reset-meta!
     #'rename
     (assoc
@@ -314,20 +307,19 @@
       'rename
       :ns
       *ns*))
-  (def rename-database
-   (fn rename_database
-     ([cluster db_name new_name]
-       (let [condition (fn condition
-                         ([p1__16789#]
-                           (cond
-                             (not (valid-db-name? new_name)) {:invalid-db-name new_name}
-                             (not (get p1__16789# db_name)) {:does-not-exist db_name}
-                             (get p1__16789# new_name) (do {:exists db_name}))))
-             resp (update-catalog
-                    cluster
-                    condition
-                    (fn fn__16793 ([p1__16790#] (rename p1__16790# db_name new_name))))]
-         (if (update-succeeded? resp) {:renamed-to new_name} resp)))))
+  (defn rename-database
+    ([cluster db_name new_name]
+      (let [condition (fn condition
+                        ([p1__16789#]
+                          (cond
+                            (not (valid-db-name? new_name)) {:invalid-db-name new_name}
+                            (not (get p1__16789# db_name)) {:does-not-exist db_name}
+                            (get p1__16789# new_name) (do {:exists db_name}))))
+            resp (update-catalog
+                   cluster
+                   condition
+                   (fn fn__16793 ([p1__16790#] (rename p1__16790# db_name new_name))))]
+        (if (update-succeeded? resp) {:renamed-to new_name} resp))))
   (reset-meta!
     #'rename-database
     (assoc
@@ -336,14 +328,13 @@
       'rename-database
       :ns
       *ns*))
-  (def delete
-   (fn delete
-     ([catalog db_name]
-       (let [temp__5802__auto__ (db-name->db-id catalog db_name)]
-         (if temp__5802__auto__
-           (let [dbid temp__5802__auto__]
-             (dissoc (update catalog :datomic/deleted (fnil conj #{}) dbid) db_name))
-           catalog)))))
+  (defn delete
+    ([catalog db_name]
+      (let [temp__5802__auto__ (db-name->db-id catalog db_name)]
+        (if temp__5802__auto__
+          (let [dbid temp__5802__auto__]
+            (dissoc (update catalog :datomic/deleted (fnil conj #{}) dbid) db_name))
+          catalog))))
   (reset-meta!
     #'delete
     (assoc
@@ -352,24 +343,23 @@
       'delete
       :ns
       *ns*))
-  (def delete-database
-   (fn delete_database
-     ([cluster db_name]
-       (let [condition (fn condition
-                         ([p1__16798#]
-                           (when (not (get p1__16798# db_name)) {:does-not-exist db_name})))
-             resp (update-catalog
-                    cluster
-                    condition
-                    (fn fn__16802 ([p1__16799#] (delete p1__16799# db_name))))]
-         (if (update-succeeded? resp)
-           {:deleted db_name,
-            :db-id
-            (first
-              (set/difference
-                (get-in resp [:new :datomic/deleted])
-                (get-in resp [:old :datomic/deleted])))}
-           resp)))))
+  (defn delete-database
+    ([cluster db_name]
+      (let [condition (fn condition
+                        ([p1__16798#]
+                          (when (not (get p1__16798# db_name)) {:does-not-exist db_name})))
+            resp (update-catalog
+                   cluster
+                   condition
+                   (fn fn__16802 ([p1__16799#] (delete p1__16799# db_name))))]
+        (if (update-succeeded? resp)
+          {:deleted db_name,
+           :db-id
+           (first
+             (set/difference
+               (get-in resp [:new :datomic/deleted])
+               (get-in resp [:old :datomic/deleted])))}
+          resp))))
   (reset-meta!
     #'delete-database
     (assoc
@@ -378,21 +368,20 @@
       'delete-database
       :ns
       *ns*))
-  (def undelete-database
-   (fn undelete_database
-     ([cluster db_id db_name]
-       (let [condition (fn condition
-                         ([p1__16805#]
-                           (cond
-                             (get p1__16805# db_name) {:name-already-taken db_name}
-                             (not (get-in p1__16805# [:datomic/deleted db_id])) (do
-                                                                                  {:id-not-deleted
-                                                                                   db_id}))))
-             resp (update-catalog
-                    cluster
-                    condition
-                    (fn fn__16809 ([p1__16806#] (add-database p1__16806# db_name db_id))))]
-         (if (update-succeeded? resp) {:undeleted db_name, :db-id db_id} resp)))))
+  (defn undelete-database
+    ([cluster db_id db_name]
+      (let [condition (fn condition
+                        ([p1__16805#]
+                          (cond
+                            (get p1__16805# db_name) {:name-already-taken db_name}
+                            (not (get-in p1__16805# [:datomic/deleted db_id])) (do
+                                                                                 {:id-not-deleted
+                                                                                  db_id}))))
+            resp (update-catalog
+                   cluster
+                   condition
+                   (fn fn__16809 ([p1__16806#] (add-database p1__16806# db_name db_id))))]
+        (if (update-succeeded? resp) {:undeleted db_name, :db-id db_id} resp))))
   (reset-meta!
     #'undelete-database
     (assoc
@@ -401,8 +390,7 @@
       'undelete-database
       :ns
       *ns*))
-  (def remove-deleted
-   (fn remove_deleted ([catalog db_id] (update catalog :datomic/deleted (fnil disj #{}) db_id))))
+  (defn remove-deleted ([catalog db_id] (update catalog :datomic/deleted (fnil disj #{}) db_id)))
   (reset-meta!
     #'remove-deleted
     (assoc
@@ -411,18 +399,17 @@
       'remove-deleted
       :ns
       *ns*))
-  (def remove-deleted-database
-   (fn remove_deleted_database
-     ([cluster db_id]
-       (let [condition (fn condition
-                         ([p1__16813#]
-                           (when-not (contains? (get p1__16813# :datomic/deleted) db_id)
-                             {:does-not-exist db_id})))
-             resp (update-catalog
-                    cluster
-                    condition
-                    (fn fn__16817 ([p1__16814#] (remove-deleted p1__16814# db_id))))]
-         (if (update-succeeded? resp) {:removed db_id} resp)))))
+  (defn remove-deleted-database
+    ([cluster db_id]
+      (let [condition (fn condition
+                        ([p1__16813#]
+                          (when-not (contains? (get p1__16813# :datomic/deleted) db_id)
+                            {:does-not-exist db_id})))
+            resp (update-catalog
+                   cluster
+                   condition
+                   (fn fn__16817 ([p1__16814#] (remove-deleted p1__16814# db_id))))]
+        (if (update-succeeded? resp) {:removed db_id} resp))))
   (reset-meta!
     #'remove-deleted-database
     (assoc
@@ -431,16 +418,15 @@
       'remove-deleted-database
       :ns
       *ns*))
-  (def deleted?
-   (fn deleted_QMARK_
-     ([catalog db_id]
-       (when-not (map? catalog)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'map? 'catalog))))))
-       (and
-         (not (contains? (db-ids catalog) db_id))
-         (contains? (get catalog :datomic/deleted) db_id)))))
+  (defn deleted?
+    ([catalog db_id]
+      (when-not (map? catalog)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'map? 'catalog))))))
+      (and
+        (not (contains? (db-ids catalog) db_id))
+        (contains? (get catalog :datomic/deleted) db_id))))
   (reset-meta!
     #'deleted?
     (assoc
@@ -449,14 +435,13 @@
       'deleted?
       :ns
       *ns*))
-  (def deleted-database-id?
-   (fn deleted_database_id_QMARK_
-     ([cluster db_id]
-       (when-not db_id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-id)))))
-       (let [temp__5802__auto__ (get-catalog cluster)]
-         (if temp__5802__auto__
-           (let [catalog temp__5802__auto__] (deleted? catalog db_id))
-           (do (throw (java.lang.RuntimeException. "No catalog")) nil))))))
+  (defn deleted-database-id?
+    ([cluster db_id]
+      (when-not db_id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db-id)))))
+      (let [temp__5802__auto__ (get-catalog cluster)]
+        (if temp__5802__auto__
+          (let [catalog temp__5802__auto__] (deleted? catalog db_id))
+          (do (throw (java.lang.RuntimeException. "No catalog")) nil)))))
   (reset-meta!
     #'deleted-database-id?
     (assoc
@@ -465,7 +450,7 @@
       'deleted-database-id?
       :ns
       *ns*))
-  (def parse-db-conf (fn parse_db_conf ([db_conf] db_conf)))
+  (defn parse-db-conf ([db_conf] db_conf))
   (reset-meta!
     #'parse-db-conf
     (assoc

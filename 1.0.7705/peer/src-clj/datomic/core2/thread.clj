@@ -41,9 +41,8 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.core2.thread" "binding-conveyor-fn")
     (deref #'clojure.core/binding-conveyor-fn))
-  (def pthread-fn
-   (fn pthread_fn
-     ([exec fn] (.execute ^java.util.concurrent.Executor exec (binding-conveyor-fn fn)) nil)))
+  (defn pthread-fn
+    ([exec fn] (.execute ^java.util.concurrent.Executor exec (binding-conveyor-fn fn)) nil))
   (reset-meta!
     #'pthread-fn
     (assoc
@@ -85,19 +84,18 @@
       :ns
       *ns*))
   (.setMacro #'pthread)
-  (def pfuture
-   (fn pfuture
-     ([f exec]
-       (let [fut (.submit ^java.util.concurrent.ExecutorService exec (binding-conveyor-fn f))]
-         (reify
-           clojure.lang.IBlockingDeref
-           clojure.lang.IDeref
-           (deref
-             [this ^long timeout_ms timeout_val]
-             (try
-               (.get ^java.util.concurrent.Future fut (long timeout_ms) TimeUnit/MILLISECONDS)
-               (catch java.util.concurrent.TimeoutException e timeout_val)))
-           (deref [this] (.get ^java.util.concurrent.Future fut)))))))
+  (defn pfuture
+    ([f exec]
+      (let [fut (.submit ^java.util.concurrent.ExecutorService exec (binding-conveyor-fn f))]
+        (reify
+          clojure.lang.IBlockingDeref
+          clojure.lang.IDeref
+          (deref
+            [this ^long timeout_ms timeout_val]
+            (try
+              (.get ^java.util.concurrent.Future fut (long timeout_ms) TimeUnit/MILLISECONDS)
+              (catch java.util.concurrent.TimeoutException e timeout_val)))
+          (deref [this] (.get ^java.util.concurrent.Future fut))))))
   (reset-meta!
     #'pfuture
     (assoc
@@ -110,21 +108,20 @@
       'pfuture
       :ns
       *ns*))
-  (def daemon-factory
-   (fn daemon_factory
-     ([name_prefix group]
-       (let [idx (atom 0)]
-         (reify
-           java.util.concurrent.ThreadFactory
-           (^java.lang.Thread newThread
-             [this ^java.lang.Runnable runnable]
-             (doto
-               (if group
-                 (java.lang.Thread. ^java.lang.ThreadGroup group ^java.lang.Runnable runnable)
-                 (.newThread (Executors/defaultThreadFactory) ^java.lang.Runnable runnable))
-               (.setName (str name_prefix (swap! idx inc)))
-               (.setDaemon (boolean (.booleanValue true))))))))
-     ([name_prefix] (daemon-factory name_prefix nil))))
+  (defn daemon-factory
+    ([name_prefix group]
+      (let [idx (atom 0)]
+        (reify
+          java.util.concurrent.ThreadFactory
+          (^java.lang.Thread newThread
+            [this ^java.lang.Runnable runnable]
+            (doto
+              (if group
+                (java.lang.Thread. ^java.lang.ThreadGroup group ^java.lang.Runnable runnable)
+                (.newThread (Executors/defaultThreadFactory) ^java.lang.Runnable runnable))
+              (.setName (str name_prefix (swap! idx inc)))
+              (.setDaemon (boolean (.booleanValue true))))))))
+    ([name_prefix] (daemon-factory name_prefix nil)))
   (reset-meta!
     #'daemon-factory
     (assoc
@@ -139,11 +136,10 @@
       'daemon-factory
       :ns
       *ns*))
-  (def fixed-thread-pool
-   (fn fixed_thread_pool
-     ([name_prefix n group]
-       (Executors/newFixedThreadPool (int ^java.lang.Number n) (daemon-factory name_prefix group)))
-     ([name_prefix n] (fixed-thread-pool name_prefix n nil))))
+  (defn fixed-thread-pool
+    ([name_prefix n group]
+      (Executors/newFixedThreadPool (int ^java.lang.Number n) (daemon-factory name_prefix group)))
+    ([name_prefix n] (fixed-thread-pool name_prefix n nil)))
   (reset-meta!
     #'fixed-thread-pool
     (assoc
@@ -156,11 +152,10 @@
       'fixed-thread-pool
       :ns
       *ns*))
-  (def result-chan
-   (fn result_chan
-     ([n xform] (clojure.core.async/chan n (comp xform (take n))))
-     ([n] (clojure.core.async/chan n (take n)))
-     ([] (clojure.core.async/chan 1 (take 1)))))
+  (defn result-chan
+    ([n xform] (clojure.core.async/chan n (comp xform (take n))))
+    ([n] (clojure.core.async/chan n (take n)))
+    ([] (clojure.core.async/chan 1 (take 1))))
   (reset-meta!
     #'result-chan
     (assoc
@@ -169,13 +164,12 @@
       'result-chan
       :ns
       *ns*))
-  (def pfuture-ch
-   (fn pfuture_ch
-     ([f exec ch]
-       (do
-         (pfuture (fn fn__21873 ([] (clojure.core.async/put! ch (^clojure.lang.IFn f)))) exec)
-         ch))
-     ([f exec] (pfuture-ch f exec (result-chan)))))
+  (defn pfuture-ch
+    ([f exec ch]
+      (do
+        (pfuture (fn fn__21873 ([] (clojure.core.async/put! ch (^clojure.lang.IFn f)))) exec)
+        ch))
+    ([f exec] (pfuture-ch f exec (result-chan))))
   (reset-meta!
     #'pfuture-ch
     (assoc
@@ -184,41 +178,40 @@
       'pfuture-ch
       :ns
       *ns*))
-  (def pmap-n
-   (fn pmap_n
-     ([n f coll & colls]
-       (let [step (fn step
-                    ([cs]
-                      (lazy-seq
-                        (let [ss (map seq cs)]
-                          (when (every? identity ss)
-                            (cons (map first ss) (^clojure.lang.IFn step (map rest ss))))))))]
-         (pmap-n
-           n
-           (fn fn__21895 ([p1__21877#] (apply f p1__21877#)))
-           (^clojure.lang.IFn step (cons coll colls)))))
-     ([n f coll]
-       (let [rets (map
-                    (fn fn__21878
-                      ([p1__21876#]
-                        (future-call (fn fn__21879 ([] (^clojure.lang.IFn f p1__21876#))))))
-                    coll)
-             step (fn step
-                    ([p__21882 fs]
-                      (let [vec__21884 p__21882
-                            seq__21885 (seq vec__21884)
-                            first__21886 (first seq__21885)
-                            seq__21885 (next seq__21885)
-                            x first__21886
-                            xs seq__21885
-                            vs vec__21884]
-                        (lazy-seq
-                          (let [temp__5823__auto__ (seq fs)]
-                            (if temp__5823__auto__
-                              (let [s temp__5823__auto__]
-                                (cons (deref x) (^clojure.lang.IFn step xs (rest s))))
-                              (map deref vs)))))))]
-         (^clojure.lang.IFn step rets (drop n rets))))))
+  (defn pmap-n
+    ([n f coll & colls]
+      (let [step (fn step
+                   ([cs]
+                     (lazy-seq
+                       (let [ss (map seq cs)]
+                         (when (every? identity ss)
+                           (cons (map first ss) (^clojure.lang.IFn step (map rest ss))))))))]
+        (pmap-n
+          n
+          (fn fn__21895 ([p1__21877#] (apply f p1__21877#)))
+          (^clojure.lang.IFn step (cons coll colls)))))
+    ([n f coll]
+      (let [rets (map
+                   (fn fn__21878
+                     ([p1__21876#]
+                       (future-call (fn fn__21879 ([] (^clojure.lang.IFn f p1__21876#))))))
+                   coll)
+            step (fn step
+                   ([p__21882 fs]
+                     (let [vec__21884 p__21882
+                           seq__21885 (seq vec__21884)
+                           first__21886 (first seq__21885)
+                           seq__21885 (next seq__21885)
+                           x first__21886
+                           xs seq__21885
+                           vs vec__21884]
+                       (lazy-seq
+                         (let [temp__5823__auto__ (seq fs)]
+                           (if temp__5823__auto__
+                             (let [s temp__5823__auto__]
+                               (cons (deref x) (^clojure.lang.IFn step xs (rest s))))
+                             (map deref vs)))))))]
+        (^clojure.lang.IFn step rets (drop n rets)))))
   (reset-meta!
     #'pmap-n
     (assoc
@@ -351,34 +344,33 @@
            (int (count (.getQueue ^java.util.concurrent.ThreadPoolExecutor pool)))),
          :units :count})))
   (defmethod cast-queue-metric java.util.concurrent.SynchronousQueue fn__21912 ([_ _] nil))
-  (def observable-thread-pool
-   (fn observable_thread_pool
-     ([pool name]
-       (->ObservableThreadPool
-         pool
-         (let [mname (clojure-name->metric-name name)
-               active_metric (keyword (str "Pool." mname ".Active"))
-               queued_metric (keyword (str "Pool." mname ".Queued"))
-               rejected_metric (keyword (str "Pool." mname ".Rejected"))]
-           (.setRejectedExecutionHandler
-             ^java.util.concurrent.ThreadPoolExecutor pool
-             (reify
-               java.util.concurrent.RejectedExecutionHandler
-               (^void rejectedExecution
-                 [this ^java.lang.Runnable _ ^java.util.concurrent.ThreadPoolExecutor _]
-                 (do
-                   (cast/metric* cast/instance {:name rejected_metric, :value 1, :units :count})
-                   (throw (java.util.concurrent.RejectedExecutionException.))))))
-           (fn fn__21916
-             ([pool]
-               (cast/metric*
-                 cast/instance
-                 {:name active_metric,
-                  :value
-                  (java.lang.Integer/valueOf
-                    (int (.getActiveCount ^java.util.concurrent.ThreadPoolExecutor pool))),
-                  :units :count})
-               (cast-queue-metric pool queued_metric))))))))
+  (defn observable-thread-pool
+    ([pool name]
+      (->ObservableThreadPool
+        pool
+        (let [mname (clojure-name->metric-name name)
+              active_metric (keyword (str "Pool." mname ".Active"))
+              queued_metric (keyword (str "Pool." mname ".Queued"))
+              rejected_metric (keyword (str "Pool." mname ".Rejected"))]
+          (.setRejectedExecutionHandler
+            ^java.util.concurrent.ThreadPoolExecutor pool
+            (reify
+              java.util.concurrent.RejectedExecutionHandler
+              (^void rejectedExecution
+                [this ^java.lang.Runnable _ ^java.util.concurrent.ThreadPoolExecutor _]
+                (do
+                  (cast/metric* cast/instance {:name rejected_metric, :value 1, :units :count})
+                  (throw (java.util.concurrent.RejectedExecutionException.))))))
+          (fn fn__21916
+            ([pool]
+              (cast/metric*
+                cast/instance
+                {:name active_metric,
+                 :value
+                 (java.lang.Integer/valueOf
+                   (int (.getActiveCount ^java.util.concurrent.ThreadPoolExecutor pool))),
+                 :units :count})
+              (cast-queue-metric pool queued_metric)))))))
   (reset-meta!
     #'observable-thread-pool
     (assoc
@@ -392,26 +384,25 @@
       'observable-thread-pool
       :ns
       *ns*))
-  (def thread-pool
-   (fn thread_pool
-     ([p__21919]
-       (let [map__21920 p__21919
-             map__21920 (if (seq? map__21920)
-                          (if (next map__21920)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21920))
-                            (if (seq map__21920) (first map__21920) {}))
-                          map__21920)
-             name (get map__21920 :name)
-             nthreads (get map__21920 :nthreads)
-             metrics? (get map__21920 :metrics? true)]
-         (when-not name (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'name)))))
-         (when-not nthreads
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'nthreads)))))
-         (let [pool (Executors/newFixedThreadPool
-                      (int ^java.lang.Number nthreads)
-                      (daemon-factory name))]
-           (if metrics? (observable-thread-pool pool name) pool))))))
+  (defn thread-pool
+    ([p__21919]
+      (let [map__21920 p__21919
+            map__21920 (if (seq? map__21920)
+                         (if (next map__21920)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21920))
+                           (if (seq map__21920) (first map__21920) {}))
+                         map__21920)
+            name (get map__21920 :name)
+            nthreads (get map__21920 :nthreads)
+            metrics? (get map__21920 :metrics? true)]
+        (when-not name (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'name)))))
+        (when-not nthreads
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'nthreads)))))
+        (let [pool (Executors/newFixedThreadPool
+                     (int ^java.lang.Number nthreads)
+                     (daemon-factory name))]
+          (if metrics? (observable-thread-pool pool name) pool)))))
   (reset-meta!
     #'thread-pool
     (assoc
@@ -425,21 +416,20 @@
       'thread-pool
       :ns
       *ns*))
-  (def cached-thread-pool
-   (fn cached_thread_pool
-     ([p__21922]
-       (let [map__21923 p__21922
-             map__21923 (if (seq? map__21923)
-                          (if (next map__21923)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21923))
-                            (if (seq map__21923) (first map__21923) {}))
-                          map__21923)
-             name (get map__21923 :name)
-             metrics? (get map__21923 :metrics? true)]
-         (when-not name (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'name)))))
-         (let [pool (Executors/newCachedThreadPool (daemon-factory name))]
-           (if metrics? (observable-thread-pool pool name) pool))))))
+  (defn cached-thread-pool
+    ([p__21922]
+      (let [map__21923 p__21922
+            map__21923 (if (seq? map__21923)
+                         (if (next map__21923)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21923))
+                           (if (seq map__21923) (first map__21923) {}))
+                         map__21923)
+            name (get map__21923 :name)
+            metrics? (get map__21923 :metrics? true)]
+        (when-not name (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'name)))))
+        (let [pool (Executors/newCachedThreadPool (daemon-factory name))]
+          (if metrics? (observable-thread-pool pool name) pool)))))
   (reset-meta!
     #'cached-thread-pool
     (assoc
@@ -453,31 +443,30 @@
       'cached-thread-pool
       :ns
       *ns*))
-  (def handoff-thread-pool
-   (fn handoff_thread_pool
-     ([p__21925]
-       (let [map__21926 p__21925
-             map__21926 (if (seq? map__21926)
-                          (if (next map__21926)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21926))
-                            (if (seq map__21926) (first map__21926) {}))
-                          map__21926)
-             core_threads (get map__21926 :core-threads 2)
-             name (get map__21926 :name)
-             max_threads (get map__21926 :max-threads)
-             metrics? (get map__21926 :metrics? true)]
-         (when-not name (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'name)))))
-         (when-not max_threads
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'max-threads)))))
-         (let [pool (java.util.concurrent.ThreadPoolExecutor.
-                      (int core_threads)
-                      (int max_threads)
-                      60
-                      TimeUnit/SECONDS
-                      (java.util.concurrent.SynchronousQueue.)
-                      (daemon-factory name))]
-           (if metrics? (observable-thread-pool pool name) pool))))))
+  (defn handoff-thread-pool
+    ([p__21925]
+      (let [map__21926 p__21925
+            map__21926 (if (seq? map__21926)
+                         (if (next map__21926)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21926))
+                           (if (seq map__21926) (first map__21926) {}))
+                         map__21926)
+            core_threads (get map__21926 :core-threads 2)
+            name (get map__21926 :name)
+            max_threads (get map__21926 :max-threads)
+            metrics? (get map__21926 :metrics? true)]
+        (when-not name (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'name)))))
+        (when-not max_threads
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'max-threads)))))
+        (let [pool (java.util.concurrent.ThreadPoolExecutor.
+                     (int core_threads)
+                     (int max_threads)
+                     60
+                     TimeUnit/SECONDS
+                     (java.util.concurrent.SynchronousQueue.)
+                     (daemon-factory name))]
+          (if metrics? (observable-thread-pool pool name) pool)))))
   (reset-meta!
     #'handoff-thread-pool
     (assoc

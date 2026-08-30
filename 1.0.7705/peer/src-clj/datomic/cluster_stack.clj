@@ -68,9 +68,8 @@
         (cache/put kv_cache k (:val v))
         (let [G__16909 (a/promise-chan)] (a/put! G__16909 {:result :unknown}) G__16909))))
   (clojure.core/import 'datomic.cluster_stack.ValStoreOnKvCache)
-  (def ->ValStoreOnKvCache
-   (fn __GT_ValStoreOnKvCache
-     ([exec kv_cache] (datomic.cluster_stack.ValStoreOnKvCache. exec kv_cache))))
+  (defn ->ValStoreOnKvCache
+    ([exec kv_cache] (datomic.cluster_stack.ValStoreOnKvCache. exec kv_cache)))
   (reset-meta!
     #'->ValStoreOnKvCache
     (assoc
@@ -79,8 +78,7 @@
       '->ValStoreOnKvCache
       :ns
       *ns*))
-  (def val-store-on-kv-cache
-   (fn val_store_on_kv_cache ([exec kv_cache] (->ValStoreOnKvCache exec kv_cache))))
+  (defn val-store-on-kv-cache ([exec kv_cache] (->ValStoreOnKvCache exec kv_cache)))
   (reset-meta!
     #'val-store-on-kv-cache
     (assoc
@@ -953,18 +951,17 @@
   (reset-meta!
     #'start-kv-cache
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'start-kv-cache :ns *ns*))
-  (def cluster-with-cache
-   (fn cluster_with_cache
-     ([cluster cache opts]
-       (let [cluster_store (val-store-on-cluster cluster)
-             caching_store (double-store/create
-                             (merge
-                               {:repair-metric :kvc.repair}
-                               opts
-                               {:near-store cache, :far-store cluster_store}))
-             val_cluster (val-cluster/val-cluster caching_store)]
-         (combined-cluster/combined-cluster cluster val_cluster)))
-     ([cluster cache] (cluster-with-cache cluster cache nil))))
+  (defn cluster-with-cache
+    ([cluster cache opts]
+      (let [cluster_store (val-store-on-cluster cluster)
+            caching_store (double-store/create
+                            (merge
+                              {:repair-metric :kvc.repair}
+                              opts
+                              {:near-store cache, :far-store cluster_store}))
+            val_cluster (val-cluster/val-cluster caching_store)]
+        (combined-cluster/combined-cluster cluster val_cluster)))
+    ([cluster cache] (cluster-with-cache cluster cache nil)))
   (reset-meta!
     #'cluster-with-cache
     (assoc

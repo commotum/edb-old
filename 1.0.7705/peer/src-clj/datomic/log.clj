@@ -104,15 +104,15 @@
       'last-by-nth
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       LogSeek
       (seek-tx-impl [log t] "Returns iterator over log transactions at t")
       (seek-seg-path [log t] "Returns the [dirid segid] that contains/would contain t."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.log" "LogSeek")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'LogSeek :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'LogSeek :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -122,13 +122,13 @@
                                       :doc "Returns iterator over log transactions at t"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "LogSeek"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "seek-tx-impl")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -139,12 +139,12 @@
                                       "Returns the [dirid segid] that contains/would contain t."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "LogSeek"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "seek-seg-path")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*))))
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*))))
   (defn seek-seg-id
     ([log t]
       (let [vec__16011 (seek-seg-path log t)
@@ -154,7 +154,7 @@
   (reset-meta!
     #'seek-seg-id
     (assoc {:arglists (clojure.core/list ['log 't]), :column (int 1)} :name 'seek-seg-id :ns *ns*))
-  (let [protocol_metadata__7436 {:column (int 1)}]
+  (let [protocol_metadata__7468 {:column (int 1)}]
     (defprotocol
       Log
       (claim [log cs] "Touch the tail pod and root rev. Returns updated log or nil")
@@ -167,8 +167,8 @@
       (val-keys [log] "Returns inorder traversal of keys (strings)"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.log" "Log")
-      (assoc (assoc protocol_metadata__7436 :doc nil) :name 'Log :ns *ns*))
-    (let [protocol_signature__7437 (assoc
+      (assoc (assoc protocol_metadata__7468 :doc nil) :name 'Log :ns *ns*))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -179,13 +179,13 @@
                                       "Touch the tail pod and root rev. Returns updated log or nil"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "Log"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "claim")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*)))
-    (let [protocol_signature__7439 (assoc
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*)))
+    (let [protocol_signature__7471 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -195,13 +195,13 @@
                                       :doc "Returns the root"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "Log"))
-          protocol_method_name__7440 (with-meta
-                                       (:name protocol_signature__7439)
-                                       protocol_signature__7439)]
+          protocol_method_name__7472 (with-meta
+                                       (:name protocol_signature__7471)
+                                       protocol_signature__7471)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "get-root-val")
-        (assoc protocol_signature__7439 :name protocol_method_name__7440 :ns *ns*)))
-    (let [protocol_signature__7441 (assoc
+        (assoc protocol_signature__7471 :name protocol_method_name__7472 :ns *ns*)))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -211,13 +211,13 @@
                                       :doc "Returns the root id"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "Log"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "get-root-id")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -228,13 +228,13 @@
                                       "Adopt a new root. Updates pod. If t is not nil,\ntruncates tail to txes since t. Returns the updated log."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "Log"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "adopt-root")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*)))
-    (let [protocol_signature__7445 (assoc
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*)))
+    (let [protocol_signature__7477 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -245,13 +245,13 @@
                                       "Appends tx msgs, segments if necessary, updates pod, returns log"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "Log"))
-          protocol_method_name__7446 (with-meta
-                                       (:name protocol_signature__7445)
-                                       protocol_signature__7445)]
+          protocol_method_name__7478 (with-meta
+                                       (:name protocol_signature__7477)
+                                       protocol_signature__7477)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "append")
-        (assoc protocol_signature__7445 :name protocol_method_name__7446 :ns *ns*)))
-    (let [protocol_signature__7447 (assoc
+        (assoc protocol_signature__7477 :name protocol_method_name__7478 :ns *ns*)))
+    (let [protocol_signature__7479 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'val-keys {:arglists (clojure.core/list ['log])}),
@@ -259,18 +259,18 @@
                                       :doc "Returns inorder traversal of keys (strings)"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "Log"))
-          protocol_method_name__7448 (with-meta
-                                       (:name protocol_signature__7447)
-                                       protocol_signature__7447)]
+          protocol_method_name__7480 (with-meta
+                                       (:name protocol_signature__7479)
+                                       protocol_signature__7479)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "val-keys")
-        (assoc protocol_signature__7447 :name protocol_method_name__7448 :ns *ns*))))
-  (let [protocol_metadata__7449 {:column (int 1)}]
+        (assoc protocol_signature__7479 :name protocol_method_name__7480 :ns *ns*))))
+  (let [protocol_metadata__7481 {:column (int 1)}]
     (defprotocol TailTxes (tail-txes [_] "Returns the tail txes"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.log" "TailTxes")
-      (assoc (assoc protocol_metadata__7449 :doc nil) :name 'TailTxes :ns *ns*))
-    (let [protocol_signature__7450 (assoc
+      (assoc (assoc protocol_metadata__7481 :doc nil) :name 'TailTxes :ns *ns*))
+    (let [protocol_signature__7482 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'tail-txes {:arglists (clojure.core/list ['_])}),
@@ -278,18 +278,18 @@
                                       :doc "Returns the tail txes"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "TailTxes"))
-          protocol_method_name__7451 (with-meta
-                                       (:name protocol_signature__7450)
-                                       protocol_signature__7450)]
+          protocol_method_name__7483 (with-meta
+                                       (:name protocol_signature__7482)
+                                       protocol_signature__7482)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "tail-txes")
-        (assoc protocol_signature__7450 :name protocol_method_name__7451 :ns *ns*))))
-  (let [protocol_metadata__7452 {:column (int 1)}]
+        (assoc protocol_signature__7482 :name protocol_method_name__7483 :ns *ns*))))
+  (let [protocol_metadata__7484 {:column (int 1)}]
     (defprotocol LogKey (log-key [_] "Key for navigating log structures on disk."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.log" "LogKey")
-      (assoc (assoc protocol_metadata__7452 :doc nil) :name 'LogKey :ns *ns*))
-    (let [protocol_signature__7453 (assoc
+      (assoc (assoc protocol_metadata__7484 :doc nil) :name 'LogKey :ns *ns*))
+    (let [protocol_signature__7485 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'log-key {:arglists (clojure.core/list ['_])}),
@@ -297,13 +297,13 @@
                                       :doc "Key for navigating log structures on disk."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "LogKey"))
-          protocol_method_name__7454 (with-meta
-                                       (:name protocol_signature__7453)
-                                       protocol_signature__7453)]
+          protocol_method_name__7486 (with-meta
+                                       (:name protocol_signature__7485)
+                                       protocol_signature__7485)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "log-key")
-        (assoc protocol_signature__7453 :name protocol_method_name__7454 :ns *ns*))))
-  (let [protocol_metadata__7455 {:column (int 1)}]
+        (assoc protocol_signature__7485 :name protocol_method_name__7486 :ns *ns*))))
+  (let [protocol_metadata__7487 {:column (int 1)}]
     (defprotocol
       LogSegSeq
       (log-seg-seq
@@ -311,8 +311,8 @@
         "Returns a seq of log segments starting at iter.\n                       Loads the segs as it goes."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.log" "LogSegSeq")
-      (assoc (assoc protocol_metadata__7455 :doc nil) :name 'LogSegSeq :ns *ns*))
-    (let [protocol_signature__7456 (assoc
+      (assoc (assoc protocol_metadata__7487 :doc nil) :name 'LogSegSeq :ns *ns*))
+    (let [protocol_signature__7488 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -323,13 +323,13 @@
                                       "Returns a seq of log segments starting at iter.\n                       Loads the segs as it goes."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "LogSegSeq"))
-          protocol_method_name__7457 (with-meta
-                                       (:name protocol_signature__7456)
-                                       protocol_signature__7456)]
+          protocol_method_name__7489 (with-meta
+                                       (:name protocol_signature__7488)
+                                       protocol_signature__7488)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "log-seg-seq")
-        (assoc protocol_signature__7456 :name protocol_method_name__7457 :ns *ns*))))
-  (let [protocol_metadata__7458 {:column (int 1)}]
+        (assoc protocol_signature__7488 :name protocol_method_name__7489 :ns *ns*))))
+  (let [protocol_metadata__7490 {:column (int 1)}]
     (defprotocol
       LogDirSeq
       (log-dir-seq
@@ -337,8 +337,8 @@
         "Returns a seq of log dir segments starting at iter.\n                       Loads the segs as it goes."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.log" "LogDirSeq")
-      (assoc (assoc protocol_metadata__7458 :doc nil) :name 'LogDirSeq :ns *ns*))
-    (let [protocol_signature__7459 (assoc
+      (assoc (assoc protocol_metadata__7490 :doc nil) :name 'LogDirSeq :ns *ns*))
+    (let [protocol_signature__7491 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -349,20 +349,19 @@
                                       "Returns a seq of log dir segments starting at iter.\n                       Loads the segs as it goes."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.log" "LogDirSeq"))
-          protocol_method_name__7460 (with-meta
-                                       (:name protocol_signature__7459)
-                                       protocol_signature__7459)]
+          protocol_method_name__7492 (with-meta
+                                       (:name protocol_signature__7491)
+                                       protocol_signature__7491)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.log" "log-dir-seq")
-        (assoc protocol_signature__7459 :name protocol_method_name__7460 :ns *ns*))))
-  (def fressianed-txes-length
-   (fn fressianed_txes_length
-     ([fressianed_txes]
-       (apply
-         +
-         (map
-           (fn fn__16172 ([tx] (java.lang.Integer/valueOf (int (.length (:fressianed-tx tx))))))
-           fressianed_txes)))))
+        (assoc protocol_signature__7491 :name protocol_method_name__7492 :ns *ns*))))
+  (defn fressianed-txes-length
+    ([fressianed_txes]
+      (apply
+        +
+        (map
+          (fn fn__16172 ([tx] (java.lang.Integer/valueOf (int (.length (:fressianed-tx tx))))))
+          fressianed_txes))))
   (reset-meta!
     #'fressianed-txes-length
     (assoc
@@ -435,10 +434,9 @@
   (reset-meta!
     #'fressianed-tx
     (assoc {:arglists (clojure.core/list ['tx]), :column (int 1)} :name 'fressianed-tx :ns *ns*))
-  (def create-entry
-   (fn create_entry
-     ([t uuid] (datomic.log.LogDir. (long ^java.lang.Number t) uuid))
-     ([t] (create-entry t (common/rand-uuid)))))
+  (defn create-entry
+    ([t uuid] (datomic.log.LogDir. (long ^java.lang.Number t) uuid))
+    ([t] (create-entry t (common/rand-uuid))))
   (reset-meta!
     #'create-entry
     (assoc
@@ -586,12 +584,11 @@
   (reset-meta!
     #'claim-log
     (assoc {:arglists (clojure.core/list ['cs 'desc]), :column (int 1)} :name 'claim-log :ns *ns*))
-  (def convert-log-version
-   (fn convert_log_version
-     ([cs to_version]
-       (error/raise
-         :db.error/log-conversion
-         "This version of Datomic cannot convert log versions"))))
+  (defn convert-log-version
+    ([cs to_version]
+      (error/raise
+        :db.error/log-conversion
+        "This version of Datomic cannot convert log versions")))
   (reset-meta!
     #'convert-log-version
     (assoc
@@ -600,25 +597,24 @@
       'convert-log-version
       :ns
       *ns*))
-  (def zip-and-create
-   (fn zip_and_create
-     ([cs uuid buf write_type]
-       (let [gz_buf (io/gzip-buffer buf)
-             kw (let [pred__16229 = expr__16230 write_type]
-                  (if (^clojure.lang.IFn pred__16229 :root expr__16230)
-                    :LogTreeRootBytesWritten
-                    (if (^clojure.lang.IFn pred__16229 :dir expr__16230)
-                      :LogTreeDirBytesWritten
-                      (if (^clojure.lang.IFn pred__16229 :leaf expr__16230)
-                        :LogTreeLeafBytesWritten
-                        (if (^clojure.lang.IFn pred__16229 :excise expr__16230)
-                          :LogTreeExciseBytesWritten
-                          :LogTreeUnknownBytesWritten)))))]
-         (monitor/add-stat
-           kw
-           (java.lang.Integer/valueOf (int (.remaining ^java.nio.Buffer gz_buf))))
-         (cluster/create-val cs 2 (cluster/uuid->val-key uuid) gz_buf)))
-     ([cs uuid buf] (zip-and-create cs uuid buf nil))))
+  (defn zip-and-create
+    ([cs uuid buf write_type]
+      (let [gz_buf (io/gzip-buffer buf)
+            kw (let [pred__16229 = expr__16230 write_type]
+                 (if (^clojure.lang.IFn pred__16229 :root expr__16230)
+                   :LogTreeRootBytesWritten
+                   (if (^clojure.lang.IFn pred__16229 :dir expr__16230)
+                     :LogTreeDirBytesWritten
+                     (if (^clojure.lang.IFn pred__16229 :leaf expr__16230)
+                       :LogTreeLeafBytesWritten
+                       (if (^clojure.lang.IFn pred__16229 :excise expr__16230)
+                         :LogTreeExciseBytesWritten
+                         :LogTreeUnknownBytesWritten)))))]
+        (monitor/add-stat
+          kw
+          (java.lang.Integer/valueOf (int (.remaining ^java.nio.Buffer gz_buf))))
+        (cluster/create-val cs 2 (cluster/uuid->val-key uuid) gz_buf)))
+    ([cs uuid buf] (zip-and-create cs uuid buf nil)))
   (reset-meta!
     #'zip-and-create
     (assoc
@@ -628,18 +624,17 @@
       'zip-and-create
       :ns
       *ns*))
-  (def write-excise-val
-   (fn write_excise_val
-     ([cs uuid fressianed_buf]
-       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
-         (when (.isDebugEnabled ^org.slf4j.Logger logger)
-           (.debug
-             ^org.slf4j.Logger logger
-             (logger/process {:event :log/write-excise-val, :id uuid})))
-         nil)
-       (when-not (= :created (deref (zip-and-create cs uuid fressianed_buf :excise)))
-         (throw (java.lang.Error. "Cluster value creation failed. Unable to write log."))
-         nil))))
+  (defn write-excise-val
+    ([cs uuid fressianed_buf]
+      (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
+        (when (.isDebugEnabled ^org.slf4j.Logger logger)
+          (.debug
+            ^org.slf4j.Logger logger
+            (logger/process {:event :log/write-excise-val, :id uuid})))
+        nil)
+      (when-not (= :created (deref (zip-and-create cs uuid fressianed_buf :excise)))
+        (throw (java.lang.Error. "Cluster value creation failed. Unable to write log."))
+        nil)))
   (reset-meta!
     #'write-excise-val
     (assoc
@@ -716,18 +711,17 @@
       'map->Tail
       :ns
       *ns*))
-  (def tail-byte-count
-   (fn tail_byte_count
-     ([p__16262]
-       (let [map__16263 p__16262
-             map__16263 (if (seq? map__16263)
-                          (if (next map__16263)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16263))
-                            (if (seq map__16263) (first map__16263) {}))
-                          map__16263)
-             bufs (get map__16263 :bufs)]
-         (apply + (map io/remaining bufs))))))
+  (defn tail-byte-count
+    ([p__16262]
+      (let [map__16263 p__16262
+            map__16263 (if (seq? map__16263)
+                         (if (next map__16263)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16263))
+                           (if (seq map__16263) (first map__16263) {}))
+                         map__16263)
+            bufs (get map__16263 :bufs)]
+        (apply + (map io/remaining bufs)))))
   (reset-meta!
     #'tail-byte-count
     (assoc
@@ -736,18 +730,17 @@
       'tail-byte-count
       :ns
       *ns*))
-  (def tail-ts
-   (fn tail_ts
-     ([p__16265]
-       (let [map__16266 p__16265
-             map__16266 (if (seq? map__16266)
-                          (if (next map__16266)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16266))
-                            (if (seq map__16266) (first map__16266) {}))
-                          map__16266)
-             txes (get map__16266 :txes)]
-         (map :t txes)))))
+  (defn tail-ts
+    ([p__16265]
+      (let [map__16266 p__16265
+            map__16266 (if (seq? map__16266)
+                         (if (next map__16266)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16266))
+                           (if (seq map__16266) (first map__16266) {}))
+                         map__16266)
+            txes (get map__16266 :txes)]
+        (map :t txes))))
   (reset-meta!
     #'tail-ts
     (assoc
@@ -756,18 +749,17 @@
       'tail-ts
       :ns
       *ns*))
-  (def tail-empty?
-   (fn tail_empty_QMARK_
-     ([p__16268]
-       (let [map__16269 p__16268
-             map__16269 (if (seq? map__16269)
-                          (if (next map__16269)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16269))
-                            (if (seq map__16269) (first map__16269) {}))
-                          map__16269)
-             txes (get map__16269 :txes)]
-         (empty? txes)))))
+  (defn tail-empty?
+    ([p__16268]
+      (let [map__16269 p__16268
+            map__16269 (if (seq? map__16269)
+                         (if (next map__16269)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16269))
+                           (if (seq map__16269) (first map__16269) {}))
+                         map__16269)
+            txes (get map__16269 :txes)]
+        (empty? txes))))
   (reset-meta!
     #'tail-empty?
     (assoc
@@ -776,19 +768,18 @@
       'tail-empty?
       :ns
       *ns*))
-  (def extend-tail
-   (fn extend_tail
-     ([p__16271 new_txes new_bufs]
-       (let [map__16272 p__16271
-             map__16272 (if (seq? map__16272)
-                          (if (next map__16272)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16272))
-                            (if (seq map__16272) (first map__16272) {}))
-                          map__16272)
-             txes (get map__16272 :txes)
-             bufs (get map__16272 :bufs)]
-         (create-tail (into txes new_txes) (into bufs new_bufs))))))
+  (defn extend-tail
+    ([p__16271 new_txes new_bufs]
+      (let [map__16272 p__16271
+            map__16272 (if (seq? map__16272)
+                         (if (next map__16272)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16272))
+                           (if (seq map__16272) (first map__16272) {}))
+                         map__16272)
+            txes (get map__16272 :txes)
+            bufs (get map__16272 :bufs)]
+        (create-tail (into txes new_txes) (into bufs new_bufs)))))
   (reset-meta!
     #'extend-tail
     (assoc
@@ -797,32 +788,31 @@
       'extend-tail
       :ns
       *ns*))
-  (def since
-   (fn since
-     ([p__16274 since_t]
-       (let [map__16275 p__16274
-             map__16275 (if (seq? map__16275)
-                          (if (next map__16275)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16275))
-                            (if (seq map__16275) (first map__16275) {}))
-                          map__16275)
-             tail map__16275
-             txes (get map__16275 :txes)
-             bufs (get map__16275 :bufs)]
-         (if (or (not since_t) (tail-empty? tail) (< since_t (first (tail-ts tail))))
-           tail
-           (let [new_txes (loop [txes txes]
-                            (let [vec__16277 txes
-                                  seq__16278 (seq vec__16277)
-                                  first__16279 (first seq__16278)
-                                  seq__16278 (next seq__16278)
-                                  tx first__16279
-                                  more seq__16278]
-                              (if tx (if (< since_t (:t tx)) (into [] txes) (recur more)) [])))
-                 bufs_ct (count bufs)
-                 new_bufs (into [] (drop (long (- bufs_ct (count new_txes)))) bufs)]
-             (create-tail new_txes new_bufs)))))))
+  (defn since
+    ([p__16274 since_t]
+      (let [map__16275 p__16274
+            map__16275 (if (seq? map__16275)
+                         (if (next map__16275)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16275))
+                           (if (seq map__16275) (first map__16275) {}))
+                         map__16275)
+            tail map__16275
+            txes (get map__16275 :txes)
+            bufs (get map__16275 :bufs)]
+        (if (or (not since_t) (tail-empty? tail) (< since_t (first (tail-ts tail))))
+          tail
+          (let [new_txes (loop [txes txes]
+                           (let [vec__16277 txes
+                                 seq__16278 (seq vec__16277)
+                                 first__16279 (first seq__16278)
+                                 seq__16278 (next seq__16278)
+                                 tx first__16279
+                                 more seq__16278]
+                             (if tx (if (< since_t (:t tx)) (into [] txes) (recur more)) [])))
+                bufs_ct (count bufs)
+                new_bufs (into [] (drop (long (- bufs_ct (count new_txes)))) bufs)]
+            (create-tail new_txes new_bufs))))))
   (reset-meta!
     #'since
     (assoc
@@ -831,14 +821,13 @@
       'since
       :ns
       *ns*))
-  (def resets-caches?
-   (fn resets_caches_QMARK_
-     ([bbuf]
-       (=
-         (long (java.lang.Byte/valueOf (unchecked-byte Codes/RESET_CACHES)))
-         (long
-           (java.lang.Byte/valueOf
-             (byte (.get ^java.nio.ByteBuffer bbuf (int (.position ^java.nio.Buffer bbuf))))))))))
+  (defn resets-caches?
+    ([bbuf]
+      (=
+        (long (java.lang.Byte/valueOf (unchecked-byte Codes/RESET_CACHES)))
+        (long
+          (java.lang.Byte/valueOf
+            (byte (.get ^java.nio.ByteBuffer bbuf (int (.position ^java.nio.Buffer bbuf)))))))))
   (reset-meta!
     #'resets-caches?
     (assoc
@@ -876,38 +865,37 @@
   (reset-meta!
     #'empty-tail
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'empty-tail :ns *ns*))
-  (def load-tail
-   (fn load_tail
-     ([bbuf]
-       (let [code (.get ^java.nio.ByteBuffer bbuf)
-             _ (when-not (=
-                           (long (java.lang.Byte/valueOf (unchecked-byte Codes/BEGIN_OPEN_LIST)))
-                           (long (java.lang.Byte/valueOf (byte code))))
-                 (throw
-                   (java.lang.AssertionError.
-                     (str
-                       "Assert failed: "
-                       (pr-str
-                         (clojure.core/list
-                           '=
-                           (clojure.core/list 'unchecked-byte 'Codes/BEGIN_OPEN_LIST)
-                           'code)))))
-                 nil)
-             bbis (org.fressian.impl.ByteBufferInputStream. ^java.nio.ByteBuffer bbuf)
-             fin (fressian/create-reader bbis read-handlers false)]
-         (loop [txes []
-                bufs []
-                pos (io/position bbuf)
-                remaining (.available ^org.fressian.impl.ByteBufferInputStream bbis)]
-           (if (= remaining 0)
-             (create-tail txes bufs)
-             (let [tx (.readObject ^org.fressian.Reader fin)
-                   size (- remaining (.available ^org.fressian.impl.ByteBufferInputStream bbis))]
-               (recur
-                 (conj txes tx)
-                 (conj bufs (io/sub-buffer bbuf (long pos) (long size)))
-                 (+ pos size)
-                 (- remaining size)))))))))
+  (defn load-tail
+    ([bbuf]
+      (let [code (.get ^java.nio.ByteBuffer bbuf)
+            _ (when-not (=
+                          (long (java.lang.Byte/valueOf (unchecked-byte Codes/BEGIN_OPEN_LIST)))
+                          (long (java.lang.Byte/valueOf (byte code))))
+                (throw
+                  (java.lang.AssertionError.
+                    (str
+                      "Assert failed: "
+                      (pr-str
+                        (clojure.core/list
+                          '=
+                          (clojure.core/list 'unchecked-byte 'Codes/BEGIN_OPEN_LIST)
+                          'code)))))
+                nil)
+            bbis (org.fressian.impl.ByteBufferInputStream. ^java.nio.ByteBuffer bbuf)
+            fin (fressian/create-reader bbis read-handlers false)]
+        (loop [txes []
+               bufs []
+               pos (io/position bbuf)
+               remaining (.available ^org.fressian.impl.ByteBufferInputStream bbis)]
+          (if (= remaining 0)
+            (create-tail txes bufs)
+            (let [tx (.readObject ^org.fressian.Reader fin)
+                  size (- remaining (.available ^org.fressian.impl.ByteBufferInputStream bbis))]
+              (recur
+                (conj txes tx)
+                (conj bufs (io/sub-buffer bbuf (long pos) (long size)))
+                (+ pos size)
+                (- remaining size))))))))
   (reset-meta!
     #'load-tail
     (assoc
@@ -1160,18 +1148,17 @@
         (^clojure.lang.IFn iter__6373__auto__
           (range (long ridx) (java.lang.Integer/valueOf (int (count root_val))))))))
   (clojure.core/import 'datomic.log.LogTxIter)
-  (def ->LogTxIter
-   (fn __GT_LogTxIter
-     ([lookup root_val tail ridx dir didx seg sidx]
-       (datomic.log.LogTxIter.
-         lookup
-         root_val
-         tail
-         (long ^java.lang.Number ridx)
-         dir
-         (long ^java.lang.Number didx)
-         seg
-         (long ^java.lang.Number sidx)))))
+  (defn ->LogTxIter
+    ([lookup root_val tail ridx dir didx seg sidx]
+      (datomic.log.LogTxIter.
+        lookup
+        root_val
+        tail
+        (long ^java.lang.Number ridx)
+        dir
+        (long ^java.lang.Number didx)
+        seg
+        (long ^java.lang.Number sidx))))
   (reset-meta!
     #'->LogTxIter
     (assoc
@@ -1379,7 +1366,7 @@
       'create-new-log
       :ns
       *ns*))
-  (def seek-tx (fn seek_tx ([provider t] (seek-tx-impl provider t))))
+  (defn seek-tx ([provider t] (seek-tx-impl provider t)))
   (reset-meta!
     #'seek-tx
     (assoc
@@ -1406,9 +1393,8 @@
       'find-log
       :ns
       *ns*))
-  (def log-tree
-   (fn log_tree
-     ([olookup root_id] (create-log-impl olookup {:rev 0, :d/l 3, :d/r root_id} (empty-tail)))))
+  (defn log-tree
+    ([olookup root_id] (create-log-impl olookup {:rev 0, :d/l 3, :d/r root_id} (empty-tail))))
   (reset-meta!
     #'log-tree
     (assoc
@@ -1417,35 +1403,34 @@
       'log-tree
       :ns
       *ns*))
-  (def catchup-tx
-   (fn catchup_tx
-     ([p__16400 tx]
-       (let [map__16401 p__16400
-             map__16401 (if (seq? map__16401)
-                          (if (next map__16401)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16401))
-                            (if (seq map__16401) (first map__16401) {}))
-                          map__16401)
-             db (get map__16401 :db)
-             size (get map__16401 :size)
-             data (common/getx tx :data)
-             basis (:nextT db)
-             d (first data)]
-         (if (and
-               (< (.getT ^datomic.impl.db.IDatum d) basis)
-               (config/property "datomic.allowLogOverlap"))
-           (do
-             (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
-               (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                 (.warn
-                   ^org.slf4j.Logger logger
-                   (logger/process
-                     {:event :log/overlap, :t (long (.getT ^datomic.impl.db.IDatum d))})))
-               nil)
-             {:db db, :size size})
-           {:db (.acceptDataCheck ^datomic.db.IDbImpl db data false),
-            :size (+ size (size/memory-size data))})))))
+  (defn catchup-tx
+    ([p__16400 tx]
+      (let [map__16401 p__16400
+            map__16401 (if (seq? map__16401)
+                         (if (next map__16401)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16401))
+                           (if (seq map__16401) (first map__16401) {}))
+                         map__16401)
+            db (get map__16401 :db)
+            size (get map__16401 :size)
+            data (common/getx tx :data)
+            basis (:nextT db)
+            d (first data)]
+        (if (and
+              (< (.getT ^datomic.impl.db.IDatum d) basis)
+              (config/property "datomic.allowLogOverlap"))
+          (do
+            (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
+              (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                (.warn
+                  ^org.slf4j.Logger logger
+                  (logger/process
+                    {:event :log/overlap, :t (long (.getT ^datomic.impl.db.IDatum d))})))
+              nil)
+            {:db db, :size size})
+          {:db (.acceptDataCheck ^datomic.db.IDbImpl db data false),
+           :size (+ size (size/memory-size data))}))))
   (reset-meta!
     #'catchup-tx
     (assoc
@@ -1456,84 +1441,83 @@
       'catchup-tx
       :ns
       *ns*))
-  (def catchup
-   (fn catchup
-     ([db log catchup_ft]
-       (let [start (java.lang.System/currentTimeMillis)
-             index_t (.basisT ^datomic.Database db)
-             iter (seek-tx log (long (.nextT ^datomic.Database db)))
-             _ (when iter
-                 (future-call
-                   (fn fn__16405
-                     ([]
-                       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
-                         (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                           (.info
-                             ^org.slf4j.Logger logger
-                             (logger/process
-                               {:event :log/load-segments,
-                                :count
-                                (java.lang.Integer/valueOf
-                                  (int (count (pmap identity (log-seg-seq iter)))))})))
-                         nil)))))
-             log_txes (iter/iter-seq iter)
-             map__16404 (reduce catchup-tx {:db db, :size 0} log_txes)
-             map__16404 (if (seq? map__16404)
-                          (if (next map__16404)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16404))
-                            (if (seq map__16404) (first map__16404) {}))
-                          map__16404)
-             result map__16404
-             db (get map__16404 :db)
-             size (get map__16404 :size)
-             elapsed (- (java.lang.System/currentTimeMillis) start)
-             db (if catchup_ft
-                  (let [m_16407 {:event :log/catchup-fulltext}
-                        ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                       "datomic.log")]
-                                          (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                            (.info
-                                              ^org.slf4j.Logger logger
-                                              (logger/process (assoc m_16407 :phase :begin))))
-                                          nil)
-                        start__8553__auto__ (java.lang.System/nanoTime)
-                        result__8554__auto__ (try
-                                               {:returned
-                                                (db/add-fulltext db (mapcat :data log_txes))}
-                                               (catch
-                                                 java.lang.Throwable
-                                                 t__8555__auto__
-                                                 {:threw t__8555__auto__}))
-                        elapsed_16408 (- (java.lang.System/nanoTime) start__8553__auto__)
-                        msec_16409 (logger/format-as-msec (long elapsed_16408))]
-                    (let [endmsg__8556__auto__ (merge
-                                                 (assoc m_16407 :msec msec_16409 :phase :end)
-                                                 (when (:threw result__8554__auto__)
-                                                   {:threw (class (:threw result__8554__auto__))}))
-                          logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
-                      (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                        (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-                      nil)
-                    (if (contains? result__8554__auto__ :returned)
-                      (:returned result__8554__auto__)
-                      (do (throw (:threw result__8554__auto__)) nil)))
-                  db)]
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process
-                 {:event :log/catchup,
-                  :bytes size,
-                  :tail-t (long (.basisT ^datomic.Database db)),
-                  :index-t (long index_t),
-                  :msec (long elapsed)})))
-           nil)
-         (monitor/add-stat :LogIngestMsec (long elapsed))
-         (monitor/add-stat :LogIngestBytes size)
-         {:db db, :size size}))
-     ([db log] (catchup db log false))))
+  (defn catchup
+    ([db log catchup_ft]
+      (let [start (java.lang.System/currentTimeMillis)
+            index_t (.basisT ^datomic.Database db)
+            iter (seek-tx log (long (.nextT ^datomic.Database db)))
+            _ (when iter
+                (future-call
+                  (fn fn__16405
+                    ([]
+                      (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
+                        (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                          (.info
+                            ^org.slf4j.Logger logger
+                            (logger/process
+                              {:event :log/load-segments,
+                               :count
+                               (java.lang.Integer/valueOf
+                                 (int (count (pmap identity (log-seg-seq iter)))))})))
+                        nil)))))
+            log_txes (iter/iter-seq iter)
+            map__16404 (reduce catchup-tx {:db db, :size 0} log_txes)
+            map__16404 (if (seq? map__16404)
+                         (if (next map__16404)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16404))
+                           (if (seq map__16404) (first map__16404) {}))
+                         map__16404)
+            result map__16404
+            db (get map__16404 :db)
+            size (get map__16404 :size)
+            elapsed (- (java.lang.System/currentTimeMillis) start)
+            db (if catchup_ft
+                 (let [m_16407 {:event :log/catchup-fulltext}
+                       ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                      "datomic.log")]
+                                         (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                           (.info
+                                             ^org.slf4j.Logger logger
+                                             (logger/process (assoc m_16407 :phase :begin))))
+                                         nil)
+                       start__8553__auto__ (java.lang.System/nanoTime)
+                       result__8554__auto__ (try
+                                              {:returned
+                                               (db/add-fulltext db (mapcat :data log_txes))}
+                                              (catch
+                                                java.lang.Throwable
+                                                t__8555__auto__
+                                                {:threw t__8555__auto__}))
+                       elapsed_16408 (- (java.lang.System/nanoTime) start__8553__auto__)
+                       msec_16409 (logger/format-as-msec (long elapsed_16408))]
+                   (let [endmsg__8556__auto__ (merge
+                                                (assoc m_16407 :msec msec_16409 :phase :end)
+                                                (when (:threw result__8554__auto__)
+                                                  {:threw (class (:threw result__8554__auto__))}))
+                         logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
+                     (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                       (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+                     nil)
+                   (if (contains? result__8554__auto__ :returned)
+                     (:returned result__8554__auto__)
+                     (do (throw (:threw result__8554__auto__)) nil)))
+                 db)]
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process
+                {:event :log/catchup,
+                 :bytes size,
+                 :tail-t (long (.basisT ^datomic.Database db)),
+                 :index-t (long index_t),
+                 :msec (long elapsed)})))
+          nil)
+        (monitor/add-stat :LogIngestMsec (long elapsed))
+        (monitor/add-stat :LogIngestBytes size)
+        {:db db, :size size}))
+    ([db log] (catchup db log false)))
   (reset-meta!
     #'catchup
     (assoc
@@ -1544,56 +1528,55 @@
       'catchup
       :ns
       *ns*))
-  (def ensure-index-and-log
-   (fn ensure_index_and_log
-     ([cluster olookup db_id]
-       (let [m_16417 {:event :transactor/ensure-index-and-log, :db-id db_id}
-             ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process (assoc m_16417 :phase :begin))))
-                               nil)
-             start__8553__auto__ (java.lang.System/nanoTime)
-             result__8554__auto__ (try
-                                    {:returned
-                                     (let [existing_root (index/find-index-root-id cluster)]
-                                       {:idxroot
-                                        (or
-                                          existing_root
-                                          (index/init-index cluster)
-                                          (do
-                                            (throw
-                                              (java.lang.RuntimeException.
-                                                (str "Unable to create index root for " db_id)))
-                                            1)),
-                                        :log
-                                        (or
-                                          (if existing_root
-                                            (find-log cluster olookup)
-                                            (create-new-log cluster olookup))
-                                          (do
-                                            (throw
-                                              (java.lang.RuntimeException.
-                                                (str "Unable to read log for db id " db_id)))
-                                            3))})}
-                                    (catch
-                                      java.lang.Throwable
-                                      t__8555__auto__
-                                      {:threw t__8555__auto__}))
-             elapsed_16418 (- (java.lang.System/nanoTime) start__8553__auto__)
-             msec_16419 (logger/format-as-msec (long elapsed_16418))]
-         (let [endmsg__8556__auto__ (merge
-                                      (assoc m_16417 :msec msec_16419 :phase :end)
-                                      (when (:threw result__8554__auto__)
-                                        {:threw (class (:threw result__8554__auto__))}))
-               logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
-           (when (.isDebugEnabled ^org.slf4j.Logger logger)
-             (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-           nil)
-         (if (contains? result__8554__auto__ :returned)
-           (:returned result__8554__auto__)
-           (do (throw (:threw result__8554__auto__)) nil))))))
+  (defn ensure-index-and-log
+    ([cluster olookup db_id]
+      (let [m_16417 {:event :transactor/ensure-index-and-log, :db-id db_id}
+            ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process (assoc m_16417 :phase :begin))))
+                              nil)
+            start__8553__auto__ (java.lang.System/nanoTime)
+            result__8554__auto__ (try
+                                   {:returned
+                                    (let [existing_root (index/find-index-root-id cluster)]
+                                      {:idxroot
+                                       (or
+                                         existing_root
+                                         (index/init-index cluster)
+                                         (do
+                                           (throw
+                                             (java.lang.RuntimeException.
+                                               (str "Unable to create index root for " db_id)))
+                                           1)),
+                                       :log
+                                       (or
+                                         (if existing_root
+                                           (find-log cluster olookup)
+                                           (create-new-log cluster olookup))
+                                         (do
+                                           (throw
+                                             (java.lang.RuntimeException.
+                                               (str "Unable to read log for db id " db_id)))
+                                           3))})}
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8555__auto__
+                                     {:threw t__8555__auto__}))
+            elapsed_16418 (- (java.lang.System/nanoTime) start__8553__auto__)
+            msec_16419 (logger/format-as-msec (long elapsed_16418))]
+        (let [endmsg__8556__auto__ (merge
+                                     (assoc m_16417 :msec msec_16419 :phase :end)
+                                     (when (:threw result__8554__auto__)
+                                       {:threw (class (:threw result__8554__auto__))}))
+              logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
+          (when (.isDebugEnabled ^org.slf4j.Logger logger)
+            (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+          nil)
+        (if (contains? result__8554__auto__ :returned)
+          (:returned result__8554__auto__)
+          (do (throw (:threw result__8554__auto__)) nil)))))
   (reset-meta!
     #'ensure-index-and-log
     (assoc
@@ -1643,77 +1626,75 @@
       'excise-dir-map
       :ns
       *ns*))
-  (def write-excised-log
-   (fn write_excised_log
-     ([cs lookup xpreds ts dir_map]
-       (reduce
-         (fn fn__16448
-           ([m p__16447]
-             (let [vec__16449 p__16447
-                   dirid (nth vec__16449 (int 0) nil)
-                   segids (nth vec__16449 (int 1) nil)
-                   excise? (fn excise_QMARK_
-                             ([d]
-                               (some
-                                 (fn fn__16456 ([p1__16446#] (x/remove? p1__16446# d)))
-                                 xpreds)))
-                   dir (common/getx lookup dirid)
-                   vec__16452 (reduce
-                                (fn fn__16460
-                                  ([p__16459 direntry]
-                                    (let [vec__16461 p__16459
-                                          m (nth vec__16461 (int 0) nil)
-                                          newdir (nth vec__16461 (int 1) nil)
-                                          t (.-t ^datomic.log.LogDir direntry)
-                                          segid (.-uuid ^datomic.log.LogDir direntry)]
-                                      (if (contains? segids segid)
-                                        (let [seg (common/getx lookup segid)
-                                              newsid (common/rand-uuid)
-                                              newseg (mapv
-                                                       (fn fn__16465
-                                                         ([p__16464]
-                                                           (let 
-                                                             [map__16466 p__16464
-                                                              map__16466
-                                                              (if
-                                                                (seq? map__16466)
+  (defn write-excised-log
+    ([cs lookup xpreds ts dir_map]
+      (reduce
+        (fn fn__16448
+          ([m p__16447]
+            (let [vec__16449 p__16447
+                  dirid (nth vec__16449 (int 0) nil)
+                  segids (nth vec__16449 (int 1) nil)
+                  excise? (fn excise_QMARK_
+                            ([d]
+                              (some
+                                (fn fn__16456 ([p1__16446#] (x/remove? p1__16446# d)))
+                                xpreds)))
+                  dir (common/getx lookup dirid)
+                  vec__16452 (reduce
+                               (fn fn__16460
+                                 ([p__16459 direntry]
+                                   (let [vec__16461 p__16459
+                                         m (nth vec__16461 (int 0) nil)
+                                         newdir (nth vec__16461 (int 1) nil)
+                                         t (.-t ^datomic.log.LogDir direntry)
+                                         segid (.-uuid ^datomic.log.LogDir direntry)]
+                                     (if (contains? segids segid)
+                                       (let [seg (common/getx lookup segid)
+                                             newsid (common/rand-uuid)
+                                             newseg (mapv
+                                                      (fn fn__16465
+                                                        ([p__16464]
+                                                          (let [map__16466 p__16464
+                                                                map__16466
                                                                 (if
-                                                                  (next map__16466)
-                                                                  (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                                    (to-array map__16466))
+                                                                  (seq? map__16466)
                                                                   (if
-                                                                    (seq map__16466)
-                                                                    (first map__16466)
-                                                                    {}))
-                                                                map__16466)
-                                                              tx map__16466
-                                                              data (get map__16466 :data)
-                                                              t (.getT (first data))]
-                                                             (if
-                                                               (contains? ts (long t))
-                                                               (assoc
-                                                                 tx
-                                                                 :data
-                                                                 (remove excise? data))
-                                                               tx))))
-                                                       seg)]
-                                          (write-excise-val cs newsid (fressianed-leaf newseg))
-                                          [(assoc m segid newsid)
-                                           (conj
-                                             newdir
-                                             (datomic.log.LogDir.
-                                               (long (.-t ^datomic.log.LogDir direntry))
-                                               newsid))])
-                                        [m (conj newdir direntry)]))))
-                                [m []]
-                                dir)
-                   m (nth vec__16452 (int 0) nil)
-                   newdir (nth vec__16452 (int 1) nil)
-                   newdid (common/rand-uuid)]
-               (write-excise-val cs newdid (fressianed-dir newdir))
-               (assoc m dirid newdid))))
-         {}
-         dir_map))))
+                                                                    (next map__16466)
+                                                                    (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                                      (to-array map__16466))
+                                                                    (if
+                                                                      (seq map__16466)
+                                                                      (first map__16466)
+                                                                      {}))
+                                                                  map__16466)
+                                                                tx map__16466
+                                                                data (get map__16466 :data)
+                                                                t (.getT (first data))]
+                                                            (if
+                                                              (contains? ts (long t))
+                                                              (assoc
+                                                                tx
+                                                                :data
+                                                                (remove excise? data))
+                                                              tx))))
+                                                      seg)]
+                                         (write-excise-val cs newsid (fressianed-leaf newseg))
+                                         [(assoc m segid newsid)
+                                          (conj
+                                            newdir
+                                            (datomic.log.LogDir.
+                                              (long (.-t ^datomic.log.LogDir direntry))
+                                              newsid))])
+                                       [m (conj newdir direntry)]))))
+                               [m []]
+                               dir)
+                  m (nth vec__16452 (int 0) nil)
+                  newdir (nth vec__16452 (int 1) nil)
+                  newdid (common/rand-uuid)]
+              (write-excise-val cs newdid (fressianed-dir newdir))
+              (assoc m dirid newdid))))
+        {}
+        dir_map)))
   (reset-meta!
     #'write-excised-log
     (assoc
@@ -1746,100 +1727,98 @@
       'excise
       :ns
       *ns*))
-  (def excise-root
-   (fn excise_root
-     ([cs lookup current_root_id p__16477]
-       (let [map__16478 p__16477
-             map__16478 (if (seq? map__16478)
-                          (if (next map__16478)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16478))
-                            (if (seq map__16478) (first map__16478) {}))
-                          map__16478)
-             dir_map (get map__16478 :dir-map)
-             replacements (get map__16478 :replacements)
-             log (log-tree lookup current_root_id)
-             root (get-root-val log)
-             dirs (into
-                    #{}
-                    (map
-                      (fn fn__16479 ([p1__16475#] (.-uuid ^datomic.log.LogDir p1__16475#)))
-                      root))
-             patch_dir (fn patch_dir
-                         ([replacements dir]
-                           (reduce
-                             (fn fn__16482
-                               ([newdir direntry]
-                                 (let [eid (.-uuid ^datomic.log.LogDir direntry)]
-                                   (conj
-                                     newdir
-                                     (let [temp__5802__auto__ (^clojure.lang.IFn replacements eid)]
-                                       (if temp__5802__auto__
-                                         (let [neweid temp__5802__auto__]
-                                           (datomic.log.LogDir.
-                                             (long (.-t ^datomic.log.LogDir direntry))
-                                             neweid))
-                                         direntry))))))
-                             []
-                             dir)))
-             pario (config/property "datomic.exciseIOParallelism")
-             cs (if pario
-                  (cluster/queueing-writer
-                    cs
-                    pario
-                    cluster/BOUNDING_TIMEOUT_MSEC
-                    (fn fn__16486
-                      ([p1__16476#] (monitor/add-stat :ExciseIOQueueCount p1__16476#))))
-                  cs)
-             changed_dirs (remove dirs (keys dir_map))
-             replacements (reduce
-                            (fn fn__16488
-                              ([m did]
-                                (let [segids (^clojure.lang.IFn dir_map did)
-                                      newdid (common/rand-uuid)
-                                      vec__16489 (seek-seg-path
-                                                   log
-                                                   (long
-                                                     (.getT
-                                                       (first
-                                                         (:data
-                                                           (first
-                                                             (common/getx
-                                                               lookup
-                                                               (^clojure.lang.IFn replacements
-                                                                 (first segids)))))))))
-                                      dirid (nth vec__16489 (int 0) nil)
-                                      _ (nth vec__16489 (int 1) nil)]
-                                  (if (not (contains? m dirid))
-                                    (let [dir (common/getx lookup dirid)
-                                          newdid (common/rand-uuid)
-                                          newdir (^clojure.lang.IFn patch_dir replacements dir)]
-                                      (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                     "datomic.log")]
-                                        (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                          (.debug
-                                            ^org.slf4j.Logger logger
-                                            (logger/process
-                                              {:event :log/excise-replace-rightmost,
-                                               :oldid dirid,
-                                               :newid newdid})))
-                                        nil)
-                                      (write-excise-val cs newdid (fressianed-dir newdir))
-                                      (assoc m dirid newdid))
-                                    m))))
-                            replacements
-                            changed_dirs)
-             changed_garbage (map replacements changed_dirs)
-             newroot (^clojure.lang.IFn patch_dir replacements root)
-             newrid (common/rand-uuid)]
-         (write-excise-val cs newrid (fressianed-dir newroot))
-         (when pario
-           (common/bounded-deref (cluster/finish-writer cs) cluster/BOUNDING_TIMEOUT_MSEC))
-         {:root-id (cluster/uuid->val-key newrid),
-          :garbage-ids
-          (map
-            cluster/uuid->val-key
-            (concat changed_garbage (cons (get-root-id log) (keys replacements))))}))))
+  (defn excise-root
+    ([cs lookup current_root_id p__16477]
+      (let [map__16478 p__16477
+            map__16478 (if (seq? map__16478)
+                         (if (next map__16478)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16478))
+                           (if (seq map__16478) (first map__16478) {}))
+                         map__16478)
+            dir_map (get map__16478 :dir-map)
+            replacements (get map__16478 :replacements)
+            log (log-tree lookup current_root_id)
+            root (get-root-val log)
+            dirs (into
+                   #{}
+                   (map
+                     (fn fn__16479 ([p1__16475#] (.-uuid ^datomic.log.LogDir p1__16475#)))
+                     root))
+            patch_dir (fn patch_dir
+                        ([replacements dir]
+                          (reduce
+                            (fn fn__16482
+                              ([newdir direntry]
+                                (let [eid (.-uuid ^datomic.log.LogDir direntry)]
+                                  (conj
+                                    newdir
+                                    (let [temp__5802__auto__ (^clojure.lang.IFn replacements eid)]
+                                      (if temp__5802__auto__
+                                        (let [neweid temp__5802__auto__]
+                                          (datomic.log.LogDir.
+                                            (long (.-t ^datomic.log.LogDir direntry))
+                                            neweid))
+                                        direntry))))))
+                            []
+                            dir)))
+            pario (config/property "datomic.exciseIOParallelism")
+            cs (if pario
+                 (cluster/queueing-writer
+                   cs
+                   pario
+                   cluster/BOUNDING_TIMEOUT_MSEC
+                   (fn fn__16486 ([p1__16476#] (monitor/add-stat :ExciseIOQueueCount p1__16476#))))
+                 cs)
+            changed_dirs (remove dirs (keys dir_map))
+            replacements (reduce
+                           (fn fn__16488
+                             ([m did]
+                               (let [segids (^clojure.lang.IFn dir_map did)
+                                     newdid (common/rand-uuid)
+                                     vec__16489 (seek-seg-path
+                                                  log
+                                                  (long
+                                                    (.getT
+                                                      (first
+                                                        (:data
+                                                          (first
+                                                            (common/getx
+                                                              lookup
+                                                              (^clojure.lang.IFn replacements
+                                                                (first segids)))))))))
+                                     dirid (nth vec__16489 (int 0) nil)
+                                     _ (nth vec__16489 (int 1) nil)]
+                                 (if (not (contains? m dirid))
+                                   (let [dir (common/getx lookup dirid)
+                                         newdid (common/rand-uuid)
+                                         newdir (^clojure.lang.IFn patch_dir replacements dir)]
+                                     (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                    "datomic.log")]
+                                       (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                         (.debug
+                                           ^org.slf4j.Logger logger
+                                           (logger/process
+                                             {:event :log/excise-replace-rightmost,
+                                              :oldid dirid,
+                                              :newid newdid})))
+                                       nil)
+                                     (write-excise-val cs newdid (fressianed-dir newdir))
+                                     (assoc m dirid newdid))
+                                   m))))
+                           replacements
+                           changed_dirs)
+            changed_garbage (map replacements changed_dirs)
+            newroot (^clojure.lang.IFn patch_dir replacements root)
+            newrid (common/rand-uuid)]
+        (write-excise-val cs newrid (fressianed-dir newroot))
+        (when pario
+          (common/bounded-deref (cluster/finish-writer cs) cluster/BOUNDING_TIMEOUT_MSEC))
+        {:root-id (cluster/uuid->val-key newrid),
+         :garbage-ids
+         (map
+           cluster/uuid->val-key
+           (concat changed_garbage (cons (get-root-id log) (keys replacements))))})))
   (reset-meta!
     #'excise-root
     (assoc
@@ -1894,21 +1873,20 @@
        ([this k]
          (let [comp (common/key-comparator log-key) idx (binary-search (.-txes this) k comp)]
            (when idx (datomic.log.TailTxIter. (.-txes this) (long ^java.lang.Number idx))))))})
-  (def tx-range
-   (fn tx_range
-     ([log db start end]
-       (let [start (if start (max 1000 (db/t-at-or-since db start)) 1000)
-             next_t (.getNextT ^datomic.db.IDb db)
-             end (if end (min next_t (db/t-at-or-since db end)) next_t)]
-         (reify
-           java.lang.Iterable
-           (^java.util.Iterator iterator
-             [this]
-             (iter/iterator
-               (let [ret (seek-tx log start)]
-                 (if end
-                   (iter/take-while (fn fn__16519 ([p1__16517#] (< (:t p1__16517#) end))) ret)
-                   ret)))))))))
+  (defn tx-range
+    ([log db start end]
+      (let [start (if start (max 1000 (db/t-at-or-since db start)) 1000)
+            next_t (.getNextT ^datomic.db.IDb db)
+            end (if end (min next_t (db/t-at-or-since db end)) next_t)]
+        (reify
+          java.lang.Iterable
+          (^java.util.Iterator iterator
+            [this]
+            (iter/iterator
+              (let [ret (seek-tx log start)]
+                (if end
+                  (iter/take-while (fn fn__16519 ([p1__16517#] (< (:t p1__16517#) end))) ret)
+                  ret))))))))
   (reset-meta!
     #'tx-range
     (assoc
@@ -1963,8 +1941,7 @@
                   (recur (.next ^datomic.iter.Iter iter))
                   iter))))))))
   (clojure.core/import 'datomic.log.LogValue)
-  (def ->LogValue
-   (fn __GT_LogValue ([db olookup root_id tail] (datomic.log.LogValue. db olookup root_id tail))))
+  (defn ->LogValue ([db olookup root_id tail] (datomic.log.LogValue. db olookup root_id tail)))
   (reset-meta!
     #'->LogValue
     (assoc
@@ -1987,19 +1964,18 @@
       'map->LogValue
       :ns
       *ns*))
-  (def segmented-basis-t
-   (fn segmented_basis_t
-     ([log_value]
-       (let [olookup (:olookup log_value)]
-         (:t
-           (last
-             (common/getx
-               olookup
-               (:uuid
-                 (last
-                   (common/getx
-                     olookup
-                     (:uuid (last (common/getx olookup (get-root-id log_value))))))))))))))
+  (defn segmented-basis-t
+    ([log_value]
+      (let [olookup (:olookup log_value)]
+        (:t
+          (last
+            (common/getx
+              olookup
+              (:uuid
+                (last
+                  (common/getx
+                    olookup
+                    (:uuid (last (common/getx olookup (get-root-id log_value)))))))))))))
   (reset-meta!
     #'segmented-basis-t
     (assoc
@@ -2008,19 +1984,18 @@
       'segmented-basis-t
       :ns
       *ns*))
-  (def create-log-val
-   (fn create_log_val
-     ([cs olookup db]
-       (when-not cs (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'cs)))))
-       (when-not olookup
-         (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'olookup)))))
-       (when-not db (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db)))))
-       (let [temp__5804__auto__ (deref (cluster/get-pod-meta cs (tail-pod-key cs)))]
-         (when temp__5804__auto__
-           (let [desc temp__5804__auto__
-                 desc (normalize-desc desc cs)
-                 root_id (cluster/val-key->uuid (:d/r desc))]
-             (->LogValue db olookup root_id (:memlog db))))))))
+  (defn create-log-val
+    ([cs olookup db]
+      (when-not cs (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'cs)))))
+      (when-not olookup
+        (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'olookup)))))
+      (when-not db (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'db)))))
+      (let [temp__5804__auto__ (deref (cluster/get-pod-meta cs (tail-pod-key cs)))]
+        (when temp__5804__auto__
+          (let [desc temp__5804__auto__
+                desc (normalize-desc desc cs)
+                root_id (cluster/val-key->uuid (:d/r desc))]
+            (->LogValue db olookup root_id (:memlog db)))))))
   (reset-meta!
     #'create-log-val
     (assoc
@@ -2047,25 +2022,24 @@
   (reset-meta!
     #'max-eidx
     (assoc {:arglists (clojure.core/list ['datoms]), :column (int 1)} :name 'max-eidx :ns *ns*))
-  (def last-tree-tx
-   (fn last_tree_tx
-     ([olookup root_id]
-       (let [root (common/getx olookup root_id)
-             dir_id (:uuid (last-by-nth root))
-             dir (when dir_id (common/getx olookup dir_id))
-             leaf_id (:uuid (last-by-nth dir))]
-         (last-by-nth (when leaf_id (common/getx olookup leaf_id)))))
-     ([p__16563]
-       (let [map__16564 p__16563
-             map__16564 (if (seq? map__16564)
-                          (if (next map__16564)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16564))
-                            (if (seq map__16564) (first map__16564) {}))
-                          map__16564)
-             log map__16564
-             olookup (get map__16564 :olookup)]
-         (last-tree-tx olookup (or (:root-id log) (get-root-id log)))))))
+  (defn last-tree-tx
+    ([olookup root_id]
+      (let [root (common/getx olookup root_id)
+            dir_id (:uuid (last-by-nth root))
+            dir (when dir_id (common/getx olookup dir_id))
+            leaf_id (:uuid (last-by-nth dir))]
+        (last-by-nth (when leaf_id (common/getx olookup leaf_id)))))
+    ([p__16563]
+      (let [map__16564 p__16563
+            map__16564 (if (seq? map__16564)
+                         (if (next map__16564)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16564))
+                           (if (seq map__16564) (first map__16564) {}))
+                         map__16564)
+            log map__16564
+            olookup (get map__16564 :olookup)]
+        (last-tree-tx olookup (or (:root-id log) (get-root-id log))))))
   (reset-meta!
     #'last-tree-tx
     (assoc
@@ -2144,23 +2118,22 @@
       'combine-last-if
       :ns
       *ns*))
-  (def create-leaves*
-   (fn create_leaves_STAR_
-     ([target_size ftxes]
-       (let [weigh (comp io/remaining second)]
-         (sequence
-           (comp
-             (partition-by-weight weigh target_size)
-             (combine-last-if
-               (fn fn__16586 ([ftxes] (< (apply + (map weigh ftxes)) (quot target_size 2))))
-               into)
-             (map
-               (fn fn__16588
-                 ([ftxes]
-                   [(ffirst ftxes)
-                    (io/unchunk
-                      (concat [BEGIN_CLOSED_LIST] (map second ftxes) [END_COLLECTION]))]))))
-           ftxes)))))
+  (defn create-leaves*
+    ([target_size ftxes]
+      (let [weigh (comp io/remaining second)]
+        (sequence
+          (comp
+            (partition-by-weight weigh target_size)
+            (combine-last-if
+              (fn fn__16586 ([ftxes] (< (apply + (map weigh ftxes)) (quot target_size 2))))
+              into)
+            (map
+              (fn fn__16588
+                ([ftxes]
+                  [(ffirst ftxes)
+                   (io/unchunk
+                     (concat [BEGIN_CLOSED_LIST] (map second ftxes) [END_COLLECTION]))]))))
+          ftxes))))
   (reset-meta!
     #'create-leaves*
     (assoc
@@ -2169,17 +2142,16 @@
       'create-leaves*
       :ns
       *ns*))
-  (def create-leaves
-   (fn create_leaves
-     ([target_size tail]
-       (when-not (every? resets-caches? (:bufs tail))
-         (throw
-           (java.lang.AssertionError.
-             (str
-               "Assert failed: "
-               (pr-str
-                 (clojure.core/list 'every? 'resets-caches? (clojure.core/list :bufs 'tail)))))))
-       (create-leaves* target_size (map vector (tail-ts tail) (:bufs tail))))))
+  (defn create-leaves
+    ([target_size tail]
+      (when-not (every? resets-caches? (:bufs tail))
+        (throw
+          (java.lang.AssertionError.
+            (str
+              "Assert failed: "
+              (pr-str
+                (clojure.core/list 'every? 'resets-caches? (clojure.core/list :bufs 'tail)))))))
+      (create-leaves* target_size (map vector (tail-ts tail) (:bufs tail)))))
   (reset-meta!
     #'create-leaves
     (assoc
@@ -2235,31 +2207,30 @@
       'select-dirs-to-merge
       :ns
       *ns*))
-  (def coalesce
-   (fn coalesce
-     ([cs root p__16608]
-       (let [map__16609 p__16608
-             map__16609 (if (seq? map__16609)
-                          (if (next map__16609)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16609))
-                            (if (seq map__16609) (first map__16609) {}))
-                          map__16609)
-             u0 (get map__16609 :u0)
-             u1 (get map__16609 :u1)
-             d0 (get map__16609 :d0)
-             d1 (get map__16609 :d1)
-             i (get map__16609 :i)
-             new_dir_id (common/rand-uuid)
-             new_dir_entry (datomic.log.LogDir. (long (get-in d0 [0 :t])) new_dir_id)
-             new_dir* (zip-and-create cs new_dir_id (fressianed-dir (into d0 d1)) :dir)
-             garbage (mapv cluster/uuid->val-key [u0 u1])
-             root (vec root)]
-         [(into
-            (assoc (subvec root 0 (long (inc (long ^java.lang.Number i)))) i new_dir_entry)
-            (subvec root (long (+ 2 (long ^java.lang.Number i)))))
-          [new_dir*]
-          garbage]))))
+  (defn coalesce
+    ([cs root p__16608]
+      (let [map__16609 p__16608
+            map__16609 (if (seq? map__16609)
+                         (if (next map__16609)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16609))
+                           (if (seq map__16609) (first map__16609) {}))
+                         map__16609)
+            u0 (get map__16609 :u0)
+            u1 (get map__16609 :u1)
+            d0 (get map__16609 :d0)
+            d1 (get map__16609 :d1)
+            i (get map__16609 :i)
+            new_dir_id (common/rand-uuid)
+            new_dir_entry (datomic.log.LogDir. (long (get-in d0 [0 :t])) new_dir_id)
+            new_dir* (zip-and-create cs new_dir_id (fressianed-dir (into d0 d1)) :dir)
+            garbage (mapv cluster/uuid->val-key [u0 u1])
+            root (vec root)]
+        [(into
+           (assoc (subvec root 0 (long (inc (long ^java.lang.Number i)))) i new_dir_entry)
+           (subvec root (long (+ 2 (long ^java.lang.Number i)))))
+         [new_dir*]
+         garbage])))
   (reset-meta!
     #'coalesce
     (assoc
@@ -2289,50 +2260,49 @@
       'coalesce-dirs
       :ns
       *ns*))
-  (def extend-tree
-   (fn extend_tree
-     ([cs olookup root_id target_dir_count leaf_segs]
-       (let [leaf_ts (map first leaf_segs)
-             leaf_bufs (map second leaf_segs)
-             new_seg_t (ffirst leaf_segs)
-             root (vec (common/getx olookup root_id))
-             old_tail_dir_uuid (common/getx (peek root) :uuid)
-             tail_dir (vec (common/getx olookup old_tail_dir_uuid))
-             new_tail_dir? (>= (count tail_dir) target_dir_count)
-             leaf_ids (repeatedly
-                        (java.lang.Integer/valueOf (int (count leaf_bufs)))
-                        common/rand-uuid)
-             vec__16614 (repeatedly common/rand-uuid)
-             new_root_id (nth vec__16614 (int 0) nil)
-             new_dir_id (nth vec__16614 (int 1) nil)
-             new_tail_dir (into (if new_tail_dir? [] tail_dir) (map create-entry leaf_ts leaf_ids))
-             new_root_entry (if new_tail_dir?
-                              (create-entry new_seg_t new_dir_id)
-                              (create-entry (common/getx (peek root) :t) new_dir_id))
-             new_root (if new_tail_dir?
-                        (conj root new_root_entry)
-                        (assoc root (long (dec (count root))) new_root_entry))
-             vec__16617 (coalesce-dirs cs olookup new_root)
-             new_root (nth vec__16617 (int 0) nil)
-             coalesce_in_flight (nth vec__16617 (int 1) nil)
-             coalesce_garbage (nth vec__16617 (int 2) nil)
-             garbage_ids (cond->
-                           (conj coalesce_garbage root_id)
-                           (not new_tail_dir?)
-                           (conj (cluster/uuid->val-key old_tail_dir_uuid)))
-             create (fn create ([uuid val buf_type] (zip-and-create cs uuid val buf_type)))
-             vals (conj (vec leaf_bufs) (fressianed-dir new_tail_dir) (fressianed-dir new_root))
-             buf_types (into
-                         (vec (repeat (java.lang.Integer/valueOf (int (count leaf_bufs))) :leaf))
-                         [:dir :root])
-             ids (conj (vec leaf_ids) new_dir_id new_root_id)
-             results (into coalesce_in_flight (map create ids vals buf_types))]
-         (if (every? (fn fn__16623 ([p1__16613#] (= p1__16613# :created))) (map deref results))
-           {:root-id (cluster/uuid->val-key new_root_id),
-            :dir-id (cluster/uuid->val-key new_dir_id),
-            :leaf-ts leaf_ts,
-            :garbage-ids garbage_ids}
-           (do (throw (java.lang.Error. "Write failure extending log tree")) nil))))))
+  (defn extend-tree
+    ([cs olookup root_id target_dir_count leaf_segs]
+      (let [leaf_ts (map first leaf_segs)
+            leaf_bufs (map second leaf_segs)
+            new_seg_t (ffirst leaf_segs)
+            root (vec (common/getx olookup root_id))
+            old_tail_dir_uuid (common/getx (peek root) :uuid)
+            tail_dir (vec (common/getx olookup old_tail_dir_uuid))
+            new_tail_dir? (>= (count tail_dir) target_dir_count)
+            leaf_ids (repeatedly
+                       (java.lang.Integer/valueOf (int (count leaf_bufs)))
+                       common/rand-uuid)
+            vec__16614 (repeatedly common/rand-uuid)
+            new_root_id (nth vec__16614 (int 0) nil)
+            new_dir_id (nth vec__16614 (int 1) nil)
+            new_tail_dir (into (if new_tail_dir? [] tail_dir) (map create-entry leaf_ts leaf_ids))
+            new_root_entry (if new_tail_dir?
+                             (create-entry new_seg_t new_dir_id)
+                             (create-entry (common/getx (peek root) :t) new_dir_id))
+            new_root (if new_tail_dir?
+                       (conj root new_root_entry)
+                       (assoc root (long (dec (count root))) new_root_entry))
+            vec__16617 (coalesce-dirs cs olookup new_root)
+            new_root (nth vec__16617 (int 0) nil)
+            coalesce_in_flight (nth vec__16617 (int 1) nil)
+            coalesce_garbage (nth vec__16617 (int 2) nil)
+            garbage_ids (cond->
+                          (conj coalesce_garbage root_id)
+                          (not new_tail_dir?)
+                          (conj (cluster/uuid->val-key old_tail_dir_uuid)))
+            create (fn create ([uuid val buf_type] (zip-and-create cs uuid val buf_type)))
+            vals (conj (vec leaf_bufs) (fressianed-dir new_tail_dir) (fressianed-dir new_root))
+            buf_types (into
+                        (vec (repeat (java.lang.Integer/valueOf (int (count leaf_bufs))) :leaf))
+                        [:dir :root])
+            ids (conj (vec leaf_ids) new_dir_id new_root_id)
+            results (into coalesce_in_flight (map create ids vals buf_types))]
+        (if (every? (fn fn__16623 ([p1__16613#] (= p1__16613# :created))) (map deref results))
+          {:root-id (cluster/uuid->val-key new_root_id),
+           :dir-id (cluster/uuid->val-key new_dir_id),
+           :leaf-ts leaf_ts,
+           :garbage-ids garbage_ids}
+          (do (throw (java.lang.Error. "Write failure extending log tree")) nil)))))
   (reset-meta!
     #'extend-tree
     (assoc

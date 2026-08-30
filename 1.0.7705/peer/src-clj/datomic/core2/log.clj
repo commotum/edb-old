@@ -20,24 +20,23 @@
           ['clojure.core.async :as 'a :refer (clojure.core/list 'go '<! '>!)]
           ['datomic.core2.anomalies :refer (clojure.core/list 'anom)]
           ['datomic.core2.log.spi :as 'spi]))))
-  (def append
-   (fn append
-     ([log p__21417 body]
-       (let [map__21418 p__21417
-             map__21418 (if (seq? map__21418)
-                          (if (next map__21418)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21418))
-                            (if (seq map__21418) (first map__21418) {}))
-                          map__21418)
-             header map__21418
-             t (get map__21418 :t)
-             next_t (get map__21418 :next-t)]
-         (when-not t (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 't)))))
-         (when-not next_t
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'next-t)))))
-         (spi/-append log header body)))
-     ([log header] (append log header nil))))
+  (defn append
+    ([log p__21417 body]
+      (let [map__21418 p__21417
+            map__21418 (if (seq? map__21418)
+                         (if (next map__21418)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21418))
+                           (if (seq map__21418) (first map__21418) {}))
+                         map__21418)
+            header map__21418
+            t (get map__21418 :t)
+            next_t (get map__21418 :next-t)]
+        (when-not t (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 't)))))
+        (when-not next_t
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'next-t)))))
+        (spi/-append log header body)))
+    ([log header] (append log header nil)))
   (reset-meta!
     #'append
     (assoc

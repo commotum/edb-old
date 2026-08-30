@@ -104,21 +104,20 @@
       'uncached-lookup-factory
       :ns
       *ns*))
-  (def create-object-cache
-   (fn create_object_cache
-     ([cache_bytes]
-       (do
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.domain")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process {:event :cache/create, :cache-bytes cache_bytes})))
-           nil)
-         (cache/create-scaled-weight-limited
-           (long (* 0.9 cache_bytes))
-           (fn fn__17935 ([k v] (long (+ (size/memory-size k) (size/memory-size v)))))
-           1000)))
-     ([] (create-object-cache (config/property "datomic.objectCacheMax")))))
+  (defn create-object-cache
+    ([cache_bytes]
+      (do
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.domain")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process {:event :cache/create, :cache-bytes cache_bytes})))
+          nil)
+        (cache/create-scaled-weight-limited
+          (long (* 0.9 cache_bytes))
+          (fn fn__17935 ([k v] (long (+ (size/memory-size k) (size/memory-size v)))))
+          1000)))
+    ([] (create-object-cache (config/property "datomic.objectCacheMax"))))
   (reset-meta!
     #'create-object-cache
     (assoc
@@ -142,10 +141,9 @@
     (deref [this] (deref server_specs_ref))
     (^void close [this] (do (.close ^java.lang.AutoCloseable timer) nil)))
   (clojure.core/import 'datomic.domain.ValcachePoller)
-  (def ->ValcachePoller
-   (fn __GT_ValcachePoller
-     ([cluster valcache_group_config server_specs_ref timer]
-       (datomic.domain.ValcachePoller. cluster valcache_group_config server_specs_ref timer))))
+  (defn ->ValcachePoller
+    ([cluster valcache_group_config server_specs_ref timer]
+      (datomic.domain.ValcachePoller. cluster valcache_group_config server_specs_ref timer)))
   (reset-meta!
     #'->ValcachePoller
     (assoc
@@ -168,40 +166,39 @@
   (reset-meta!
     #'system-cache
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'system-cache :ns *ns*))
-  (def peer-object-lookup
-   (fn peer_object_lookup
-     ([val_lookup read_lookup object_cache]
-       (let [load_counter (fn load_counter ([ctr] (keyword (str (name ctr) "-load"))))]
-         (cache/lookup-cache
-           (cache/lookup-with-inflight-cache
-             (cache/lookup-transformer
-               val_lookup
-               :key-fn
-               cluster/uuid->val-key
-               :val-fn
-               (fressian/val->obj read_lookup)))
-           object_cache
-           (fn fn__17952
-             ([k h_or_m]
-               (io-stats/inc! :ocache)
-               (let [index_counter io-stats/*io-index*
-                     seg_type_counter io-stats/*io-seg-type*
-                     leaf? (and (not= seg_type_counter :dir) index_counter)]
-                 (when leaf? (io-stats/inc! index_counter))
-                 (when (and seg_type_counter (not= seg_type_counter :dir))
-                   (io-stats/inc! seg_type_counter))
-                 (when (= :miss h_or_m)
-                   (cond
-                     leaf? (io-stats/inc! (^clojure.lang.IFn load_counter index_counter))
-                     seg_type_counter (do
-                                        (when (= seg_type_counter :dir)
-                                          (monitor/add-stat :DirLoads 1))
-                                        (io-stats/inc!
-                                          (^clojure.lang.IFn load_counter seg_type_counter))))))
-               (monitor/add-stat
-                 :ObjectCache
-                 (let [G__17953 h_or_m] (case G__17953 :miss 0 :hit 1))))))))
-     ([val_lookup read_lookup] (peer-object-lookup val_lookup read_lookup (system-cache)))))
+  (defn peer-object-lookup
+    ([val_lookup read_lookup object_cache]
+      (let [load_counter (fn load_counter ([ctr] (keyword (str (name ctr) "-load"))))]
+        (cache/lookup-cache
+          (cache/lookup-with-inflight-cache
+            (cache/lookup-transformer
+              val_lookup
+              :key-fn
+              cluster/uuid->val-key
+              :val-fn
+              (fressian/val->obj read_lookup)))
+          object_cache
+          (fn fn__17952
+            ([k h_or_m]
+              (io-stats/inc! :ocache)
+              (let [index_counter io-stats/*io-index*
+                    seg_type_counter io-stats/*io-seg-type*
+                    leaf? (and (not= seg_type_counter :dir) index_counter)]
+                (when leaf? (io-stats/inc! index_counter))
+                (when (and seg_type_counter (not= seg_type_counter :dir))
+                  (io-stats/inc! seg_type_counter))
+                (when (= :miss h_or_m)
+                  (cond
+                    leaf? (io-stats/inc! (^clojure.lang.IFn load_counter index_counter))
+                    seg_type_counter (do
+                                       (when (= seg_type_counter :dir)
+                                         (monitor/add-stat :DirLoads 1))
+                                       (io-stats/inc!
+                                         (^clojure.lang.IFn load_counter seg_type_counter))))))
+              (monitor/add-stat
+                :ObjectCache
+                (let [G__17953 h_or_m] (case G__17953 :miss 0 :hit 1))))))))
+    ([val_lookup read_lookup] (peer-object-lookup val_lookup read_lookup (system-cache))))
   (reset-meta!
     #'peer-object-lookup
     (assoc
@@ -282,35 +279,34 @@
       'deserializing-repairing-lookup
       :ns
       *ns*))
-  (def lookup-with-object-cache
-   (fn lookup_with_object_cache
-     ([lookup object_cache]
-       (let [load_counter (fn load_counter ([ctr] (keyword (str (name ctr) "-load"))))]
-         (cache/lookup-cache
-           lookup
-           object_cache
-           (fn fn__17970
-             ([k h_or_m]
-               (io-stats/inc! :ocache)
-               (let [index_counter io-stats/*io-index*
-                     seg_type_counter io-stats/*io-seg-type*
-                     leaf? (and (not= seg_type_counter :dir) index_counter)]
-                 (io-trace/note! k index_counter)
-                 (when leaf? (io-stats/inc! index_counter))
-                 (when (and seg_type_counter (not= seg_type_counter :dir))
-                   (io-stats/inc! seg_type_counter))
-                 (when (= :miss h_or_m)
-                   (cond
-                     leaf? (io-stats/inc! (^clojure.lang.IFn load_counter index_counter))
-                     seg_type_counter (do
-                                        (when (= seg_type_counter :dir)
-                                          (monitor/add-stat :DirLoads 1))
-                                        (io-stats/inc!
-                                          (^clojure.lang.IFn load_counter seg_type_counter))))))
-               (monitor/add-stat
-                 :ObjectCache
-                 (let [G__17971 h_or_m] (case G__17971 :miss 0 :hit 1))))))))
-     ([lookup] (lookup-with-object-cache lookup (system-cache)))))
+  (defn lookup-with-object-cache
+    ([lookup object_cache]
+      (let [load_counter (fn load_counter ([ctr] (keyword (str (name ctr) "-load"))))]
+        (cache/lookup-cache
+          lookup
+          object_cache
+          (fn fn__17970
+            ([k h_or_m]
+              (io-stats/inc! :ocache)
+              (let [index_counter io-stats/*io-index*
+                    seg_type_counter io-stats/*io-seg-type*
+                    leaf? (and (not= seg_type_counter :dir) index_counter)]
+                (io-trace/note! k index_counter)
+                (when leaf? (io-stats/inc! index_counter))
+                (when (and seg_type_counter (not= seg_type_counter :dir))
+                  (io-stats/inc! seg_type_counter))
+                (when (= :miss h_or_m)
+                  (cond
+                    leaf? (io-stats/inc! (^clojure.lang.IFn load_counter index_counter))
+                    seg_type_counter (do
+                                       (when (= seg_type_counter :dir)
+                                         (monitor/add-stat :DirLoads 1))
+                                       (io-stats/inc!
+                                         (^clojure.lang.IFn load_counter seg_type_counter))))))
+              (monitor/add-stat
+                :ObjectCache
+                (let [G__17971 h_or_m] (case G__17971 :miss 0 :hit 1))))))))
+    ([lookup] (lookup-with-object-cache lookup (system-cache))))
   (reset-meta!
     #'lookup-with-object-cache
     (assoc

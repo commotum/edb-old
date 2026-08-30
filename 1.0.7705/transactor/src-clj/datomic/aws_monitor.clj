@@ -21,12 +21,12 @@
           ['datomic.cloudwatch :as 'cw]
           ['datomic.config :as 'config]
           ['datomic.slf4j :as 'logger]))))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Qn (qualified-name [_]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.aws-monitor" "Qn")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Qn :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Qn :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -36,12 +36,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.aws-monitor" "Qn"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.aws-monitor" "qualified-name")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend
     clojure.lang.Keyword
     Qn
@@ -82,14 +82,14 @@
        :StorageGetBytes "Bytes",
        :StorageGetBackoffMsec "Milliseconds"}
       (zipmap (vals logger/event->timing) (repeat "Milliseconds"))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       ToMetricData
       (to-metric-data-helper [v k] "argument flipping helper for to-metric-data"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.aws-monitor" "ToMetricData")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'ToMetricData :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'ToMetricData :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -99,12 +99,12 @@
                                       :doc "argument flipping helper for to-metric-data"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.aws-monitor" "ToMetricData"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.aws-monitor" "to-metric-data-helper")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*))))
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*))))
   (extend
     java.util.Map
     ToMetricData
@@ -217,32 +217,31 @@
       'report-metrics
       :ns
       *ns*))
-  (def create-cloudwatch-reporter
-   (fn create_cloudwatch_reporter
-     ([& p__30714]
-       (let [map__30715 p__30714
-             map__30715 (if (seq? map__30715)
-                          (if (next map__30715)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__30715))
-                            (if (seq map__30715) (first map__30715) {}))
-                          map__30715)
-             name (get map__30715 :name)
-             creds (get map__30715 :creds)
-             aws_cloudwatch_dimension_value (get map__30715 :aws-cloudwatch-dimension-value)
-             aws_cloudwatch_region (get map__30715 :aws-cloudwatch-region)]
-         (when (and aws_cloudwatch_dimension_value aws_cloudwatch_region)
-           (let [client (if (:aws-access-key-id creds)
-                          (cw/client
-                            (aws/static-credentials-provider creds)
-                            {:region aws_cloudwatch_region})
-                          (cw/client {:region aws_cloudwatch_region}))]
-             (fn fn__30716
-               ([metrics]
-                 (report-metrics
-                   client
-                   [{:Name name, :Value aws_cloudwatch_dimension_value}]
-                   metrics)))))))))
+  (defn create-cloudwatch-reporter
+    ([& p__30714]
+      (let [map__30715 p__30714
+            map__30715 (if (seq? map__30715)
+                         (if (next map__30715)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__30715))
+                           (if (seq map__30715) (first map__30715) {}))
+                         map__30715)
+            name (get map__30715 :name)
+            creds (get map__30715 :creds)
+            aws_cloudwatch_dimension_value (get map__30715 :aws-cloudwatch-dimension-value)
+            aws_cloudwatch_region (get map__30715 :aws-cloudwatch-region)]
+        (when (and aws_cloudwatch_dimension_value aws_cloudwatch_region)
+          (let [client (if (:aws-access-key-id creds)
+                         (cw/client
+                           (aws/static-credentials-provider creds)
+                           {:region aws_cloudwatch_region})
+                         (cw/client {:region aws_cloudwatch_region}))]
+            (fn fn__30716
+              ([metrics]
+                (report-metrics
+                  client
+                  [{:Name name, :Value aws_cloudwatch_dimension_value}]
+                  metrics))))))))
   (reset-meta!
     #'create-cloudwatch-reporter
     (assoc

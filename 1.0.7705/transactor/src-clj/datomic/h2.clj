@@ -58,9 +58,8 @@
                (.setValidationQuery "SELECT 1")
                (.setTestWhileIdle (boolean (.booleanValue true)))
                (.setInitialSize (int 2)))})))))
-  (def create-sql-spec
-   (fn create_sql_spec
-     ([cluster_map] (locking driver-manager-lock (create-sql-spec* cluster_map)))))
+  (defn create-sql-spec
+    ([cluster_map] (locking driver-manager-lock (create-sql-spec* cluster_map))))
   (reset-meta!
     #'create-sql-spec
     (assoc
@@ -69,39 +68,38 @@
       'create-sql-spec
       :ns
       *ns*))
-  (def sql-url (fn sql_url ([data_dir] (str "jdbc:h2:" data_dir "/datomic"))))
+  (defn sql-url ([data_dir] (str "jdbc:h2:" data_dir "/datomic")))
   (reset-meta!
     #'sql-url
     (assoc {:arglists (clojure.core/list ['data-dir]), :column (int 1)} :name 'sql-url :ns *ns*))
-  (def try-connect
-   (fn try_connect
-     ([p__31540]
-       (let [map__31541 p__31540
-             map__31541 (if (seq? map__31541)
-                          (if (next map__31541)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31541))
-                            (if (seq map__31541) (first map__31541) {}))
-                          map__31541)
-             data_dir (get map__31541 :data-dir)
-             username (get map__31541 :username)
-             password (get map__31541 :password)]
-         (when-not (and data_dir username password)
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 (pr-str (clojure.core/list 'and 'data-dir 'username 'password))))))
-         (try
-           (sql/connect
-             (create-sql-spec
-               {:sql-url (sql-url data_dir), :username username, :password password}))
-           (catch
-             java.sql.SQLException
-             e
-             (when-not (= (.getErrorCode ^java.sql.SQLException e) 28000)
-               (throw ^java.lang.Throwable e)
-               nil)))))))
+  (defn try-connect
+    ([p__31540]
+      (let [map__31541 p__31540
+            map__31541 (if (seq? map__31541)
+                         (if (next map__31541)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31541))
+                           (if (seq map__31541) (first map__31541) {}))
+                         map__31541)
+            data_dir (get map__31541 :data-dir)
+            username (get map__31541 :username)
+            password (get map__31541 :password)]
+        (when-not (and data_dir username password)
+          (throw
+            (java.lang.AssertionError.
+              (str
+                "Assert failed: "
+                (pr-str (clojure.core/list 'and 'data-dir 'username 'password))))))
+        (try
+          (sql/connect
+            (create-sql-spec
+              {:sql-url (sql-url data_dir), :username username, :password password}))
+          (catch
+            java.sql.SQLException
+            e
+            (when-not (= (.getErrorCode ^java.sql.SQLException e) 28000)
+              (throw ^java.lang.Throwable e)
+              nil))))))
   (reset-meta!
     #'try-connect
     (assoc
@@ -114,20 +112,19 @@
   (reset-meta!
     #'uq
     (assoc {:arglists (clojure.core/list ['username]), :column (int 1)} :name 'uq :ns *ns*))
-  (def rename-user-cmd
-   (fn rename_user_cmd
-     ([p__31546]
-       (let [map__31547 p__31546
-             map__31547 (if (seq? map__31547)
-                          (if (next map__31547)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31547))
-                            (if (seq map__31547) (first map__31547) {}))
-                          map__31547)
-             old_user (get map__31547 :old-user)
-             user (get map__31547 :user)]
-         (when (and (and old_user user) (not= old_user user))
-           (format "alter user %s rename to %s" (uq old_user) (uq user)))))))
+  (defn rename-user-cmd
+    ([p__31546]
+      (let [map__31547 p__31546
+            map__31547 (if (seq? map__31547)
+                         (if (next map__31547)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31547))
+                           (if (seq map__31547) (first map__31547) {}))
+                         map__31547)
+            old_user (get map__31547 :old-user)
+            user (get map__31547 :user)]
+        (when (and (and old_user user) (not= old_user user))
+          (format "alter user %s rename to %s" (uq old_user) (uq user))))))
   (reset-meta!
     #'rename-user-cmd
     (assoc
@@ -136,20 +133,18 @@
       'rename-user-cmd
       :ns
       *ns*))
-  (def set-password-cmd
-   (fn set_password_cmd
-     ([p__31551]
-       (let [map__31552 p__31551
-             map__31552 (if (seq? map__31552)
-                          (if (next map__31552)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31552))
-                            (if (seq map__31552) (first map__31552) {}))
-                          map__31552)
-             user (get map__31552 :user)
-             password (get map__31552 :password)]
-         (when (and user password)
-           (format "alter user %s set password '%s'" (uq user) password))))))
+  (defn set-password-cmd
+    ([p__31551]
+      (let [map__31552 p__31551
+            map__31552 (if (seq? map__31552)
+                         (if (next map__31552)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31552))
+                           (if (seq map__31552) (first map__31552) {}))
+                         map__31552)
+            user (get map__31552 :user)
+            password (get map__31552 :password)]
+        (when (and user password) (format "alter user %s set password '%s'" (uq user) password)))))
   (reset-meta!
     #'set-password-cmd
     (assoc
@@ -158,39 +153,38 @@
       'set-password-cmd
       :ns
       *ns*))
-  (def updating-connect
-   (fn updating_connect
-     ([data_dir p__31555]
-       (let [map__31556 p__31555
-             map__31556 (if (seq? map__31556)
-                          (if (next map__31556)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31556))
-                            (if (seq map__31556) (first map__31556) {}))
-                          map__31556)
-             args map__31556
-             user (get map__31556 :user)
-             password (get map__31556 :password)
-             old_user (get map__31556 :old-user)
-             old_password (get map__31556 :old-password)]
-         (when (and old_user user old_password password)
-           (let [temp__5825__auto__ (try-connect
-                                      {:data-dir data_dir,
-                                       :username old_user,
-                                       :password old_password})]
-             (when temp__5825__auto__
-               (let [conn temp__5825__auto__]
-                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.h2")]
-                   (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                     (.info
-                       ^org.slf4j.Logger logger
-                       (logger/process {:event :storage/update-password, :user user})))
-                   nil)
-                 (apply
-                   sql/execute-commands
-                   conn
-                   (filter identity [(rename-user-cmd args) (set-password-cmd args)]))
-                 conn))))))))
+  (defn updating-connect
+    ([data_dir p__31555]
+      (let [map__31556 p__31555
+            map__31556 (if (seq? map__31556)
+                         (if (next map__31556)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31556))
+                           (if (seq map__31556) (first map__31556) {}))
+                         map__31556)
+            args map__31556
+            user (get map__31556 :user)
+            password (get map__31556 :password)
+            old_user (get map__31556 :old-user)
+            old_password (get map__31556 :old-password)]
+        (when (and old_user user old_password password)
+          (let [temp__5825__auto__ (try-connect
+                                     {:data-dir data_dir,
+                                      :username old_user,
+                                      :password old_password})]
+            (when temp__5825__auto__
+              (let [conn temp__5825__auto__]
+                (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.h2")]
+                  (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                    (.info
+                      ^org.slf4j.Logger logger
+                      (logger/process {:event :storage/update-password, :user user})))
+                  nil)
+                (apply
+                  sql/execute-commands
+                  conn
+                  (filter identity [(rename-user-cmd args) (set-password-cmd args)]))
+                conn)))))))
   (reset-meta!
     #'updating-connect
     (assoc
@@ -202,33 +196,32 @@
       'updating-connect
       :ns
       *ns*))
-  (def ensure-admin-conn
-   (fn ensure_admin_conn
-     ([p__31562]
-       (let [map__31563 p__31562
-             map__31563 (if (seq? map__31563)
-                          (if (next map__31563)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31563))
-                            (if (seq map__31563) (first map__31563) {}))
-                          map__31563)
-             cluster_map map__31563
-             data_dir (get map__31563 :data-dir)
-             storage_admin_password (get map__31563 :storage-admin-password)
-             old_storage_admin_password (get map__31563 :old-storage-admin-password)]
-         (or
-           (if storage_admin_password
-             (try-connect {:data-dir data_dir, :username "", :password storage_admin_password})
-             (try-connect {:data-dir data_dir, :username "", :password ""}))
-           (updating-connect
-             data_dir
-             {:old-user "",
-              :old-password old_storage_admin_password,
-              :user "",
-              :password storage_admin_password})
-           (updating-connect
-             data_dir
-             {:old-user "", :old-password "", :user "", :password storage_admin_password}))))))
+  (defn ensure-admin-conn
+    ([p__31562]
+      (let [map__31563 p__31562
+            map__31563 (if (seq? map__31563)
+                         (if (next map__31563)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31563))
+                           (if (seq map__31563) (first map__31563) {}))
+                         map__31563)
+            cluster_map map__31563
+            data_dir (get map__31563 :data-dir)
+            storage_admin_password (get map__31563 :storage-admin-password)
+            old_storage_admin_password (get map__31563 :old-storage-admin-password)]
+        (or
+          (if storage_admin_password
+            (try-connect {:data-dir data_dir, :username "", :password storage_admin_password})
+            (try-connect {:data-dir data_dir, :username "", :password ""}))
+          (updating-connect
+            data_dir
+            {:old-user "",
+             :old-password old_storage_admin_password,
+             :user "",
+             :password storage_admin_password})
+          (updating-connect
+            data_dir
+            {:old-user "", :old-password "", :user "", :password storage_admin_password})))))
   (reset-meta!
     #'ensure-admin-conn
     (assoc
@@ -241,37 +234,36 @@
       'ensure-admin-conn
       :ns
       *ns*))
-  (def ensure-datomic-password
-   (fn ensure_datomic_password
-     ([p__31567]
-       (let [map__31568 p__31567
-             map__31568 (if (seq? map__31568)
-                          (if (next map__31568)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31568))
-                            (if (seq map__31568) (first map__31568) {}))
-                          map__31568)
-             cluster_map map__31568
-             data_dir (get map__31568 :data-dir)
-             storage_datomic_password (get map__31568 :storage-datomic-password)
-             old_storage_datomic_password (get map__31568 :old-storage-datomic-password)]
-         (or
-           (if storage_datomic_password
-             (try-connect
-               {:data-dir data_dir, :username "datomic", :password storage_datomic_password})
-             (try-connect {:data-dir data_dir, :username "datomic", :password "datomic"}))
-           (updating-connect
-             data_dir
-             {:old-user "datomic",
-              :old-password old_storage_datomic_password,
-              :user "datomic",
-              :password storage_datomic_password})
-           (updating-connect
-             data_dir
-             {:old-user "datomic",
-              :old-password "datomic",
-              :user "datomic",
-              :password storage_datomic_password}))))))
+  (defn ensure-datomic-password
+    ([p__31567]
+      (let [map__31568 p__31567
+            map__31568 (if (seq? map__31568)
+                         (if (next map__31568)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31568))
+                           (if (seq map__31568) (first map__31568) {}))
+                         map__31568)
+            cluster_map map__31568
+            data_dir (get map__31568 :data-dir)
+            storage_datomic_password (get map__31568 :storage-datomic-password)
+            old_storage_datomic_password (get map__31568 :old-storage-datomic-password)]
+        (or
+          (if storage_datomic_password
+            (try-connect
+              {:data-dir data_dir, :username "datomic", :password storage_datomic_password})
+            (try-connect {:data-dir data_dir, :username "datomic", :password "datomic"}))
+          (updating-connect
+            data_dir
+            {:old-user "datomic",
+             :old-password old_storage_datomic_password,
+             :user "datomic",
+             :password storage_datomic_password})
+          (updating-connect
+            data_dir
+            {:old-user "datomic",
+             :old-password "datomic",
+             :user "datomic",
+             :password storage_datomic_password})))))
   (reset-meta!
     #'ensure-datomic-password
     (assoc
@@ -284,29 +276,28 @@
       'ensure-datomic-password
       :ns
       *ns*))
-  (def can-remote?
-   (fn can_remote_QMARK_
-     ([p__31572]
-       (let [map__31573 p__31572
-             map__31573 (if (seq? map__31573)
-                          (if (next map__31573)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31573))
-                            (if (seq map__31573) (first map__31573) {}))
-                          map__31573)
-             h2_init_spec map__31573
-             storage_access (get map__31573 :storage-access)
-             storage_datomic_password (get map__31573 :storage-datomic-password)
-             storage_admin_password (get map__31573 :storage-admin-password)]
-         (if (= "remote" storage_access)
-           (if (and storage_datomic_password storage_admin_password)
-             true
-             (do
-               (throw
-                 (java.lang.IllegalArgumentException.
-                   "You must set storage-datomic-password and storage-admin-password before enabling storage-access=remote."))
-               nil))
-           false)))))
+  (defn can-remote?
+    ([p__31572]
+      (let [map__31573 p__31572
+            map__31573 (if (seq? map__31573)
+                         (if (next map__31573)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31573))
+                           (if (seq map__31573) (first map__31573) {}))
+                         map__31573)
+            h2_init_spec map__31573
+            storage_access (get map__31573 :storage-access)
+            storage_datomic_password (get map__31573 :storage-datomic-password)
+            storage_admin_password (get map__31573 :storage-admin-password)]
+        (if (= "remote" storage_access)
+          (if (and storage_datomic_password storage_admin_password)
+            true
+            (do
+              (throw
+                (java.lang.IllegalArgumentException.
+                  "You must set storage-datomic-password and storage-admin-password before enabling storage-access=remote."))
+              nil))
+          false))))
   (reset-meta!
     #'can-remote?
     (assoc
@@ -342,38 +333,37 @@
   (reset-meta!
     #'init-embedded
     (assoc {:arglists (clojure.core/list ['spec]), :column (int 1)} :name 'init-embedded :ns *ns*))
-  (def init-tcp
-   (fn init_tcp
-     ([p__31580]
-       (let [map__31581 p__31580
-             map__31581 (if (seq? map__31581)
-                          (if (next map__31581)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31581))
-                            (if (seq map__31581) (first map__31581) {}))
-                          map__31581)
-             spec map__31581
-             host (get map__31581 :host)
-             h2_port (get map__31581 :h2-port)
-             data_dir (get map__31581 :data-dir)]
-         (init-embedded spec)
-         (let [conn (ensure-datomic-password spec)]
-           (if conn
-             (.close ^java.lang.AutoCloseable conn)
-             (throw (java.lang.RuntimeException. "Incorrect storage-datomic-password"))))
-         (let [server (Server/createTcpServer
-                        (into-array
-                          (concat
-                            (when (can-remote? spec) ["-tcpAllowOthers"])
-                            ["-ifExists"
-                             "-properties"
-                             ""
-                             "-tcpPort"
-                             (str h2_port)
-                             "-baseDir"
-                             data_dir])))]
-           (.start ^org.h2.tools.Server server)
-           (assoc spec :server server))))))
+  (defn init-tcp
+    ([p__31580]
+      (let [map__31581 p__31580
+            map__31581 (if (seq? map__31581)
+                         (if (next map__31581)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31581))
+                           (if (seq map__31581) (first map__31581) {}))
+                         map__31581)
+            spec map__31581
+            host (get map__31581 :host)
+            h2_port (get map__31581 :h2-port)
+            data_dir (get map__31581 :data-dir)]
+        (init-embedded spec)
+        (let [conn (ensure-datomic-password spec)]
+          (if conn
+            (.close ^java.lang.AutoCloseable conn)
+            (throw (java.lang.RuntimeException. "Incorrect storage-datomic-password"))))
+        (let [server (Server/createTcpServer
+                       (into-array
+                         (concat
+                           (when (can-remote? spec) ["-tcpAllowOthers"])
+                           ["-ifExists"
+                            "-properties"
+                            ""
+                            "-tcpPort"
+                            (str h2_port)
+                            "-baseDir"
+                            data_dir])))]
+          (.start ^org.h2.tools.Server server)
+          (assoc spec :server server)))))
   (reset-meta!
     #'init-tcp
     (assoc
@@ -383,19 +373,18 @@
       'init-tcp
       :ns
       *ns*))
-  (def shutdown
-   (fn shutdown
-     ([p__31583]
-       (let [map__31584 p__31583
-             map__31584 (if (seq? map__31584)
-                          (if (next map__31584)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31584))
-                            (if (seq map__31584) (first map__31584) {}))
-                          map__31584)
-             server (get map__31584 :server)]
-         (.stop ^org.h2.tools.Server server)
-         nil))))
+  (defn shutdown
+    ([p__31583]
+      (let [map__31584 p__31583
+            map__31584 (if (seq? map__31584)
+                         (if (next map__31584)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31584))
+                           (if (seq map__31584) (first map__31584) {}))
+                         map__31584)
+            server (get map__31584 :server)]
+        (.stop ^org.h2.tools.Server server)
+        nil)))
   (reset-meta!
     #'shutdown
     (assoc
@@ -405,25 +394,24 @@
       'shutdown
       :ns
       *ns*))
-  (def local-jdbc-spec
-   (fn local_jdbc_spec
-     ([p__31586]
-       (let [map__31587 p__31586
-             map__31587 (if (seq? map__31587)
-                          (if (next map__31587)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31587))
-                            (if (seq map__31587) (first map__31587) {}))
-                          map__31587)
-             cluster_map map__31587
-             data_dir (get map__31587 :data-dir)
-             storage_datomic_password (get map__31587 :storage-datomic-password)]
-         (when-not data_dir
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'data-dir)))))
-         (create-sql-spec
-           {:sql-url (str "jdbc:h2:" data_dir "/datomic"),
-            :username "datomic",
-            :password (or storage_datomic_password "datomic")})))))
+  (defn local-jdbc-spec
+    ([p__31586]
+      (let [map__31587 p__31586
+            map__31587 (if (seq? map__31587)
+                         (if (next map__31587)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31587))
+                           (if (seq map__31587) (first map__31587) {}))
+                         map__31587)
+            cluster_map map__31587
+            data_dir (get map__31587 :data-dir)
+            storage_datomic_password (get map__31587 :storage-datomic-password)]
+        (when-not data_dir
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'data-dir)))))
+        (create-sql-spec
+          {:sql-url (str "jdbc:h2:" data_dir "/datomic"),
+           :username "datomic",
+           :password (or storage_datomic_password "datomic")}))))
   (reset-meta!
     #'local-jdbc-spec
     (assoc
@@ -434,29 +422,26 @@
       'local-jdbc-spec
       :ns
       *ns*))
-  (def remote-jdbc-spec
-   (fn remote_jdbc_spec
-     ([p__31590]
-       (let [map__31591 p__31590
-             map__31591 (if (seq? map__31591)
-                          (if (next map__31591)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31591))
-                            (if (seq map__31591) (first map__31591) {}))
-                          map__31591)
-             host (get map__31591 :host)
-             h2_port (get map__31591 :h2-port)
-             password (get map__31591 :password)]
-         (when-not (and host h2_port password)
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 (pr-str (clojure.core/list 'and 'host 'h2-port 'password))))))
-         (create-sql-spec
-           {:sql-url (str "jdbc:h2:tcp://" host ":" h2_port "/datomic"),
-            :username "datomic",
-            :password password})))))
+  (defn remote-jdbc-spec
+    ([p__31590]
+      (let [map__31591 p__31590
+            map__31591 (if (seq? map__31591)
+                         (if (next map__31591)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31591))
+                           (if (seq map__31591) (first map__31591) {}))
+                         map__31591)
+            host (get map__31591 :host)
+            h2_port (get map__31591 :h2-port)
+            password (get map__31591 :password)]
+        (when-not (and host h2_port password)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list 'and 'host 'h2-port 'password))))))
+        (create-sql-spec
+          {:sql-url (str "jdbc:h2:tcp://" host ":" h2_port "/datomic"),
+           :username "datomic",
+           :password password}))))
   (reset-meta!
     #'remote-jdbc-spec
     (assoc

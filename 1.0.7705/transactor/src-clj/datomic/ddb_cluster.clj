@@ -38,7 +38,7 @@
         (clojure.core/import 'software.amazon.awssdk.core.exception.SdkClientException)
         (clojure.core/import
           'software.amazon.awssdk.regions.providers.DefaultAwsRegionProviderChain))))
-  (def key-path (fn key_path ([path_map k] (cluster/path (assoc path_map :key k)))))
+  (defn key-path ([path_map k] (cluster/path (assoc path_map :key k))))
   (reset-meta!
     #'key-path
     (assoc
@@ -56,36 +56,35 @@
   (reset-meta!
     #'default-aws-region
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'default-aws-region :ns *ns*))
-  (def create-connection
-   (fn create_connection
-     ([p__27618]
-       (let [map__27619 p__27618
-             map__27619 (if (seq? map__27619)
-                          (if (next map__27619)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27619))
-                            (if (seq map__27619) (first map__27619) {}))
-                          map__27619)
-             cluster_conf map__27619
-             system_root (get map__27619 :system-root)
-             params (get map__27619 :params)
-             region (get map__27619 :region)
-             override_endpoint (get map__27619 :override-endpoint)
-             creds (when (get-in params [:ddb :aws-access-key-id])
-                     (aws-helpers/static-credentials-provider (:ddb params)))
-             override_endpoint (let [G__27620 override_endpoint]
-                                 (when-not (nil? G__27620) (str "http://" G__27620)))
-             region (or region (default-aws-region))
-             ddb_client (if creds
-                          (ddb/client
-                            creds
-                            (config/ddb-client-args
-                              {:region region, :override-endpoint override_endpoint}))
-                          (ddb/client
-                            (config/ddb-client-args
-                              {:region region, :override-endpoint override_endpoint})))
-             kvs (kvd/kv-dynamo ddb_client system_root)]
-         (kvc/kv-cluster kvs cluster_conf)))))
+  (defn create-connection
+    ([p__27618]
+      (let [map__27619 p__27618
+            map__27619 (if (seq? map__27619)
+                         (if (next map__27619)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27619))
+                           (if (seq map__27619) (first map__27619) {}))
+                         map__27619)
+            cluster_conf map__27619
+            system_root (get map__27619 :system-root)
+            params (get map__27619 :params)
+            region (get map__27619 :region)
+            override_endpoint (get map__27619 :override-endpoint)
+            creds (when (get-in params [:ddb :aws-access-key-id])
+                    (aws-helpers/static-credentials-provider (:ddb params)))
+            override_endpoint (let [G__27620 override_endpoint]
+                                (when-not (nil? G__27620) (str "http://" G__27620)))
+            region (or region (default-aws-region))
+            ddb_client (if creds
+                         (ddb/client
+                           creds
+                           (config/ddb-client-args
+                             {:region region, :override-endpoint override_endpoint}))
+                         (ddb/client
+                           (config/ddb-client-args
+                             {:region region, :override-endpoint override_endpoint})))
+            kvs (kvd/kv-dynamo ddb_client system_root)]
+        (kvc/kv-cluster kvs cluster_conf))))
   (reset-meta!
     #'create-connection
     (assoc
@@ -97,25 +96,24 @@
       'create-connection
       :ns
       *ns*))
-  (def create-ddbx-connection
-   (fn create_ddbx_connection
-     ([p__27623]
-       (let [map__27624 p__27623
-             map__27624 (if (seq? map__27624)
-                          (if (next map__27624)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27624))
-                            (if (seq map__27624) (first map__27624) {}))
-                          map__27624)
-             cluster_conf map__27624
-             aws_dynamodb_table (get map__27624 :aws-dynamodb-table)]
-         (create-connection
-           (assoc
-             cluster_conf
-             :protocol
-             :ddb
-             :region
-             (:region (aws-helpers/parse-arn aws_dynamodb_table))))))))
+  (defn create-ddbx-connection
+    ([p__27623]
+      (let [map__27624 p__27623
+            map__27624 (if (seq? map__27624)
+                         (if (next map__27624)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27624))
+                           (if (seq map__27624) (first map__27624) {}))
+                         map__27624)
+            cluster_conf map__27624
+            aws_dynamodb_table (get map__27624 :aws-dynamodb-table)]
+        (create-connection
+          (assoc
+            cluster_conf
+            :protocol
+            :ddb
+            :region
+            (:region (aws-helpers/parse-arn aws_dynamodb_table)))))))
   (reset-meta!
     #'create-ddbx-connection
     (assoc

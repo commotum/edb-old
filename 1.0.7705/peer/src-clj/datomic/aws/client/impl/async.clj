@@ -63,26 +63,25 @@
     (clojure.lang.RT/var "datomic.aws.client.impl.async" "response-xformers")
     {:bytes (fn fn__14411 ([] (AsyncResponseTransformer/toBytes))),
      :input-stream (fn fn__14413 ([] (AsyncResponseTransformer/toBlockingInputStream)))})
-  (def process-result
-   (fn process_result
-     ([result blob_response? meta]
-       (if blob_response?
-         (cond->
-           {:ret (datafy/sdk->clj (datafy/response result)), :body (datafy/sdk->body result)}
-           meta
-           (assoc :datomic.aws.client.api/meta meta)
-           true
-           (update
-             :ret
-             assoc
-             :aws/RequestId
-             (datafy/response->request-id (datafy/response result))))
-         (cond->
-           (datafy/sdk->clj result)
-           meta
-           (assoc :datomic.aws.client.api/meta meta)
-           true
-           (assoc :aws/RequestId (datafy/response->request-id result)))))))
+  (defn process-result
+    ([result blob_response? meta]
+      (if blob_response?
+        (cond->
+          {:ret (datafy/sdk->clj (datafy/response result)), :body (datafy/sdk->body result)}
+          meta
+          (assoc :datomic.aws.client.api/meta meta)
+          true
+          (update
+            :ret
+            assoc
+            :aws/RequestId
+            (datafy/response->request-id (datafy/response result))))
+        (cond->
+          (datafy/sdk->clj result)
+          meta
+          (assoc :datomic.aws.client.api/meta meta)
+          true
+          (assoc :aws/RequestId (datafy/response->request-id result))))))
   (reset-meta!
     #'process-result
     (assoc
@@ -93,76 +92,75 @@
       'process-result
       :ns
       *ns*))
-  (def exec-op
-   (fn exec_op
-     ([client p__14418 p__14419]
-       (let [map__14420 p__14418
-             map__14420 (if (seq? map__14420)
-                          (if (next map__14420)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__14420))
-                            (if (seq map__14420) (first map__14420) {}))
-                          map__14420)
-             op_map map__14420
-             req (get map__14420 :req)
-             body (get map__14420 :body)
-             ch (get map__14420 :ch)
-             meta (get map__14420 :meta)
-             response_as (get map__14420 :response-as)
-             overrides (get map__14420 :overrides)
-             map__14421 p__14419
-             map__14421 (if (seq? map__14421)
-                          (if (next map__14421)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__14421))
-                            (if (seq map__14421) (first map__14421) {}))
-                          map__14421)
-             method (get map__14421 :method)
-             request_builder (get map__14421 :request-builder)
-             variant (get map__14421 :variant)]
-         (try
-           (let [service (.serviceName ^software.amazon.awssdk.core.SdkClient client)
-                 request (cond->
-                           (^clojure.lang.IFn request_builder)
-                           true
-                           (datafy/clj->sdk req)
-                           (seq overrides)
-                           (datafy/override-config overrides))
-                 fut (let [G__14423 variant]
-                       (case
-                         G__14423
-                         :blob-response
-                         (^clojure.lang.IFn method
-                           client
-                           request
-                           ((get response-xformers response_as)))
-                         :request
-                         (^clojure.lang.IFn method client request)
-                         :blob-request
-                         (^clojure.lang.IFn method client request (async-request-body body))))]
-             (.whenComplete
-               ^java.util.concurrent.CompletableFuture fut
-               (reify
-                 java.util.function.BiConsumer
-                 (^void accept
-                   [this result ex]
-                   (do
-                     (try
-                       (if ex
-                         (let [t (if (instance? java.util.concurrent.CompletionException ex)
-                                   (.getCause ^java.lang.Throwable ex)
-                                   ex)]
-                           (a/put! ch (anom/anomalize t (assoc op_map :service service))))
-                         (a/put! ch (process-result result (= :blob-response variant) meta)))
-                       (catch
-                         java.lang.Throwable
-                         t
-                         (a/put!
-                           ch
-                           {:cognitect.anomalies/category :cognitect.anomalies/fault,
-                            :throwable (Throwable->map t)})))
-                     nil)))))
-           (catch java.lang.Exception ex (a/put! ch (anom/anomalize ex op_map))))))))
+  (defn exec-op
+    ([client p__14418 p__14419]
+      (let [map__14420 p__14418
+            map__14420 (if (seq? map__14420)
+                         (if (next map__14420)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__14420))
+                           (if (seq map__14420) (first map__14420) {}))
+                         map__14420)
+            op_map map__14420
+            req (get map__14420 :req)
+            body (get map__14420 :body)
+            ch (get map__14420 :ch)
+            meta (get map__14420 :meta)
+            response_as (get map__14420 :response-as)
+            overrides (get map__14420 :overrides)
+            map__14421 p__14419
+            map__14421 (if (seq? map__14421)
+                         (if (next map__14421)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__14421))
+                           (if (seq map__14421) (first map__14421) {}))
+                         map__14421)
+            method (get map__14421 :method)
+            request_builder (get map__14421 :request-builder)
+            variant (get map__14421 :variant)]
+        (try
+          (let [service (.serviceName ^software.amazon.awssdk.core.SdkClient client)
+                request (cond->
+                          (^clojure.lang.IFn request_builder)
+                          true
+                          (datafy/clj->sdk req)
+                          (seq overrides)
+                          (datafy/override-config overrides))
+                fut (let [G__14423 variant]
+                      (case
+                        G__14423
+                        :blob-response
+                        (^clojure.lang.IFn method
+                          client
+                          request
+                          ((get response-xformers response_as)))
+                        :request
+                        (^clojure.lang.IFn method client request)
+                        :blob-request
+                        (^clojure.lang.IFn method client request (async-request-body body))))]
+            (.whenComplete
+              ^java.util.concurrent.CompletableFuture fut
+              (reify
+                java.util.function.BiConsumer
+                (^void accept
+                  [this result ex]
+                  (do
+                    (try
+                      (if ex
+                        (let [t (if (instance? java.util.concurrent.CompletionException ex)
+                                  (.getCause ^java.lang.Throwable ex)
+                                  ex)]
+                          (a/put! ch (anom/anomalize t (assoc op_map :service service))))
+                        (a/put! ch (process-result result (= :blob-response variant) meta)))
+                      (catch
+                        java.lang.Throwable
+                        t
+                        (a/put!
+                          ch
+                          {:cognitect.anomalies/category :cognitect.anomalies/fault,
+                           :throwable (Throwable->map t)})))
+                    nil)))))
+          (catch java.lang.Exception ex (a/put! ch (anom/anomalize ex op_map)))))))
   (reset-meta!
     #'exec-op
     (assoc

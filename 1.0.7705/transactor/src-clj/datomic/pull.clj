@@ -43,29 +43,28 @@
         (clojure.core/import 'java.util.Iterator)
         (clojure.core/import 'java.util.NoSuchElementException))))
   (set! *warn-on-reflection* true)
-  (def limit-iterable
-   (fn limit_iterable
-     ([limit iterable]
-       (if (not limit)
-         iterable
-         (reify
-           java.lang.Iterable
-           (^java.util.Iterator iterator
-             [this]
-             (let [iter (.iterator ^java.lang.Iterable iterable) i (long-array (int 1) 0)]
-               (reify
-                 java.util.Iterator
-                 (next
-                   [this]
-                   (let [_i (aget ^longs i (int 0))]
-                     (when-not (< _i limit) (throw (java.util.NoSuchElementException.)))
-                     (aset ^longs i (int 0) (long (inc _i)))
-                     (.next ^java.util.Iterator iter)))
-                 (^boolean hasNext
-                   [this]
-                   (and
-                     (< (aget ^longs i (int 0)) limit)
-                     (.hasNext ^java.util.Iterator iter)))))))))))
+  (defn limit-iterable
+    ([limit iterable]
+      (if (not limit)
+        iterable
+        (reify
+          java.lang.Iterable
+          (^java.util.Iterator iterator
+            [this]
+            (let [iter (.iterator ^java.lang.Iterable iterable) i (long-array (int 1) 0)]
+              (reify
+                java.util.Iterator
+                (next
+                  [this]
+                  (let [_i (aget ^longs i (int 0))]
+                    (when-not (< _i limit) (throw (java.util.NoSuchElementException.)))
+                    (aset ^longs i (int 0) (long (inc _i)))
+                    (.next ^java.util.Iterator iter)))
+                (^boolean hasNext
+                  [this]
+                  (and
+                    (< (aget ^longs i (int 0)) limit)
+                    (.hasNext ^java.util.Iterator iter))))))))))
   (reset-meta!
     #'limit-iterable
     (assoc
@@ -79,41 +78,40 @@
   (reset-meta!
     #'nilify-empty
     (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'nilify-empty :ns *ns*))
-  (def ra->e
-   (fn ra__GT_e
-     ([db r attr xf limit valfn]
-       (^clojure.lang.IFn valfn
-         (when attr
-           (let [rid (db/resolve-id db r)
-                 attrid (.id ^datomic.db.Attribute attr)
-                 mk_iter (fn mk_iter
-                           ([]
-                             (iter/map
-                               (fn fn__16225 ([d] (.e ^datomic.Datom d)))
-                               (db/windowed
-                                 db
-                                 (fn fn__16227
-                                   ([p1__16223#]
-                                     (and
-                                       (= rid (.v ^datomic.Datom p1__16223#))
-                                       (= attrid (.a ^datomic.Datom p1__16223#)))))
-                                 (.seekRAET ^datomic.db.IDb db (db/datum db :v rid :a attrid))))))
-                 temp__5825__auto__ (^clojure.lang.IFn mk_iter)]
-             (when temp__5825__auto__
-               (let [iter temp__5825__auto__]
-                 (if (.-isComponent ^datomic.db.Attribute attr)
-                   (^clojure.lang.IFn xf (.get ^datomic.iter.Iter iter))
-                   (nilify-empty
-                     (persistent!
-                       (reduce
-                         (fn fn__16231
-                           ([coll item]
-                             (let [temp__5823__auto__ (^clojure.lang.IFn xf item)]
-                               (if temp__5823__auto__
-                                 (let [xitem temp__5823__auto__] (conj! coll xitem))
-                                 coll))))
-                         (transient [])
-                         (limit-iterable limit (iter/iterable mk_iter))))))))))))))
+  (defn ra->e
+    ([db r attr xf limit valfn]
+      (^clojure.lang.IFn valfn
+        (when attr
+          (let [rid (db/resolve-id db r)
+                attrid (.id ^datomic.db.Attribute attr)
+                mk_iter (fn mk_iter
+                          ([]
+                            (iter/map
+                              (fn fn__16225 ([d] (.e ^datomic.Datom d)))
+                              (db/windowed
+                                db
+                                (fn fn__16227
+                                  ([p1__16223#]
+                                    (and
+                                      (= rid (.v ^datomic.Datom p1__16223#))
+                                      (= attrid (.a ^datomic.Datom p1__16223#)))))
+                                (.seekRAET ^datomic.db.IDb db (db/datum db :v rid :a attrid))))))
+                temp__5825__auto__ (^clojure.lang.IFn mk_iter)]
+            (when temp__5825__auto__
+              (let [iter temp__5825__auto__]
+                (if (.-isComponent ^datomic.db.Attribute attr)
+                  (^clojure.lang.IFn xf (.get ^datomic.iter.Iter iter))
+                  (nilify-empty
+                    (persistent!
+                      (reduce
+                        (fn fn__16231
+                          ([coll item]
+                            (let [temp__5823__auto__ (^clojure.lang.IFn xf item)]
+                              (if temp__5823__auto__
+                                (let [xitem temp__5823__auto__] (conj! coll xitem))
+                                coll))))
+                        (transient [])
+                        (limit-iterable limit (iter/iterable mk_iter)))))))))))))
   (reset-meta!
     #'ra->e
     (assoc
@@ -124,43 +122,42 @@
       'ra->e
       :ns
       *ns*))
-  (def ea->v
-   (fn ea__GT_v
-     ([db e attr xf limit valfn use_aevt?]
-       (^clojure.lang.IFn valfn
-         (when attr
-           (let [eid (db/resolve-id db e)
-                 attrid (.id ^datomic.db.Attribute attr)
-                 d (db/datum db :e eid :a attrid)
-                 mk_iter (fn mk_iter
-                           ([]
-                             (iter/map
-                               (fn fn__16238 ([d] (.v ^datomic.Datom d)))
-                               (db/windowed
-                                 db
-                                 (fn fn__16240
-                                   ([p1__16236#]
-                                     (and
-                                       (= eid (.e ^datomic.Datom p1__16236#))
-                                       (= attrid (.a ^datomic.Datom p1__16236#)))))
-                                 (if use_aevt?
-                                   (.seekAEVT ^datomic.db.IDb db ^datomic.impl.db.IDatum d)
-                                   (.seekEAVT ^datomic.db.IDb db ^datomic.impl.db.IDatum d))))))
-                 temp__5825__auto__ (^clojure.lang.IFn mk_iter)]
-             (when temp__5825__auto__
-               (let [iter temp__5825__auto__]
-                 (if (= 36 (.-cardinality ^datomic.db.Attribute attr))
-                   (nilify-empty
-                     (persistent!
-                       (reduce
-                         (fn fn__16244
-                           ([coll item]
-                             (let [xitem (^clojure.lang.IFn xf item)]
-                               (if (nil? xitem) coll (conj! coll xitem)))))
-                         (transient [])
-                         (limit-iterable limit (iter/iterable mk_iter)))))
-                   (^clojure.lang.IFn xf (.get ^datomic.iter.Iter iter)))))))))
-     ([db e attr xf limit valfn] (ea->v db e attr xf limit valfn false))))
+  (defn ea->v
+    ([db e attr xf limit valfn use_aevt?]
+      (^clojure.lang.IFn valfn
+        (when attr
+          (let [eid (db/resolve-id db e)
+                attrid (.id ^datomic.db.Attribute attr)
+                d (db/datum db :e eid :a attrid)
+                mk_iter (fn mk_iter
+                          ([]
+                            (iter/map
+                              (fn fn__16238 ([d] (.v ^datomic.Datom d)))
+                              (db/windowed
+                                db
+                                (fn fn__16240
+                                  ([p1__16236#]
+                                    (and
+                                      (= eid (.e ^datomic.Datom p1__16236#))
+                                      (= attrid (.a ^datomic.Datom p1__16236#)))))
+                                (if use_aevt?
+                                  (.seekAEVT ^datomic.db.IDb db ^datomic.impl.db.IDatum d)
+                                  (.seekEAVT ^datomic.db.IDb db ^datomic.impl.db.IDatum d))))))
+                temp__5825__auto__ (^clojure.lang.IFn mk_iter)]
+            (when temp__5825__auto__
+              (let [iter temp__5825__auto__]
+                (if (= 36 (.-cardinality ^datomic.db.Attribute attr))
+                  (nilify-empty
+                    (persistent!
+                      (reduce
+                        (fn fn__16244
+                          ([coll item]
+                            (let [xitem (^clojure.lang.IFn xf item)]
+                              (if (nil? xitem) coll (conj! coll xitem)))))
+                        (transient [])
+                        (limit-iterable limit (iter/iterable mk_iter)))))
+                  (^clojure.lang.IFn xf (.get ^datomic.iter.Iter iter)))))))))
+    ([db e attr xf limit valfn] (ea->v db e attr xf limit valfn false)))
   (reset-meta!
     #'ea->v
     (assoc
@@ -175,33 +172,32 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.pull" "default-limit") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.pull" "default-limit") (atom 1000))
-  (def attr-spec->fn
-   (fn attr_spec__GT_fn
-     ([attr_spec]
-       (if (not (instance? java.util.List attr_spec))
-         [(deref default-limit) identity]
-         (let [vec__16248 attr_spec
-               sym (nth vec__16248 (int 0) nil)
-               kw (nth vec__16248 (int 1) nil)
-               arg (nth vec__16248 (int 2) nil)
-               G__16251 (db/normalize-kw sym)]
-           (case
-             G__16251
-             :default
-             [(deref default-limit) (fn fn__16252 ([v] (or v arg)))]
-             :limit
-             (if (or (integer? arg) (nil? arg))
-               [arg identity]
-               (error/arg
-                 :db.error/invalid-limit
-                 (str "'" arg "' is not a valid limit in '" attr_spec "'")))
-             (error/arg
-               :db.error/invalid-attr-spec
-               (str
-                 "Cannot interpret as an attribute spec: "
-                 attr_spec
-                 " of class: "
-                 (class attr_spec)))))))))
+  (defn attr-spec->fn
+    ([attr_spec]
+      (if (not (instance? java.util.List attr_spec))
+        [(deref default-limit) identity]
+        (let [vec__16248 attr_spec
+              sym (nth vec__16248 (int 0) nil)
+              kw (nth vec__16248 (int 1) nil)
+              arg (nth vec__16248 (int 2) nil)
+              G__16251 (db/normalize-kw sym)]
+          (case
+            G__16251
+            :default
+            [(deref default-limit) (fn fn__16252 ([v] (or v arg)))]
+            :limit
+            (if (or (integer? arg) (nil? arg))
+              [arg identity]
+              (error/arg
+                :db.error/invalid-limit
+                (str "'" arg "' is not a valid limit in '" attr_spec "'")))
+            (error/arg
+              :db.error/invalid-attr-spec
+              (str
+                "Cannot interpret as an attribute spec: "
+                attr_spec
+                " of class: "
+                (class attr_spec))))))))
   (reset-meta!
     #'attr-spec->fn
     (assoc
@@ -210,26 +206,25 @@
       'attr-spec->fn
       :ns
       *ns*))
-  (def attr-spec->attr
-   (fn attr_spec__GT_attr
-     ([attr_spec]
-       (if (instance? java.util.List attr_spec)
-         (attr-spec->attr (second attr_spec))
-         (if (not (keyword? attr_spec))
-           (let [s (str attr_spec) s (if (or (= s "*") (= s ":*")) "*" s)]
-             (if (= s "*")
-               (if (string? attr_spec) s (keyword attr_spec))
-               (if (= (char (.charAt ^java.lang.String s (int 0))) (char (.charValue \:)))
-                 s
-                 (error/arg
-                   :db.error/invalid-attr-spec
-                   (str
-                     "Attribute identifier "
-                     s
-                     " of class: "
-                     (class s)
-                     " does not start with a colon")))))
-           attr_spec)))))
+  (defn attr-spec->attr
+    ([attr_spec]
+      (if (instance? java.util.List attr_spec)
+        (attr-spec->attr (second attr_spec))
+        (if (not (keyword? attr_spec))
+          (let [s (str attr_spec) s (if (or (= s "*") (= s ":*")) "*" s)]
+            (if (= s "*")
+              (if (string? attr_spec) s (keyword attr_spec))
+              (if (= (char (.charAt ^java.lang.String s (int 0))) (char (.charValue \:)))
+                s
+                (error/arg
+                  :db.error/invalid-attr-spec
+                  (str
+                    "Attribute identifier "
+                    s
+                    " of class: "
+                    (class s)
+                    " does not start with a colon")))))
+          attr_spec))))
   (reset-meta!
     #'attr-spec->attr
     (assoc
@@ -252,19 +247,18 @@
       'attr-with-opts?
       :ns
       *ns*))
-  (def limit-default-from-map
-   (fn limit_default_from_map
-     ([p__16262]
-       (let [map__16263 p__16262
-             map__16263 (if (seq? map__16263)
-                          (if (next map__16263)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16263))
-                            (if (seq map__16263) (first map__16263) {}))
-                          map__16263)
-             args map__16263
-             limit (get map__16263 :limit)]
-         (if (contains? args :limit) limit (deref default-limit))))))
+  (defn limit-default-from-map
+    ([p__16262]
+      (let [map__16263 p__16262
+            map__16263 (if (seq? map__16263)
+                         (if (next map__16263)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16263))
+                           (if (seq map__16263) (first map__16263) {}))
+                         map__16263)
+            args map__16263
+            limit (get map__16263 :limit)]
+        (if (contains? args :limit) limit (deref default-limit)))))
   (reset-meta!
     #'limit-default-from-map
     (assoc
@@ -295,29 +289,27 @@
       'try-xform
       :ns
       *ns*))
-  (def attr-with-opts->valfn
-   (fn attr_with_opts__GT_valfn
-     ([p__16268]
-       (let [vec__16269 p__16268
-             seq__16270 (seq vec__16269)
-             args seq__16270
-             map__16272 (apply hash-map args)
-             map__16272 (if (seq? map__16272)
-                          (if (next map__16272)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16272))
-                            (if (seq map__16272) (first map__16272) {}))
-                          map__16272)
-             opts map__16272
-             default (get map__16272 :default)
-             xform (get map__16272 :xform)]
-         (apply
-           comp
-           (let [G__16273 [identity]
-                 G__16273 (if xform (cons (try-xform xform) G__16273) G__16273)]
-             (if (contains? opts :default)
-               (cons (fn fn__16274 ([v] (if (nil? v) default v))) G__16273)
-               G__16273)))))))
+  (defn attr-with-opts->valfn
+    ([p__16268]
+      (let [vec__16269 p__16268
+            seq__16270 (seq vec__16269)
+            args seq__16270
+            map__16272 (apply hash-map args)
+            map__16272 (if (seq? map__16272)
+                         (if (next map__16272)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16272))
+                           (if (seq map__16272) (first map__16272) {}))
+                         map__16272)
+            opts map__16272
+            default (get map__16272 :default)
+            xform (get map__16272 :xform)]
+        (apply
+          comp
+          (let [G__16273 [identity] G__16273 (if xform (cons (try-xform xform) G__16273) G__16273)]
+            (if (contains? opts :default)
+              (cons (fn fn__16274 ([v] (if (nil? v) default v))) G__16273)
+              G__16273))))))
   (reset-meta!
     #'attr-with-opts->valfn
     (assoc
@@ -326,28 +318,27 @@
       'attr-with-opts->valfn
       :ns
       *ns*))
-  (def attr-with-opts->attr-tuple
-   (fn attr_with_opts__GT_attr_tuple
-     ([p__16277]
-       (let [vec__16278 p__16277
-             seq__16279 (seq vec__16278)
-             first__16280 (first seq__16279)
-             seq__16279 (next seq__16279)
-             attr first__16280
-             args seq__16279
-             map__16281 (apply hash-map args)
-             map__16281 (if (seq? map__16281)
-                          (if (next map__16281)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16281))
-                            (if (seq map__16281) (first map__16281) {}))
-                          map__16281)
-             opts map__16281
-             as (get map__16281 :as)]
-         [attr
-          (limit-default-from-map opts)
-          (attr-with-opts->valfn args)
-          (if as (constantly as) identity)]))))
+  (defn attr-with-opts->attr-tuple
+    ([p__16277]
+      (let [vec__16278 p__16277
+            seq__16279 (seq vec__16278)
+            first__16280 (first seq__16279)
+            seq__16279 (next seq__16279)
+            attr first__16280
+            args seq__16279
+            map__16281 (apply hash-map args)
+            map__16281 (if (seq? map__16281)
+                         (if (next map__16281)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16281))
+                           (if (seq map__16281) (first map__16281) {}))
+                         map__16281)
+            opts map__16281
+            as (get map__16281 :as)]
+        [attr
+         (limit-default-from-map opts)
+         (attr-with-opts->valfn args)
+         (if as (constantly as) identity)])))
   (reset-meta!
     #'attr-with-opts->attr-tuple
     (assoc
@@ -356,12 +347,11 @@
       'attr-with-opts->attr-tuple
       :ns
       *ns*))
-  (def normalize-attr
-   (fn normalize_attr
-     ([attr_spec]
-       (if (attr-with-opts? attr_spec)
-         (attr-with-opts->attr-tuple attr_spec)
-         (conj (into [(attr-spec->attr attr_spec)] (attr-spec->fn attr_spec)) identity)))))
+  (defn normalize-attr
+    ([attr_spec]
+      (if (attr-with-opts? attr_spec)
+        (attr-with-opts->attr-tuple attr_spec)
+        (conj (into [(attr-spec->attr attr_spec)] (attr-spec->fn attr_spec)) identity))))
   (reset-meta!
     #'normalize-attr
     (assoc
@@ -387,71 +377,70 @@
       'normalize-recur-limit
       :ns
       *ns*))
-  (def normalize-pattern
-   (fn normalize_pattern
-     ([pull_spec]
-       (cond
-         (map? pull_spec) pull_spec
-         (string? pull_spec) (normalize-pattern (edn/read-string pull_spec))
-         :else (do
-                 (let [direction (fn direction
-                                   ([kw]
-                                     (if (db/reverse-key? (db/normalize-kw kw))
-                                       :reverse
-                                       :forward)))]
-                   (reduce
-                     (fn fn__16288
-                       ([m i]
-                         (if (instance? java.util.Map i)
-                           (reduce-kv
-                             (fn fn__16289
-                               ([m k subspec]
-                                 (let [vec__16290 (normalize-attr k)
-                                       attr_name (nth vec__16290 (int 0) nil)
-                                       limit (nth vec__16290 (int 1) nil)
-                                       valfn (nth vec__16290 (int 2) nil)
-                                       keyfn (nth vec__16290 (int 3) nil)]
-                                   (if (get-in
-                                         m
-                                         [(^clojure.lang.IFn direction attr_name) attr_name])
-                                     (error/arg
-                                       :pull/duplicate-attribute
-                                       (str "Multiple specifications for " attr_name))
-                                     (assoc-in
-                                       m
-                                       [(^clojure.lang.IFn direction attr_name) attr_name]
-                                       {:limit limit,
-                                        :valfn valfn,
-                                        :keyfn keyfn,
-                                        :subspec
-                                        (if (sequential? subspec)
-                                          (normalize-pattern subspec)
-                                          (normalize-recur-limit subspec))})))))
-                             m
-                             i)
-                           (let [vec__16294 (normalize-attr i)
-                                 attr_name (nth vec__16294 (int 0) nil)
-                                 limit (nth vec__16294 (int 1) nil)
-                                 valfn (nth vec__16294 (int 2) nil)
-                                 keyfn (nth vec__16294 (int 3) nil)
-                                 attr_name_type (class attr_name)
-                                 G__16297 (keyword attr_name)]
-                             (case
-                               G__16297
-                               :*
-                               (assoc m :wildcard attr_name_type :dbid attr_name_type)
-                               :db/id
-                               (assoc m :dbid attr_name_type)
-                               (if (get-in m [(^clojure.lang.IFn direction attr_name) attr_name])
-                                 (error/arg
-                                   :pull/duplicate-attribute
-                                   (str "Multiple specifications for " attr_name))
-                                 (assoc-in
-                                   m
-                                   [(^clojure.lang.IFn direction attr_name) attr_name]
-                                   {:limit limit, :keyfn keyfn, :valfn valfn})))))))
-                     {}
-                     pull_spec)))))))
+  (defn normalize-pattern
+    ([pull_spec]
+      (cond
+        (map? pull_spec) pull_spec
+        (string? pull_spec) (normalize-pattern (edn/read-string pull_spec))
+        :else (do
+                (let [direction (fn direction
+                                  ([kw]
+                                    (if (db/reverse-key? (db/normalize-kw kw))
+                                      :reverse
+                                      :forward)))]
+                  (reduce
+                    (fn fn__16288
+                      ([m i]
+                        (if (instance? java.util.Map i)
+                          (reduce-kv
+                            (fn fn__16289
+                              ([m k subspec]
+                                (let [vec__16290 (normalize-attr k)
+                                      attr_name (nth vec__16290 (int 0) nil)
+                                      limit (nth vec__16290 (int 1) nil)
+                                      valfn (nth vec__16290 (int 2) nil)
+                                      keyfn (nth vec__16290 (int 3) nil)]
+                                  (if (get-in
+                                        m
+                                        [(^clojure.lang.IFn direction attr_name) attr_name])
+                                    (error/arg
+                                      :pull/duplicate-attribute
+                                      (str "Multiple specifications for " attr_name))
+                                    (assoc-in
+                                      m
+                                      [(^clojure.lang.IFn direction attr_name) attr_name]
+                                      {:limit limit,
+                                       :valfn valfn,
+                                       :keyfn keyfn,
+                                       :subspec
+                                       (if (sequential? subspec)
+                                         (normalize-pattern subspec)
+                                         (normalize-recur-limit subspec))})))))
+                            m
+                            i)
+                          (let [vec__16294 (normalize-attr i)
+                                attr_name (nth vec__16294 (int 0) nil)
+                                limit (nth vec__16294 (int 1) nil)
+                                valfn (nth vec__16294 (int 2) nil)
+                                keyfn (nth vec__16294 (int 3) nil)
+                                attr_name_type (class attr_name)
+                                G__16297 (keyword attr_name)]
+                            (case
+                              G__16297
+                              :*
+                              (assoc m :wildcard attr_name_type :dbid attr_name_type)
+                              :db/id
+                              (assoc m :dbid attr_name_type)
+                              (if (get-in m [(^clojure.lang.IFn direction attr_name) attr_name])
+                                (error/arg
+                                  :pull/duplicate-attribute
+                                  (str "Multiple specifications for " attr_name))
+                                (assoc-in
+                                  m
+                                  [(^clojure.lang.IFn direction attr_name) attr_name]
+                                  {:limit limit, :keyfn keyfn, :valfn valfn})))))))
+                    {}
+                    pull_spec))))))
   (reset-meta!
     #'normalize-pattern
     (assoc
@@ -518,15 +507,14 @@
       'resolve-attr
       :ns
       *ns*))
-  (def default-spec
-   (fn default_spec
-     ([attr kw db]
-       (when (and attr (= 20 (.-vtypeid ^datomic.db.Attribute attr)))
-         (if (and
-               (.-isComponent ^datomic.db.Attribute attr)
-               (not (db/reverse-lookup? db (db/normalize-kw kw))))
-           {:wildcard (class kw), :dbid (class kw)}
-           {:dbid (class kw)})))))
+  (defn default-spec
+    ([attr kw db]
+      (when (and attr (= 20 (.-vtypeid ^datomic.db.Attribute attr)))
+        (if (and
+              (.-isComponent ^datomic.db.Attribute attr)
+              (not (db/reverse-lookup? db (db/normalize-kw kw))))
+          {:wildcard (class kw), :dbid (class kw)}
+          {:dbid (class kw)}))))
   (reset-meta!
     #'default-spec
     (assoc
@@ -557,25 +545,24 @@
       'denormalize-kw
       :ns
       *ns*))
-  (def fix-specs-for-underscore-prefix-attrs
-   (fn fix_specs_for_underscore_prefix_attrs
-     ([p__16321 db]
-       (let [map__16322 p__16321
-             map__16322 (if (seq? map__16322)
-                          (if (next map__16322)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16322))
-                            (if (seq map__16322) (first map__16322) {}))
-                          map__16322)
-             m map__16322
-             forward (get map__16322 :forward)
-             reverse (get map__16322 :reverse)
-             temp__5823__auto__ (:_keys db)]
-         (if temp__5823__auto__
-           (let [ks temp__5823__auto__]
-             {:forward (merge forward (select-keys reverse ks)),
-              :reverse (apply dissoc reverse ks)})
-           m)))))
+  (defn fix-specs-for-underscore-prefix-attrs
+    ([p__16321 db]
+      (let [map__16322 p__16321
+            map__16322 (if (seq? map__16322)
+                         (if (next map__16322)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16322))
+                           (if (seq map__16322) (first map__16322) {}))
+                         map__16322)
+            m map__16322
+            forward (get map__16322 :forward)
+            reverse (get map__16322 :reverse)
+            temp__5823__auto__ (:_keys db)]
+        (if temp__5823__auto__
+          (let [ks temp__5823__auto__]
+            {:forward (merge forward (select-keys reverse ks)),
+             :reverse (apply dissoc reverse ks)})
+          m))))
   (reset-meta!
     #'fix-specs-for-underscore-prefix-attrs
     (assoc
@@ -584,181 +571,180 @@
       'fix-specs-for-underscore-prefix-attrs
       :ns
       *ns*))
-  (def pull*
-   (fn pull_STAR_
-     ([db p__16325 recursed prefer_aevt? e]
-       (let [map__16326 p__16325
-             map__16326 (if (seq? map__16326)
-                          (if (next map__16326)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16326))
-                            (if (seq map__16326) (first map__16326) {}))
-                          map__16326)
-             spec map__16326
-             wildcard (get map__16326 :wildcard)
-             dbid (get map__16326 :dbid)]
-         (when (.isHistory ^datomic.Database db)
-           (throw (java.lang.IllegalStateException. "Can't pull from history")))
-         (let [map__16327 (fix-specs-for-underscore-prefix-attrs spec db)
-               map__16327 (if (seq? map__16327)
-                            (if (next map__16327)
-                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                (to-array map__16327))
-                              (if (seq map__16327) (first map__16327) {}))
-                            map__16327)
-               forward (get map__16327 :forward)
-               reverse (get map__16327 :reverse)
-               kw_>attr (partial resolve-attr db)
-               mk_xf (fn mk_xf
-                       ([path subspec def_subspec]
-                         (let [vec__16329 (cond
-                                            (nil? subspec) [def_subspec recursed]
-                                            (map? subspec) [subspec recursed]
-                                            (integer? subspec) (if
-                                                                 (and
-                                                                   (clojure.lang.Numbers/isPos
-                                                                     subspec)
-                                                                   (not
-                                                                     (^clojure.lang.IFn recursed
-                                                                       e)))
-                                                                 [(update-in
-                                                                    spec
-                                                                    (conj path :subspec)
-                                                                    dec)
-                                                                  (conj recursed e)]
-                                                                 [(let 
-                                                                    [temp__5823__auto__
-                                                                     (get spec :dbid)]
-                                                                    (if
-                                                                      temp__5823__auto__
-                                                                      (let 
-                                                                        [idc temp__5823__auto__]
-                                                                        {:dbid idc})
-                                                                      {}))
-                                                                  recursed])
-                                            (= '... subspec) (if
-                                                               (not (^clojure.lang.IFn recursed e))
-                                                               [spec (conj recursed e)]
-                                                               [(let 
-                                                                  [temp__5823__auto__
-                                                                   (get spec :dbid)]
-                                                                  (if
-                                                                    temp__5823__auto__
-                                                                    (let 
-                                                                      [idc temp__5823__auto__]
-                                                                      {:dbid idc})
-                                                                    {}))
-                                                                recursed])
-                                            :else (do
-                                                    (error/arg
-                                                      :db.error/invalid-attr-subspec
-                                                      (str
-                                                        "Cannot interpret as sub-pull pattern: "
-                                                        subspec
-                                                        " of class: "
-                                                        (class subspec)))))
-                               _subspec (nth vec__16329 (int 0) nil)
-                               _recursed (nth vec__16329 (int 1) nil)]
-                           (if _subspec
-                             (fn fn__16332 ([e] (pull* db _subspec _recursed prefer_aevt? e)))
-                             identity))))
-               eid (db/resolve-id db e)
-               ret (transient (if dbid {(denormalize-kw :db/id dbid) eid} {}))
-               ret (if wildcard
-                     (iter/reduce
-                       (fn fn__16338
-                         ([ret a]
-                           (let [kw (denormalize-kw (.ident ^datomic.Database db a) wildcard)
-                                 attr (db/attribute db a)
-                                 def_subspec (default-spec attr kw db)
-                                 map__16339 (get forward kw)
-                                 map__16339 (if (seq? map__16339)
-                                              (if (next map__16339)
-                                                (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                  (to-array map__16339))
-                                                (if (seq map__16339) (first map__16339) {}))
-                                              map__16339)
-                                 forward_args map__16339
-                                 valfn (get map__16339 :valfn)
-                                 keyfn (get map__16339 :keyfn)
-                                 subspec (get map__16339 :subspec)
-                                 v (ea->v
-                                     db
-                                     eid
-                                     attr
-                                     (^clojure.lang.IFn mk_xf [] subspec def_subspec)
-                                     (limit-default-from-map forward_args)
-                                     (or valfn identity))]
-                             (assoc! ret ((or keyfn identity) kw) v))))
-                       ret
-                       (a-iter db eid))
-                     ret)
-               ret (reduce-kv
-                     (fn fn__16344
-                       ([ret kw p__16343]
-                         (let [map__16345 p__16343
-                               map__16345 (if (seq? map__16345)
-                                            (if (next map__16345)
-                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                (to-array map__16345))
-                                              (if (seq map__16345) (first map__16345) {}))
-                                            map__16345)
-                               limit (get map__16345 :limit)
-                               valfn (get map__16345 :valfn)
-                               keyfn (get map__16345 :keyfn)
-                               subspec (get map__16345 :subspec)]
-                           (if (get ret (^clojure.lang.IFn keyfn (denormalize-kw kw (type kw))))
-                             ret
-                             (let [attr (^clojure.lang.IFn kw_>attr kw)
-                                   def_subspec (default-spec attr kw db)
-                                   v (ea->v
-                                       db
-                                       eid
-                                       attr
-                                       (^clojure.lang.IFn mk_xf [:forward kw] subspec def_subspec)
-                                       limit
-                                       valfn
-                                       (and prefer_aevt? (not wildcard)))]
-                               (if (nil? v)
-                                 ret
-                                 (assoc!
-                                   ret
-                                   (^clojure.lang.IFn keyfn (denormalize-kw kw (type kw)))
-                                   v)))))))
-                     ret
-                     forward)
-               ret (reduce-kv
-                     (fn fn__16349
-                       ([ret kw p__16348]
-                         (let [map__16350 p__16348
-                               map__16350 (if (seq? map__16350)
-                                            (if (next map__16350)
-                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                (to-array map__16350))
-                                              (if (seq map__16350) (first map__16350) {}))
-                                            map__16350)
-                               limit (get map__16350 :limit)
-                               valfn (get map__16350 :valfn)
-                               keyfn (get map__16350 :keyfn)
-                               subspec (get map__16350 :subspec)
-                               attr (^clojure.lang.IFn kw_>attr (db/forward-attr (db/to-kw kw)))
-                               def_subspec (default-spec attr kw db)
-                               r (ra->e
-                                   db
-                                   eid
-                                   attr
-                                   (^clojure.lang.IFn mk_xf [:reverse kw] subspec def_subspec)
-                                   limit
-                                   valfn)]
-                           (if (nil? r)
-                             ret
-                             (assoc!
-                               ret
-                               (^clojure.lang.IFn keyfn (denormalize-kw kw (type kw)))
-                               r)))))
-                     ret
-                     reverse)]
-           (nilify-empty (persistent! ret)))))))
+  (defn pull*
+    ([db p__16325 recursed prefer_aevt? e]
+      (let [map__16326 p__16325
+            map__16326 (if (seq? map__16326)
+                         (if (next map__16326)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16326))
+                           (if (seq map__16326) (first map__16326) {}))
+                         map__16326)
+            spec map__16326
+            wildcard (get map__16326 :wildcard)
+            dbid (get map__16326 :dbid)]
+        (when (.isHistory ^datomic.Database db)
+          (throw (java.lang.IllegalStateException. "Can't pull from history")))
+        (let [map__16327 (fix-specs-for-underscore-prefix-attrs spec db)
+              map__16327 (if (seq? map__16327)
+                           (if (next map__16327)
+                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                               (to-array map__16327))
+                             (if (seq map__16327) (first map__16327) {}))
+                           map__16327)
+              forward (get map__16327 :forward)
+              reverse (get map__16327 :reverse)
+              kw_>attr (partial resolve-attr db)
+              mk_xf (fn mk_xf
+                      ([path subspec def_subspec]
+                        (let [vec__16329 (cond
+                                           (nil? subspec) [def_subspec recursed]
+                                           (map? subspec) [subspec recursed]
+                                           (integer? subspec) (if
+                                                                (and
+                                                                  (clojure.lang.Numbers/isPos
+                                                                    subspec)
+                                                                  (not
+                                                                    (^clojure.lang.IFn recursed
+                                                                      e)))
+                                                                [(update-in
+                                                                   spec
+                                                                   (conj path :subspec)
+                                                                   dec)
+                                                                 (conj recursed e)]
+                                                                [(let 
+                                                                   [temp__5823__auto__
+                                                                    (get spec :dbid)]
+                                                                   (if
+                                                                     temp__5823__auto__
+                                                                     (let 
+                                                                       [idc temp__5823__auto__]
+                                                                       {:dbid idc})
+                                                                     {}))
+                                                                 recursed])
+                                           (= '... subspec) (if
+                                                              (not (^clojure.lang.IFn recursed e))
+                                                              [spec (conj recursed e)]
+                                                              [(let 
+                                                                 [temp__5823__auto__
+                                                                  (get spec :dbid)]
+                                                                 (if
+                                                                   temp__5823__auto__
+                                                                   (let 
+                                                                     [idc temp__5823__auto__]
+                                                                     {:dbid idc})
+                                                                   {}))
+                                                               recursed])
+                                           :else (do
+                                                   (error/arg
+                                                     :db.error/invalid-attr-subspec
+                                                     (str
+                                                       "Cannot interpret as sub-pull pattern: "
+                                                       subspec
+                                                       " of class: "
+                                                       (class subspec)))))
+                              _subspec (nth vec__16329 (int 0) nil)
+                              _recursed (nth vec__16329 (int 1) nil)]
+                          (if _subspec
+                            (fn fn__16332 ([e] (pull* db _subspec _recursed prefer_aevt? e)))
+                            identity))))
+              eid (db/resolve-id db e)
+              ret (transient (if dbid {(denormalize-kw :db/id dbid) eid} {}))
+              ret (if wildcard
+                    (iter/reduce
+                      (fn fn__16338
+                        ([ret a]
+                          (let [kw (denormalize-kw (.ident ^datomic.Database db a) wildcard)
+                                attr (db/attribute db a)
+                                def_subspec (default-spec attr kw db)
+                                map__16339 (get forward kw)
+                                map__16339 (if (seq? map__16339)
+                                             (if (next map__16339)
+                                               (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                 (to-array map__16339))
+                                               (if (seq map__16339) (first map__16339) {}))
+                                             map__16339)
+                                forward_args map__16339
+                                valfn (get map__16339 :valfn)
+                                keyfn (get map__16339 :keyfn)
+                                subspec (get map__16339 :subspec)
+                                v (ea->v
+                                    db
+                                    eid
+                                    attr
+                                    (^clojure.lang.IFn mk_xf [] subspec def_subspec)
+                                    (limit-default-from-map forward_args)
+                                    (or valfn identity))]
+                            (assoc! ret ((or keyfn identity) kw) v))))
+                      ret
+                      (a-iter db eid))
+                    ret)
+              ret (reduce-kv
+                    (fn fn__16344
+                      ([ret kw p__16343]
+                        (let [map__16345 p__16343
+                              map__16345 (if (seq? map__16345)
+                                           (if (next map__16345)
+                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                               (to-array map__16345))
+                                             (if (seq map__16345) (first map__16345) {}))
+                                           map__16345)
+                              limit (get map__16345 :limit)
+                              valfn (get map__16345 :valfn)
+                              keyfn (get map__16345 :keyfn)
+                              subspec (get map__16345 :subspec)]
+                          (if (get ret (^clojure.lang.IFn keyfn (denormalize-kw kw (type kw))))
+                            ret
+                            (let [attr (^clojure.lang.IFn kw_>attr kw)
+                                  def_subspec (default-spec attr kw db)
+                                  v (ea->v
+                                      db
+                                      eid
+                                      attr
+                                      (^clojure.lang.IFn mk_xf [:forward kw] subspec def_subspec)
+                                      limit
+                                      valfn
+                                      (and prefer_aevt? (not wildcard)))]
+                              (if (nil? v)
+                                ret
+                                (assoc!
+                                  ret
+                                  (^clojure.lang.IFn keyfn (denormalize-kw kw (type kw)))
+                                  v)))))))
+                    ret
+                    forward)
+              ret (reduce-kv
+                    (fn fn__16349
+                      ([ret kw p__16348]
+                        (let [map__16350 p__16348
+                              map__16350 (if (seq? map__16350)
+                                           (if (next map__16350)
+                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                               (to-array map__16350))
+                                             (if (seq map__16350) (first map__16350) {}))
+                                           map__16350)
+                              limit (get map__16350 :limit)
+                              valfn (get map__16350 :valfn)
+                              keyfn (get map__16350 :keyfn)
+                              subspec (get map__16350 :subspec)
+                              attr (^clojure.lang.IFn kw_>attr (db/forward-attr (db/to-kw kw)))
+                              def_subspec (default-spec attr kw db)
+                              r (ra->e
+                                  db
+                                  eid
+                                  attr
+                                  (^clojure.lang.IFn mk_xf [:reverse kw] subspec def_subspec)
+                                  limit
+                                  valfn)]
+                          (if (nil? r)
+                            ret
+                            (assoc!
+                              ret
+                              (^clojure.lang.IFn keyfn (denormalize-kw kw (type kw)))
+                              r)))))
+                    ret
+                    reverse)]
+          (nilify-empty (persistent! ret))))))
   (reset-meta!
     #'pull*
     (assoc
@@ -774,9 +760,8 @@
       'pull*
       :ns
       *ns*))
-  (def parse-index-pull-arg-map
-   (fn parse_index_pull_arg_map
-     ([arg_map] (if (string? arg_map) (edn/read-string arg_map) arg_map))))
+  (defn parse-index-pull-arg-map
+    ([arg_map] (if (string? arg_map) (edn/read-string arg_map) arg_map)))
   (reset-meta!
     #'parse-index-pull-arg-map
     (assoc
@@ -785,71 +770,68 @@
       'parse-index-pull-arg-map
       :ns
       *ns*))
-  (def index-pull
-   (fn index_pull
-     ([db arg_map]
-       (let [map__16355 (parse-index-pull-arg-map arg_map)
-             map__16355 (if (seq? map__16355)
-                          (if (next map__16355)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16355))
-                            (if (seq map__16355) (first map__16355) {}))
-                          map__16355)
-             index (get map__16355 :index)
-             reverse (get map__16355 :reverse)
-             selector (get map__16355 :selector)
-             start (get map__16355 :start)]
-         (when (or (empty? start) (not selector) (not index))
-           (error/arg
-             :db.error/nil-input
-             "selector, index, and start attribute must be specified"))
-         (when (.isHistory ^datomic.Database db)
-           (throw (java.lang.IllegalStateException. "Can't pull from history")))
-         (let [a (first start)
-               attrid (db/require-attrid db a)
-               attribute (db/attribute db attrid)
-               seek_fn (if reverse db/rseek-datoms db/seek-datoms)
-               cached_selector (get normalized-pattern-cache selector)
-               pull_kw (if (= index :avet) :e :v)]
-           (cond
-             (and (= index :avet) (= (:cardinality attribute) 36) (< (count start) 2)) (error/arg
-                                                                                         :db.error/invalid-pull
-                                                                                         (str
-                                                                                           a
-                                                                                           " is not card-one, as required for :avet when start has only A specified"))
-             (and (= index :aevt) (not= (:cardinality attribute) 36)) (error/arg
-                                                                        :db.error/invalid-pull
-                                                                        (str
-                                                                          a
-                                                                          " is not card-many, as required for :aevt"))
-             (and (= index :aevt) (not= (:vtypeid attribute) 20)) (error/arg
-                                                                    :db.error/invalid-pull
-                                                                    (str
-                                                                      a
-                                                                      " is not a ref, as required for :aevt"))
-             (contains? #{:aevt :avet} index) (map
-                                                (fn fn__16356
-                                                  ([datom]
-                                                    (delay
-                                                      (pull*
-                                                        db
-                                                        cached_selector
-                                                        #{}
-                                                        true
-                                                        (^clojure.lang.IFn pull_kw datom)))))
-                                                (take-while
-                                                  (fn fn__16360
-                                                    ([p1__16354#]
-                                                      (=
-                                                        attrid
-                                                        (long
-                                                          (.getA
-                                                            ^datomic.impl.db.IDatum p1__16354#)))))
-                                                  (^clojure.lang.IFn seek_fn db index start)))
-             :default (do
-                        (error/arg
-                          :db.error/invalid-pull
-                          (str (name index) " is an invalid index, must be :avet or :aevt")))))))))
+  (defn index-pull
+    ([db arg_map]
+      (let [map__16355 (parse-index-pull-arg-map arg_map)
+            map__16355 (if (seq? map__16355)
+                         (if (next map__16355)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16355))
+                           (if (seq map__16355) (first map__16355) {}))
+                         map__16355)
+            index (get map__16355 :index)
+            reverse (get map__16355 :reverse)
+            selector (get map__16355 :selector)
+            start (get map__16355 :start)]
+        (when (or (empty? start) (not selector) (not index))
+          (error/arg :db.error/nil-input "selector, index, and start attribute must be specified"))
+        (when (.isHistory ^datomic.Database db)
+          (throw (java.lang.IllegalStateException. "Can't pull from history")))
+        (let [a (first start)
+              attrid (db/require-attrid db a)
+              attribute (db/attribute db attrid)
+              seek_fn (if reverse db/rseek-datoms db/seek-datoms)
+              cached_selector (get normalized-pattern-cache selector)
+              pull_kw (if (= index :avet) :e :v)]
+          (cond
+            (and (= index :avet) (= (:cardinality attribute) 36) (< (count start) 2)) (error/arg
+                                                                                        :db.error/invalid-pull
+                                                                                        (str
+                                                                                          a
+                                                                                          " is not card-one, as required for :avet when start has only A specified"))
+            (and (= index :aevt) (not= (:cardinality attribute) 36)) (error/arg
+                                                                       :db.error/invalid-pull
+                                                                       (str
+                                                                         a
+                                                                         " is not card-many, as required for :aevt"))
+            (and (= index :aevt) (not= (:vtypeid attribute) 20)) (error/arg
+                                                                   :db.error/invalid-pull
+                                                                   (str
+                                                                     a
+                                                                     " is not a ref, as required for :aevt"))
+            (contains? #{:aevt :avet} index) (map
+                                               (fn fn__16356
+                                                 ([datom]
+                                                   (delay
+                                                     (pull*
+                                                       db
+                                                       cached_selector
+                                                       #{}
+                                                       true
+                                                       (^clojure.lang.IFn pull_kw datom)))))
+                                               (take-while
+                                                 (fn fn__16360
+                                                   ([p1__16354#]
+                                                     (=
+                                                       attrid
+                                                       (long
+                                                         (.getA
+                                                           ^datomic.impl.db.IDatum p1__16354#)))))
+                                                 (^clojure.lang.IFn seek_fn db index start)))
+            :default (do
+                       (error/arg
+                         :db.error/invalid-pull
+                         (str (name index) " is an invalid index, must be :avet or :aevt"))))))))
   (reset-meta!
     #'index-pull
     (assoc
@@ -858,8 +840,7 @@
       'index-pull
       :ns
       *ns*))
-  (def dereffed-index-pull
-   (fn dereffed_index_pull ([db arg_map] (seq (map deref (index-pull db arg_map))))))
+  (defn dereffed-index-pull ([db arg_map] (seq (map deref (index-pull db arg_map)))))
   (reset-meta!
     #'dereffed-index-pull
     (assoc
@@ -868,23 +849,22 @@
       'dereffed-index-pull
       :ns
       *ns*))
-  (def pull-1
-   (fn pull_1
-     ([db selector e p__16370]
-       (let [map__16371 p__16370
-             map__16371 (if (seq? map__16371)
-                          (if (next map__16371)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16371))
-                            (if (seq map__16371) (first map__16371) {}))
-                          map__16371)
-             options map__16371
-             io_context (get map__16371 :io-context)
-             f (fn f ([] (pull* db (get normalized-pattern-cache selector) #{} false e)))]
-         (if io_context
-           (io-stats/throw-if-ex! (io-stats/with-io-stats f {:io-context io_context, :api :pull}))
-           (^clojure.lang.IFn f))))
-     ([db selector e] (pull-1 db selector e nil))))
+  (defn pull-1
+    ([db selector e p__16370]
+      (let [map__16371 p__16370
+            map__16371 (if (seq? map__16371)
+                         (if (next map__16371)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16371))
+                           (if (seq map__16371) (first map__16371) {}))
+                         map__16371)
+            options map__16371
+            io_context (get map__16371 :io-context)
+            f (fn f ([] (pull* db (get normalized-pattern-cache selector) #{} false e)))]
+        (if io_context
+          (io-stats/throw-if-ex! (io-stats/with-io-stats f {:io-context io_context, :api :pull}))
+          (^clojure.lang.IFn f))))
+    ([db selector e] (pull-1 db selector e nil)))
   (reset-meta!
     #'pull-1
     (assoc
@@ -897,26 +877,25 @@
       'pull-1
       :ns
       *ns*))
-  (def pull
-   (fn pull
-     ([db selector es p__16375]
-       (let [map__16376 p__16375
-             map__16376 (if (seq? map__16376)
-                          (if (next map__16376)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16376))
-                            (if (seq map__16376) (first map__16376) {}))
-                          map__16376)
-             options map__16376
-             io_context (get map__16376 :io-context)
-             f (fn f
-                 ([]
-                   (mapv (partial pull* db (get normalized-pattern-cache selector) #{} true) es)))]
-         (if io_context
-           (io-stats/throw-if-ex!
-             (io-stats/with-io-stats f {:io-context io_context, :api :pull-many}))
-           (^clojure.lang.IFn f))))
-     ([db selector es] (pull db selector es nil))))
+  (defn pull
+    ([db selector es p__16375]
+      (let [map__16376 p__16375
+            map__16376 (if (seq? map__16376)
+                         (if (next map__16376)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16376))
+                           (if (seq map__16376) (first map__16376) {}))
+                         map__16376)
+            options map__16376
+            io_context (get map__16376 :io-context)
+            f (fn f
+                ([]
+                  (mapv (partial pull* db (get normalized-pattern-cache selector) #{} true) es)))]
+        (if io_context
+          (io-stats/throw-if-ex!
+            (io-stats/with-io-stats f {:io-context io_context, :api :pull-many}))
+          (^clojure.lang.IFn f))))
+    ([db selector es] (pull db selector es nil)))
   (reset-meta!
     #'pull
     (assoc

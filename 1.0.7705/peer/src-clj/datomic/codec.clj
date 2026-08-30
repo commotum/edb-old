@@ -10,7 +10,7 @@
       (do
         (clojure.core/refer 'clojure.core)
         (clojure.core/import 'org.apache.commons.codec.binary.Base64))))
-  (def string->bytes (fn string__GT_bytes ([s] (.getBytes ^java.lang.String s "UTF-8"))))
+  (defn string->bytes ([s] (.getBytes ^java.lang.String s "UTF-8")))
   (reset-meta!
     #'string->bytes
     (assoc
@@ -19,7 +19,7 @@
       'string->bytes
       :ns
       *ns*))
-  (def bytes->string (fn bytes__GT_string ([b] (java.lang.String. ^bytes b "UTF-8"))))
+  (defn bytes->string ([b] (java.lang.String. ^bytes b "UTF-8")))
   (reset-meta!
     #'bytes->string
     (assoc
@@ -28,8 +28,7 @@
       'bytes->string
       :ns
       *ns*))
-  (def encode-64
-   (fn encode_64 ([raw] (Base64/encodeBase64 ^bytes raw (boolean (.booleanValue false))))))
+  (defn encode-64 ([raw] (Base64/encodeBase64 ^bytes raw (boolean (.booleanValue false)))))
   (reset-meta!
     #'encode-64
     (assoc
@@ -38,7 +37,7 @@
       'encode-64
       :ns
       *ns*))
-  (def decode-64 (fn decode_64 ([coded] (Base64/decodeBase64 ^bytes coded))))
+  (defn decode-64 ([coded] (Base64/decodeBase64 ^bytes coded)))
   (reset-meta!
     #'decode-64
     (assoc

@@ -47,11 +47,10 @@
       'card-one-collisions
       :ns
       *ns*))
-  (def boot-tail-collision?
-   (fn boot_tail_collision_QMARK_
-     ([p__20992]
-       (let [vec__20993 p__20992 d1 (nth vec__20993 (int 0) nil) _ (nth vec__20993 (int 1) nil)]
-         (= (.e ^datomic.Datom d1) (db/BOOT-IDS :db.bootstrap/part))))))
+  (defn boot-tail-collision?
+    ([p__20992]
+      (let [vec__20993 p__20992 d1 (nth vec__20993 (int 0) nil) _ (nth vec__20993 (int 1) nil)]
+        (= (.e ^datomic.Datom d1) (db/BOOT-IDS :db.bootstrap/part)))))
   (reset-meta!
     #'boot-tail-collision?
     (assoc
@@ -60,14 +59,13 @@
       'boot-tail-collision?
       :ns
       *ns*))
-  (def non-unique?
-   (fn non_unique_QMARK_
-     ([p__20997]
-       (let [vec__20998 p__20997 d1 (nth vec__20998 (int 0) nil) d2 (nth vec__20998 (int 1) nil)]
-         (and
-           (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
-           (= (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))
-           (= (boolean (.added ^datomic.Datom d1)) (boolean (.added ^datomic.Datom d2))))))))
+  (defn non-unique?
+    ([p__20997]
+      (let [vec__20998 p__20997 d1 (nth vec__20998 (int 0) nil) d2 (nth vec__20998 (int 1) nil)]
+        (and
+          (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
+          (= (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))
+          (= (boolean (.added ^datomic.Datom d1)) (boolean (.added ^datomic.Datom d2)))))))
   (reset-meta!
     #'non-unique?
     (assoc
@@ -111,26 +109,23 @@
   (reset-meta!
     #'rename-from
     (assoc {:arglists (clojure.core/list ['db 'e]), :column (int 1)} :name 'rename-from :ns *ns*))
-  (def maybe-renamed?
-   (fn maybe_renamed_QMARK_
-     ([db p__21012]
-       (let [map__21013 p__21012
-             map__21013 (if (seq? map__21013)
-                          (if (next map__21013)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21013))
-                            (if (seq map__21013) (first map__21013) {}))
-                          map__21013)
-             e (get map__21013 :e)
-             a (get map__21013 :a)
-             v (get map__21013 :v)
-             tx (get map__21013 :tx)]
-         (or
-           (rename-from db e)
-           (rename-to db e)
-           (and
-             (= 20 (.-vtypeid (db/attribute db a)))
-             (or (rename-to db v) (rename-from db v))))))))
+  (defn maybe-renamed?
+    ([db p__21012]
+      (let [map__21013 p__21012
+            map__21013 (if (seq? map__21013)
+                         (if (next map__21013)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21013))
+                           (if (seq map__21013) (first map__21013) {}))
+                         map__21013)
+            e (get map__21013 :e)
+            a (get map__21013 :a)
+            v (get map__21013 :v)
+            tx (get map__21013 :tx)]
+        (or
+          (rename-from db e)
+          (rename-to db e)
+          (and (= 20 (.-vtypeid (db/attribute db a))) (or (rename-to db v) (rename-from db v)))))))
   (reset-meta!
     #'maybe-renamed?
     (assoc

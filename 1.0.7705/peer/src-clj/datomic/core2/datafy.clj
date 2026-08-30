@@ -57,18 +57,16 @@
       :ns
       *ns*))
   (.setMacro #'datafy-declared-fields)
-  (def val-navs
-   (fn val_navs
-     ([k_>f]
-       (fn fn__21408
-         ([_ k v]
-           (let [temp__5823__auto__ (^clojure.lang.IFn k_>f k)]
-             (if temp__5823__auto__ (let [f temp__5823__auto__] (^clojure.lang.IFn f v)) v)))))))
+  (defn val-navs
+    ([k_>f]
+      (fn fn__21408
+        ([_ k v]
+          (let [temp__5823__auto__ (^clojure.lang.IFn k_>f k)]
+            (if temp__5823__auto__ (let [f temp__5823__auto__] (^clojure.lang.IFn f v)) v))))))
   (reset-meta!
     #'val-navs
     (assoc {:arglists (clojure.core/list ['k->f]), :column (int 1)} :name 'val-navs :ns *ns*))
-  (def with-nav
-   (fn with_nav ([x nav_fn] (when x (vary-meta x assoc 'clojure.core.protocols/nav nav_fn)))))
+  (defn with-nav ([x nav_fn] (when x (vary-meta x assoc 'clojure.core.protocols/nav nav_fn))))
   (reset-meta!
     #'with-nav
     (assoc {:arglists (clojure.core/list ['x 'nav-fn]), :column (int 1)} :name 'with-nav :ns *ns*)))

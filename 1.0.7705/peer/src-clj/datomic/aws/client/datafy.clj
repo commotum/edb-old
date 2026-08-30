@@ -55,12 +55,11 @@
         (clojure.core/import 'software.amazon.awssdk.core.traits.MapTrait)
         (clojure.core/import 'software.amazon.awssdk.utils.builder.CopyableBuilder))))
   (set! *warn-on-reflection* true)
-  (def lowerize
-   (fn lowerize
-     ([s]
-       (if (< (count s) 2)
-         (.toLowerCase ^java.lang.String s)
-         (str (.toLowerCase (subs s 0 1)) (subs s 1))))))
+  (defn lowerize
+    ([s]
+      (if (< (count s) 2)
+        (.toLowerCase ^java.lang.String s)
+        (str (.toLowerCase (subs s 0 1)) (subs s 1)))))
   (reset-meta!
     #'lowerize
     (assoc
@@ -71,50 +70,49 @@
       'lowerize
       :ns
       *ns*))
-  (def select-method
-   (fn select_method
-     ([client_class op]
-       (let [method_name (lowerize (name op))
-             methods (sort-by
-                       (fn fn__14296
-                         ([p1__14295#]
-                           (java.lang.Integer/valueOf
-                             (int (.getParameterCount ^java.lang.reflect.Method p1__14295#)))))
-                       >
-                       (filter
-                         (fn fn__14298
-                           ([m]
-                             (let [vec__14299 (.getParameterTypes ^java.lang.reflect.Method m)
-                                   arg1 (nth vec__14299 (int 0) nil)
-                                   arg2 (nth vec__14299 (int 1) nil)]
-                               (and
-                                 (isa? arg1 software.amazon.awssdk.core.SdkPojo)
-                                 (or
-                                   (nil? arg2)
-                                   (#{software.amazon.awssdk.core.sync.ResponseTransformer
-                                      software.amazon.awssdk.core.sync.RequestBody
-                                      software.amazon.awssdk.core.async.AsyncResponseTransformer
-                                      software.amazon.awssdk.core.async.AsyncRequestBody}
-                                     arg2))))))
-                         (filter
-                           (fn fn__14305
-                             ([m]
-                               (#{1 2}
-                                 (java.lang.Integer/valueOf
-                                   (int (.getParameterCount ^java.lang.reflect.Method m))))))
-                           (filter
-                             (fn fn__14307
-                               ([m] (= (.getName ^java.lang.reflect.Method m) method_name)))
-                             (.getMethods ^java.lang.Class client_class)))))]
-         (when-not (first methods)
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 "No method eligible for registration found"
-                 "\n"
-                 (pr-str (clojure.core/list 'first 'methods))))))
-         (first methods)))))
+  (defn select-method
+    ([client_class op]
+      (let [method_name (lowerize (name op))
+            methods (sort-by
+                      (fn fn__14296
+                        ([p1__14295#]
+                          (java.lang.Integer/valueOf
+                            (int (.getParameterCount ^java.lang.reflect.Method p1__14295#)))))
+                      >
+                      (filter
+                        (fn fn__14298
+                          ([m]
+                            (let [vec__14299 (.getParameterTypes ^java.lang.reflect.Method m)
+                                  arg1 (nth vec__14299 (int 0) nil)
+                                  arg2 (nth vec__14299 (int 1) nil)]
+                              (and
+                                (isa? arg1 software.amazon.awssdk.core.SdkPojo)
+                                (or
+                                  (nil? arg2)
+                                  (#{software.amazon.awssdk.core.sync.ResponseTransformer
+                                     software.amazon.awssdk.core.sync.RequestBody
+                                     software.amazon.awssdk.core.async.AsyncResponseTransformer
+                                     software.amazon.awssdk.core.async.AsyncRequestBody}
+                                    arg2))))))
+                        (filter
+                          (fn fn__14305
+                            ([m]
+                              (#{1 2}
+                                (java.lang.Integer/valueOf
+                                  (int (.getParameterCount ^java.lang.reflect.Method m))))))
+                          (filter
+                            (fn fn__14307
+                              ([m] (= (.getName ^java.lang.reflect.Method m) method_name)))
+                            (.getMethods ^java.lang.Class client_class)))))]
+        (when-not (first methods)
+          (throw
+            (java.lang.AssertionError.
+              (str
+                "Assert failed: "
+                "No method eligible for registration found"
+                "\n"
+                (pr-str (clojure.core/list 'first 'methods))))))
+        (first methods))))
   (reset-meta!
     #'select-method
     (assoc
@@ -124,20 +122,19 @@
       'select-method
       :ns
       *ns*))
-  (def variant
-   (fn variant
-     ([m]
-       (let [vec__14310 (.getParameterTypes ^java.lang.reflect.Method m)
-             arg1 (nth vec__14310 (int 0) nil)
-             arg2 (nth vec__14310 (int 1) nil)]
-         (cond
-           (#{software.amazon.awssdk.core.sync.ResponseTransformer
-              software.amazon.awssdk.core.async.AsyncResponseTransformer}
-             arg2) :blob-response
-           (#{software.amazon.awssdk.core.sync.RequestBody
-              software.amazon.awssdk.core.async.AsyncRequestBody}
-             arg2) :blob-request
-           :else (do :request))))))
+  (defn variant
+    ([m]
+      (let [vec__14310 (.getParameterTypes ^java.lang.reflect.Method m)
+            arg1 (nth vec__14310 (int 0) nil)
+            arg2 (nth vec__14310 (int 1) nil)]
+        (cond
+          (#{software.amazon.awssdk.core.sync.ResponseTransformer
+             software.amazon.awssdk.core.async.AsyncResponseTransformer}
+            arg2) :blob-response
+          (#{software.amazon.awssdk.core.sync.RequestBody
+             software.amazon.awssdk.core.async.AsyncRequestBody}
+            arg2) :blob-request
+          :else (do :request)))))
   (reset-meta!
     #'variant
     (assoc
@@ -146,11 +143,10 @@
       'variant
       :ns
       *ns*))
-  (def ret-mode
-   (fn ret_mode
-     ([m]
-       (let [rt (.getReturnType ^java.lang.reflect.Method m)]
-         (if (isa? rt java.util.concurrent.CompletableFuture) :async :sync)))))
+  (defn ret-mode
+    ([m]
+      (let [rt (.getReturnType ^java.lang.reflect.Method m)]
+        (if (isa? rt java.util.concurrent.CompletableFuture) :async :sync))))
   (reset-meta!
     #'ret-mode
     (assoc
@@ -159,26 +155,25 @@
       'ret-mode
       :ns
       *ns*))
-  (def override-config
-   (fn override_config
-     ([request p__14315]
-       (let [map__14316 p__14315
-             map__14316 (if (seq? map__14316)
-                          (if (next map__14316)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__14316))
-                            (if (seq map__14316) (first map__14316) {}))
-                          map__14316)
-             timeout (get map__14316 :timeout)
-             builder (.toBuilder ^software.amazon.awssdk.awscore.AwsRequest request)
-             override_config (.build
-                               (.apiCallTimeout
-                                 (AwsRequestOverrideConfiguration/builder)
-                                 (Duration/ofMillis (long ^java.lang.Number timeout))))]
-         (.overrideConfiguration
-           ^software.amazon.awssdk.awscore.AwsRequest$Builder builder
-           ^software.amazon.awssdk.awscore.AwsRequestOverrideConfiguration override_config)
-         (.build ^software.amazon.awssdk.awscore.AwsRequest$Builder builder)))))
+  (defn override-config
+    ([request p__14315]
+      (let [map__14316 p__14315
+            map__14316 (if (seq? map__14316)
+                         (if (next map__14316)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__14316))
+                           (if (seq map__14316) (first map__14316) {}))
+                         map__14316)
+            timeout (get map__14316 :timeout)
+            builder (.toBuilder ^software.amazon.awssdk.awscore.AwsRequest request)
+            override_config (.build
+                              (.apiCallTimeout
+                                (AwsRequestOverrideConfiguration/builder)
+                                (Duration/ofMillis (long ^java.lang.Number timeout))))]
+        (.overrideConfiguration
+          ^software.amazon.awssdk.awscore.AwsRequest$Builder builder
+          ^software.amazon.awssdk.awscore.AwsRequestOverrideConfiguration override_config)
+        (.build ^software.amazon.awssdk.awscore.AwsRequest$Builder builder))))
   (reset-meta!
     #'override-config
     (assoc
@@ -188,93 +183,90 @@
       'override-config
       :ns
       *ns*))
-  (def clj->sdk
-   (fn clj__GT_sdk
-     ([builder v]
-       (let [member_name_>field (into
-                                  {}
-                                  (map
-                                    (fn fn__14320
-                                      ([field]
-                                        [(.memberName ^software.amazon.awssdk.core.SdkField field)
-                                         field]))
-                                    (.sdkFields ^software.amazon.awssdk.core.SdkPojo builder)))]
-         (reduce-kv
-           (fn fn__14322
-             ([builder k v']
-               (let [temp__5806__auto__ (^clojure.lang.IFn member_name_>field (name k))]
-                 (when (nil? temp__5806__auto__)
-                   (throw
-                     (ex-info
-                       (str
-                         "No corresponding field for key "
-                         k
-                         " in builder "
-                         (.getCanonicalName (class builder)))
-                       {:field k, :value v', :builder builder, :builder-class (class builder)})))
-                 (let [field temp__5806__auto__
-                       pred__14323 =
-                       expr__14324 (.marshallingType ^software.amazon.awssdk.core.SdkField field)]
-                   (if (^clojure.lang.IFn pred__14323 MarshallingType/SDK_POJO expr__14324)
-                     (let [field_ctor (.get
-                                        (.constructor
-                                          ^software.amazon.awssdk.core.SdkField field))]
-                       (.set
-                         ^software.amazon.awssdk.core.SdkField field
-                         builder
-                         (clj->sdk field_ctor v')))
-                     (if (^clojure.lang.IFn pred__14323 MarshallingType/MAP expr__14324)
-                       (let [map_trait (.getTrait
-                                         ^software.amazon.awssdk.core.SdkField field
-                                         software.amazon.awssdk.core.traits.MapTrait)
-                             value_field (.valueFieldInfo
-                                           ^software.amazon.awssdk.core.traits.MapTrait map_trait)]
-                         (if (=
-                               MarshallingType/STRING
-                               (.marshallingType
-                                 ^software.amazon.awssdk.core.SdkField value_field))
-                           (.set ^software.amazon.awssdk.core.SdkField field builder v')
-                           (.set
-                             ^software.amazon.awssdk.core.SdkField field
-                             builder
-                             (update-vals
-                               v'
-                               (fn fn__14325
-                                 ([p1__14318#]
-                                   (clj->sdk
-                                     (.get
-                                       (.constructor
-                                         ^software.amazon.awssdk.core.SdkField value_field))
-                                     p1__14318#)))))))
-                       (if (^clojure.lang.IFn pred__14323 MarshallingType/LIST expr__14324)
-                         (let [member_field (.memberFieldInfo
-                                              (.getTrait
-                                                ^software.amazon.awssdk.core.SdkField field
-                                                software.amazon.awssdk.core.traits.ListTrait))]
-                           (.set
-                             ^software.amazon.awssdk.core.SdkField field
-                             builder
-                             (mapv
-                               (fn fn__14327
-                                 ([p1__14319#]
-                                   (clj->sdk
-                                     (.get
-                                       (.constructor
-                                         ^software.amazon.awssdk.core.SdkField member_field))
-                                     p1__14319#)))
-                               v')))
-                         (if (^clojure.lang.IFn pred__14323 MarshallingType/INTEGER expr__14324)
-                           (.set
-                             ^software.amazon.awssdk.core.SdkField field
-                             builder
-                             (java.lang.Integer/valueOf (int v')))
-                           (if (^clojure.lang.IFn pred__14323 MarshallingType/LONG expr__14324)
-                             (.set ^software.amazon.awssdk.core.SdkField field builder (long v'))
-                             (.set ^software.amazon.awssdk.core.SdkField field builder v'))))))))
-               builder))
-           builder
-           v))
-       (.build ^software.amazon.awssdk.utils.builder.SdkBuilder builder))))
+  (defn clj->sdk
+    ([builder v]
+      (let [member_name_>field (into
+                                 {}
+                                 (map
+                                   (fn fn__14320
+                                     ([field]
+                                       [(.memberName ^software.amazon.awssdk.core.SdkField field)
+                                        field]))
+                                   (.sdkFields ^software.amazon.awssdk.core.SdkPojo builder)))]
+        (reduce-kv
+          (fn fn__14322
+            ([builder k v']
+              (let [temp__5806__auto__ (^clojure.lang.IFn member_name_>field (name k))]
+                (when (nil? temp__5806__auto__)
+                  (throw
+                    (ex-info
+                      (str
+                        "No corresponding field for key "
+                        k
+                        " in builder "
+                        (.getCanonicalName (class builder)))
+                      {:field k, :value v', :builder builder, :builder-class (class builder)})))
+                (let [field temp__5806__auto__
+                      pred__14323 =
+                      expr__14324 (.marshallingType ^software.amazon.awssdk.core.SdkField field)]
+                  (if (^clojure.lang.IFn pred__14323 MarshallingType/SDK_POJO expr__14324)
+                    (let [field_ctor (.get
+                                       (.constructor ^software.amazon.awssdk.core.SdkField field))]
+                      (.set
+                        ^software.amazon.awssdk.core.SdkField field
+                        builder
+                        (clj->sdk field_ctor v')))
+                    (if (^clojure.lang.IFn pred__14323 MarshallingType/MAP expr__14324)
+                      (let [map_trait (.getTrait
+                                        ^software.amazon.awssdk.core.SdkField field
+                                        software.amazon.awssdk.core.traits.MapTrait)
+                            value_field (.valueFieldInfo
+                                          ^software.amazon.awssdk.core.traits.MapTrait map_trait)]
+                        (if (=
+                              MarshallingType/STRING
+                              (.marshallingType ^software.amazon.awssdk.core.SdkField value_field))
+                          (.set ^software.amazon.awssdk.core.SdkField field builder v')
+                          (.set
+                            ^software.amazon.awssdk.core.SdkField field
+                            builder
+                            (update-vals
+                              v'
+                              (fn fn__14325
+                                ([p1__14318#]
+                                  (clj->sdk
+                                    (.get
+                                      (.constructor
+                                        ^software.amazon.awssdk.core.SdkField value_field))
+                                    p1__14318#)))))))
+                      (if (^clojure.lang.IFn pred__14323 MarshallingType/LIST expr__14324)
+                        (let [member_field (.memberFieldInfo
+                                             (.getTrait
+                                               ^software.amazon.awssdk.core.SdkField field
+                                               software.amazon.awssdk.core.traits.ListTrait))]
+                          (.set
+                            ^software.amazon.awssdk.core.SdkField field
+                            builder
+                            (mapv
+                              (fn fn__14327
+                                ([p1__14319#]
+                                  (clj->sdk
+                                    (.get
+                                      (.constructor
+                                        ^software.amazon.awssdk.core.SdkField member_field))
+                                    p1__14319#)))
+                              v')))
+                        (if (^clojure.lang.IFn pred__14323 MarshallingType/INTEGER expr__14324)
+                          (.set
+                            ^software.amazon.awssdk.core.SdkField field
+                            builder
+                            (java.lang.Integer/valueOf (int v')))
+                          (if (^clojure.lang.IFn pred__14323 MarshallingType/LONG expr__14324)
+                            (.set ^software.amazon.awssdk.core.SdkField field builder (long v'))
+                            (.set ^software.amazon.awssdk.core.SdkField field builder v'))))))))
+              builder))
+          builder
+          v))
+      (.build ^software.amazon.awssdk.utils.builder.SdkBuilder builder)))
   (reset-meta!
     #'clj->sdk
     (assoc
@@ -283,7 +275,7 @@
       'clj->sdk
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       SdkPojoConverter
       "Protocol for converting SdkPojo objects to Clojure data"
@@ -292,14 +284,14 @@
       (clojure.lang.RT/var "datomic.aws.client.datafy" "SdkPojoConverter")
       (assoc
         (assoc
-          protocol_metadata__7431
+          protocol_metadata__7463
           :doc
           "Protocol for converting SdkPojo objects to Clojure data")
         :name
         'SdkPojoConverter
         :ns
         *ns*))
-    (let [protocol_signature__7432 (assoc
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -311,13 +303,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.aws.client.datafy"
                                        "SdkPojoConverter"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.aws.client.datafy" "sdk->clj")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       AsyncResponseBodyConverter
       "Protocol for converting AsyncResponseBody objects"
@@ -326,12 +318,12 @@
     (reset-meta!
       (clojure.lang.RT/var "datomic.aws.client.datafy" "AsyncResponseBodyConverter")
       (assoc
-        (assoc protocol_metadata__7434 :doc "Protocol for converting AsyncResponseBody objects")
+        (assoc protocol_metadata__7466 :doc "Protocol for converting AsyncResponseBody objects")
         :name
         'AsyncResponseBodyConverter
         :ns
         *ns*))
-    (let [protocol_signature__7435 (assoc
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -343,13 +335,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.aws.client.datafy"
                                        "AsyncResponseBodyConverter"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.aws.client.datafy" "sdk->body")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*)))
-    (let [protocol_signature__7437 (assoc
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*)))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -361,12 +353,12 @@
                                      (clojure.lang.RT/var
                                        "datomic.aws.client.datafy"
                                        "AsyncResponseBodyConverter"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.aws.client.datafy" "response")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*))))
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*))))
   (extend
     software.amazon.awssdk.core.SdkPojo
     SdkPojoConverter
@@ -418,10 +410,9 @@
      :response
      (fn fn__14403
        ([response_is] (.response ^software.amazon.awssdk.core.ResponseInputStream response_is)))})
-  (def response->request-id
-   (fn response__GT_request_id
-     ([response]
-       (.requestId (.responseMetadata ^software.amazon.awssdk.awscore.AwsResponse response)))))
+  (defn response->request-id
+    ([response]
+      (.requestId (.responseMetadata ^software.amazon.awssdk.awscore.AwsResponse response))))
   (reset-meta!
     #'response->request-id
     (assoc

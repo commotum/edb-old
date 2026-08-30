@@ -7,7 +7,7 @@
     (clojure.core/with-loading-context
       (do (clojure.core/refer 'clojure.core) (clojure.core/import 'clojure.lang.IFn$OL))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       MemorySize*
       (memory-size*
@@ -15,8 +15,8 @@
         "Return best guess of the memory size of an object.\nDo not call directly -- call 'memory-size' fn instead.\nSee also 'extend-memory-size'"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.memory-size" "MemorySize*")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'MemorySize* :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'MemorySize* :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -27,12 +27,12 @@
                                       "Return best guess of the memory size of an object.\nDo not call directly -- call 'memory-size' fn instead.\nSee also 'extend-memory-size'"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.memory-size" "MemorySize*"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.memory-size" "memory-size*")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (.setMeta
     (clojure.lang.RT/var "datomic.memory-size" "memory-size-handlers")
     {:tag java.util.Map, :private true, :column (int 1)})
@@ -54,15 +54,14 @@
       'register-memory-size-handler!
       :ns
       *ns*))
-  (def memory-size
-   (fn memory_size
-     (^long [o]
-       (if (nil? o)
-         0
-         (if (instance? java.lang.Long o)
-           24
-           (let [hdlr (.get memory-size-handlers (.getClass o))]
-             (if (nil? hdlr) (long (memory-size* o)) (^clojure.lang.IFn$OL hdlr o))))))))
+  (defn memory-size
+    (^long [o]
+      (if (nil? o)
+        0
+        (if (instance? java.lang.Long o)
+          24
+          (let [hdlr (.get memory-size-handlers (.getClass o))]
+            (if (nil? hdlr) (long (memory-size* o)) (^clojure.lang.IFn$OL hdlr o)))))))
   (reset-meta!
     #'memory-size
     (assoc

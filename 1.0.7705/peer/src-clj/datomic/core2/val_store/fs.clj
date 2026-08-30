@@ -103,7 +103,7 @@
   (reset-meta!
     #'wrap-op
     (assoc {:arglists (clojure.core/list ['f 'k 'op]), :column (int 1)} :name 'wrap-op :ns *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       Impl
       (-file-path [_ k opts])
@@ -111,8 +111,8 @@
       (-sync-put [_ k v opts] "Returns {:result :created} or anomaly."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.core2.val-store.fs" "Impl")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Impl :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Impl :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -122,13 +122,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.core2.val-store.fs" "Impl"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.fs" "-file-path")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -139,13 +139,13 @@
                                       "Returns {:val ByteBuffer (or nil iff not found)}  or anomaly."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.core2.val-store.fs" "Impl"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.fs" "-sync-get")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*)))
-    (let [protocol_signature__7436 (assoc
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*)))
+    (let [protocol_signature__7468 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -155,12 +155,12 @@
                                       :doc "Returns {:result :created} or anomaly."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.core2.val-store.fs" "Impl"))
-          protocol_method_name__7437 (with-meta
-                                       (:name protocol_signature__7436)
-                                       protocol_signature__7436)]
+          protocol_method_name__7469 (with-meta
+                                       (:name protocol_signature__7468)
+                                       protocol_signature__7468)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.fs" "-sync-put")
-        (assoc protocol_signature__7436 :name protocol_method_name__7437 :ns *ns*))))
+        (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*))))
   (.setMeta
     (clojure.lang.RT/var "datomic.core2.val-store.fs" "SYNC_PUT_OPEN_OPTIONS")
     {:column (int 1)})
@@ -263,10 +263,9 @@
         (io/file path k)
         (io/file path (spi/splice-partition-key k (spi/partition-key k))))))
   (clojure.core/import 'datomic.core2.val_store.fs.FS)
-  (def ->FS
-   (fn __GT_FS
-     ([get_pool put_pool path delete_pool]
-       (datomic.core2.val_store.fs.FS. get_pool put_pool path delete_pool))))
+  (defn ->FS
+    ([get_pool put_pool path delete_pool]
+      (datomic.core2.val_store.fs.FS. get_pool put_pool path delete_pool)))
   (reset-meta!
     #'->FS
     (assoc
@@ -275,27 +274,26 @@
       '->FS
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__22198]
-       (let [map__22199 p__22198
-             map__22199 (if (seq? map__22199)
-                          (if (next map__22199)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22199))
-                            (if (seq map__22199) (first map__22199) {}))
-                          map__22199)
-             delete_pool (get map__22199 :delete-pool)
-             get_pool (get map__22199 :get-pool)
-             path (get map__22199 :path)
-             put_pool (get map__22199 :put-pool)]
-         (when-not (and delete_pool get_pool path put_pool)
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 (pr-str (clojure.core/list 'and 'delete-pool 'get-pool 'path 'put-pool))))))
-         (->FS get_pool put_pool path delete_pool)))))
+  (defn create
+    ([p__22198]
+      (let [map__22199 p__22198
+            map__22199 (if (seq? map__22199)
+                         (if (next map__22199)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22199))
+                           (if (seq map__22199) (first map__22199) {}))
+                         map__22199)
+            delete_pool (get map__22199 :delete-pool)
+            get_pool (get map__22199 :get-pool)
+            path (get map__22199 :path)
+            put_pool (get map__22199 :put-pool)]
+        (when-not (and delete_pool get_pool path put_pool)
+          (throw
+            (java.lang.AssertionError.
+              (str
+                "Assert failed: "
+                (pr-str (clojure.core/list 'and 'delete-pool 'get-pool 'path 'put-pool))))))
+        (->FS get_pool put_pool path delete_pool))))
   (reset-meta!
     #'create
     (assoc

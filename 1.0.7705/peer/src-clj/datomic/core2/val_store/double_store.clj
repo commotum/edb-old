@@ -1942,14 +1942,13 @@
         c__10363__auto__))
     (-delete [this k opts] (do (vs/delete near_store k opts) (vs/delete far_store k opts))))
   (clojure.core/import 'datomic.core2.val_store.double_store.ValStore)
-  (def ->ValStore
-   (fn __GT_ValStore
-     ([near_store far_store repair_metric get_fallback_msec]
-       (datomic.core2.val_store.double_store.ValStore.
-         near_store
-         far_store
-         repair_metric
-         get_fallback_msec))))
+  (defn ->ValStore
+    ([near_store far_store repair_metric get_fallback_msec]
+      (datomic.core2.val_store.double_store.ValStore.
+        near_store
+        far_store
+        repair_metric
+        get_fallback_msec)))
   (reset-meta!
     #'->ValStore
     (assoc
@@ -1959,25 +1958,24 @@
       '->ValStore
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__22108]
-       (let [map__22109 p__22108
-             map__22109 (if (seq? map__22109)
-                          (if (next map__22109)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22109))
-                            (if (seq map__22109) (first map__22109) {}))
-                          map__22109)
-             near_store (get map__22109 :near-store)
-             far_store (get map__22109 :far-store)
-             repair_metric (get map__22109 :repair-metric :fs.repair)
-             get_fallback_msec (get map__22109 :get-fallback-msec 20)]
-         (when-not (and near_store far_store)
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str (clojure.core/list 'and 'near-store 'far-store))))))
-         (->ValStore near_store far_store repair_metric get_fallback_msec)))))
+  (defn create
+    ([p__22108]
+      (let [map__22109 p__22108
+            map__22109 (if (seq? map__22109)
+                         (if (next map__22109)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22109))
+                           (if (seq map__22109) (first map__22109) {}))
+                         map__22109)
+            near_store (get map__22109 :near-store)
+            far_store (get map__22109 :far-store)
+            repair_metric (get map__22109 :repair-metric :fs.repair)
+            get_fallback_msec (get map__22109 :get-fallback-msec 20)]
+        (when-not (and near_store far_store)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list 'and 'near-store 'far-store))))))
+        (->ValStore near_store far_store repair_metric get_fallback_msec))))
   (reset-meta!
     #'create
     (assoc

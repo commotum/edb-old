@@ -24,42 +24,41 @@
           ['datomic.tools :as 'tools]
           ['datomic.tools.repair-865 :as 'repair])
         (clojure.core/import 'java.io.PushbackReader))))
-  (def unique-problems
-   (fn unique_problems
-     ([db es unique_fn]
-       (mapv
-         (fn fn__32324
-           ([p__32323]
-             (let [vec__32325 p__32323
-                   _ (nth vec__32325 (int 0) nil)
-                   a (nth vec__32325 (int 1) nil)
-                   v (nth vec__32325 (int 2) nil)]
-               (into [] (d/datoms db :avet a v)))))
-         (sort-by
-           first
-           (filter
-             (fn fn__32330
-               ([p__32329]
-                 (let [vec__32331 p__32329
-                       ce (nth vec__32331 (int 0) nil)
-                       a (nth vec__32331 (int 1) nil)
-                       v (nth vec__32331 (int 2) nil)]
-                   (> ce 1))))
-             (d/q
-               [:find
-                (clojure.core/list 'count '?e2)
-                '?a
-                '?v
-                :in
-                '$
-                ['?e1 '...]
-                ['?a '...]
-                :where
-                ['?e1 '?a '?v]
-                ['?e2 '?a '?v]]
-               db
-               es
-               (^clojure.lang.IFn unique_fn db))))))))
+  (defn unique-problems
+    ([db es unique_fn]
+      (mapv
+        (fn fn__32324
+          ([p__32323]
+            (let [vec__32325 p__32323
+                  _ (nth vec__32325 (int 0) nil)
+                  a (nth vec__32325 (int 1) nil)
+                  v (nth vec__32325 (int 2) nil)]
+              (into [] (d/datoms db :avet a v)))))
+        (sort-by
+          first
+          (filter
+            (fn fn__32330
+              ([p__32329]
+                (let [vec__32331 p__32329
+                      ce (nth vec__32331 (int 0) nil)
+                      a (nth vec__32331 (int 1) nil)
+                      v (nth vec__32331 (int 2) nil)]
+                  (> ce 1))))
+            (d/q
+              [:find
+               (clojure.core/list 'count '?e2)
+               '?a
+               '?v
+               :in
+               '$
+               ['?e1 '...]
+               ['?a '...]
+               :where
+               ['?e1 '?a '?v]
+               ['?e2 '?a '?v]]
+              db
+              es
+              (^clojure.lang.IFn unique_fn db)))))))
   (reset-meta!
     #'unique-problems
     (assoc

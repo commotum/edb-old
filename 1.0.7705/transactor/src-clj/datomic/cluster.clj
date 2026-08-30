@@ -31,7 +31,7 @@
         (clojure.core/import 'java.util.concurrent.TimeoutException)
         (clojure.core/import 'java.util.concurrent.TimeUnit))))
   (set! *warn-on-reflection* true)
-  (def uuid->val-key (fn uuid__GT_val_key ([uuid] (str uuid))))
+  (defn uuid->val-key ([uuid] (str uuid)))
   (reset-meta!
     #'uuid->val-key
     (assoc
@@ -40,7 +40,7 @@
       'uuid->val-key
       :ns
       *ns*))
-  (def val-key->uuid (fn val_key__GT_uuid ([val_key] (UUID/fromString ^java.lang.String val_key))))
+  (defn val-key->uuid ([val_key] (UUID/fromString ^java.lang.String val_key)))
   (reset-meta!
     #'val-key->uuid
     (assoc
@@ -49,7 +49,7 @@
       'val-key->uuid
       :ns
       *ns*))
-  (def uuid->pod-key (fn uuid__GT_pod_key ([uuid] (str "pod-" uuid))))
+  (defn uuid->pod-key ([uuid] (str "pod-" uuid)))
   (reset-meta!
     #'uuid->pod-key
     (assoc
@@ -58,7 +58,7 @@
       'uuid->pod-key
       :ns
       *ns*))
-  (def pod-key->uuid (fn pod_key__GT_uuid ([pod_key] (UUID/fromString (subs pod_key 4)))))
+  (defn pod-key->uuid ([pod_key] (UUID/fromString (subs pod_key 4))))
   (reset-meta!
     #'pod-key->uuid
     (assoc
@@ -115,12 +115,12 @@
   (reset-meta! #'PRIORITY_MID (assoc {:const true, :column (int 1)} :name 'PRIORITY_MID :ns *ns*))
   (def PRIORITY_LOW 4)
   (reset-meta! #'PRIORITY_LOW (assoc {:const true, :column (int 1)} :name 'PRIORITY_LOW :ns *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Dbid (dbId [c] "Returns the db id of a cluster, or nil if a system cluster."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cluster" "Dbid")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Dbid :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Dbid :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name (.withMeta 'dbId {:arglists (clojure.core/list ['c])}),
                                       :arglists (clojure.core/list ['c]),
@@ -128,13 +128,13 @@
                                       "Returns the db id of a cluster, or nil if a system cluster."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "Dbid"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "dbId")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       ClusteredStore
       "An interface to a clustered store. All fns might throw an exception on deref if no quorum is available."
@@ -168,14 +168,14 @@
       (clojure.lang.RT/var "datomic.cluster" "ClusteredStore")
       (assoc
         (assoc
-          protocol_metadata__7434
+          protocol_metadata__7466
           :doc
           "An interface to a clustered store. All fns might throw an exception on deref if no quorum is available.")
         :name
         'ClusteredStore
         :ns
         *ns*))
-    (let [protocol_signature__7435 (assoc
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -190,13 +190,13 @@
                                       "Returns reference to pod-meta, without walking entire linked list a la get-pod."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "get-pod-meta")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*)))
-    (let [protocol_signature__7437 (assoc
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*)))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -209,13 +209,13 @@
                                       :doc "Soft delete. Returns a reference to :ok"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "delete")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*)))
-    (let [protocol_signature__7439 (assoc
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*)))
+    (let [protocol_signature__7471 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -230,13 +230,13 @@
                                       "Gets the value at a key. Returns a reference to {:buf buf} or nil if not found"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7440 (with-meta
-                                       (:name protocol_signature__7439)
-                                       protocol_signature__7439)]
+          protocol_method_name__7472 (with-meta
+                                       (:name protocol_signature__7471)
+                                       protocol_signature__7471)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "get-val")
-        (assoc protocol_signature__7439 :name protocol_method_name__7440 :ns *ns*)))
-    (let [protocol_signature__7441 (assoc
+        (assoc protocol_signature__7471 :name protocol_method_name__7472 :ns *ns*)))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -251,13 +251,13 @@
                                       "Returns a reference to {:rev nnn, :key k} or nil if not found"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "get-ref")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -282,13 +282,13 @@
                                       "With nil etag, creates or resets pod to be supplied value. When\n   etag is non-nil, appends a non-nil buf to the current value of the\n   pod (a nil buf just 'touches' the pod, incrementing rev and leaving\n   the value intact), iff etag matches.  In all cases rev must be one\n   higher than existing rev. You must obtain rev and etag from a prior\n   get/update, and increment rev. Keys in metamap must be\n   namespaced. Returns a reference to {:rev nnn, :etag xxx, :buf buf}\n   or {:failed :conflict}."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "update-pod*")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*)))
-    (let [protocol_signature__7445 (assoc
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*)))
+    (let [protocol_signature__7477 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -315,13 +315,13 @@
                                       "Creates a new value in the store. Returns a reference to :created or nil"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7446 (with-meta
-                                       (:name protocol_signature__7445)
-                                       protocol_signature__7445)]
+          protocol_method_name__7478 (with-meta
+                                       (:name protocol_signature__7477)
+                                       protocol_signature__7477)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "create-val")
-        (assoc protocol_signature__7445 :name protocol_method_name__7446 :ns *ns*)))
-    (let [protocol_signature__7447 (assoc
+        (assoc protocol_signature__7477 :name protocol_method_name__7478 :ns *ns*)))
+    (let [protocol_signature__7479 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -335,13 +335,13 @@
                                       "Delete a reference (pod or ref).  Returns a reference to :ok"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7448 (with-meta
-                                       (:name protocol_signature__7447)
-                                       protocol_signature__7447)]
+          protocol_method_name__7480 (with-meta
+                                       (:name protocol_signature__7479)
+                                       protocol_signature__7479)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "delete-reference")
-        (assoc protocol_signature__7447 :name protocol_method_name__7448 :ns *ns*)))
-    (let [protocol_signature__7449 (assoc
+        (assoc protocol_signature__7479 :name protocol_method_name__7480 :ns *ns*)))
+    (let [protocol_signature__7481 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -362,13 +362,13 @@
                                       "Makes vkey the new value of ref, iff rev is higher than existing\n   rev. You must have obtained rev from a prior read and incremented\n   it. Returns a reference to :ok or :conflict. set-ref with a rev of 0 can create a ref."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7450 (with-meta
-                                       (:name protocol_signature__7449)
-                                       protocol_signature__7449)]
+          protocol_method_name__7482 (with-meta
+                                       (:name protocol_signature__7481)
+                                       protocol_signature__7481)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "set-ref")
-        (assoc protocol_signature__7449 :name protocol_method_name__7450 :ns *ns*)))
-    (let [protocol_signature__7451 (assoc
+        (assoc protocol_signature__7481 :name protocol_method_name__7482 :ns *ns*)))
+    (let [protocol_signature__7483 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -383,13 +383,13 @@
                                       "Gets the value in a pod. Returns a reference to {:rev nnn, :etag xxx, :buf buf} and any metadata keys.\n   or nil if not found."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "ClusteredStore"))
-          protocol_method_name__7452 (with-meta
-                                       (:name protocol_signature__7451)
-                                       protocol_signature__7451)]
+          protocol_method_name__7484 (with-meta
+                                       (:name protocol_signature__7483)
+                                       protocol_signature__7483)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "get-pod")
-        (assoc protocol_signature__7451 :name protocol_method_name__7452 :ns *ns*))))
-  (let [protocol_metadata__7453 {:column (int 1)}]
+        (assoc protocol_signature__7483 :name protocol_method_name__7484 :ns *ns*))))
+  (let [protocol_metadata__7485 {:column (int 1)}]
     (defprotocol
       Get2
       "Enhanced ClusteredStore/get-val that accepts opts map."
@@ -400,14 +400,14 @@
       (clojure.lang.RT/var "datomic.cluster" "Get2")
       (assoc
         (assoc
-          protocol_metadata__7453
+          protocol_metadata__7485
           :doc
           "Enhanced ClusteredStore/get-val that accepts opts map.")
         :name
         'Get2
         :ns
         *ns*))
-    (let [protocol_signature__7454 (assoc
+    (let [protocol_signature__7486 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -422,25 +422,24 @@
                                       "Like ClusteredStore/get-val, but takes an opts map that flows to underlying implementations."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "Get2"))
-          protocol_method_name__7455 (with-meta
-                                       (:name protocol_signature__7454)
-                                       protocol_signature__7454)]
+          protocol_method_name__7487 (with-meta
+                                       (:name protocol_signature__7486)
+                                       protocol_signature__7486)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "get-val2")
-        (assoc protocol_signature__7454 :name protocol_method_name__7455 :ns *ns*))))
-  (def update-pod
-   (fn update_pod
-     ([cs pod_key rev etag buf metamap]
-       (do
-         (when-not (every? namespace (keys metamap))
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 (pr-str
-                   (clojure.core/list 'every? 'namespace (clojure.core/list 'keys 'metamap)))))))
-         (update-pod* cs pod_key rev etag buf metamap)))
-     ([cs pod_key rev etag buf] (update-pod cs pod_key rev etag buf nil))))
+        (assoc protocol_signature__7486 :name protocol_method_name__7487 :ns *ns*))))
+  (defn update-pod
+    ([cs pod_key rev etag buf metamap]
+      (do
+        (when-not (every? namespace (keys metamap))
+          (throw
+            (java.lang.AssertionError.
+              (str
+                "Assert failed: "
+                (pr-str
+                  (clojure.core/list 'every? 'namespace (clojure.core/list 'keys 'metamap)))))))
+        (update-pod* cs pod_key rev etag buf metamap)))
+    ([cs pod_key rev etag buf] (update-pod cs pod_key rev etag buf nil)))
   (reset-meta!
     #'update-pod
     (assoc
@@ -572,9 +571,8 @@
       'reset-pod
       :ns
       *ns*))
-  (def touch-pod
-   (fn touch_pod
-     ([cs pod_key pod] (deref (update-pod cs pod_key (inc (:rev pod)) (:etag pod) nil)))))
+  (defn touch-pod
+    ([cs pod_key pod] (deref (update-pod cs pod_key (inc (:rev pod)) (:etag pod) nil))))
   (reset-meta!
     #'touch-pod
     (assoc
@@ -583,17 +581,16 @@
       'touch-pod
       :ns
       *ns*))
-  (def claim-pod
-   (fn claim_pod
-     ([cs pod_key msec]
-       (let [start (java.lang.System/currentTimeMillis)]
-         (loop []
-           (let [temp__5825__auto__ (deref (get-pod cs pod_key))]
-             (when temp__5825__auto__
-               (let [pod temp__5825__auto__ touched (touch-pod cs pod_key pod)]
-                 (cond
-                   (:rev touched) (assoc touched :buf (:buf pod))
-                   (<= (- (java.lang.System/currentTimeMillis) start) msec) (do (recur)))))))))))
+  (defn claim-pod
+    ([cs pod_key msec]
+      (let [start (java.lang.System/currentTimeMillis)]
+        (loop []
+          (let [temp__5825__auto__ (deref (get-pod cs pod_key))]
+            (when temp__5825__auto__
+              (let [pod temp__5825__auto__ touched (touch-pod cs pod_key pod)]
+                (cond
+                  (:rev touched) (assoc touched :buf (:buf pod))
+                  (<= (- (java.lang.System/currentTimeMillis) start) msec) (do (recur))))))))))
   (reset-meta!
     #'claim-pod
     (assoc
@@ -602,23 +599,22 @@
       'claim-pod
       :ns
       *ns*))
-  (def clone-pod
-   (fn clone_pod
-     ([cs from_key to_key]
-       (let [temp__5823__auto__ (deref (get-pod cs from_key))]
-         (if temp__5823__auto__
-           (let [map__9350 temp__5823__auto__
-                 map__9350 (if (seq? map__9350)
-                             (if (next map__9350)
-                               (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                 (to-array map__9350))
-                               (if (seq map__9350) (first map__9350) {}))
-                             map__9350)
-                 rev (get map__9350 :rev)
-                 etag (get map__9350 :etag)
-                 buf (get map__9350 :buf)]
-             (deref (update-pod cs to_key 0 nil buf)))
-           {:failed :absent})))))
+  (defn clone-pod
+    ([cs from_key to_key]
+      (let [temp__5823__auto__ (deref (get-pod cs from_key))]
+        (if temp__5823__auto__
+          (let [map__9350 temp__5823__auto__
+                map__9350 (if (seq? map__9350)
+                            (if (next map__9350)
+                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                (to-array map__9350))
+                              (if (seq map__9350) (first map__9350) {}))
+                            map__9350)
+                rev (get map__9350 :rev)
+                etag (get map__9350 :etag)
+                buf (get map__9350 :buf)]
+            (deref (update-pod cs to_key 0 nil buf)))
+          {:failed :absent}))))
   (reset-meta!
     #'clone-pod
     (assoc
@@ -627,21 +623,20 @@
       'clone-pod
       :ns
       *ns*))
-  (def clone-ref
-   (fn clone_ref
-     ([cs from_key to_key]
-       (let [temp__5823__auto__ (deref (get-ref cs from_key))]
-         (when temp__5823__auto__
-           (let [map__9353 temp__5823__auto__
-                 map__9353 (if (seq? map__9353)
-                             (if (next map__9353)
-                               (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                 (to-array map__9353))
-                               (if (seq map__9353) (first map__9353) {}))
-                             map__9353)
-                 rev (get map__9353 :rev)
-                 key (get map__9353 :key)]
-             (if (= :ok (deref (set-ref cs to_key 0 key))) {:rev 0} {:failed :conflict})))))))
+  (defn clone-ref
+    ([cs from_key to_key]
+      (let [temp__5823__auto__ (deref (get-ref cs from_key))]
+        (when temp__5823__auto__
+          (let [map__9353 temp__5823__auto__
+                map__9353 (if (seq? map__9353)
+                            (if (next map__9353)
+                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                (to-array map__9353))
+                              (if (seq map__9353) (first map__9353) {}))
+                            map__9353)
+                rev (get map__9353 :rev)
+                key (get map__9353 :key)]
+            (if (= :ok (deref (set-ref cs to_key 0 key))) {:rev 0} {:failed :conflict}))))))
   (reset-meta!
     #'clone-ref
     (assoc
@@ -767,15 +762,15 @@
       'write-vals
       :ns
       *ns*))
-  (let [protocol_metadata__7456 {:column (int 1)}]
+  (let [protocol_metadata__7488 {:column (int 1)}]
     (defprotocol
       AsyncWriter
       (finish-writer [_] "Finish writer. Returns a future that will throw if any write failed.")
       (sync-writes [_] "Returns a promise that will be filled after all pending writes complete."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cluster" "AsyncWriter")
-      (assoc (assoc protocol_metadata__7456 :doc nil) :name 'AsyncWriter :ns *ns*))
-    (let [protocol_signature__7457 (assoc
+      (assoc (assoc protocol_metadata__7488 :doc nil) :name 'AsyncWriter :ns *ns*))
+    (let [protocol_signature__7489 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -786,13 +781,13 @@
                                       "Finish writer. Returns a future that will throw if any write failed."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "AsyncWriter"))
-          protocol_method_name__7458 (with-meta
-                                       (:name protocol_signature__7457)
-                                       protocol_signature__7457)]
+          protocol_method_name__7490 (with-meta
+                                       (:name protocol_signature__7489)
+                                       protocol_signature__7489)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "finish-writer")
-        (assoc protocol_signature__7457 :name protocol_method_name__7458 :ns *ns*)))
-    (let [protocol_signature__7459 (assoc
+        (assoc protocol_signature__7489 :name protocol_method_name__7490 :ns *ns*)))
+    (let [protocol_signature__7491 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -803,12 +798,12 @@
                                       "Returns a promise that will be filled after all pending writes complete."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "AsyncWriter"))
-          protocol_method_name__7460 (with-meta
-                                       (:name protocol_signature__7459)
-                                       protocol_signature__7459)]
+          protocol_method_name__7492 (with-meta
+                                       (:name protocol_signature__7491)
+                                       protocol_signature__7491)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "sync-writes")
-        (assoc protocol_signature__7459 :name protocol_method_name__7460 :ns *ns*))))
+        (assoc protocol_signature__7491 :name protocol_method_name__7492 :ns *ns*))))
   (deftype
     QueueingWriter
     [cluster done_reason bounding_timeout_msec queue]
@@ -849,10 +844,9 @@
             (throw (java.util.concurrent.TimeoutException. "Timed out waiting for queue"))
             nil)))))
   (clojure.core/import 'datomic.cluster.QueueingWriter)
-  (def ->QueueingWriter
-   (fn __GT_QueueingWriter
-     ([cluster done_reason bounding_timeout_msec queue]
-       (datomic.cluster.QueueingWriter. cluster done_reason bounding_timeout_msec queue))))
+  (defn ->QueueingWriter
+    ([cluster done_reason bounding_timeout_msec queue]
+      (datomic.cluster.QueueingWriter. cluster done_reason bounding_timeout_msec queue)))
   (reset-meta!
     #'->QueueingWriter
     (assoc
@@ -862,46 +856,45 @@
       '->QueueingWriter
       :ns
       *ns*))
-  (def queueing-writer
-   (fn queueing_writer
-     ([cluster par bounding_timeout_msec progress]
-       (let [queue (java.util.concurrent.ArrayBlockingQueue. (int ^java.lang.Number par))
-             done_reason (promise/settable-future)
-             writer (datomic.cluster.QueueingWriter.
-                      cluster
-                      done_reason
-                      bounding_timeout_msec
-                      queue)]
-         (future-call
-           (fn fn__9424
-             ([]
-               (try
-                 (loop []
-                   (when-not (realized? done_reason)
-                     (let [map__9425 (.take ^java.util.concurrent.ArrayBlockingQueue queue)
-                           map__9425 (if (seq? map__9425)
-                                       (if (next map__9425)
-                                         (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                           (to-array map__9425))
-                                         (if (seq map__9425) (first map__9425) {}))
-                                       map__9425)
-                           type (get map__9425 :type)
-                           obj (get map__9425 :obj)
-                           G__9426 type]
-                       (case
-                         G__9426
-                         :sync-writes
-                         (do (deliver obj :synced) (recur))
-                         :create-val
-                         (do
-                           (^clojure.lang.IFn progress
-                             (java.lang.Integer/valueOf (int (count queue))))
-                           (let [create_result (deref obj)]
-                             (when (= :created create_result) (recur))))
-                         :finish
-                         (^clojure.lang.IFn done_reason :done)))))
-                 (catch java.lang.Throwable t (^clojure.lang.IFn done_reason t))))))
-         writer))))
+  (defn queueing-writer
+    ([cluster par bounding_timeout_msec progress]
+      (let [queue (java.util.concurrent.ArrayBlockingQueue. (int ^java.lang.Number par))
+            done_reason (promise/settable-future)
+            writer (datomic.cluster.QueueingWriter.
+                     cluster
+                     done_reason
+                     bounding_timeout_msec
+                     queue)]
+        (future-call
+          (fn fn__9424
+            ([]
+              (try
+                (loop []
+                  (when-not (realized? done_reason)
+                    (let [map__9425 (.take ^java.util.concurrent.ArrayBlockingQueue queue)
+                          map__9425 (if (seq? map__9425)
+                                      (if (next map__9425)
+                                        (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                          (to-array map__9425))
+                                        (if (seq map__9425) (first map__9425) {}))
+                                      map__9425)
+                          type (get map__9425 :type)
+                          obj (get map__9425 :obj)
+                          G__9426 type]
+                      (case
+                        G__9426
+                        :sync-writes
+                        (do (deliver obj :synced) (recur))
+                        :create-val
+                        (do
+                          (^clojure.lang.IFn progress
+                            (java.lang.Integer/valueOf (int (count queue))))
+                          (let [create_result (deref obj)]
+                            (when (= :created create_result) (recur))))
+                        :finish
+                        (^clojure.lang.IFn done_reason :done)))))
+                (catch java.lang.Throwable t (^clojure.lang.IFn done_reason t))))))
+        writer)))
   (reset-meta!
     #'queueing-writer
     (assoc
@@ -911,7 +904,7 @@
       'queueing-writer
       :ns
       *ns*))
-  (let [protocol_metadata__7461 {:column (int 1)}]
+  (let [protocol_metadata__7493 {:column (int 1)}]
     (defprotocol
       RefClusterStore
       "Helper for getting a ref store from a cluster"
@@ -919,12 +912,12 @@
     (reset-meta!
       (clojure.lang.RT/var "datomic.cluster" "RefClusterStore")
       (assoc
-        (assoc protocol_metadata__7461 :doc "Helper for getting a ref store from a cluster")
+        (assoc protocol_metadata__7493 :doc "Helper for getting a ref store from a cluster")
         :name
         'RefClusterStore
         :ns
         *ns*))
-    (let [protocol_signature__7462 (assoc
+    (let [protocol_signature__7494 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -934,12 +927,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cluster" "RefClusterStore"))
-          protocol_method_name__7463 (with-meta
-                                       (:name protocol_signature__7462)
-                                       protocol_signature__7462)]
+          protocol_method_name__7495 (with-meta
+                                       (:name protocol_signature__7494)
+                                       protocol_signature__7494)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "-get-ref-store")
-        (assoc protocol_signature__7462 :name protocol_method_name__7463 :ns *ns*))))
+        (assoc protocol_signature__7494 :name protocol_method_name__7495 :ns *ns*))))
   (defn get-ref-store ([cs] (-get-ref-store cs)))
   (reset-meta!
     #'get-ref-store

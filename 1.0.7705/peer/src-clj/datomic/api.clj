@@ -64,8 +64,7 @@
       'get-database-names
       :ns
       *ns*))
-  (def list-backups
-   (fn list_backups ([backup_uri] (Peer/listBackups ^java.lang.String backup_uri))))
+  (defn list-backups ([backup_uri] (Peer/listBackups ^java.lang.String backup_uri)))
   (reset-meta!
     #'list-backups
     (assoc
@@ -83,8 +82,7 @@
       'administer-system
       :ns
       *ns*))
-  (def rename-database
-   (fn rename_database ([uri new_name] (Peer/renameDatabase uri ^java.lang.String new_name))))
+  (defn rename-database ([uri new_name] (Peer/renameDatabase uri ^java.lang.String new_name)))
   (reset-meta!
     #'rename-database
     (assoc
@@ -97,18 +95,17 @@
   (reset-meta!
     #'q
     (assoc {:arglists (clojure.core/list ['query '& 'inputs]), :column (int 1)} :name 'q :ns *ns*))
-  (def query (fn query ([query_map] (datomic.query/query query_map))))
+  (defn query ([query_map] (datomic.query/query query_map)))
   (reset-meta!
     #'query
     (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'query :ns *ns*))
-  (def qseq (fn qseq ([query_map] (datomic.query/qseq query_map))))
+  (defn qseq ([query_map] (datomic.query/qseq query_map)))
   (reset-meta!
     #'qseq
     (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'qseq :ns *ns*))
-  (def tempid
-   (fn tempid
-     ([partition n] (Peer/tempid partition (long ^java.lang.Number n)))
-     ([partition] (Peer/tempid partition))))
+  (defn tempid
+    ([partition n] (Peer/tempid partition (long ^java.lang.Number n)))
+    ([partition] (Peer/tempid partition)))
   (reset-meta!
     #'tempid
     (assoc
@@ -126,7 +123,7 @@
       't->tx
       :ns
       *ns*))
-  (def tx->t (fn tx__GT_t (^long [tx] (Peer/toT tx))))
+  (defn tx->t (^long [tx] (Peer/toT tx)))
   (reset-meta!
     #'tx->t
     (assoc
@@ -159,10 +156,9 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.api" "log")
     (fn log ([connection] (.log ^datomic.Connection connection))))
-  (def sync
-   (fn sync
-     ([connection t] (.sync ^datomic.Connection connection (long ^java.lang.Number t)))
-     ([connection] (.sync ^datomic.Connection connection))))
+  (defn sync
+    ([connection t] (.sync ^datomic.Connection connection (long ^java.lang.Number t)))
+    ([connection] (.sync ^datomic.Connection connection)))
   (reset-meta!
     #'sync
     (assoc
@@ -175,9 +171,8 @@
       'sync
       :ns
       *ns*))
-  (def sync-index
-   (fn sync_index
-     ([connection t] (.syncIndex ^datomic.Connection connection (long ^java.lang.Number t)))))
+  (defn sync-index
+    ([connection t] (.syncIndex ^datomic.Connection connection (long ^java.lang.Number t))))
   (reset-meta!
     #'sync-index
     (assoc
@@ -187,9 +182,8 @@
       'sync-index
       :ns
       *ns*))
-  (def sync-schema
-   (fn sync_schema
-     ([connection t] (.syncSchema ^datomic.Connection connection (long ^java.lang.Number t)))))
+  (defn sync-schema
+    ([connection t] (.syncSchema ^datomic.Connection connection (long ^java.lang.Number t))))
   (reset-meta!
     #'sync-schema
     (assoc
@@ -199,9 +193,8 @@
       'sync-schema
       :ns
       *ns*))
-  (def sync-excise
-   (fn sync_excise
-     ([connection t] (.syncExcise ^datomic.Connection connection (long ^java.lang.Number t)))))
+  (defn sync-excise
+    ([connection t] (.syncExcise ^datomic.Connection connection (long ^java.lang.Number t))))
   (reset-meta!
     #'sync-excise
     (assoc
@@ -211,8 +204,7 @@
       'sync-excise
       :ns
       *ns*))
-  (def request-index
-   (fn request_index ([connection] (.requestIndex ^datomic.Connection connection))))
+  (defn request-index ([connection] (.requestIndex ^datomic.Connection connection)))
   (reset-meta!
     #'request-index
     (assoc
@@ -221,11 +213,10 @@
       'request-index
       :ns
       *ns*))
-  (def gc-storage
-   (fn gc_storage
-     ([connection older_than]
-       (.gcStorage ^datomic.Connection connection ^java.util.Date older_than)
-       nil)))
+  (defn gc-storage
+    ([connection older_than]
+      (.gcStorage ^datomic.Connection connection ^java.util.Date older_than)
+      nil))
   (reset-meta!
     #'gc-storage
     (assoc
@@ -235,18 +226,17 @@
       'gc-storage
       :ns
       *ns*))
-  (def transact
-   (fn transact
-     ([connection tx_data & p__19400]
-       (let [map__19401 p__19400
-             map__19401 (if (seq? map__19401)
-                          (if (next map__19401)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19401))
-                            (if (seq map__19401) (first map__19401) {}))
-                          map__19401)
-             options map__19401]
-         (.transact ^datomic.Connection connection ^java.util.List tx_data options)))))
+  (defn transact
+    ([connection tx_data & p__19400]
+      (let [map__19401 p__19400
+            map__19401 (if (seq? map__19401)
+                         (if (next map__19401)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19401))
+                           (if (seq map__19401) (first map__19401) {}))
+                         map__19401)
+            options map__19401]
+        (.transact ^datomic.Connection connection ^java.util.List tx_data options))))
   (reset-meta!
     #'transact
     (assoc
@@ -257,18 +247,17 @@
       'transact
       :ns
       *ns*))
-  (def transact-async
-   (fn transact_async
-     ([connection tx_data & p__19403]
-       (let [map__19404 p__19403
-             map__19404 (if (seq? map__19404)
-                          (if (next map__19404)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19404))
-                            (if (seq map__19404) (first map__19404) {}))
-                          map__19404)
-             options map__19404]
-         (.transactAsync ^datomic.Connection connection ^java.util.List tx_data options)))))
+  (defn transact-async
+    ([connection tx_data & p__19403]
+      (let [map__19404 p__19403
+            map__19404 (if (seq? map__19404)
+                         (if (next map__19404)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19404))
+                           (if (seq map__19404) (first map__19404) {}))
+                         map__19404)
+            options map__19404]
+        (.transactAsync ^datomic.Connection connection ^java.util.List tx_data options))))
   (reset-meta!
     #'transact-async
     (assoc
@@ -279,8 +268,7 @@
       'transact-async
       :ns
       *ns*))
-  (def tx-report-queue
-   (fn tx_report_queue ([connection] (.txReportQueue ^datomic.Connection connection))))
+  (defn tx-report-queue ([connection] (.txReportQueue ^datomic.Connection connection)))
   (reset-meta!
     #'tx-report-queue
     (assoc
@@ -289,9 +277,8 @@
       'tx-report-queue
       :ns
       *ns*))
-  (def remove-tx-report-queue
-   (fn remove_tx_report_queue
-     ([connection] (.removeTxReportQueue ^datomic.Connection connection) nil)))
+  (defn remove-tx-report-queue
+    ([connection] (.removeTxReportQueue ^datomic.Connection connection) nil))
   (reset-meta!
     #'remove-tx-report-queue
     (assoc
@@ -333,10 +320,9 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.api" "filter")
     (fn filter ([db pred] (.filter ^datomic.Database db pred))))
-  (def with
-   (fn with
-     ([db tx_data & opts] (.with ^datomic.Database db ^java.util.List tx_data opts))
-     ([db tx_data] (.with ^datomic.Database db ^java.util.List tx_data))))
+  (defn with
+    ([db tx_data & opts] (.with ^datomic.Database db ^java.util.List tx_data opts))
+    ([db tx_data] (.with ^datomic.Database db ^java.util.List tx_data)))
   (reset-meta!
     #'with
     (assoc
@@ -349,7 +335,7 @@
       'with
       :ns
       *ns*))
-  (def basis-t (fn basis_t ([db] (long (.basisT ^datomic.Database db)))))
+  (defn basis-t ([db] (long (.basisT ^datomic.Database db))))
   (reset-meta!
     #'basis-t
     (assoc
@@ -358,7 +344,7 @@
       'basis-t
       :ns
       *ns*))
-  (def next-t (fn next_t ([db] (long (.nextT ^datomic.Database db)))))
+  (defn next-t ([db] (long (.nextT ^datomic.Database db))))
   (reset-meta!
     #'next-t
     (assoc
@@ -367,7 +353,7 @@
       'next-t
       :ns
       *ns*))
-  (def as-of-t (fn as_of_t ([db] (.asOfT ^datomic.Database db))))
+  (defn as-of-t ([db] (.asOfT ^datomic.Database db)))
   (reset-meta!
     #'as-of-t
     (assoc
@@ -376,7 +362,7 @@
       'as-of-t
       :ns
       *ns*))
-  (def since-t (fn since_t ([db] (.sinceT ^datomic.Database db))))
+  (defn since-t ([db] (.sinceT ^datomic.Database db)))
   (reset-meta!
     #'since-t
     (assoc
@@ -385,7 +371,7 @@
       'since-t
       :ns
       *ns*))
-  (def is-history (fn is_history ([db] (.isHistory ^datomic.Database db))))
+  (defn is-history ([db] (.isHistory ^datomic.Database db)))
   (reset-meta!
     #'is-history
     (assoc
@@ -394,7 +380,7 @@
       'is-history
       :ns
       *ns*))
-  (def is-filtered (fn is_filtered ([db] (.isFiltered ^datomic.Database db))))
+  (defn is-filtered ([db] (.isFiltered ^datomic.Database db)))
   (reset-meta!
     #'is-filtered
     (assoc
@@ -403,7 +389,7 @@
       'is-filtered
       :ns
       *ns*))
-  (def attribute (fn attribute ([db attrid] (.attribute ^datomic.Database db attrid))))
+  (defn attribute ([db attrid] (.attribute ^datomic.Database db attrid)))
   (reset-meta!
     #'attribute
     (assoc
@@ -412,7 +398,7 @@
       'attribute
       :ns
       *ns*))
-  (def entity (fn entity ([db eid] (.entity ^datomic.Database db eid))))
+  (defn entity ([db eid] (.entity ^datomic.Database db eid)))
   (reset-meta!
     #'entity
     (assoc
@@ -421,18 +407,17 @@
       'entity
       :ns
       *ns*))
-  (def pull
-   (fn pull
-     ([db pattern eid & p__19421]
-       (let [map__19422 p__19421
-             map__19422 (if (seq? map__19422)
-                          (if (next map__19422)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19422))
-                            (if (seq map__19422) (first map__19422) {}))
-                          map__19422)
-             options map__19422]
-         (.pull ^datomic.Database db pattern eid options)))))
+  (defn pull
+    ([db pattern eid & p__19421]
+      (let [map__19422 p__19421
+            map__19422 (if (seq? map__19422)
+                         (if (next map__19422)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19422))
+                           (if (seq map__19422) (first map__19422) {}))
+                         map__19422)
+            options map__19422]
+        (.pull ^datomic.Database db pattern eid options))))
   (reset-meta!
     #'pull
     (assoc
@@ -443,7 +428,7 @@
       'pull
       :ns
       *ns*))
-  (def index-pull (fn index_pull ([db arg_map] (datomic.pull/dereffed-index-pull db arg_map))))
+  (defn index-pull ([db arg_map] (datomic.pull/dereffed-index-pull db arg_map)))
   (reset-meta!
     #'index-pull
     (assoc
@@ -452,18 +437,17 @@
       'index-pull
       :ns
       *ns*))
-  (def pull-many
-   (fn pull_many
-     ([db pattern eids & p__19425]
-       (let [map__19426 p__19425
-             map__19426 (if (seq? map__19426)
-                          (if (next map__19426)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19426))
-                            (if (seq map__19426) (first map__19426) {}))
-                          map__19426)
-             options map__19426]
-         (.pullMany ^datomic.Database db pattern ^java.util.List eids options)))))
+  (defn pull-many
+    ([db pattern eids & p__19425]
+      (let [map__19426 p__19425
+            map__19426 (if (seq? map__19426)
+                         (if (next map__19426)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19426))
+                           (if (seq map__19426) (first map__19426) {}))
+                         map__19426)
+            options map__19426]
+        (.pullMany ^datomic.Database db pattern ^java.util.List eids options))))
   (reset-meta!
     #'pull-many
     (assoc
@@ -474,7 +458,7 @@
       'pull-many
       :ns
       *ns*))
-  (def touch (fn touch ([entity] (.touch ^datomic.Entity entity))))
+  (defn touch ([entity] (.touch ^datomic.Entity entity)))
   (reset-meta!
     #'touch
     (assoc
@@ -483,7 +467,7 @@
       'touch
       :ns
       *ns*))
-  (def entity-db (fn entity_db ([entity] (.db ^datomic.Entity entity))))
+  (defn entity-db ([entity] (.db ^datomic.Entity entity)))
   (reset-meta!
     #'entity-db
     (assoc
@@ -492,8 +476,7 @@
       'entity-db
       :ns
       *ns*))
-  (def index-range
-   (fn index_range ([db attrid start end] (.indexRange ^datomic.Database db attrid start end))))
+  (defn index-range ([db attrid start end] (.indexRange ^datomic.Database db attrid start end)))
   (reset-meta!
     #'index-range
     (assoc
@@ -503,7 +486,7 @@
       'index-range
       :ns
       *ns*))
-  (def tx-range (fn tx_range ([log start end] (.txRange ^datomic.Log log start end))))
+  (defn tx-range ([log start end] (.txRange ^datomic.Log log start end)))
   (reset-meta!
     #'tx-range
     (assoc
@@ -512,7 +495,7 @@
       'tx-range
       :ns
       *ns*))
-  (def ident (fn ident ([db eid] (.ident ^datomic.Database db eid))))
+  (defn ident ([db eid] (.ident ^datomic.Database db eid)))
   (reset-meta!
     #'ident
     (assoc
@@ -521,7 +504,7 @@
       'ident
       :ns
       *ns*))
-  (def entid (fn entid ([db ident] (.entid ^datomic.Database db ident))))
+  (defn entid ([db ident] (.entid ^datomic.Database db ident)))
   (reset-meta!
     #'entid
     (assoc
@@ -530,7 +513,7 @@
       'entid
       :ns
       *ns*))
-  (def entid-at (fn entid_at ([db part t_or_date] (.entidAt ^datomic.Database db part t_or_date))))
+  (defn entid-at ([db part t_or_date] (.entidAt ^datomic.Database db part t_or_date)))
   (reset-meta!
     #'entid-at
     (assoc
@@ -540,7 +523,7 @@
       'entid-at
       :ns
       *ns*))
-  (def invoke (fn invoke ([db eid_or_ident & args] (apply db/invoke db eid_or_ident args))))
+  (defn invoke ([db eid_or_ident & args] (apply db/invoke db eid_or_ident args)))
   (reset-meta!
     #'invoke
     (assoc
@@ -550,7 +533,7 @@
       'invoke
       :ns
       *ns*))
-  (def datoms (fn datoms ([db index & components] (db/datoms db index components))))
+  (defn datoms ([db index & components] (db/datoms db index components)))
   (reset-meta!
     #'datoms
     (assoc
@@ -560,7 +543,7 @@
       'datoms
       :ns
       *ns*))
-  (def seek-datoms (fn seek_datoms ([db index & components] (db/seek-datoms db index components))))
+  (defn seek-datoms ([db index & components] (db/seek-datoms db index components)))
   (reset-meta!
     #'seek-datoms
     (assoc
@@ -570,8 +553,7 @@
       'seek-datoms
       :ns
       *ns*))
-  (def rseek-datoms
-   (fn rseek_datoms ([db index & components] (db/rseek-datoms db index components))))
+  (defn rseek-datoms ([db index & components] (db/rseek-datoms db index components)))
   (reset-meta!
     #'rseek-datoms
     (assoc
@@ -591,11 +573,10 @@
       'resolve-tempid
       :ns
       *ns*))
-  (def shutdown
-   (fn shutdown
-     ([shutdown_clojure]
-       (Peer/shutdown (boolean (.booleanValue ^java.lang.Boolean shutdown_clojure)))
-       nil)))
+  (defn shutdown
+    ([shutdown_clojure]
+      (Peer/shutdown (boolean (.booleanValue ^java.lang.Boolean shutdown_clojure)))
+      nil))
   (reset-meta!
     #'shutdown
     (assoc
@@ -604,7 +585,7 @@
       'shutdown
       :ns
       *ns*))
-  (def release (fn release ([conn] (.release ^datomic.Connection conn) nil)))
+  (defn release ([conn] (.release ^datomic.Connection conn) nil))
   (reset-meta!
     #'release
     (assoc
@@ -615,41 +596,40 @@
       'release
       :ns
       *ns*))
-  (def cancel
-   (fn cancel
-     ([p__19443]
-       (let [map__19444 p__19443
-             map__19444 (if (seq? map__19444)
-                          (if (next map__19444)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19444))
-                            (if (seq map__19444) (first map__19444) {}))
-                          map__19444)
-             anomaly_map map__19444
-             category (get map__19444 :cognitect.anomalies/category)
-             allowed_anoms #{:cognitect.anomalies/conflict :cognitect.anomalies/incorrect}
-             throw_incorrect_anom (fn throw_incorrect_anom
-                                    ([p1__19442#]
-                                      (throw
-                                        (ex-info
-                                          p1__19442#
-                                          #:cognitect.anomalies{:category
-                                                                :cognitect.anomalies/incorrect,
-                                                                :message p1__19442#}))))]
-         (if (not category)
-           (^clojure.lang.IFn throw_incorrect_anom "Cancel requires :cognitect.anomalies/category")
-           (if (not (some #{category} allowed_anoms))
-             (^clojure.lang.IFn throw_incorrect_anom
-               (str "Invalid :cognitect.anomalies/category provided to cancel: " category))
-             (if (not (fressian/fressianable? anomaly_map))
-               (^clojure.lang.IFn throw_incorrect_anom "Could not marshal data in cancel anomaly")
-               (do
-                 (when :default
-                   (throw
-                     (ex-info
-                       (or (:cognitect.anomalies/message anomaly_map) "Operation Cancelled")
-                       (merge {} anomaly_map #:datomic{:cancelled true}))))
-                 nil))))))))
+  (defn cancel
+    ([p__19443]
+      (let [map__19444 p__19443
+            map__19444 (if (seq? map__19444)
+                         (if (next map__19444)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19444))
+                           (if (seq map__19444) (first map__19444) {}))
+                         map__19444)
+            anomaly_map map__19444
+            category (get map__19444 :cognitect.anomalies/category)
+            allowed_anoms #{:cognitect.anomalies/conflict :cognitect.anomalies/incorrect}
+            throw_incorrect_anom (fn throw_incorrect_anom
+                                   ([p1__19442#]
+                                     (throw
+                                       (ex-info
+                                         p1__19442#
+                                         #:cognitect.anomalies{:category
+                                                               :cognitect.anomalies/incorrect,
+                                                               :message p1__19442#}))))]
+        (if (not category)
+          (^clojure.lang.IFn throw_incorrect_anom "Cancel requires :cognitect.anomalies/category")
+          (if (not (some #{category} allowed_anoms))
+            (^clojure.lang.IFn throw_incorrect_anom
+              (str "Invalid :cognitect.anomalies/category provided to cancel: " category))
+            (if (not (fressian/fressianable? anomaly_map))
+              (^clojure.lang.IFn throw_incorrect_anom "Could not marshal data in cancel anomaly")
+              (do
+                (when :default
+                  (throw
+                    (ex-info
+                      (or (:cognitect.anomalies/message anomaly_map) "Operation Cancelled")
+                      (merge {} anomaly_map #:datomic{:cancelled true}))))
+                nil)))))))
   (reset-meta!
     #'cancel
     (assoc
@@ -663,8 +643,7 @@
   (reset-meta!
     #'squuid
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'squuid :ns *ns*))
-  (def squuid-time-millis
-   (fn squuid_time_millis (^long [squuid] (Peer/squuidTimeMillis ^java.util.UUID squuid))))
+  (defn squuid-time-millis (^long [squuid] (Peer/squuidTimeMillis ^java.util.UUID squuid)))
   (reset-meta!
     #'squuid-time-millis
     (assoc
@@ -673,14 +652,13 @@
       'squuid-time-millis
       :ns
       *ns*))
-  (def add-listener
-   (fn add_listener
-     ([fut f executor]
-       (.addListener
-         ^datomic.ListenableFuture fut
-         ^java.lang.Runnable f
-         ^java.util.concurrent.Executor executor)
-       nil)))
+  (defn add-listener
+    ([fut f executor]
+      (.addListener
+        ^datomic.ListenableFuture fut
+        ^java.lang.Runnable f
+        ^java.util.concurrent.Executor executor)
+      nil))
   (reset-meta!
     #'add-listener
     (assoc
@@ -691,7 +669,7 @@
       'add-listener
       :ns
       *ns*))
-  (def db-stats (fn db_stats ([db] (.dbStats ^datomic.Database db))))
+  (defn db-stats ([db] (.dbStats ^datomic.Database db)))
   (reset-meta!
     #'db-stats
     (assoc
@@ -702,7 +680,7 @@
       'db-stats
       :ns
       *ns*))
-  (def implicit-part (fn implicit_part (^long [^long id] (db/implicit-part id))))
+  (defn implicit-part (^long [^long id] (db/implicit-part id)))
   (reset-meta!
     #'implicit-part
     (assoc

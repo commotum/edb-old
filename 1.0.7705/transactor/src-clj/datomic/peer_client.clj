@@ -62,7 +62,7 @@
   (reset-meta!
     #'base-uri
     (assoc {:arglists (clojure.core/list ['cfg]), :column (int 1)} :name 'base-uri :ns *ns*))
-  (def db-uri (fn db_uri ([cfg db_name] (str (base-uri cfg) "/" db_name))))
+  (defn db-uri ([cfg db_name] (str (base-uri cfg) "/" db_name)))
   (reset-meta!
     #'db-uri
     (assoc
@@ -71,19 +71,18 @@
       'db-uri
       :ns
       *ns*))
-  (def result-seq
-   (fn result_seq
-     ([result p__26268]
-       (let [map__26269 p__26268
-             map__26269 (if (seq? map__26269)
-                          (if (next map__26269)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26269))
-                            (if (seq map__26269) (first map__26269) {}))
-                          map__26269)
-             offset (get map__26269 :offset)
-             limit (get map__26269 :limit 1000)]
-         (sequence (common/result-xform offset limit force) result)))))
+  (defn result-seq
+    ([result p__26268]
+      (let [map__26269 p__26268
+            map__26269 (if (seq? map__26269)
+                         (if (next map__26269)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26269))
+                           (if (seq map__26269) (first map__26269) {}))
+                         map__26269)
+            offset (get map__26269 :offset)
+            limit (get map__26269 :limit 1000)]
+        (sequence (common/result-xform offset limit force) result))))
   (reset-meta!
     #'result-seq
     (assoc
@@ -93,10 +92,9 @@
       'result-seq
       :ns
       *ns*))
-  (def apply-timeout
-   (fn apply_timeout
-     ([vq user_timeout]
-       (merge vq {:timeout [60000]} (when user_timeout {:timeout [user_timeout]})))))
+  (defn apply-timeout
+    ([vq user_timeout]
+      (merge vq {:timeout [60000]} (when user_timeout {:timeout [user_timeout]}))))
   (reset-meta!
     #'apply-timeout
     (assoc
@@ -121,12 +119,12 @@
       'create-db-lookup
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Unwrap (unwrap-proxies [x] "Unwraps x if a db proxy, else returns x unchanged."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.peer-client" "Unwrap")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Unwrap :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Unwrap :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -136,10 +134,10 @@
                                       :doc "Unwraps x if a db proxy, else returns x unchanged."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer-client" "Unwrap"))
-          protocol_method_name__7433 'unwrap-proxies]
+          protocol_method_name__7465 'unwrap-proxies]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer-client" "unwrap-proxies")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend java.lang.Object Unwrap {:unwrap-proxies (fn fn__26291 ([x] x))})
   (extend nil Unwrap {:unwrap-proxies (fn fn__26293 ([_] nil))})
   (defn disallow-find-variants!
@@ -218,9 +216,8 @@
   (reset-meta!
     #'create-client
     (assoc {:arglists (clojure.core/list ['cfg]), :column (int 1)} :name 'create-client :ns *ns*))
-  (def desc->db
-   (fn desc__GT_db
-     ([desc conn] (spi-support/desc->db desc (:database-id desc) (create-db-lookup conn)))))
+  (defn desc->db
+    ([desc conn] (spi-support/desc->db desc (:database-id desc) (create-db-lookup conn))))
   (reset-meta!
     #'desc->db
     (assoc
@@ -230,33 +227,32 @@
       'desc->db
       :ns
       *ns*))
-  (def local-q
-   (fn local_q
-     ([arg_map qtype]
-       (let [map__26328 arg_map
-             map__26328 (if (seq? map__26328)
-                          (if (next map__26328)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26328))
-                            (if (seq map__26328) (first map__26328) {}))
-                          map__26328)
-             query (get map__26328 :query)
-             args (get map__26328 :args)
-             offset (get map__26328 :offset)
-             limit (get map__26328 :limit)
-             query (qs/query-map query)
-             _ (disallow-find-variants! query)
-             vec__26329 (q/q* query (map unwrap-proxies args))
-             result (nth vec__26329 (int 0) nil)
-             pf (nth vec__26329 (int 1) nil)
-             xform (common/result-xform offset limit pf)
-             G__26332 qtype]
-         (case
-           G__26332
-           :q
-           (into [] xform result)
-           :qseq
-           (qs/counted-seq (sequence xform result) (common/result-count offset limit result)))))))
+  (defn local-q
+    ([arg_map qtype]
+      (let [map__26328 arg_map
+            map__26328 (if (seq? map__26328)
+                         (if (next map__26328)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26328))
+                           (if (seq map__26328) (first map__26328) {}))
+                         map__26328)
+            query (get map__26328 :query)
+            args (get map__26328 :args)
+            offset (get map__26328 :offset)
+            limit (get map__26328 :limit)
+            query (qs/query-map query)
+            _ (disallow-find-variants! query)
+            vec__26329 (q/q* query (map unwrap-proxies args))
+            result (nth vec__26329 (int 0) nil)
+            pf (nth vec__26329 (int 1) nil)
+            xform (common/result-xform offset limit pf)
+            G__26332 qtype]
+        (case
+          G__26332
+          :q
+          (into [] xform result)
+          :qseq
+          (qs/counted-seq (sequence xform result) (common/result-count offset limit result))))))
   (reset-meta!
     #'local-q
     (assoc
@@ -357,10 +353,9 @@
         (str (assoc (.-desc ^datomic.peer_client.DbProxy db) :type :datomic.peer-client/db-proxy)))
       nil))
   (defmethod print-dup datomic.peer_client.DbProxy fn__26345 ([o w] (print-method o w)))
-  (def create-db-proxy
-   (fn create_db_proxy
-     ([db conn] (let [db_id (:id db) desc (spi-support/db->desc db)] (->DbProxy desc conn)))
-     ([conn] (create-db-proxy (api/db conn) conn))))
+  (defn create-db-proxy
+    ([db conn] (let [db_id (:id db) desc (spi-support/db->desc db)] (->DbProxy desc conn)))
+    ([conn] (create-db-proxy (api/db conn) conn)))
   (reset-meta!
     #'create-db-proxy
     (assoc

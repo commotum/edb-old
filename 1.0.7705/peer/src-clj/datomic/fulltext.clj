@@ -118,15 +118,14 @@
            (double (/ (.-score ^com.datomic.lucene.search.ScoreDoc sd) high_score)))]))
     (^boolean hasNext [this] (.hasNext ^java.util.Iterator score_docs)))
   (clojure.core/import 'datomic.fulltext.SearchIterator)
-  (def ->SearchIterator
-   (fn __GT_SearchIterator
-     ([searcher search score_docs attr high_score]
-       (datomic.fulltext.SearchIterator.
-         searcher
-         search
-         score_docs
-         attr
-         (float ^java.lang.Number high_score)))))
+  (defn ->SearchIterator
+    ([searcher search score_docs attr high_score]
+      (datomic.fulltext.SearchIterator.
+        searcher
+        search
+        score_docs
+        attr
+        (float ^java.lang.Number high_score))))
   (reset-meta!
     #'->SearchIterator
     (assoc
@@ -149,15 +148,14 @@
         attr
         (float high_score))))
   (clojure.core/import 'datomic.fulltext.SearchIterable)
-  (def ->SearchIterable
-   (fn __GT_SearchIterable
-     ([searcher search score_docs attr high_score]
-       (datomic.fulltext.SearchIterable.
-         searcher
-         search
-         score_docs
-         attr
-         (float ^java.lang.Number high_score)))))
+  (defn ->SearchIterable
+    ([searcher search score_docs attr high_score]
+      (datomic.fulltext.SearchIterable.
+        searcher
+        search
+        score_docs
+        attr
+        (float ^java.lang.Number high_score))))
   (reset-meta!
     #'->SearchIterable
     (assoc
@@ -167,69 +165,68 @@
       '->SearchIterable
       :ns
       *ns*))
-  (def search-iterable
-   (fn search_iterable
-     ([searcher db attr search_map]
-       (let [qmap (if (string? search_map) {:search search_map} search_map)
-             map__13183 qmap
-             map__13183 (if (seq? map__13183)
-                          (if (next map__13183)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__13183))
-                            (if (seq map__13183) (first map__13183) {}))
-                          map__13183)
-             search (get map__13183 :search)
-             limit (get map__13183 :limit 10000)
-             query (lucene/parse-query "v" search)
-             scoredocs (.-scoreDocs
-                         (.search
-                           ^com.datomic.lucene.search.IndexSearcher searcher
-                           ^com.datomic.lucene.search.Query query
-                           (int limit)))]
-         (if (seq scoredocs)
-           (datomic.fulltext.SearchIterable.
-             searcher
-             search_map
-             (remove
-               nil?
-               (map
-                 (fn fn__13184
-                   ([sd]
-                     (let [doc (.doc
-                                 ^com.datomic.lucene.search.IndexSearcher searcher
-                                 (int (.-doc ^com.datomic.lucene.search.ScoreDoc sd)))
-                           d (db/datum
-                               db
-                               :e
-                               (lucene/long-value (lucene/get-field doc "e"))
-                               :a
-                               attr
-                               :v
-                               (lucene/string-value (lucene/get-field doc "v"))
-                               :asserting
-                               false)
-                           iter (db/windowed
-                                  db
-                                  nil
-                                  (.seekAEVT ^datomic.db.IDb db ^datomic.impl.db.IDatum d))
-                           it (db/dget iter)]
-                       (when (and
-                               it
-                               (=
-                                 (long (.getE ^datomic.impl.db.IDatum d))
-                                 (long (.getE ^datomic.impl.db.IDatum it)))
-                               (=
-                                 (long (.getA ^datomic.impl.db.IDatum d))
-                                 (long (.getA ^datomic.impl.db.IDatum it)))
-                               (zero?
-                                 (common/compare
-                                   (.getV ^datomic.impl.db.IDatum d)
-                                   (.getV ^datomic.impl.db.IDatum it))))
-                         sd))))
-                 scoredocs))
-             attr
-             (float (.-score (first scoredocs))))
-           [])))))
+  (defn search-iterable
+    ([searcher db attr search_map]
+      (let [qmap (if (string? search_map) {:search search_map} search_map)
+            map__13183 qmap
+            map__13183 (if (seq? map__13183)
+                         (if (next map__13183)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__13183))
+                           (if (seq map__13183) (first map__13183) {}))
+                         map__13183)
+            search (get map__13183 :search)
+            limit (get map__13183 :limit 10000)
+            query (lucene/parse-query "v" search)
+            scoredocs (.-scoreDocs
+                        (.search
+                          ^com.datomic.lucene.search.IndexSearcher searcher
+                          ^com.datomic.lucene.search.Query query
+                          (int limit)))]
+        (if (seq scoredocs)
+          (datomic.fulltext.SearchIterable.
+            searcher
+            search_map
+            (remove
+              nil?
+              (map
+                (fn fn__13184
+                  ([sd]
+                    (let [doc (.doc
+                                ^com.datomic.lucene.search.IndexSearcher searcher
+                                (int (.-doc ^com.datomic.lucene.search.ScoreDoc sd)))
+                          d (db/datum
+                              db
+                              :e
+                              (lucene/long-value (lucene/get-field doc "e"))
+                              :a
+                              attr
+                              :v
+                              (lucene/string-value (lucene/get-field doc "v"))
+                              :asserting
+                              false)
+                          iter (db/windowed
+                                 db
+                                 nil
+                                 (.seekAEVT ^datomic.db.IDb db ^datomic.impl.db.IDatum d))
+                          it (db/dget iter)]
+                      (when (and
+                              it
+                              (=
+                                (long (.getE ^datomic.impl.db.IDatum d))
+                                (long (.getE ^datomic.impl.db.IDatum it)))
+                              (=
+                                (long (.getA ^datomic.impl.db.IDatum d))
+                                (long (.getA ^datomic.impl.db.IDatum it)))
+                              (zero?
+                                (common/compare
+                                  (.getV ^datomic.impl.db.IDatum d)
+                                  (.getV ^datomic.impl.db.IDatum it))))
+                        sd))))
+                scoredocs))
+            attr
+            (float (.-score (first scoredocs))))
+          []))))
   (reset-meta!
     #'search-iterable
     (assoc
@@ -244,13 +241,12 @@
   (reset-meta!
     #'default-chunk-size
     (assoc {:const true, :column (int 1)} :name 'default-chunk-size :ns *ns*))
-  (def hybrid-dir
-   (fn hybrid_dir
-     ([writer reader delete_handler]
-       (datomic.impl.lucene.HybridDirectory.
-         ^com.datomic.lucene.store.Directory writer
-         ^com.datomic.lucene.store.Directory reader
-         ^clojure.lang.IFn delete_handler))))
+  (defn hybrid-dir
+    ([writer reader delete_handler]
+      (datomic.impl.lucene.HybridDirectory.
+        ^com.datomic.lucene.store.Directory writer
+        ^com.datomic.lucene.store.Directory reader
+        ^clojure.lang.IFn delete_handler)))
   (reset-meta!
     #'hybrid-dir
     (assoc
@@ -259,14 +255,13 @@
       'hybrid-dir
       :ns
       *ns*))
-  (def index-files
-   (fn index_files
-     ([index_dir]
-       (reduce
-         (fn fn__13191
-           ([m f] (if (.isFile ^java.io.File f) (assoc m f (.getName ^java.io.File f)) m)))
-         {}
-         (file-seq index_dir)))))
+  (defn index-files
+    ([index_dir]
+      (reduce
+        (fn fn__13191
+          ([m f] (if (.isFile ^java.io.File f) (assoc m f (.getName ^java.io.File f)) m)))
+        {}
+        (file-seq index_dir))))
   (reset-meta!
     #'index-files
     (assoc
@@ -275,32 +270,31 @@
       'index-files
       :ns
       *ns*))
-  (def promote-to-cluster
-   (fn promote_to_cluster
-     ([indexing_job]
-       (let [map__13194 indexing_job
-             map__13194 (if (seq? map__13194)
-                          (if (next map__13194)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__13194))
-                            (if (seq map__13194) (first map__13194) {}))
-                          map__13194)
-             cstore (get map__13194 :cstore)
-             path (get map__13194 :path)
-             baseid (get map__13194 :baseid)
-             basefs (get map__13194 :basefs)
-             delete_requests (get map__13194 :delete-requests)
-             filemap (datomic.fulltext/index-files path)]
-         (if (seq filemap)
-           [(fs/create-fs
-              cstore
-              (datomic.fulltext/index-files path)
-              :chunk-size
-              (if basefs (:chunk-size basefs) 54000)
-              :base
-              (when basefs (reduce dissoc (:dir basefs) (deref delete_requests))))
-            (fs/chunk-keys basefs (deref delete_requests))]
-           [baseid nil])))))
+  (defn promote-to-cluster
+    ([indexing_job]
+      (let [map__13194 indexing_job
+            map__13194 (if (seq? map__13194)
+                         (if (next map__13194)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__13194))
+                           (if (seq map__13194) (first map__13194) {}))
+                         map__13194)
+            cstore (get map__13194 :cstore)
+            path (get map__13194 :path)
+            baseid (get map__13194 :baseid)
+            basefs (get map__13194 :basefs)
+            delete_requests (get map__13194 :delete-requests)
+            filemap (datomic.fulltext/index-files path)]
+        (if (seq filemap)
+          [(fs/create-fs
+             cstore
+             (datomic.fulltext/index-files path)
+             :chunk-size
+             (if basefs (:chunk-size basefs) 54000)
+             :base
+             (when basefs (reduce dissoc (:dir basefs) (deref delete_requests))))
+           (fs/chunk-keys basefs (deref delete_requests))]
+          [baseid nil]))))
   (reset-meta!
     #'promote-to-cluster
     (assoc
@@ -474,45 +468,44 @@
       'add-chunked-data-to-writer
       :ns
       *ns*))
-  (def find-historic-docid
-   (fn find_historic_docid
-     ([searcher datum]
-       (let [q (lucene/boolean-query
-                 (lucene/long-query "e" (long (.getE ^datomic.impl.db.IDatum datum)))
-                 :must
-                 (lucene/long-query "t" (long (.getT ^datomic.impl.db.IDatum datum)))
-                 :must)
-             G__13238 (.-scoreDocs
-                        (.search
-                          ^com.datomic.lucene.search.IndexSearcher searcher
-                          ^com.datomic.lucene.search.Query q
-                          (int 1000)))
-             vec__13239 G__13238
-             seq__13240 (seq vec__13239)
-             first__13241 (first seq__13240)
-             seq__13240 (next seq__13240)
-             sd first__13241
-             more seq__13240]
-         (loop [G__13238 G__13238]
-           (let [vec__13242 G__13238
-                 seq__13243 (seq vec__13242)
-                 first__13244 (first seq__13243)
-                 seq__13243 (next seq__13243)
-                 sd first__13244
-                 more seq__13243]
-             (when sd
-               (let [docid (.-doc ^com.datomic.lucene.search.ScoreDoc sd)
-                     found (datomic.fulltext/doc->datum
-                             (.doc ^com.datomic.lucene.search.IndexSearcher searcher (int docid))
-                             (.getA ^datomic.impl.db.IDatum datum))]
-                 (if (and
-                       found
-                       (zero?
-                         (common/compare
-                           (.getV ^datomic.impl.db.IDatum datum)
-                           (.getV ^datomic.impl.db.IDatum found))))
-                   (java.lang.Integer/valueOf (int docid))
-                   (recur more))))))))))
+  (defn find-historic-docid
+    ([searcher datum]
+      (let [q (lucene/boolean-query
+                (lucene/long-query "e" (long (.getE ^datomic.impl.db.IDatum datum)))
+                :must
+                (lucene/long-query "t" (long (.getT ^datomic.impl.db.IDatum datum)))
+                :must)
+            G__13238 (.-scoreDocs
+                       (.search
+                         ^com.datomic.lucene.search.IndexSearcher searcher
+                         ^com.datomic.lucene.search.Query q
+                         (int 1000)))
+            vec__13239 G__13238
+            seq__13240 (seq vec__13239)
+            first__13241 (first seq__13240)
+            seq__13240 (next seq__13240)
+            sd first__13241
+            more seq__13240]
+        (loop [G__13238 G__13238]
+          (let [vec__13242 G__13238
+                seq__13243 (seq vec__13242)
+                first__13244 (first seq__13243)
+                seq__13243 (next seq__13243)
+                sd first__13244
+                more seq__13243]
+            (when sd
+              (let [docid (.-doc ^com.datomic.lucene.search.ScoreDoc sd)
+                    found (datomic.fulltext/doc->datum
+                            (.doc ^com.datomic.lucene.search.IndexSearcher searcher (int docid))
+                            (.getA ^datomic.impl.db.IDatum datum))]
+                (if (and
+                      found
+                      (zero?
+                        (common/compare
+                          (.getV ^datomic.impl.db.IDatum datum)
+                          (.getV ^datomic.impl.db.IDatum found))))
+                  (java.lang.Integer/valueOf (int docid))
+                  (recur more)))))))))
   (reset-meta!
     #'find-historic-docid
     (assoc
@@ -524,50 +517,49 @@
       'find-historic-docid
       :ns
       *ns*))
-  (def remove-data-from-reader
-   (fn remove_data_from_reader
-     ([reader data]
-       (let [findid (partial datomic.fulltext/find-historic-docid (lucene/index-searcher reader))]
-         (loop [seq_13247 (seq data) chunk_13248 nil count_13249 0 i_13250 0]
-           (if (< i_13250 count_13249)
-             (let [datum (.nth ^clojure.lang.Indexed chunk_13248 (int i_13250))]
-               (let [temp__5804__auto__ (^clojure.lang.IFn findid datum)]
-                 (when temp__5804__auto__
-                   (let [docid temp__5804__auto__]
-                     (.deleteDocument
-                       ^com.datomic.lucene.index.IndexReader reader
-                       (int ^java.lang.Number docid))
-                     (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
-                       (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                         (.debug
-                           ^org.slf4j.Logger logger
-                           (logger/process #:fulltext{:remove-data docid})))
-                       nil))))
-               (recur seq_13247 chunk_13248 count_13249 (inc i_13250)))
-             (let [temp__5804__auto__ (seq seq_13247)]
-               (when temp__5804__auto__
-                 (let [seq_13247 temp__5804__auto__]
-                   (if (chunked-seq? seq_13247)
-                     (let [c__6065__auto__ (chunk-first seq_13247)]
-                       (recur
-                         (chunk-rest seq_13247)
-                         c__6065__auto__
-                         (int (count c__6065__auto__))
-                         (int 0)))
-                     (let [datum (first seq_13247)]
-                       (let [temp__5804__auto__ (^clojure.lang.IFn findid datum)]
-                         (when temp__5804__auto__
-                           (let [docid temp__5804__auto__]
-                             (.deleteDocument
-                               ^com.datomic.lucene.index.IndexReader reader
-                               (int ^java.lang.Number docid))
-                             (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process #:fulltext{:remove-data docid})))
-                               nil))))
-                       (recur (next seq_13247) nil 0 0))))))))))))
+  (defn remove-data-from-reader
+    ([reader data]
+      (let [findid (partial datomic.fulltext/find-historic-docid (lucene/index-searcher reader))]
+        (loop [seq_13247 (seq data) chunk_13248 nil count_13249 0 i_13250 0]
+          (if (< i_13250 count_13249)
+            (let [datum (.nth ^clojure.lang.Indexed chunk_13248 (int i_13250))]
+              (let [temp__5804__auto__ (^clojure.lang.IFn findid datum)]
+                (when temp__5804__auto__
+                  (let [docid temp__5804__auto__]
+                    (.deleteDocument
+                      ^com.datomic.lucene.index.IndexReader reader
+                      (int ^java.lang.Number docid))
+                    (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
+                      (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                        (.debug
+                          ^org.slf4j.Logger logger
+                          (logger/process #:fulltext{:remove-data docid})))
+                      nil))))
+              (recur seq_13247 chunk_13248 count_13249 (inc i_13250)))
+            (let [temp__5804__auto__ (seq seq_13247)]
+              (when temp__5804__auto__
+                (let [seq_13247 temp__5804__auto__]
+                  (if (chunked-seq? seq_13247)
+                    (let [c__6065__auto__ (chunk-first seq_13247)]
+                      (recur
+                        (chunk-rest seq_13247)
+                        c__6065__auto__
+                        (int (count c__6065__auto__))
+                        (int 0)))
+                    (let [datum (first seq_13247)]
+                      (let [temp__5804__auto__ (^clojure.lang.IFn findid datum)]
+                        (when temp__5804__auto__
+                          (let [docid temp__5804__auto__]
+                            (.deleteDocument
+                              ^com.datomic.lucene.index.IndexReader reader
+                              (int ^java.lang.Number docid))
+                            (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process #:fulltext{:remove-data docid})))
+                              nil))))
+                      (recur (next seq_13247) nil 0 0)))))))))))
   (reset-meta!
     #'remove-data-from-reader
     (assoc
@@ -577,17 +569,16 @@
       'remove-data-from-reader
       :ns
       *ns*))
-  (def create-index-on-dir
-   (fn create_index_on_dir
-     ([dir add_data remove_data]
-       (with-open [writer (lucene/index-writer dir)]
-         (datomic.fulltext/add-chunked-data-to-writer writer add_data))
-       (when (seq remove_data)
-         (with-open [reader (IndexReader/open
-                              ^com.datomic.lucene.store.Directory dir
-                              (boolean (.booleanValue false)))]
-           (datomic.fulltext/remove-data-from-reader reader remove_data)))
-       dir)))
+  (defn create-index-on-dir
+    ([dir add_data remove_data]
+      (with-open [writer (lucene/index-writer dir)]
+        (datomic.fulltext/add-chunked-data-to-writer writer add_data))
+      (when (seq remove_data)
+        (with-open [reader (IndexReader/open
+                             ^com.datomic.lucene.store.Directory dir
+                             (boolean (.booleanValue false)))]
+          (datomic.fulltext/remove-data-from-reader reader remove_data)))
+      dir))
   (reset-meta!
     #'create-index-on-dir
     (assoc
@@ -596,96 +587,95 @@
       'create-index-on-dir
       :ns
       *ns*))
-  (def do-indexing-job
-   (fn do_indexing_job
-     ([cstore olookup add_data remove_data attr_id dirid]
-       (let [job (datomic.fulltext/create-indexing-job cstore olookup dirid)]
-         (try
-           (do
-             (let [m_13261 {:event :index/build-fulltext-local, :attr attr_id}
-                   ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                  "datomic.fulltext")]
-                                     (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                       (.debug
-                                         ^org.slf4j.Logger logger
-                                         (logger/process (assoc m_13261 :phase :begin))))
-                                     nil)
-                   start__8553__auto__ (java.lang.System/nanoTime)
-                   result__8554__auto__ (try
-                                          {:returned
-                                           (datomic.fulltext/create-index-on-dir
-                                             (:directory job)
-                                             add_data
-                                             remove_data)}
-                                          (catch
-                                            java.lang.Throwable
-                                            t__8555__auto__
-                                            {:threw t__8555__auto__}))
-                   elapsed_13262 (- (java.lang.System/nanoTime) start__8553__auto__)
-                   msec_13263 (logger/format-as-msec (long elapsed_13262))]
-               (let [endmsg__8556__auto__ (merge
-                                            (assoc m_13261 :msec msec_13263 :phase :end)
-                                            (when (:threw result__8554__auto__)
-                                              {:threw (class (:threw result__8554__auto__))}))
-                     logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
-                 (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                   (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-                 nil)
-               (if (contains? result__8554__auto__ :returned)
-                 (:returned result__8554__auto__)
-                 (throw (:threw result__8554__auto__))))
-             (datomic.fulltext/promote-to-cluster job))
-           (finally
-             (future-call
-               (fn fn__13266
-                 ([]
-                   (try
-                     (let [m_13267 {:event :index/cleanup-fulltext, :dir (:path job)}
-                           ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                          "datomic.fulltext")]
-                                             (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                               (.debug
-                                                 ^org.slf4j.Logger logger
-                                                 (logger/process (assoc m_13267 :phase :begin))))
-                                             nil)
-                           start__8553__auto__ (java.lang.System/nanoTime)
-                           result__8554__auto__ (try
-                                                  {:returned
-                                                   (common/delete-file-recursively (:path job))}
-                                                  (catch
-                                                    java.lang.Throwable
-                                                    t__8555__auto__
-                                                    {:threw t__8555__auto__}))
-                           elapsed_13268 (- (java.lang.System/nanoTime) start__8553__auto__)
-                           msec_13269 (logger/format-as-msec (long elapsed_13268))]
-                       (let [endmsg__8556__auto__ (merge
-                                                    (assoc m_13267 :msec msec_13269 :phase :end)
-                                                    (when (:threw result__8554__auto__)
-                                                      {:threw
-                                                       (class (:threw result__8554__auto__))}))
-                             logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
-                         (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                           (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-                         nil)
-                       (if (contains? result__8554__auto__ :returned)
-                         (:returned result__8554__auto__)
-                         (do (throw (:threw result__8554__auto__)) nil)))
-                     (catch
-                       java.lang.Throwable
-                       t__8798__auto__
-                       (do
-                         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")
-                               ex t__8798__auto__]
-                           (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                             (.warn
-                               ^org.slf4j.Logger logger
-                               (logger/process "error executing future")
-                               ^java.lang.Throwable ex)
-                             (logger/caused-by logger ex))
-                           nil)
-                         (monitor/alarm :UnhandledException)
-                         (throw ^java.lang.Throwable t__8798__auto__)
-                         nil))))))))))))
+  (defn do-indexing-job
+    ([cstore olookup add_data remove_data attr_id dirid]
+      (let [job (datomic.fulltext/create-indexing-job cstore olookup dirid)]
+        (try
+          (do
+            (let [m_13261 {:event :index/build-fulltext-local, :attr attr_id}
+                  ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                 "datomic.fulltext")]
+                                    (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                      (.debug
+                                        ^org.slf4j.Logger logger
+                                        (logger/process (assoc m_13261 :phase :begin))))
+                                    nil)
+                  start__8553__auto__ (java.lang.System/nanoTime)
+                  result__8554__auto__ (try
+                                         {:returned
+                                          (datomic.fulltext/create-index-on-dir
+                                            (:directory job)
+                                            add_data
+                                            remove_data)}
+                                         (catch
+                                           java.lang.Throwable
+                                           t__8555__auto__
+                                           {:threw t__8555__auto__}))
+                  elapsed_13262 (- (java.lang.System/nanoTime) start__8553__auto__)
+                  msec_13263 (logger/format-as-msec (long elapsed_13262))]
+              (let [endmsg__8556__auto__ (merge
+                                           (assoc m_13261 :msec msec_13263 :phase :end)
+                                           (when (:threw result__8554__auto__)
+                                             {:threw (class (:threw result__8554__auto__))}))
+                    logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
+                (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                  (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+                nil)
+              (if (contains? result__8554__auto__ :returned)
+                (:returned result__8554__auto__)
+                (throw (:threw result__8554__auto__))))
+            (datomic.fulltext/promote-to-cluster job))
+          (finally
+            (future-call
+              (fn fn__13266
+                ([]
+                  (try
+                    (let [m_13267 {:event :index/cleanup-fulltext, :dir (:path job)}
+                          ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                         "datomic.fulltext")]
+                                            (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                              (.debug
+                                                ^org.slf4j.Logger logger
+                                                (logger/process (assoc m_13267 :phase :begin))))
+                                            nil)
+                          start__8553__auto__ (java.lang.System/nanoTime)
+                          result__8554__auto__ (try
+                                                 {:returned
+                                                  (common/delete-file-recursively (:path job))}
+                                                 (catch
+                                                   java.lang.Throwable
+                                                   t__8555__auto__
+                                                   {:threw t__8555__auto__}))
+                          elapsed_13268 (- (java.lang.System/nanoTime) start__8553__auto__)
+                          msec_13269 (logger/format-as-msec (long elapsed_13268))]
+                      (let [endmsg__8556__auto__ (merge
+                                                   (assoc m_13267 :msec msec_13269 :phase :end)
+                                                   (when (:threw result__8554__auto__)
+                                                     {:threw
+                                                      (class (:threw result__8554__auto__))}))
+                            logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
+                        (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                          (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+                        nil)
+                      (if (contains? result__8554__auto__ :returned)
+                        (:returned result__8554__auto__)
+                        (do (throw (:threw result__8554__auto__)) nil)))
+                    (catch
+                      java.lang.Throwable
+                      t__8798__auto__
+                      (do
+                        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")
+                              ex t__8798__auto__]
+                          (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                            (.warn
+                              ^org.slf4j.Logger logger
+                              (logger/process "error executing future")
+                              ^java.lang.Throwable ex)
+                            (logger/caused-by logger ex))
+                          nil)
+                        (monitor/alarm :UnhandledException)
+                        (throw ^java.lang.Throwable t__8798__auto__)
+                        nil)))))))))))
   (reset-meta!
     #'do-indexing-job
     (assoc
@@ -764,37 +754,36 @@
       'write-changed-val
       :ns
       *ns*))
-  (def find-matching-assertion
-   (fn find_matching_assertion
-     ([db d]
-       (let [iter (iter/filter
-                    (fn fn__13309 ([p1__13308#] (.isAssertion ^datomic.impl.db.IDatum p1__13308#)))
-                    (.seekAEVT
-                      ^datomic.db.IDb db
-                      (db/datum
-                        db
-                        :a
-                        (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))
-                        :e
-                        (long (.getE ^datomic.impl.db.IDatum d))
-                        :v
-                        (.getV ^datomic.impl.db.IDatum d)
-                        :asserting
-                        true)))
-             it (db/dget iter)]
-         (when (and
-                 it
-                 (=
-                   (long (.getE ^datomic.impl.db.IDatum d))
-                   (long (.getE ^datomic.impl.db.IDatum it)))
-                 (=
-                   (long (.getA ^datomic.impl.db.IDatum d))
-                   (long (.getA ^datomic.impl.db.IDatum it)))
-                 (zero?
-                   (common/compare
-                     (.getV ^datomic.impl.db.IDatum d)
-                     (.getV ^datomic.impl.db.IDatum it))))
-           it)))))
+  (defn find-matching-assertion
+    ([db d]
+      (let [iter (iter/filter
+                   (fn fn__13309 ([p1__13308#] (.isAssertion ^datomic.impl.db.IDatum p1__13308#)))
+                   (.seekAEVT
+                     ^datomic.db.IDb db
+                     (db/datum
+                       db
+                       :a
+                       (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))
+                       :e
+                       (long (.getE ^datomic.impl.db.IDatum d))
+                       :v
+                       (.getV ^datomic.impl.db.IDatum d)
+                       :asserting
+                       true)))
+            it (db/dget iter)]
+        (when (and
+                it
+                (=
+                  (long (.getE ^datomic.impl.db.IDatum d))
+                  (long (.getE ^datomic.impl.db.IDatum it)))
+                (=
+                  (long (.getA ^datomic.impl.db.IDatum d))
+                  (long (.getA ^datomic.impl.db.IDatum it)))
+                (zero?
+                  (common/compare
+                    (.getV ^datomic.impl.db.IDatum d)
+                    (.getV ^datomic.impl.db.IDatum it))))
+          it))))
   (reset-meta!
     #'find-matching-assertion
     (assoc
@@ -841,171 +830,167 @@
       'separate-history
       :ns
       *ns*))
-  (def build-index
-   (fn build_index
-     ([cstore olookup db aevt attrids old_root_id old_hist_id]
-       (let [m_13321 {:event :index/build-fulltext}
-             ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process (assoc m_13321 :phase :begin))))
-                               nil)
-             start__8553__auto__ (java.lang.System/nanoTime)
-             result__8554__auto__ (try
-                                    {:returned
-                                     (let [attriters (reduce
-                                                       (fn fn__13334
-                                                         ([m attrid]
-                                                           (let 
-                                                             [temp__5802__auto__
-                                                              (db/scan-aevt aevt attrid)]
-                                                             (if
-                                                               temp__5802__auto__
-                                                               (let 
-                                                                 [iter temp__5802__auto__]
-                                                                 (assoc m attrid iter))
-                                                               m))))
-                                                       nil
-                                                       attrids)
-                                           oldroot (when old_root_id
-                                                     (common/getx olookup old_root_id))
-                                           oldhist (when old_hist_id
-                                                     (common/getx olookup old_hist_id))
-                                           vec__13325 (let [rootmap
+  (defn build-index
+    ([cstore olookup db aevt attrids old_root_id old_hist_id]
+      (let [m_13321 {:event :index/build-fulltext}
+            ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process (assoc m_13321 :phase :begin))))
+                              nil)
+            start__8553__auto__ (java.lang.System/nanoTime)
+            result__8554__auto__ (try
+                                   {:returned
+                                    (let [attriters (reduce
+                                                      (fn fn__13334
+                                                        ([m attrid]
+                                                          (let [temp__5802__auto__
+                                                                (db/scan-aevt aevt attrid)]
                                                             (if
-                                                              oldroot
-                                                              (.-attrmap
-                                                                ^datomic.fulltext.Root oldroot)
-                                                              {})
-                                                            histmap
-                                                            (if
-                                                              oldhist
-                                                              (.-attrmap
-                                                                ^datomic.fulltext.Root oldhist)
-                                                              {})
-                                                            garbage []
-                                                            G__13343 (seq attriters)
-                                                            vec__13344 G__13343
-                                                            seq__13345 (seq vec__13344)
-                                                            first__13346 (first seq__13345)
-                                                            seq__13345 (next seq__13345)
-                                                            vec__13347 first__13346
-                                                            attrid (nth vec__13347 (int 0) nil)
-                                                            iter (nth vec__13347 (int 1) nil)
-                                                            more seq__13345]
-                                                        (loop [rootmap rootmap
+                                                              temp__5802__auto__
+                                                              (let 
+                                                                [iter temp__5802__auto__]
+                                                                (assoc m attrid iter))
+                                                              m))))
+                                                      nil
+                                                      attrids)
+                                          oldroot (when old_root_id
+                                                    (common/getx olookup old_root_id))
+                                          oldhist (when old_hist_id
+                                                    (common/getx olookup old_hist_id))
+                                          vec__13325 (let [rootmap (if
+                                                                     oldroot
+                                                                     (.-attrmap
+                                                                       ^datomic.fulltext.Root oldroot)
+                                                                     {})
+                                                           histmap (if
+                                                                     oldhist
+                                                                     (.-attrmap
+                                                                       ^datomic.fulltext.Root oldhist)
+                                                                     {})
+                                                           garbage []
+                                                           G__13343 (seq attriters)
+                                                           vec__13344 G__13343
+                                                           seq__13345 (seq vec__13344)
+                                                           first__13346 (first seq__13345)
+                                                           seq__13345 (next seq__13345)
+                                                           vec__13347 first__13346
+                                                           attrid (nth vec__13347 (int 0) nil)
+                                                           iter (nth vec__13347 (int 1) nil)
+                                                           more seq__13345]
+                                                       (loop [rootmap rootmap
+                                                              histmap histmap
+                                                              garbage garbage
+                                                              G__13343 G__13343]
+                                                         (let [rootmap rootmap
                                                                histmap histmap
                                                                garbage garbage
-                                                               G__13343 G__13343]
-                                                          (let [rootmap rootmap
-                                                                histmap histmap
-                                                                garbage garbage
-                                                                vec__13351 G__13343
-                                                                seq__13352 (seq vec__13351)
-                                                                first__13353 (first seq__13352)
-                                                                seq__13352 (next seq__13352)
-                                                                vec__13354 first__13353
-                                                                attrid (nth vec__13354 (int 0) nil)
-                                                                iter (nth vec__13354 (int 1) nil)
-                                                                more seq__13352]
-                                                            (if
-                                                              attrid
-                                                              (let 
-                                                                [vec__13357
-                                                                 (datomic.fulltext/separate-history
-                                                                   db
-                                                                   (iter/iter-seq iter)
-                                                                   [])
-                                                                 data (nth vec__13357 (int 0) nil)
-                                                                 histdata
-                                                                 (nth vec__13357 (int 1) nil)
-                                                                 vec__13360
-                                                                 (datomic.fulltext/do-indexing-job
-                                                                   cstore
-                                                                   olookup
-                                                                   data
-                                                                   histdata
+                                                               vec__13351 G__13343
+                                                               seq__13352 (seq vec__13351)
+                                                               first__13353 (first seq__13352)
+                                                               seq__13352 (next seq__13352)
+                                                               vec__13354 first__13353
+                                                               attrid (nth vec__13354 (int 0) nil)
+                                                               iter (nth vec__13354 (int 1) nil)
+                                                               more seq__13352]
+                                                           (if
+                                                             attrid
+                                                             (let 
+                                                               [vec__13357
+                                                                (datomic.fulltext/separate-history
+                                                                  db
+                                                                  (iter/iter-seq iter)
+                                                                  [])
+                                                                data (nth vec__13357 (int 0) nil)
+                                                                histdata
+                                                                (nth vec__13357 (int 1) nil)
+                                                                vec__13360
+                                                                (datomic.fulltext/do-indexing-job
+                                                                  cstore
+                                                                  olookup
+                                                                  data
+                                                                  histdata
+                                                                  attrid
+                                                                  (get rootmap attrid))
+                                                                newdirid
+                                                                (nth vec__13360 (int 0) nil)
+                                                                gids (nth vec__13360 (int 1) nil)
+                                                                vec__13363
+                                                                (datomic.fulltext/do-indexing-job
+                                                                  cstore
+                                                                  olookup
+                                                                  histdata
+                                                                  nil
+                                                                  attrid
+                                                                  (get histmap attrid))
+                                                                newhistdirid
+                                                                (nth vec__13363 (int 0) nil)
+                                                                histgids
+                                                                (nth vec__13363 (int 1) nil)]
+                                                               (recur
+                                                                 (assoc rootmap attrid newdirid)
+                                                                 (assoc
+                                                                   histmap
                                                                    attrid
-                                                                   (get rootmap attrid))
-                                                                 newdirid
-                                                                 (nth vec__13360 (int 0) nil)
-                                                                 gids (nth vec__13360 (int 1) nil)
-                                                                 vec__13363
-                                                                 (datomic.fulltext/do-indexing-job
-                                                                   cstore
-                                                                   olookup
-                                                                   histdata
-                                                                   nil
-                                                                   attrid
-                                                                   (get histmap attrid))
-                                                                 newhistdirid
-                                                                 (nth vec__13363 (int 0) nil)
-                                                                 histgids
-                                                                 (nth vec__13363 (int 1) nil)]
-                                                                (recur
-                                                                  (assoc rootmap attrid newdirid)
-                                                                  (assoc
-                                                                    histmap
-                                                                    attrid
-                                                                    newhistdirid)
-                                                                  (reduce
-                                                                    into
-                                                                    garbage
-                                                                    [gids histgids])
-                                                                  more))
-                                                              [(datomic.fulltext.Root. rootmap)
-                                                               (datomic.fulltext.Root. histmap)
-                                                               garbage]))))
-                                           root (nth vec__13325 (int 0) nil)
-                                           hist (nth vec__13325 (int 1) nil)
-                                           garbage (nth vec__13325 (int 2) nil)
-                                           vec__13328 (datomic.fulltext/write-changed-val
-                                                        cstore
-                                                        old_root_id
-                                                        oldroot
-                                                        root
-                                                        garbage)
-                                           new_root_id (nth vec__13328 (int 0) nil)
-                                           garbage (nth vec__13328 (int 1) nil)
-                                           vec__13331 (datomic.fulltext/write-changed-val
-                                                        cstore
-                                                        old_hist_id
-                                                        oldhist
-                                                        hist
-                                                        garbage)
-                                           new_hist_id (nth vec__13331 (int 0) nil)
-                                           garbage (nth vec__13331 (int 1) nil)]
-                                       (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                      "datomic.fulltext")]
-                                         (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                           (.debug
-                                             ^org.slf4j.Logger logger
-                                             (logger/process
-                                               #:index{:fulltext-garbage
-                                                       {:garbage-count
-                                                        (java.lang.Integer/valueOf
-                                                          (int (count garbage)))}})))
-                                         nil)
-                                       [new_root_id new_hist_id garbage])}
-                                    (catch
-                                      java.lang.Throwable
-                                      t__8555__auto__
-                                      {:threw t__8555__auto__}))
-             elapsed_13322 (- (java.lang.System/nanoTime) start__8553__auto__)
-             msec_13323 (logger/format-as-msec (long elapsed_13322))]
-         (monitor/add-stat :CreateFulltextIndexMsec msec_13323)
-         (let [endmsg__8556__auto__ (merge
-                                      (assoc m_13321 :msec msec_13323 :phase :end)
-                                      (when (:threw result__8554__auto__)
-                                        {:threw (class (:threw result__8554__auto__))}))
-               logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
-           (when (.isDebugEnabled ^org.slf4j.Logger logger)
-             (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-           nil)
-         (if (contains? result__8554__auto__ :returned)
-           (:returned result__8554__auto__)
-           (do (throw (:threw result__8554__auto__)) nil))))))
+                                                                   newhistdirid)
+                                                                 (reduce
+                                                                   into
+                                                                   garbage
+                                                                   [gids histgids])
+                                                                 more))
+                                                             [(datomic.fulltext.Root. rootmap)
+                                                              (datomic.fulltext.Root. histmap)
+                                                              garbage]))))
+                                          root (nth vec__13325 (int 0) nil)
+                                          hist (nth vec__13325 (int 1) nil)
+                                          garbage (nth vec__13325 (int 2) nil)
+                                          vec__13328 (datomic.fulltext/write-changed-val
+                                                       cstore
+                                                       old_root_id
+                                                       oldroot
+                                                       root
+                                                       garbage)
+                                          new_root_id (nth vec__13328 (int 0) nil)
+                                          garbage (nth vec__13328 (int 1) nil)
+                                          vec__13331 (datomic.fulltext/write-changed-val
+                                                       cstore
+                                                       old_hist_id
+                                                       oldhist
+                                                       hist
+                                                       garbage)
+                                          new_hist_id (nth vec__13331 (int 0) nil)
+                                          garbage (nth vec__13331 (int 1) nil)]
+                                      (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                     "datomic.fulltext")]
+                                        (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                          (.debug
+                                            ^org.slf4j.Logger logger
+                                            (logger/process
+                                              #:index{:fulltext-garbage
+                                                      {:garbage-count
+                                                       (java.lang.Integer/valueOf
+                                                         (int (count garbage)))}})))
+                                        nil)
+                                      [new_root_id new_hist_id garbage])}
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8555__auto__
+                                     {:threw t__8555__auto__}))
+            elapsed_13322 (- (java.lang.System/nanoTime) start__8553__auto__)
+            msec_13323 (logger/format-as-msec (long elapsed_13322))]
+        (monitor/add-stat :CreateFulltextIndexMsec msec_13323)
+        (let [endmsg__8556__auto__ (merge
+                                     (assoc m_13321 :msec msec_13323 :phase :end)
+                                     (when (:threw result__8554__auto__)
+                                       {:threw (class (:threw result__8554__auto__))}))
+              logger (org.slf4j.LoggerFactory/getLogger "datomic.fulltext")]
+          (when (.isDebugEnabled ^org.slf4j.Logger logger)
+            (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+          nil)
+        (if (contains? result__8554__auto__ :returned)
+          (:returned result__8554__auto__)
+          (do (throw (:threw result__8554__auto__)) nil)))))
   (reset-meta!
     #'build-index
     (assoc
@@ -1081,28 +1066,27 @@
       'fulltext-index-reader
       :ns
       *ns*))
-  (def search
-   (fn search
-     ([db a search_map]
-       (let [attrid (db/resolve-id db a)
-             temp__5802__auto__ (seq
-                                  (remove
-                                    nil?
-                                    (map
-                                      (fn fn__13402
-                                        ([p1__13401#]
-                                          (datomic.fulltext/fulltext-index-reader
-                                            db
-                                            p1__13401#
-                                            attrid)))
-                                      (if (.isHistory ^datomic.Database db)
-                                        [:memidx :indexing :index :history]
-                                        [:memidx :indexing :index]))))]
-         (if temp__5802__auto__
-           (let [readers temp__5802__auto__
-                 reader (lucene/multi-reader readers :close-subreaders false)]
-             (datomic.fulltext/search-iterable (lucene/index-searcher reader) db a search_map))
-           [])))))
+  (defn search
+    ([db a search_map]
+      (let [attrid (db/resolve-id db a)
+            temp__5802__auto__ (seq
+                                 (remove
+                                   nil?
+                                   (map
+                                     (fn fn__13402
+                                       ([p1__13401#]
+                                         (datomic.fulltext/fulltext-index-reader
+                                           db
+                                           p1__13401#
+                                           attrid)))
+                                     (if (.isHistory ^datomic.Database db)
+                                       [:memidx :indexing :index :history]
+                                       [:memidx :indexing :index]))))]
+        (if temp__5802__auto__
+          (let [readers temp__5802__auto__
+                reader (lucene/multi-reader readers :close-subreaders false)]
+            (datomic.fulltext/search-iterable (lucene/index-searcher reader) db a search_map))
+          []))))
   (reset-meta!
     #'search
     (assoc

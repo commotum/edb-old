@@ -41,40 +41,37 @@
       'mean-and-stddev
       :ns
       *ns*))
-  (def sla
-   (fn sla
-     ([sorted_coll]
-       (loop [percentile 0.9 coll sorted_coll results {}]
-         (if (< (count coll) 10)
-           (into
-             (sorted-map)
-             (assoc results (java.lang.Double/valueOf (double percentile)) (last coll)))
-           (let [rest (drop (java.lang.Double/valueOf (double (* 0.9 (count coll)))) coll)]
-             (recur
-               (+ percentile (* 0.9 (- 1 percentile)))
-               rest
-               (assoc results (java.lang.Double/valueOf (double percentile)) (first rest)))))))))
+  (defn sla
+    ([sorted_coll]
+      (loop [percentile 0.9 coll sorted_coll results {}]
+        (if (< (count coll) 10)
+          (into
+            (sorted-map)
+            (assoc results (java.lang.Double/valueOf (double percentile)) (last coll)))
+          (let [rest (drop (java.lang.Double/valueOf (double (* 0.9 (count coll)))) coll)]
+            (recur
+              (+ percentile (* 0.9 (- 1 percentile)))
+              rest
+              (assoc results (java.lang.Double/valueOf (double percentile)) (first rest))))))))
   (reset-meta!
     #'sla
     (assoc {:arglists (clojure.core/list ['sorted-coll]), :column (int 1)} :name 'sla :ns *ns*))
-  (def median
-   (fn median
-     ([sorted_coll] (when (seq sorted_coll) (nth sorted_coll (int (/ (count sorted_coll) 2)))))))
+  (defn median
+    ([sorted_coll] (when (seq sorted_coll) (nth sorted_coll (int (/ (count sorted_coll) 2))))))
   (reset-meta!
     #'median
     (assoc {:arglists (clojure.core/list ['sorted-coll]), :column (int 1)} :name 'median :ns *ns*))
-  (def round
-   (fn round
-     ([^double num ^long significant_digits]
-       (if (= num 0.0)
-         (java.lang.Double/valueOf (double num))
-         (let [d (java.lang.Math/ceil
-                   (double (java.lang.Math/log10 (double (if (< num 0) (- num) num)))))
-               power (- significant_digits d)
-               mag (java.lang.Math/pow (double 10) (double power))
-               shifted (java.lang.Math/round (double (* num mag)))]
-           (java.lang.Double/valueOf (double (/ shifted mag))))))
-     ([num] (if (integer? num) num (long (java.lang.Math/round (double num)))))))
+  (defn round
+    ([^double num ^long significant_digits]
+      (if (= num 0.0)
+        (java.lang.Double/valueOf (double num))
+        (let [d (java.lang.Math/ceil
+                  (double (java.lang.Math/log10 (double (if (< num 0) (- num) num)))))
+              power (- significant_digits d)
+              mag (java.lang.Math/pow (double 10) (double power))
+              shifted (java.lang.Math/round (double (* num mag)))]
+          (java.lang.Double/valueOf (double (/ shifted mag))))))
+    ([num] (if (integer? num) num (long (java.lang.Math/round (double num))))))
   (reset-meta!
     #'round
     (assoc
@@ -91,25 +88,24 @@
   (reset-meta!
     #'rounded-mb
     (assoc {:arglists (clojure.core/list ['bytes]), :column (int 1)} :name 'rounded-mb :ns *ns*))
-  (def create-exponential
-   (fn create_exponential
-     ([p__281]
-       (let [map__282 p__281
-             map__282 (if (seq? map__282)
-                        (if (next map__282)
-                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__282))
-                          (if (seq map__282) (first map__282) {}))
-                        map__282)
-             x1 (get map__282 :x1)
-             x2 (get map__282 :x2)
-             y1 (get map__282 :y1)
-             y2 (get map__282 :y2)
-             b (java.lang.Math/pow (double (/ (float y2) y1)) (double (/ 1.0 (- x2 x1))))
-             a (/ y1 (java.lang.Math/pow (double b) (double ^java.lang.Number x1)))]
-         (fn fn__283
-           ([x]
-             (java.lang.Double/valueOf
-               (double (* a (java.lang.Math/pow (double b) (double ^java.lang.Number x)))))))))))
+  (defn create-exponential
+    ([p__281]
+      (let [map__282 p__281
+            map__282 (if (seq? map__282)
+                       (if (next map__282)
+                         (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__282))
+                         (if (seq map__282) (first map__282) {}))
+                       map__282)
+            x1 (get map__282 :x1)
+            x2 (get map__282 :x2)
+            y1 (get map__282 :y1)
+            y2 (get map__282 :y2)
+            b (java.lang.Math/pow (double (/ (float y2) y1)) (double (/ 1.0 (- x2 x1))))
+            a (/ y1 (java.lang.Math/pow (double b) (double ^java.lang.Number x1)))]
+        (fn fn__283
+          ([x]
+            (java.lang.Double/valueOf
+              (double (* a (java.lang.Math/pow (double b) (double ^java.lang.Number x))))))))))
   (reset-meta!
     #'create-exponential
     (assoc
@@ -125,16 +121,15 @@
   (.bindRoot
     (.setDynamic (clojure.lang.RT/var "datomic.math" "*rnd*") true)
     (java.util.Random. 42))
-  (def uniform
-   (fn uniform
-     (^long [lo hi]
-       (do
-         (when-not (< lo hi)
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str (clojure.core/list '< 'lo 'hi))))))
-         (long (java.lang.Math/floor (double (+ lo (* (.nextDouble *rnd*) (- hi lo))))))))
-     (^long [] (.nextLong *rnd*))))
+  (defn uniform
+    (^long [lo hi]
+      (do
+        (when-not (< lo hi)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list '< 'lo 'hi))))))
+        (long (java.lang.Math/floor (double (+ lo (* (.nextDouble *rnd*) (- hi lo))))))))
+    (^long [] (.nextLong *rnd*)))
   (reset-meta!
     #'uniform
     (assoc

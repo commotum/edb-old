@@ -28,9 +28,7 @@
         (clojure.core/import 'java.sql.SQLException))))
   (set! *warn-on-reflection* true)
   (req/maybe-require 'datomic.kv-sql-ext)
-  (def constraint-violation?
-   (fn constraint_violation_QMARK_
-     ([e] (.startsWith (.getSQLState ^java.sql.SQLException e) "23"))))
+  (defn constraint-violation? ([e] (.startsWith (.getSQLState ^java.sql.SQLException e) "23")))
   (reset-meta!
     #'constraint-violation?
     (assoc

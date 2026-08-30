@@ -42,10 +42,9 @@
     (dbId [this] (cluster/dbId ref_cluster))
     (^void close [this] (do (cluster/close ref_cluster) (cluster/close val_cluster) nil)))
   (clojure.core/import 'datomic.combined_cluster.CombinedCluster)
-  (def ->CombinedCluster
-   (fn __GT_CombinedCluster
-     ([ref_cluster val_cluster]
-       (datomic.combined_cluster.CombinedCluster. ref_cluster val_cluster))))
+  (defn ->CombinedCluster
+    ([ref_cluster val_cluster]
+      (datomic.combined_cluster.CombinedCluster. ref_cluster val_cluster)))
   (reset-meta!
     #'->CombinedCluster
     (assoc
@@ -54,10 +53,9 @@
       '->CombinedCluster
       :ns
       *ns*))
-  (def combined-cluster
-   (fn combined_cluster
-     ([ref_cluster val_cluster]
-       (datomic.combined_cluster.CombinedCluster. ref_cluster val_cluster))))
+  (defn combined-cluster
+    ([ref_cluster val_cluster]
+      (datomic.combined_cluster.CombinedCluster. ref_cluster val_cluster)))
   (reset-meta!
     #'combined-cluster
     (assoc

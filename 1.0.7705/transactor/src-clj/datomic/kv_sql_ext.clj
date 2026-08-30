@@ -69,34 +69,33 @@
       'validation-query
       :ns
       *ns*))
-  (def try-validation-query
-   (fn try_validation_query
-     ([sql_url spec]
-       (let [q (validation-query sql_url)]
-         (try
-           (with-open [conn (sql/connect spec)]
-             (with-open [stmt (.prepareStatement ^java.sql.Connection conn ^java.lang.String q)]
-               (when-not (.next (.executeQuery ^java.sql.PreparedStatement stmt))
-                 (monitor/alarm :SQLValidationQueryFailed)
-                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-sql-ext")]
-                   (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                     (.warn
-                       ^org.slf4j.Logger logger
-                       (logger/process {:event :sql/validation-query-failed, :query q})))
-                   nil))))
-           (catch
-             java.lang.Throwable
-             t
-             (do
-               (monitor/alarm :SQLValidationQueryFailed)
-               (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-sql-ext") ex t]
-                 (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                   (.warn
-                     ^org.slf4j.Logger logger
-                     (logger/process {:event :sql/validation-query-failed, :query q})
-                     ^java.lang.Throwable ex)
-                   (logger/caused-by logger ex))
-                 nil))))))))
+  (defn try-validation-query
+    ([sql_url spec]
+      (let [q (validation-query sql_url)]
+        (try
+          (with-open [conn (sql/connect spec)]
+            (with-open [stmt (.prepareStatement ^java.sql.Connection conn ^java.lang.String q)]
+              (when-not (.next (.executeQuery ^java.sql.PreparedStatement stmt))
+                (monitor/alarm :SQLValidationQueryFailed)
+                (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-sql-ext")]
+                  (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                    (.warn
+                      ^org.slf4j.Logger logger
+                      (logger/process {:event :sql/validation-query-failed, :query q})))
+                  nil))))
+          (catch
+            java.lang.Throwable
+            t
+            (do
+              (monitor/alarm :SQLValidationQueryFailed)
+              (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-sql-ext") ex t]
+                (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                  (.warn
+                    ^org.slf4j.Logger logger
+                    (logger/process {:event :sql/validation-query-failed, :query q})
+                    ^java.lang.Throwable ex)
+                  (logger/caused-by logger ex))
+                nil)))))))
   (reset-meta!
     #'try-validation-query
     (assoc
@@ -163,28 +162,27 @@
                                nil)))))}]
             (try-validation-query sql_url spec)
             spec)))))
-  (def cluster-conf->spec
-   (fn cluster_conf__GT_spec
-     ([p__10798]
-       (let [map__10799 p__10798
-             map__10799 (if (seq? map__10799)
-                          (if (next map__10799)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__10799))
-                            (if (seq map__10799) (first map__10799) {}))
-                          map__10799)
-             cluster_conf map__10799
-             sql_url (clojure.core/get map__10799 :sql-url)
-             data_source (clojure.core/get map__10799 :data-source)
-             factory (clojure.core/get map__10799 :factory)]
-         (cond
-           sql_url (locking driver-manager-lock (create-datasource cluster_conf))
-           data_source {:datasource data_source}
-           factory {:factory (fn fn__10800 ([] (.call ^java.util.concurrent.Callable factory)))}
-           :else (do
-                   (error/arg
-                     :db.error/invalid-sql-connection
-                     "Must supply jdbc url in uri, or DataSource or Callable<Connection> in protocolObject arg to Peer.connect")))))))
+  (defn cluster-conf->spec
+    ([p__10798]
+      (let [map__10799 p__10798
+            map__10799 (if (seq? map__10799)
+                         (if (next map__10799)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__10799))
+                           (if (seq map__10799) (first map__10799) {}))
+                         map__10799)
+            cluster_conf map__10799
+            sql_url (clojure.core/get map__10799 :sql-url)
+            data_source (clojure.core/get map__10799 :data-source)
+            factory (clojure.core/get map__10799 :factory)]
+        (cond
+          sql_url (locking driver-manager-lock (create-datasource cluster_conf))
+          data_source {:datasource data_source}
+          factory {:factory (fn fn__10800 ([] (.call ^java.util.concurrent.Callable factory)))}
+          :else (do
+                  (error/arg
+                    :db.error/invalid-sql-connection
+                    "Must supply jdbc url in uri, or DataSource or Callable<Connection> in protocolObject arg to Peer.connect"))))))
   (reset-meta!
     #'cluster-conf->spec
     (assoc
@@ -194,9 +192,8 @@
       'cluster-conf->spec
       :ns
       *ns*))
-  (def kv-sql
-   (fn kv_sql
-     ([cluster_conf] ((resolve 'datomic.kv-sql/from-spec) (cluster-conf->spec cluster_conf)))))
+  (defn kv-sql
+    ([cluster_conf] ((resolve 'datomic.kv-sql/from-spec) (cluster-conf->spec cluster_conf))))
   (reset-meta!
     #'kv-sql
     (assoc

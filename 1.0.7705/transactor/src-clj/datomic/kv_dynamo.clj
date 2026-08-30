@@ -42,20 +42,19 @@
       'remove-prefix
       :ns
       *ns*))
-  (def expected-map
-   (fn expected_map
-     ([expect_map]
-       (into
-         {}
-         (map
-           (fn fn__26784
-             ([p__26783]
-               (let [vec__26785 p__26783
-                     k (nth vec__26785 (int 0) nil)
-                     v (nth vec__26785 (int 1) nil)]
-                 [(name k)
-                  (if (nil? v) {:Exists false} {:Value {(if (number? v) :N :S) (str v)}})])))
-           expect_map)))))
+  (defn expected-map
+    ([expect_map]
+      (into
+        {}
+        (map
+          (fn fn__26784
+            ([p__26783]
+              (let [vec__26785 p__26783
+                    k (nth vec__26785 (int 0) nil)
+                    v (nth vec__26785 (int 1) nil)]
+                [(name k)
+                 (if (nil? v) {:Exists false} {:Value {(if (number? v) :N :S) (str v)}})])))
+          expect_map))))
   (reset-meta!
     #'expected-map
     (assoc
@@ -123,10 +122,9 @@
       '->KVDynamo
       :ns
       *ns*))
-  (def kv-dynamo
-   (fn kv_dynamo
-     ([client table prefix] (datomic.kv_dynamo.KVDynamo. client table prefix))
-     ([client table] (datomic.kv_dynamo.KVDynamo. client table nil))))
+  (defn kv-dynamo
+    ([client table prefix] (datomic.kv_dynamo.KVDynamo. client table prefix))
+    ([client table] (datomic.kv_dynamo.KVDynamo. client table nil)))
   (reset-meta!
     #'kv-dynamo
     (assoc

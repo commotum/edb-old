@@ -70,21 +70,20 @@
           ['datomic.specs :as 'specs]
           ['datomic.uri :as 'uri])
         (clojure.core/import 'datomic.peer.LocalConnection))))
-  (def id-and-conn
-   (fn id_and_conn
-     ([db_uri]
-       (let [map__26381 (uri/parse-db db_uri)
-             map__26381 (if (seq? map__26381)
-                          (if (next map__26381)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26381))
-                            (if (seq map__26381) (first map__26381) {}))
-                          map__26381)
-             protocol (get map__26381 :protocol)
-             db_name (get map__26381 :db-name)
-             uri (get map__26381 :uri)]
-         (when (= protocol :mem) (peer/create-local-database db_name uri))
-         (let [conn (d/connect uri)] [(:id (d/db conn)) conn])))))
+  (defn id-and-conn
+    ([db_uri]
+      (let [map__26381 (uri/parse-db db_uri)
+            map__26381 (if (seq? map__26381)
+                         (if (next map__26381)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26381))
+                           (if (seq map__26381) (first map__26381) {}))
+                         map__26381)
+            protocol (get map__26381 :protocol)
+            db_name (get map__26381 :db-name)
+            uri (get map__26381 :uri)]
+        (when (= protocol :mem) (peer/create-local-database db_name uri))
+        (let [conn (d/connect uri)] [(:id (d/db conn)) conn]))))
   (reset-meta!
     #'id-and-conn
     (assoc {:arglists (clojure.core/list ['db-uri]), :column (int 1)} :name 'id-and-conn :ns *ns*))
@@ -505,25 +504,24 @@
       nil
       nil
       nil))
-  (def db-admin-op-impls
-   (fn db_admin_op_impls
-     ([db_map]
-       (let [c (reduce-kv
-                 (fn fn__26447
-                   ([caches name db_uri]
-                     (let [vec__26448 (id-and-conn db_uri)
-                           id (nth vec__26448 (int 0) nil)
-                           conn (nth vec__26448 (int 1) nil)]
-                       (assoc-in
-                         (assoc-in caches [:datomic.peer-server/id->conn id] conn)
-                         [:datomic.peer-server/name->id name]
-                         id))))
-                 #:datomic.peer-server{:id->conn {}, :name->id {}}
-                 db_map)]
-         (assoc
-           c
-           :datomic.peer-server/list-db-names
-           (constantly (vec (keys (:datomic.peer-server/name->id c)))))))))
+  (defn db-admin-op-impls
+    ([db_map]
+      (let [c (reduce-kv
+                (fn fn__26447
+                  ([caches name db_uri]
+                    (let [vec__26448 (id-and-conn db_uri)
+                          id (nth vec__26448 (int 0) nil)
+                          conn (nth vec__26448 (int 1) nil)]
+                      (assoc-in
+                        (assoc-in caches [:datomic.peer-server/id->conn id] conn)
+                        [:datomic.peer-server/name->id name]
+                        id))))
+                #:datomic.peer-server{:id->conn {}, :name->id {}}
+                db_map)]
+        (assoc
+          c
+          :datomic.peer-server/list-db-names
+          (constantly (vec (keys (:datomic.peer-server/name->id c))))))))
   (reset-meta!
     #'db-admin-op-impls
     (assoc
@@ -532,30 +530,29 @@
       'db-admin-op-impls
       :ns
       *ns*))
-  (def connect-to-storage-from-id
-   (fn connect_to_storage_from_id
-     ([p__26453]
-       (let [map__26454 p__26453
-             map__26454 (if (seq? map__26454)
-                          (if (next map__26454)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26454))
-                            (if (seq map__26454) (first map__26454) {}))
-                          map__26454)
-             resolved_conf map__26454
-             db_id (get map__26454 :db-id)
-             cluster (coord/create-db-cluster resolved_conf)
-             olookup (domain/system-cache-olookup cluster)
-             map__26455 (db-io/load-db-from-basis cluster olookup db_id nil true)
-             map__26455 (if (seq? map__26455)
-                          (if (next map__26455)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26455))
-                            (if (seq map__26455) (first map__26455) {}))
-                          map__26455)
-             db (get map__26455 :db)
-             log (get map__26455 :log)]
-         (peer/->StorageOnlyConnection db_id cluster db log)))))
+  (defn connect-to-storage-from-id
+    ([p__26453]
+      (let [map__26454 p__26453
+            map__26454 (if (seq? map__26454)
+                         (if (next map__26454)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26454))
+                           (if (seq map__26454) (first map__26454) {}))
+                         map__26454)
+            resolved_conf map__26454
+            db_id (get map__26454 :db-id)
+            cluster (coord/create-db-cluster resolved_conf)
+            olookup (domain/system-cache-olookup cluster)
+            map__26455 (db-io/load-db-from-basis cluster olookup db_id nil true)
+            map__26455 (if (seq? map__26455)
+                         (if (next map__26455)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26455))
+                           (if (seq map__26455) (first map__26455) {}))
+                         map__26455)
+            db (get map__26455 :db)
+            log (get map__26455 :log)]
+        (peer/->StorageOnlyConnection db_id cluster db log))))
   (reset-meta!
     #'connect-to-storage-from-id
     (assoc
@@ -564,21 +561,20 @@
       'connect-to-storage-from-id
       :ns
       *ns*))
-  (def get-connection-from-id
-   (fn get_connection_from_id
-     ([system_conf db_id]
-       (when db_id
-         (let [db_conf (assoc system_conf :db-id db_id)
-               temp__5823__auto__ (get peer/connection-cache db_conf)]
-           (if temp__5823__auto__
-             (let [conn temp__5823__auto__] conn)
-             (locking peer/connection-lock
-              (let [temp__5823__auto__ (get peer/connection-cache db_conf)]
-                (if temp__5823__auto__
-                  (let [conn temp__5823__auto__] conn)
-                  (let [conn (peer/create-connection db_conf)]
-                    (cache/put peer/connection-cache db_conf conn)
-                    conn))))))))))
+  (defn get-connection-from-id
+    ([system_conf db_id]
+      (when db_id
+        (let [db_conf (assoc system_conf :db-id db_id)
+              temp__5823__auto__ (get peer/connection-cache db_conf)]
+          (if temp__5823__auto__
+            (let [conn temp__5823__auto__] conn)
+            (locking peer/connection-lock
+             (let [temp__5823__auto__ (get peer/connection-cache db_conf)]
+               (if temp__5823__auto__
+                 (let [conn temp__5823__auto__] conn)
+                 (let [conn (peer/create-connection db_conf)]
+                   (cache/put peer/connection-cache db_conf conn)
+                   conn)))))))))
   (reset-meta!
     #'get-connection-from-id
     (assoc
@@ -596,12 +592,11 @@
       'mem-dbs
       :ns
       *ns*))
-  (def connect-local-database-from-id
-   (fn connect_local_database_from_id
-     ([db_id]
-       (or
-         (some (fn fn__26463 ([conn] (when (= db_id (:id (d/db conn))) conn))) (vals (mem-dbs)))
-         (error/raise :db.error/db-not-found (str "Could not find " db_id))))))
+  (defn connect-local-database-from-id
+    ([db_id]
+      (or
+        (some (fn fn__26463 ([conn] (when (= db_id (:id (d/db conn))) conn))) (vals (mem-dbs)))
+        (error/raise :db.error/db-not-found (str "Could not find " db_id)))))
   (reset-meta!
     #'connect-local-database-from-id
     (assoc
@@ -610,17 +605,12 @@
       'connect-local-database-from-id
       :ns
       *ns*))
-  (def read-only-local-database-from-id
-   (fn read_only_local_database_from_id
-     ([db_id]
-       (let [conn (connect-local-database-from-id db_id)
-             db (deref (.-db-ref ^datomic.peer.LocalConnection conn))
-             log (peer/->LocalLog db)]
-         (peer/->StorageOnlyConnection
-           (.-dbname ^datomic.peer.LocalConnection conn)
-           nil
-           db
-           log)))))
+  (defn read-only-local-database-from-id
+    ([db_id]
+      (let [conn (connect-local-database-from-id db_id)
+            db (deref (.-db-ref ^datomic.peer.LocalConnection conn))
+            log (peer/->LocalLog db)]
+        (peer/->StorageOnlyConnection (.-dbname ^datomic.peer.LocalConnection conn) nil db log))))
   (reset-meta!
     #'read-only-local-database-from-id
     (assoc
@@ -629,32 +619,31 @@
       'read-only-local-database-from-id
       :ns
       *ns*))
-  (def connect-id-fn
-   (fn connect_id_fn
-     ([system_conf]
-       (let [protocol (:protocol system_conf)]
-         (when (= protocol :backup)
-           (throw (ex-info ":backup not supported" {:cluster-conf system_conf})))
-         (cond
-           (= protocol :mem) (if (:read-only system_conf)
-                               (fn fn__26468
-                                 ([db_id]
-                                   (deref peer/initialize)
-                                   (read-only-local-database-from-id db_id)))
-                               (fn fn__26470
-                                 ([db_id]
-                                   (deref peer/initialize)
-                                   (connect-local-database-from-id db_id))))
-           (:read-only system_conf) (fn fn__26472
-                                      ([db_id]
-                                        (deref peer/initialize)
-                                        (connect-to-storage-from-id
-                                          (assoc system_conf :db-id db_id))))
-           :else (do
-                   (fn fn__26474
-                     ([db_id]
-                       (deref peer/initialize)
-                       (get-connection-from-id system_conf db_id)))))))))
+  (defn connect-id-fn
+    ([system_conf]
+      (let [protocol (:protocol system_conf)]
+        (when (= protocol :backup)
+          (throw (ex-info ":backup not supported" {:cluster-conf system_conf})))
+        (cond
+          (= protocol :mem) (if (:read-only system_conf)
+                              (fn fn__26468
+                                ([db_id]
+                                  (deref peer/initialize)
+                                  (read-only-local-database-from-id db_id)))
+                              (fn fn__26470
+                                ([db_id]
+                                  (deref peer/initialize)
+                                  (connect-local-database-from-id db_id))))
+          (:read-only system_conf) (fn fn__26472
+                                     ([db_id]
+                                       (deref peer/initialize)
+                                       (connect-to-storage-from-id
+                                         (assoc system_conf :db-id db_id))))
+          :else (do
+                  (fn fn__26474
+                    ([db_id]
+                      (deref peer/initialize)
+                      (get-connection-from-id system_conf db_id))))))))
   (reset-meta!
     #'connect-id-fn
     (assoc
@@ -686,52 +675,49 @@
       nil
       nil
       nil))
-  (def storage-admin-op-impls
-   (fn storage_admin_op_impls
-     ([storage_uri]
-       (let [system_conf (dissoc (uri/parse storage_uri) :db-name :db-id)
-             db_id_>conn (connect-id-fn system_conf)
-             db_name_>db_id (if (= :mem (:protocol system_conf))
-                              (fn fn__26479
-                                ([p1__26477#] (some-> (get (mem-dbs) p1__26477#) (d/db) (:id))))
-                              (fn fn__26482
-                                ([p1__26478#]
-                                  (:db-id
-                                    (coord/resolve-db-name
-                                      (assoc system_conf :db-name p1__26478#))))))]
-         #:datomic.peer-server{:id->conn (cache/fn->lookup db_id_>conn),
-                               :name->id (cache/fn->lookup db_name_>db_id),
-                               :list-db-names
-                               (fn fn__26484 ([] (vec (peer/get-database-names storage_uri)))),
-                               :create-db
-                               (fn fn__26486
-                                 ([db_name]
-                                   (peer/create-database (uri/db-uri storage_uri db_name)))),
-                               :delete-db
-                               (fn fn__26488
-                                 ([db_name]
-                                   (peer/delete-database (uri/db-uri storage_uri db_name)))),
-                               :administer-system
-                               (fn fn__26491
-                                 ([p__26490]
-                                   (let [map__26492 p__26490
-                                         map__26492 (if (seq? map__26492)
-                                                      (if (next map__26492)
-                                                        (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                          (to-array map__26492))
-                                                        (if (seq map__26492)
-                                                          (first map__26492)
-                                                          {}))
-                                                      map__26492)
-                                         m map__26492
-                                         db_name (get map__26492 :db-name)
-                                         args (if db_name
-                                                (assoc
-                                                  (dissoc m :db-name)
-                                                  :uri
-                                                  (uri/db-uri storage_uri db_name))
-                                                m)]
-                                     (peer/administer-system args))))}))))
+  (defn storage-admin-op-impls
+    ([storage_uri]
+      (let [system_conf (dissoc (uri/parse storage_uri) :db-name :db-id)
+            db_id_>conn (connect-id-fn system_conf)
+            db_name_>db_id (if (= :mem (:protocol system_conf))
+                             (fn fn__26479
+                               ([p1__26477#] (some-> (get (mem-dbs) p1__26477#) (d/db) (:id))))
+                             (fn fn__26482
+                               ([p1__26478#]
+                                 (:db-id
+                                   (coord/resolve-db-name
+                                     (assoc system_conf :db-name p1__26478#))))))]
+        #:datomic.peer-server{:id->conn (cache/fn->lookup db_id_>conn),
+                              :name->id (cache/fn->lookup db_name_>db_id),
+                              :list-db-names
+                              (fn fn__26484 ([] (vec (peer/get-database-names storage_uri)))),
+                              :create-db
+                              (fn fn__26486
+                                ([db_name]
+                                  (peer/create-database (uri/db-uri storage_uri db_name)))),
+                              :delete-db
+                              (fn fn__26488
+                                ([db_name]
+                                  (peer/delete-database (uri/db-uri storage_uri db_name)))),
+                              :administer-system
+                              (fn fn__26491
+                                ([p__26490]
+                                  (let [map__26492 p__26490
+                                        map__26492 (if (seq? map__26492)
+                                                     (if (next map__26492)
+                                                       (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                         (to-array map__26492))
+                                                       (if (seq map__26492) (first map__26492) {}))
+                                                     map__26492)
+                                        m map__26492
+                                        db_name (get map__26492 :db-name)
+                                        args (if db_name
+                                               (assoc
+                                                 (dissoc m :db-name)
+                                                 :uri
+                                                 (uri/db-uri storage_uri db_name))
+                                               m)]
+                                    (peer/administer-system args))))})))
   (reset-meta!
     #'storage-admin-op-impls
     (assoc
@@ -740,102 +726,100 @@
       'storage-admin-op-impls
       :ns
       *ns*))
-  (def add-admin-ops
-   (fn add_admin_ops
-     ([nsm p__26495]
-       (let [map__26496 p__26495
-             map__26496 (if (seq? map__26496)
-                          (if (next map__26496)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26496))
-                            (if (seq map__26496) (first map__26496) {}))
-                          map__26496)
-             name_>id (get map__26496 :datomic.peer-server/name->id)
-             list_db_names (get map__26496 :datomic.peer-server/list-db-names)
-             create_db (get map__26496 :datomic.peer-server/create-db)
-             delete_db (get map__26496 :datomic.peer-server/delete-db)
-             administer_system (get map__26496 :datomic.peer-server/administer-system)
-             group {:group :peer-server}
-             op (fn op ([f] {:fn f, :groups [group], :routing :balanced}))
-             ops #:datomic.catalog{:resolve-db
-                                   (^clojure.lang.IFn op
-                                     (fn fn__26499
-                                       ([req _ch]
-                                         (let [db_name (some-> req (:body) (:db-name))
-                                               temp__5823__auto__ (get name_>id db_name)]
-                                           (if temp__5823__auto__
-                                             (let [db_id temp__5823__auto__]
-                                               {:status 200, :body {:database-id db_id}})
-                                             {:status 400,
-                                              :body
-                                              {:cause
-                                               (str "Database " db_name " not found")}}))))),
-                                   :list-dbs
-                                   (^clojure.lang.IFn op
-                                     (fn fn__26503
-                                       ([_req _ch]
-                                         (try
-                                           {:status 200,
-                                            :body {:result (^clojure.lang.IFn list_db_names)}}
-                                           (catch
-                                             java.lang.Exception
-                                             _
-                                             {:status 500,
-                                              :body {:cause "Could not get databases"}})))))}
-             ops (cond->
-                   ops
-                   create_db
-                   (assoc
-                     :datomic.catalog/create-db
-                     (^clojure.lang.IFn op
-                       (fn fn__26506
-                         ([req _ch]
-                           (let [db_name (some-> req (:body) (:db-name))]
-                             (try
-                               {:status 200, :body {:result (^clojure.lang.IFn create_db db_name)}}
-                               (catch
-                                 java.lang.IllegalArgumentException
-                                 e
-                                 {:status 400, :body {:cause (ex-message e)}})
-                               (catch
-                                 java.lang.Exception
-                                 _
-                                 {:status 500, :body {:cause "Could not create database"}})))))))
-                   delete_db
-                   (assoc
-                     :datomic.catalog/delete-db
-                     (^clojure.lang.IFn op
-                       (fn fn__26509
-                         ([req _ch]
-                           (let [db_name (some-> req (:body) (:db-name))]
-                             (try
-                               {:status 200, :body {:result (^clojure.lang.IFn delete_db db_name)}}
-                               (catch
-                                 java.lang.IllegalArgumentException
-                                 e
-                                 {:status 400, :body {:cause (ex-message e)}})
-                               (catch
-                                 java.lang.Exception
-                                 _
-                                 {:status 500, :body {:cause "Could not delete database"}})))))))
-                   administer_system
-                   (assoc
-                     :datomic.catalog/administer-system
-                     (^clojure.lang.IFn op
-                       (fn fn__26512
-                         ([req _ch]
-                           (try
-                             {:status 200,
-                              :body {:result (^clojure.lang.IFn administer_system (:body req))}}
-                             (catch
-                               java.lang.Exception
-                               _
-                               {:status 500, :body {:cause "Could not perform action"}})
-                             (catch
-                               java.lang.IllegalArgumentException
-                               e
-                               {:status 400, :body {:cause (ex-message e)}})))))))]
-         (update (update nsm :groups conj group) :ops merge ops)))))
+  (defn add-admin-ops
+    ([nsm p__26495]
+      (let [map__26496 p__26495
+            map__26496 (if (seq? map__26496)
+                         (if (next map__26496)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26496))
+                           (if (seq map__26496) (first map__26496) {}))
+                         map__26496)
+            name_>id (get map__26496 :datomic.peer-server/name->id)
+            list_db_names (get map__26496 :datomic.peer-server/list-db-names)
+            create_db (get map__26496 :datomic.peer-server/create-db)
+            delete_db (get map__26496 :datomic.peer-server/delete-db)
+            administer_system (get map__26496 :datomic.peer-server/administer-system)
+            group {:group :peer-server}
+            op (fn op ([f] {:fn f, :groups [group], :routing :balanced}))
+            ops #:datomic.catalog{:resolve-db
+                                  (^clojure.lang.IFn op
+                                    (fn fn__26499
+                                      ([req _ch]
+                                        (let [db_name (some-> req (:body) (:db-name))
+                                              temp__5823__auto__ (get name_>id db_name)]
+                                          (if temp__5823__auto__
+                                            (let [db_id temp__5823__auto__]
+                                              {:status 200, :body {:database-id db_id}})
+                                            {:status 400,
+                                             :body
+                                             {:cause (str "Database " db_name " not found")}}))))),
+                                  :list-dbs
+                                  (^clojure.lang.IFn op
+                                    (fn fn__26503
+                                      ([_req _ch]
+                                        (try
+                                          {:status 200,
+                                           :body {:result (^clojure.lang.IFn list_db_names)}}
+                                          (catch
+                                            java.lang.Exception
+                                            _
+                                            {:status 500,
+                                             :body {:cause "Could not get databases"}})))))}
+            ops (cond->
+                  ops
+                  create_db
+                  (assoc
+                    :datomic.catalog/create-db
+                    (^clojure.lang.IFn op
+                      (fn fn__26506
+                        ([req _ch]
+                          (let [db_name (some-> req (:body) (:db-name))]
+                            (try
+                              {:status 200, :body {:result (^clojure.lang.IFn create_db db_name)}}
+                              (catch
+                                java.lang.IllegalArgumentException
+                                e
+                                {:status 400, :body {:cause (ex-message e)}})
+                              (catch
+                                java.lang.Exception
+                                _
+                                {:status 500, :body {:cause "Could not create database"}})))))))
+                  delete_db
+                  (assoc
+                    :datomic.catalog/delete-db
+                    (^clojure.lang.IFn op
+                      (fn fn__26509
+                        ([req _ch]
+                          (let [db_name (some-> req (:body) (:db-name))]
+                            (try
+                              {:status 200, :body {:result (^clojure.lang.IFn delete_db db_name)}}
+                              (catch
+                                java.lang.IllegalArgumentException
+                                e
+                                {:status 400, :body {:cause (ex-message e)}})
+                              (catch
+                                java.lang.Exception
+                                _
+                                {:status 500, :body {:cause "Could not delete database"}})))))))
+                  administer_system
+                  (assoc
+                    :datomic.catalog/administer-system
+                    (^clojure.lang.IFn op
+                      (fn fn__26512
+                        ([req _ch]
+                          (try
+                            {:status 200,
+                             :body {:result (^clojure.lang.IFn administer_system (:body req))}}
+                            (catch
+                              java.lang.Exception
+                              _
+                              {:status 500, :body {:cause "Could not perform action"}})
+                            (catch
+                              java.lang.IllegalArgumentException
+                              e
+                              {:status 400, :body {:cause (ex-message e)}})))))))]
+        (update (update nsm :groups conj group) :ops merge ops))))
   (reset-meta!
     #'add-admin-ops
     (assoc
@@ -853,49 +837,48 @@
       'add-admin-ops
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__26515]
-       (let [map__26516 p__26515
-             map__26516 (if (seq? map__26516)
-                          (if (next map__26516)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26516))
-                            (if (seq map__26516) (first map__26516) {}))
-                          map__26516)
-             args map__26516
-             host (get map__26516 :host)
-             port (get map__26516 :port)
-             auth (get map__26516 :auth)
-             db (get map__26516 :db)
-             storage (get map__26516 :storage)
-             concurrency (get map__26516 :concurrency)]
-         (cast2slf4j/redirect)
-         (client-spi/initialize! spi-support/client-spi-config)
-         (let [admin_op_impls (if db (db-admin-op-impls db) (storage-admin-op-impls storage))
-               token_manager (auth/create-token-manager args)
-               server_spi (spi-support/create-spi
-                            (:datomic.peer-server/id->conn admin_op_impls)
-                            token_manager)
-               nsm (client-spi/nano-services-map server_spi :peer-server)
-               nsm (add-admin-ops nsm admin_op_impls)
-               ncm {:marshaling marshal/instance,
-                    :server
-                    {:connection-concurrency concurrency,
-                     :bind-address {:host host, :ssl-port port},
-                     :pending-ops-limit 127,
-                     :processing-concurrency concurrency,
-                     :ping-path "/health",
-                     :auth-callback (partial auth/callback auth),
-                     :ssl (auth/ssl-config),
-                     :bounding-timeout 60000},
-                    :casters cast/casters,
-                    :advertise-addr {:server-name host, :server-port port, :scheme "https"},
-                    :nano-services nsm}]
-           {:caches admin_op_impls,
-            :server-spi server_spi,
-            :ncm ncm,
-            :nano (nano-impl/create ncm)})))))
+  (defn create
+    ([p__26515]
+      (let [map__26516 p__26515
+            map__26516 (if (seq? map__26516)
+                         (if (next map__26516)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26516))
+                           (if (seq map__26516) (first map__26516) {}))
+                         map__26516)
+            args map__26516
+            host (get map__26516 :host)
+            port (get map__26516 :port)
+            auth (get map__26516 :auth)
+            db (get map__26516 :db)
+            storage (get map__26516 :storage)
+            concurrency (get map__26516 :concurrency)]
+        (cast2slf4j/redirect)
+        (client-spi/initialize! spi-support/client-spi-config)
+        (let [admin_op_impls (if db (db-admin-op-impls db) (storage-admin-op-impls storage))
+              token_manager (auth/create-token-manager args)
+              server_spi (spi-support/create-spi
+                           (:datomic.peer-server/id->conn admin_op_impls)
+                           token_manager)
+              nsm (client-spi/nano-services-map server_spi :peer-server)
+              nsm (add-admin-ops nsm admin_op_impls)
+              ncm {:marshaling marshal/instance,
+                   :server
+                   {:connection-concurrency concurrency,
+                    :bind-address {:host host, :ssl-port port},
+                    :pending-ops-limit 127,
+                    :processing-concurrency concurrency,
+                    :ping-path "/health",
+                    :auth-callback (partial auth/callback auth),
+                    :ssl (auth/ssl-config),
+                    :bounding-timeout 60000},
+                   :casters cast/casters,
+                   :advertise-addr {:server-name host, :server-port port, :scheme "https"},
+                   :nano-services nsm}]
+          {:caches admin_op_impls,
+           :server-spi server_spi,
+           :ncm ncm,
+           :nano (nano-impl/create ncm)}))))
   (reset-meta!
     #'create
     (assoc
@@ -915,13 +898,12 @@
       'cli-split-by-comma
       :ns
       *ns*))
-  (def cli-add-to-map
-   (fn cli_add_to_map
-     ([m k p__26519]
-       (let [vec__26520 p__26519
-             access_key (nth vec__26520 (int 0) nil)
-             secret (nth vec__26520 (int 1) nil)]
-         (update m k assoc access_key secret)))))
+  (defn cli-add-to-map
+    ([m k p__26519]
+      (let [vec__26520 p__26519
+            access_key (nth vec__26520 (int 0) nil)
+            secret (nth vec__26520 (int 1) nil)]
+        (update m k assoc access_key secret))))
   (reset-meta!
     #'cli-add-to-map
     (assoc

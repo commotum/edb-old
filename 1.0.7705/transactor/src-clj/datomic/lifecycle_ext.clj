@@ -73,49 +73,48 @@
       'set-standby-ref
       :ns
       *ns*))
-  (def standby-loop
-   (fn standby_loop
-     ([p__28136]
-       (let [map__28137 p__28136
-             map__28137 (if (seq? map__28137)
-                          (if (next map__28137)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__28137))
-                            (if (seq map__28137) (first map__28137) {}))
-                          map__28137)
-             args map__28137
-             cluster (get map__28137 :cluster)
-             tick (get map__28137 :tick)
-             serve (get map__28137 :serve)
-             endpoint (get map__28137 :endpoint)
-             ha? (get map__28137 :ha?)]
-         (loop [refval (deref (cluster/get-ref cluster coord/pod-key))
-                tstamp (java.lang.System/currentTimeMillis)
-                missed 0]
-           (if (and (< missed 2) ha?)
-             (do
-               (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.lifecycle-ext")]
-                 (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                   (.info
-                     ^org.slf4j.Logger logger
-                     (logger/process
-                       {:event :transactor/standby,
-                        :rev (:rev refval),
-                        :missed (long missed),
-                        :timestamp (timestamp refval)})))
-                 nil)
-               (java.lang.Thread/sleep (long ^java.lang.Number tick))
-               (let [new_refval (deref (cluster/get-ref cluster coord/pod-key))
-                     new_tstamp (java.lang.System/currentTimeMillis)]
-                 (monitor/add-stat :HeartMonitorMsec (long (- new_tstamp tstamp)))
-                 (set-standby-ref cluster (assoc endpoint :timestamp (long new_tstamp)))
-                 (recur
-                   new_refval
-                   new_tstamp
-                   (if (= (timestamp refval) (timestamp new_refval)) (inc missed) 0))))
-             (let [beat (lifecycle/pump cluster endpoint tick (or (:rev refval) -1))]
-               (when beat (^clojure.lang.IFn serve))
-               (lifecycle/master-loop beat args))))))))
+  (defn standby-loop
+    ([p__28136]
+      (let [map__28137 p__28136
+            map__28137 (if (seq? map__28137)
+                         (if (next map__28137)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__28137))
+                           (if (seq map__28137) (first map__28137) {}))
+                         map__28137)
+            args map__28137
+            cluster (get map__28137 :cluster)
+            tick (get map__28137 :tick)
+            serve (get map__28137 :serve)
+            endpoint (get map__28137 :endpoint)
+            ha? (get map__28137 :ha?)]
+        (loop [refval (deref (cluster/get-ref cluster coord/pod-key))
+               tstamp (java.lang.System/currentTimeMillis)
+               missed 0]
+          (if (and (< missed 2) ha?)
+            (do
+              (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.lifecycle-ext")]
+                (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                  (.info
+                    ^org.slf4j.Logger logger
+                    (logger/process
+                      {:event :transactor/standby,
+                       :rev (:rev refval),
+                       :missed (long missed),
+                       :timestamp (timestamp refval)})))
+                nil)
+              (java.lang.Thread/sleep (long ^java.lang.Number tick))
+              (let [new_refval (deref (cluster/get-ref cluster coord/pod-key))
+                    new_tstamp (java.lang.System/currentTimeMillis)]
+                (monitor/add-stat :HeartMonitorMsec (long (- new_tstamp tstamp)))
+                (set-standby-ref cluster (assoc endpoint :timestamp (long new_tstamp)))
+                (recur
+                  new_refval
+                  new_tstamp
+                  (if (= (timestamp refval) (timestamp new_refval)) (inc missed) 0))))
+            (let [beat (lifecycle/pump cluster endpoint tick (or (:rev refval) -1))]
+              (when beat (^clojure.lang.IFn serve))
+              (lifecycle/master-loop beat args)))))))
   (reset-meta!
     #'standby-loop
     (assoc

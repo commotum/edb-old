@@ -45,12 +45,12 @@
         (clojure.core/import 'java.util.Map)
         (clojure.core/import 'java.lang.ref.WeakReference))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Startable (start [_] "Idempotently start a task, returning a future."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.connector" "Startable")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Startable :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Startable :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'start {:arglists (clojure.core/list ['_])}),
@@ -58,13 +58,13 @@
                                       :doc "Idempotently start a task, returning a future."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.connector" "Startable"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "start")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       NotificationHandler
       (notify-sync [_ id] "Sync completed")
@@ -74,8 +74,8 @@
       (notify-index [_] "Database has a new index in storage."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.connector" "NotificationHandler")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'NotificationHandler :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'NotificationHandler :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -87,13 +87,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "NotificationHandler"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "notify-sync")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*)))
-    (let [protocol_signature__7437 (assoc
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*)))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -106,13 +106,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "NotificationHandler"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "notify-data")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*)))
-    (let [protocol_signature__7439 (assoc
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*)))
+    (let [protocol_signature__7471 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -124,13 +124,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "NotificationHandler"))
-          protocol_method_name__7440 (with-meta
-                                       (:name protocol_signature__7439)
-                                       protocol_signature__7439)]
+          protocol_method_name__7472 (with-meta
+                                       (:name protocol_signature__7471)
+                                       protocol_signature__7471)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "notify-error")
-        (assoc protocol_signature__7439 :name protocol_method_name__7440 :ns *ns*)))
-    (let [protocol_signature__7441 (assoc
+        (assoc protocol_signature__7471 :name protocol_method_name__7472 :ns *ns*)))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -143,13 +143,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "NotificationHandler"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "notify-db")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -161,13 +161,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "NotificationHandler"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "notify-index")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*))))
-  (let [protocol_metadata__7445 {:column (int 1)}]
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*))))
+  (let [protocol_metadata__7477 {:column (int 1)}]
     (defprotocol
       TransactorConnector
       (endpoint [_] "Return the transactor endpoint or nil.")
@@ -182,8 +182,8 @@
         "Start updater, taking transactions from update-queue and queuing them to the transactor. Return value implements AsyncShutdown. Calls failure-handler with no args if update put fails. Calls push-handler (a NotificationHandler) with any errors that occur prior to remote call"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.connector" "TransactorConnector")
-      (assoc (assoc protocol_metadata__7445 :doc nil) :name 'TransactorConnector :ns *ns*))
-    (let [protocol_signature__7446 (assoc
+      (assoc (assoc protocol_metadata__7477 :doc nil) :name 'TransactorConnector :ns *ns*))
+    (let [protocol_signature__7478 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'endpoint {:arglists (clojure.core/list ['_])}),
@@ -193,13 +193,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "TransactorConnector"))
-          protocol_method_name__7447 (with-meta
-                                       (:name protocol_signature__7446)
-                                       protocol_signature__7446)]
+          protocol_method_name__7479 (with-meta
+                                       (:name protocol_signature__7478)
+                                       protocol_signature__7478)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "endpoint")
-        (assoc protocol_signature__7446 :name protocol_method_name__7447 :ns *ns*)))
-    (let [protocol_signature__7448 (assoc
+        (assoc protocol_signature__7478 :name protocol_method_name__7479 :ns *ns*)))
+    (let [protocol_signature__7480 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -214,13 +214,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "TransactorConnector"))
-          protocol_method_name__7449 (with-meta
-                                       (:name protocol_signature__7448)
-                                       protocol_signature__7448)]
+          protocol_method_name__7481 (with-meta
+                                       (:name protocol_signature__7480)
+                                       protocol_signature__7480)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "admin-request*")
-        (assoc protocol_signature__7448 :name protocol_method_name__7449 :ns *ns*)))
-    (let [protocol_signature__7450 (assoc
+        (assoc protocol_signature__7480 :name protocol_method_name__7481 :ns *ns*)))
+    (let [protocol_signature__7482 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -234,13 +234,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "TransactorConnector"))
-          protocol_method_name__7451 (with-meta
-                                       (:name protocol_signature__7450)
-                                       protocol_signature__7450)]
+          protocol_method_name__7483 (with-meta
+                                       (:name protocol_signature__7482)
+                                       protocol_signature__7482)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "create-notifier")
-        (assoc protocol_signature__7450 :name protocol_method_name__7451 :ns *ns*)))
-    (let [protocol_signature__7452 (assoc
+        (assoc protocol_signature__7482 :name protocol_method_name__7483 :ns *ns*)))
+    (let [protocol_signature__7484 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -257,19 +257,18 @@
                                      (clojure.lang.RT/var
                                        "datomic.connector"
                                        "TransactorConnector"))
-          protocol_method_name__7453 (with-meta
-                                       (:name protocol_signature__7452)
-                                       protocol_signature__7452)]
+          protocol_method_name__7485 (with-meta
+                                       (:name protocol_signature__7484)
+                                       protocol_signature__7484)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.connector" "start-updater")
-        (assoc protocol_signature__7452 :name protocol_method_name__7453 :ns *ns*))))
-  (def admin-request
-   (fn admin_request
-     ([connector request arg timeout_msec]
-       (let [result (admin-request* connector request arg timeout_msec)]
-         (when (:db/error result) (throw (ex-info (:message result) (dissoc result :message))))
-         (:value result)))
-     ([connector request arg] (admin-request connector request arg 60000))))
+        (assoc protocol_signature__7484 :name protocol_method_name__7485 :ns *ns*))))
+  (defn admin-request
+    ([connector request arg timeout_msec]
+      (let [result (admin-request* connector request arg timeout_msec)]
+        (when (:db/error result) (throw (ex-info (:message result) (dissoc result :message))))
+        (:value result)))
+    ([connector request arg] (admin-request connector request arg 60000)))
   (reset-meta!
     #'admin-request
     (assoc
@@ -280,29 +279,28 @@
       'admin-request
       :ns
       *ns*))
-  (def endpoint-error
-   (fn endpoint_error
-     ([p__18992 cause]
-       (let [map__18993 p__18992
-             map__18993 (if (seq? map__18993)
-                          (if (next map__18993)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__18993))
-                            (if (seq map__18993) (first map__18993) {}))
-                          map__18993)
-             endpoint map__18993
-             host (get map__18993 :host)
-             alt_host (get map__18993 :alt-host)
-             port (get map__18993 :port)]
-         (ex-info
-           (str
-             "Error communicating with HOST "
-             host
-             (if alt_host (str " or ALT_HOST " alt_host) "")
-             " on PORT "
-             port)
-           (logger/redact endpoint #{:password})
-           cause)))))
+  (defn endpoint-error
+    ([p__18992 cause]
+      (let [map__18993 p__18992
+            map__18993 (if (seq? map__18993)
+                         (if (next map__18993)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__18993))
+                           (if (seq map__18993) (first map__18993) {}))
+                         map__18993)
+            endpoint map__18993
+            host (get map__18993 :host)
+            alt_host (get map__18993 :alt-host)
+            port (get map__18993 :port)]
+        (ex-info
+          (str
+            "Error communicating with HOST "
+            host
+            (if alt_host (str " or ALT_HOST " alt_host) "")
+            " on PORT "
+            port)
+          (logger/redact endpoint #{:password})
+          cause))))
   (reset-meta!
     #'endpoint-error
     (assoc
@@ -346,58 +344,57 @@
       'stop-all-connectors
       :ns
       *ns*))
-  (def try-hornet-connect
-   (fn try_hornet_connect
-     ([conn_factory conn_args session_args]
-       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
-         (when (.isDebugEnabled ^org.slf4j.Logger logger)
-           (.debug
-             ^org.slf4j.Logger logger
-             (logger/process {:event :peer/hornet-connect, :host (:host conn_args)})))
-         nil)
-       (let [cache_key [conn_factory conn_args session_args]]
-         (try
-           (let [temp__5823__auto__ (get sfb-cache cache_key)]
-             (if temp__5823__auto__
-               (let [bundle temp__5823__auto__]
-                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
-                   (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                     (.debug
-                       ^org.slf4j.Logger logger
-                       (logger/process
-                         {:event :peer/hornet-reuse-factory, :host (:host conn_args)})))
-                   nil)
-                 bundle)
-               (let [connector (apply
-                                 aclient/create-connector
-                                 conn_factory
-                                 :verifyHost
-                                 false
-                                 :trustStorePath
-                                 "datomic/transactor-trust.jks"
-                                 :trustStorePassword
-                                 "transactor"
-                                 (mapcat identity conn_args))
-                     bundle (aclient/create-session-factory connector session_args)]
-                 (cleanup/register-cleanup
-                   (deref cleanup/shared-manager-ref)
-                   bundle
-                   (fn fn__19004
-                     ([] ((.-cleanup ^datomic.artemis_client.SessionFactoryBundle bundle)))))
-                 (cache/put sfb-cache cache_key bundle)
-                 bundle)))
-           (catch
-             java.lang.Throwable
-             e
-             (do
-               (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
-                 (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                   (.debug
-                     ^org.slf4j.Logger logger
-                     (logger/process
-                       {:event :peer/hornet-connect-failed, :host (:host conn_args)})))
-                 nil)
-               e)))))))
+  (defn try-hornet-connect
+    ([conn_factory conn_args session_args]
+      (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
+        (when (.isDebugEnabled ^org.slf4j.Logger logger)
+          (.debug
+            ^org.slf4j.Logger logger
+            (logger/process {:event :peer/hornet-connect, :host (:host conn_args)})))
+        nil)
+      (let [cache_key [conn_factory conn_args session_args]]
+        (try
+          (let [temp__5823__auto__ (get sfb-cache cache_key)]
+            (if temp__5823__auto__
+              (let [bundle temp__5823__auto__]
+                (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
+                  (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                    (.debug
+                      ^org.slf4j.Logger logger
+                      (logger/process
+                        {:event :peer/hornet-reuse-factory, :host (:host conn_args)})))
+                  nil)
+                bundle)
+              (let [connector (apply
+                                aclient/create-connector
+                                conn_factory
+                                :verifyHost
+                                false
+                                :trustStorePath
+                                "datomic/transactor-trust.jks"
+                                :trustStorePassword
+                                "transactor"
+                                (mapcat identity conn_args))
+                    bundle (aclient/create-session-factory connector session_args)]
+                (cleanup/register-cleanup
+                  (deref cleanup/shared-manager-ref)
+                  bundle
+                  (fn fn__19004
+                    ([] ((.-cleanup ^datomic.artemis_client.SessionFactoryBundle bundle)))))
+                (cache/put sfb-cache cache_key bundle)
+                bundle)))
+          (catch
+            java.lang.Throwable
+            e
+            (do
+              (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
+                (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                  (.debug
+                    ^org.slf4j.Logger logger
+                    (logger/process
+                      {:event :peer/hornet-connect-failed, :host (:host conn_args)})))
+                nil)
+              e))))))
   (reset-meta!
     #'try-hornet-connect
     (assoc
@@ -408,16 +405,15 @@
       'try-hornet-connect
       :ns
       *ns*))
-  (def host-order
-   (fn host_order
-     ([host alt_host]
-       (cond
-         (nil? host) [alt_host]
-         (nil? alt_host) [host]
-         :default (do
-                    (remove
-                      nil?
-                      (if (aws-detect/running-in-ec2?) [host alt_host] [alt_host host])))))))
+  (defn host-order
+    ([host alt_host]
+      (cond
+        (nil? host) [alt_host]
+        (nil? alt_host) [host]
+        :default (do
+                   (remove
+                     nil?
+                     (if (aws-detect/running-in-ec2?) [host alt_host] [alt_host host]))))))
   (reset-meta!
     #'host-order
     (assoc
@@ -426,47 +422,46 @@
       'host-order
       :ns
       *ns*))
-  (def create-hornet-factory
-   (fn create_hornet_factory
-     ([p__19009 ttl]
-       (let [map__19010 p__19009
-             map__19010 (if (seq? map__19010)
-                          (if (next map__19010)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19010))
-                            (if (seq map__19010) (first map__19010) {}))
-                          map__19010)
-             endpoint map__19010
-             host (get map__19010 :host)
-             port (get map__19010 :port)
-             alt_host (get map__19010 :alt-host)
-             encrypt_channel (get map__19010 :encrypt-channel)
-             conn_args {:port port,
-                        :sslEnabled encrypt_channel,
-                        :keyStorePath "datomic/transactor-key.jks",
-                        :keyStorePassword "transactor"}
-             session_args {:ttl ttl}
-             G__19014 (host-order host alt_host)
-             vec__19015 G__19014
-             seq__19016 (seq vec__19015)
-             first__19017 (first seq__19016)
-             seq__19016 (next seq__19016)
-             host first__19017
-             more seq__19016]
-         (loop [G__19014 G__19014]
-           (let [vec__19018 G__19014
-                 seq__19019 (seq vec__19018)
-                 first__19020 (first seq__19019)
-                 seq__19019 (next seq__19019)
-                 host first__19020
-                 more seq__19019
-                 result (try-hornet-connect
-                          aclient/netty-connector-factory
-                          (assoc conn_args :host host)
-                          session_args)]
-             (if (instance? java.lang.Throwable result)
-               (if more (recur more) (do (throw (endpoint-error endpoint result)) nil))
-               result)))))))
+  (defn create-hornet-factory
+    ([p__19009 ttl]
+      (let [map__19010 p__19009
+            map__19010 (if (seq? map__19010)
+                         (if (next map__19010)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19010))
+                           (if (seq map__19010) (first map__19010) {}))
+                         map__19010)
+            endpoint map__19010
+            host (get map__19010 :host)
+            port (get map__19010 :port)
+            alt_host (get map__19010 :alt-host)
+            encrypt_channel (get map__19010 :encrypt-channel)
+            conn_args {:port port,
+                       :sslEnabled encrypt_channel,
+                       :keyStorePath "datomic/transactor-key.jks",
+                       :keyStorePassword "transactor"}
+            session_args {:ttl ttl}
+            G__19014 (host-order host alt_host)
+            vec__19015 G__19014
+            seq__19016 (seq vec__19015)
+            first__19017 (first seq__19016)
+            seq__19016 (next seq__19016)
+            host first__19017
+            more seq__19016]
+        (loop [G__19014 G__19014]
+          (let [vec__19018 G__19014
+                seq__19019 (seq vec__19018)
+                first__19020 (first seq__19019)
+                seq__19019 (next seq__19019)
+                host first__19020
+                more seq__19019
+                result (try-hornet-connect
+                         aclient/netty-connector-factory
+                         (assoc conn_args :host host)
+                         session_args)]
+            (if (instance? java.lang.Throwable result)
+              (if more (recur more) (do (throw (endpoint-error endpoint result)) nil))
+              result))))))
   (reset-meta!
     #'create-hornet-factory
     (assoc
@@ -508,16 +503,15 @@
                   (throw ^java.lang.Throwable t__8765__auto__)
                   nil))))))))
   (clojure.core/import 'datomic.connector.HornetNotifier)
-  (def ->HornetNotifier
-   (fn __GT_HornetNotifier
-     ([push_handler_ref session result_queue hornet_consumer starter cleanup]
-       (datomic.connector.HornetNotifier.
-         push_handler_ref
-         session
-         result_queue
-         hornet_consumer
-         starter
-         cleanup))))
+  (defn ->HornetNotifier
+    ([push_handler_ref session result_queue hornet_consumer starter cleanup]
+      (datomic.connector.HornetNotifier.
+        push_handler_ref
+        session
+        result_queue
+        hornet_consumer
+        starter
+        cleanup)))
   (reset-meta!
     #'->HornetNotifier
     (assoc
@@ -547,230 +541,227 @@
   (defmethod notify :error fn__19037 ([msg conn] (notify-error conn (:id msg) msg)))
   (defmethod notify :index fn__19039 ([msg conn] (notify-index conn)))
   (defmethod notify :sync fn__19041 ([msg conn] (notify-sync conn (:id msg))))
-  (def create-hornet-notifier
-   (fn create_hornet_notifier
-     ([push_handler session result_queue hornet_consumer failure_handler]
-       (let [push_handler_ref (java.lang.ref.WeakReference. push_handler)
-             cleanup_ref (promise)
-             done_ref (promise)
-             starter (delay
-                       (future-call
-                         (fn fn__19044
-                           ([]
-                             (try
-                               (let [m_19045 {:event :connector/notify-loop}
-                                     ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                                    "datomic.connector")]
-                                                       (when (.isDebugEnabled
-                                                               ^org.slf4j.Logger logger)
-                                                         (.debug
-                                                           ^org.slf4j.Logger logger
-                                                           (logger/process
-                                                             (assoc m_19045 :phase :begin))))
-                                                       nil)
-                                     start__8599__auto__ (java.lang.System/nanoTime)
-                                     result__8600__auto__ (try
-                                                            {:returned
-                                                             (try
-                                                               (try
-                                                                 (loop 
-                                                                   [msges
-                                                                    (queue/take hornet_consumer)]
-                                                                   (when
-                                                                     (and
-                                                                       msges
-                                                                       (not (realized? done_ref)))
-                                                                     (let 
-                                                                       [temp__5825__auto__
-                                                                        (.get
-                                                                          ^java.lang.ref.Reference push_handler_ref)]
-                                                                       (when
-                                                                         temp__5825__auto__
-                                                                         (let 
-                                                                           [push_handler
-                                                                            temp__5825__auto__]
-                                                                           (loop 
-                                                                             [seq_19050
-                                                                              (seq
-                                                                                (aclient/read-batch
-                                                                                  msges
-                                                                                  tx/read-handlers))
-                                                                              chunk_19051 nil
-                                                                              count_19052 0
-                                                                              i_19053 0]
-                                                                             (if
-                                                                               (<
-                                                                                 i_19053
-                                                                                 count_19052)
-                                                                               (let 
-                                                                                 [msg
-                                                                                  (.nth
-                                                                                    ^clojure.lang.Indexed chunk_19051
-                                                                                    (int i_19053))]
-                                                                                 (notify
-                                                                                   msg
-                                                                                   push_handler)
-                                                                                 (recur
-                                                                                   seq_19050
-                                                                                   chunk_19051
-                                                                                   count_19052
-                                                                                   (inc i_19053)))
-                                                                               (let 
-                                                                                 [temp__5825__auto__
-                                                                                  (seq seq_19050)]
-                                                                                 (when
-                                                                                   temp__5825__auto__
-                                                                                   (let 
-                                                                                     [seq_19050
-                                                                                      temp__5825__auto__]
-                                                                                     (if
-                                                                                       (chunked-seq?
-                                                                                         seq_19050)
-                                                                                       (let 
-                                                                                         [c__6090__auto__
-                                                                                          (chunk-first
-                                                                                            seq_19050)]
-                                                                                         (recur
-                                                                                           (chunk-rest
-                                                                                             seq_19050)
-                                                                                           c__6090__auto__
-                                                                                           (int
-                                                                                             (count
-                                                                                               c__6090__auto__))
-                                                                                           (int
-                                                                                             0)))
-                                                                                       (let 
-                                                                                         [msg
-                                                                                          (first
-                                                                                            seq_19050)]
-                                                                                         (notify
-                                                                                           msg
-                                                                                           push_handler)
-                                                                                         (recur
-                                                                                           (next
-                                                                                             seq_19050)
-                                                                                           nil
-                                                                                           0
-                                                                                           0))))))))
-                                                                           (recur
-                                                                             (queue/take
-                                                                               hornet_consumer)))))))
-                                                                 (catch
-                                                                   java.lang.Throwable
-                                                                   t
-                                                                   (when-not
-                                                                     (instance?
-                                                                       java.lang.InterruptedException
-                                                                       t)
-                                                                     (^clojure.lang.IFn failure_handler
-                                                                       t)
-                                                                     (throw ^java.lang.Throwable t)
-                                                                     nil)))
-                                                               (finally ((deref cleanup_ref))))}
-                                                            (catch
-                                                              java.lang.Throwable
-                                                              t__8601__auto__
-                                                              {:threw t__8601__auto__}))
-                                     elapsed_19046 (-
-                                                     (java.lang.System/nanoTime)
-                                                     start__8599__auto__)
-                                     msec_19047 (logger/format-as-msec (long elapsed_19046))]
-                                 (let [endmsg__8602__auto__ (merge
-                                                              (assoc
-                                                                m_19045
-                                                                :msec
-                                                                msec_19047
-                                                                :phase
-                                                                :end)
-                                                              (when
-                                                                (:threw result__8600__auto__)
-                                                                {:threw
-                                                                 (class
-                                                                   (:threw
-                                                                     result__8600__auto__))}))
-                                       logger (org.slf4j.LoggerFactory/getLogger
-                                                "datomic.connector")]
-                                   (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                     (.debug
-                                       ^org.slf4j.Logger logger
-                                       (logger/process endmsg__8602__auto__)))
-                                   nil)
-                                 (if (contains? result__8600__auto__ :returned)
-                                   (:returned result__8600__auto__)
-                                   (do (throw (:threw result__8600__auto__)) nil)))
-                               (catch
-                                 java.lang.Throwable
-                                 t__8765__auto__
-                                 (do
-                                   (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                  "datomic.connector")
-                                         ex t__8765__auto__]
-                                     (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                                       (.warn
-                                         ^org.slf4j.Logger logger
-                                         (logger/process "error executing future")
-                                         ^java.lang.Throwable ex)
-                                       (logger/caused-by logger ex))
-                                     nil)
-                                   (datomic.monitor/alarm :UnhandledException)
-                                   (throw ^java.lang.Throwable t__8765__auto__)
-                                   nil)))))))
-             cleanup (error/runonce
-                       (fn fn__19066
-                         ([]
-                           (let [m_19067 {:event :connector/notify-cleanup}
-                                 ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                                "datomic.connector")]
-                                                   (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                                     (.debug
-                                                       ^org.slf4j.Logger logger
-                                                       (logger/process
-                                                         (assoc m_19067 :phase :begin))))
-                                                   nil)
-                                 start__8599__auto__ (java.lang.System/nanoTime)
-                                 result__8600__auto__ (try
-                                                        (do
-                                                          (deliver done_ref true)
-                                                          (common/sync-shutdown hornet_consumer)
-                                                          (aclient/delete-queue
-                                                            session
-                                                            result_queue)
-                                                          {:returned
-                                                           (common/sync-shutdown session)})
-                                                        (catch
-                                                          java.lang.Throwable
-                                                          t__8601__auto__
-                                                          {:threw t__8601__auto__}))
-                                 elapsed_19068 (- (java.lang.System/nanoTime) start__8599__auto__)
-                                 msec_19069 (logger/format-as-msec (long elapsed_19068))]
-                             (let [endmsg__8602__auto__ (merge
-                                                          (assoc
-                                                            m_19067
-                                                            :msec
-                                                            msec_19069
-                                                            :phase
-                                                            :end)
-                                                          (when (:threw result__8600__auto__)
-                                                            {:threw
-                                                             (class
-                                                               (:threw result__8600__auto__))}))
-                                   logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process endmsg__8602__auto__)))
-                               nil)
-                             (if (contains? result__8600__auto__ :returned)
-                               (:returned result__8600__auto__)
-                               (do (throw (:threw result__8600__auto__)) nil))))))]
-         (deliver cleanup_ref cleanup)
-         (datomic.connector.HornetNotifier.
-           push_handler_ref
-           session
-           result_queue
-           hornet_consumer
-           starter
-           cleanup)))))
+  (defn create-hornet-notifier
+    ([push_handler session result_queue hornet_consumer failure_handler]
+      (let [push_handler_ref (java.lang.ref.WeakReference. push_handler)
+            cleanup_ref (promise)
+            done_ref (promise)
+            starter (delay
+                      (future-call
+                        (fn fn__19044
+                          ([]
+                            (try
+                              (let [m_19045 {:event :connector/notify-loop}
+                                    ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                                   "datomic.connector")]
+                                                      (when (.isDebugEnabled
+                                                              ^org.slf4j.Logger logger)
+                                                        (.debug
+                                                          ^org.slf4j.Logger logger
+                                                          (logger/process
+                                                            (assoc m_19045 :phase :begin))))
+                                                      nil)
+                                    start__8599__auto__ (java.lang.System/nanoTime)
+                                    result__8600__auto__ (try
+                                                           {:returned
+                                                            (try
+                                                              (try
+                                                                (loop 
+                                                                  [msges
+                                                                   (queue/take hornet_consumer)]
+                                                                  (when
+                                                                    (and
+                                                                      msges
+                                                                      (not (realized? done_ref)))
+                                                                    (let 
+                                                                      [temp__5825__auto__
+                                                                       (.get
+                                                                         ^java.lang.ref.Reference push_handler_ref)]
+                                                                      (when
+                                                                        temp__5825__auto__
+                                                                        (let 
+                                                                          [push_handler
+                                                                           temp__5825__auto__]
+                                                                          (loop 
+                                                                            [seq_19050
+                                                                             (seq
+                                                                               (aclient/read-batch
+                                                                                 msges
+                                                                                 tx/read-handlers))
+                                                                             chunk_19051 nil
+                                                                             count_19052 0
+                                                                             i_19053 0]
+                                                                            (if
+                                                                              (<
+                                                                                i_19053
+                                                                                count_19052)
+                                                                              (let 
+                                                                                [msg
+                                                                                 (.nth
+                                                                                   ^clojure.lang.Indexed chunk_19051
+                                                                                   (int i_19053))]
+                                                                                (notify
+                                                                                  msg
+                                                                                  push_handler)
+                                                                                (recur
+                                                                                  seq_19050
+                                                                                  chunk_19051
+                                                                                  count_19052
+                                                                                  (inc i_19053)))
+                                                                              (let 
+                                                                                [temp__5825__auto__
+                                                                                 (seq seq_19050)]
+                                                                                (when
+                                                                                  temp__5825__auto__
+                                                                                  (let 
+                                                                                    [seq_19050
+                                                                                     temp__5825__auto__]
+                                                                                    (if
+                                                                                      (chunked-seq?
+                                                                                        seq_19050)
+                                                                                      (let 
+                                                                                        [c__6090__auto__
+                                                                                         (chunk-first
+                                                                                           seq_19050)]
+                                                                                        (recur
+                                                                                          (chunk-rest
+                                                                                            seq_19050)
+                                                                                          c__6090__auto__
+                                                                                          (int
+                                                                                            (count
+                                                                                              c__6090__auto__))
+                                                                                          (int 0)))
+                                                                                      (let 
+                                                                                        [msg
+                                                                                         (first
+                                                                                           seq_19050)]
+                                                                                        (notify
+                                                                                          msg
+                                                                                          push_handler)
+                                                                                        (recur
+                                                                                          (next
+                                                                                            seq_19050)
+                                                                                          nil
+                                                                                          0
+                                                                                          0))))))))
+                                                                          (recur
+                                                                            (queue/take
+                                                                              hornet_consumer)))))))
+                                                                (catch
+                                                                  java.lang.Throwable
+                                                                  t
+                                                                  (when-not
+                                                                    (instance?
+                                                                      java.lang.InterruptedException
+                                                                      t)
+                                                                    (^clojure.lang.IFn failure_handler
+                                                                      t)
+                                                                    (throw ^java.lang.Throwable t)
+                                                                    nil)))
+                                                              (finally ((deref cleanup_ref))))}
+                                                           (catch
+                                                             java.lang.Throwable
+                                                             t__8601__auto__
+                                                             {:threw t__8601__auto__}))
+                                    elapsed_19046 (-
+                                                    (java.lang.System/nanoTime)
+                                                    start__8599__auto__)
+                                    msec_19047 (logger/format-as-msec (long elapsed_19046))]
+                                (let [endmsg__8602__auto__ (merge
+                                                             (assoc
+                                                               m_19045
+                                                               :msec
+                                                               msec_19047
+                                                               :phase
+                                                               :end)
+                                                             (when
+                                                               (:threw result__8600__auto__)
+                                                               {:threw
+                                                                (class
+                                                                  (:threw result__8600__auto__))}))
+                                      logger (org.slf4j.LoggerFactory/getLogger
+                                               "datomic.connector")]
+                                  (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                    (.debug
+                                      ^org.slf4j.Logger logger
+                                      (logger/process endmsg__8602__auto__)))
+                                  nil)
+                                (if (contains? result__8600__auto__ :returned)
+                                  (:returned result__8600__auto__)
+                                  (do (throw (:threw result__8600__auto__)) nil)))
+                              (catch
+                                java.lang.Throwable
+                                t__8765__auto__
+                                (do
+                                  (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                 "datomic.connector")
+                                        ex t__8765__auto__]
+                                    (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                                      (.warn
+                                        ^org.slf4j.Logger logger
+                                        (logger/process "error executing future")
+                                        ^java.lang.Throwable ex)
+                                      (logger/caused-by logger ex))
+                                    nil)
+                                  (datomic.monitor/alarm :UnhandledException)
+                                  (throw ^java.lang.Throwable t__8765__auto__)
+                                  nil)))))))
+            cleanup (error/runonce
+                      (fn fn__19066
+                        ([]
+                          (let [m_19067 {:event :connector/notify-cleanup}
+                                ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                               "datomic.connector")]
+                                                  (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                                    (.debug
+                                                      ^org.slf4j.Logger logger
+                                                      (logger/process
+                                                        (assoc m_19067 :phase :begin))))
+                                                  nil)
+                                start__8599__auto__ (java.lang.System/nanoTime)
+                                result__8600__auto__ (try
+                                                       (do
+                                                         (deliver done_ref true)
+                                                         (common/sync-shutdown hornet_consumer)
+                                                         (aclient/delete-queue
+                                                           session
+                                                           result_queue)
+                                                         {:returned
+                                                          (common/sync-shutdown session)})
+                                                       (catch
+                                                         java.lang.Throwable
+                                                         t__8601__auto__
+                                                         {:threw t__8601__auto__}))
+                                elapsed_19068 (- (java.lang.System/nanoTime) start__8599__auto__)
+                                msec_19069 (logger/format-as-msec (long elapsed_19068))]
+                            (let [endmsg__8602__auto__ (merge
+                                                         (assoc
+                                                           m_19067
+                                                           :msec
+                                                           msec_19069
+                                                           :phase
+                                                           :end)
+                                                         (when (:threw result__8600__auto__)
+                                                           {:threw
+                                                            (class
+                                                              (:threw result__8600__auto__))}))
+                                  logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process endmsg__8602__auto__)))
+                              nil)
+                            (if (contains? result__8600__auto__ :returned)
+                              (:returned result__8600__auto__)
+                              (do (throw (:threw result__8600__auto__)) nil))))))]
+        (deliver cleanup_ref cleanup)
+        (datomic.connector.HornetNotifier.
+          push_handler_ref
+          session
+          result_queue
+          hornet_consumer
+          starter
+          cleanup))))
   (reset-meta!
     #'create-hornet-notifier
     (assoc
@@ -1062,13 +1053,12 @@
                        nil)
                      result)))))
   (clojure.core/import 'datomic.connector.TransactorHornetConnector)
-  (def ->TransactorHornetConnector
-   (fn __GT_TransactorHornetConnector
-     ([cluster_conf transactor_endpoint hornet_factory]
-       (datomic.connector.TransactorHornetConnector.
-         cluster_conf
-         transactor_endpoint
-         hornet_factory))))
+  (defn ->TransactorHornetConnector
+    ([cluster_conf transactor_endpoint hornet_factory]
+      (datomic.connector.TransactorHornetConnector.
+        cluster_conf
+        transactor_endpoint
+        hornet_factory)))
   (reset-meta!
     #'->TransactorHornetConnector
     (assoc
@@ -1078,16 +1068,15 @@
       '->TransactorHornetConnector
       :ns
       *ns*))
-  (def create-transactor-hornet-connector
-   (fn create_transactor_hornet_connector
-     ([cluster_conf endpoint ttl]
-       (let [hornet_factory (create-hornet-factory endpoint ttl)]
-         (datomic.connector.TransactorHornetConnector. cluster_conf endpoint hornet_factory)))
-     ([cluster_conf endpoint]
-       (create-transactor-hornet-connector
-         cluster_conf
-         endpoint
-         (config/property "datomic.peerConnectionTTLMsec")))))
+  (defn create-transactor-hornet-connector
+    ([cluster_conf endpoint ttl]
+      (let [hornet_factory (create-hornet-factory endpoint ttl)]
+        (datomic.connector.TransactorHornetConnector. cluster_conf endpoint hornet_factory)))
+    ([cluster_conf endpoint]
+      (create-transactor-hornet-connector
+        cluster_conf
+        endpoint
+        (config/property "datomic.peerConnectionTTLMsec"))))
   (reset-meta!
     #'create-transactor-hornet-connector
     (assoc

@@ -26,12 +26,12 @@
           ['datomic.config :as 'config]
           'datomic.btset
           'datomic.db))))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol QueueDatabaseIndex (memory-threshold-request-index [db]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.indexer" "QueueDatabaseIndex")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'QueueDatabaseIndex :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'QueueDatabaseIndex :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -41,13 +41,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "QueueDatabaseIndex"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "memory-threshold-request-index")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       Indexer
       (memidx-total [_] "Total size of memidx and indexing across all dbs")
@@ -62,8 +62,8 @@
       (remove-database [_ db-name] "Remove database from indexer"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.indexer" "Indexer")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'Indexer :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'Indexer :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -73,13 +73,13 @@
                                       :doc "Total size of memidx and indexing across all dbs"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "memidx-total")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*)))
-    (let [protocol_signature__7437 (assoc
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*)))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -89,13 +89,13 @@
                                       :doc "Memory index limit exceeded?"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "memidx-limit-exceeded?")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*)))
-    (let [protocol_signature__7439 (assoc
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*)))
+    (let [protocol_signature__7471 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -105,13 +105,13 @@
                                       :doc "Queue indexing job for a particular db, if needed"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7440 (with-meta
-                                       (:name protocol_signature__7439)
-                                       protocol_signature__7439)]
+          protocol_method_name__7472 (with-meta
+                                       (:name protocol_signature__7471)
+                                       protocol_signature__7471)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "queue-db-index-job")
-        (assoc protocol_signature__7439 :name protocol_method_name__7440 :ns *ns*)))
-    (let [protocol_signature__7441 (assoc
+        (assoc protocol_signature__7471 :name protocol_method_name__7472 :ns *ns*)))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -121,13 +121,13 @@
                                       :doc "Inc memidx usage of named db"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "inc-memidx-usage")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -137,13 +137,13 @@
                                       :doc "Size of memidx and indexing for a particular db"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "db-total")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*)))
-    (let [protocol_signature__7445 (assoc
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*)))
+    (let [protocol_signature__7477 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -153,13 +153,13 @@
                                       :doc "Notify indexer that indexing job completed"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7446 (with-meta
-                                       (:name protocol_signature__7445)
-                                       protocol_signature__7445)]
+          protocol_method_name__7478 (with-meta
+                                       (:name protocol_signature__7477)
+                                       protocol_signature__7477)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "indexing-completed")
-        (assoc protocol_signature__7445 :name protocol_method_name__7446 :ns *ns*)))
-    (let [protocol_signature__7447 (assoc
+        (assoc protocol_signature__7477 :name protocol_method_name__7478 :ns *ns*)))
+    (let [protocol_signature__7479 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -169,13 +169,13 @@
                                       :doc "Notify indexer that indexing job started"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7448 (with-meta
-                                       (:name protocol_signature__7447)
-                                       protocol_signature__7447)]
+          protocol_method_name__7480 (with-meta
+                                       (:name protocol_signature__7479)
+                                       protocol_signature__7479)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "indexing-started")
-        (assoc protocol_signature__7447 :name protocol_method_name__7448 :ns *ns*)))
-    (let [protocol_signature__7449 (assoc
+        (assoc protocol_signature__7479 :name protocol_method_name__7480 :ns *ns*)))
+    (let [protocol_signature__7481 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -185,13 +185,13 @@
                                       :doc "Inform indexer of data added to a database."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7450 (with-meta
-                                       (:name protocol_signature__7449)
-                                       protocol_signature__7449)]
+          protocol_method_name__7482 (with-meta
+                                       (:name protocol_signature__7481)
+                                       protocol_signature__7481)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "notify-txdata")
-        (assoc protocol_signature__7449 :name protocol_method_name__7450 :ns *ns*)))
-    (let [protocol_signature__7451 (assoc
+        (assoc protocol_signature__7481 :name protocol_method_name__7482 :ns *ns*)))
+    (let [protocol_signature__7483 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -201,13 +201,13 @@
                                       :doc "Queue jobs for database that need them."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7452 (with-meta
-                                       (:name protocol_signature__7451)
-                                       protocol_signature__7451)]
+          protocol_method_name__7484 (with-meta
+                                       (:name protocol_signature__7483)
+                                       protocol_signature__7483)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "queue-index-jobs")
-        (assoc protocol_signature__7451 :name protocol_method_name__7452 :ns *ns*)))
-    (let [protocol_signature__7453 (assoc
+        (assoc protocol_signature__7483 :name protocol_method_name__7484 :ns *ns*)))
+    (let [protocol_signature__7485 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -217,18 +217,17 @@
                                       :doc "Remove database from indexer"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "Indexer"))
-          protocol_method_name__7454 (with-meta
-                                       (:name protocol_signature__7453)
-                                       protocol_signature__7453)]
+          protocol_method_name__7486 (with-meta
+                                       (:name protocol_signature__7485)
+                                       protocol_signature__7485)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.indexer" "remove-database")
-        (assoc protocol_signature__7453 :name protocol_method_name__7454 :ns *ns*))))
-  (def maxf
-   (fn maxf
-     ([f x y & more] (reduce (partial maxf f) (maxf x y) more))
-     ([f x y] (if (< (^clojure.lang.IFn f x) (^clojure.lang.IFn f y)) y x))
-     ([f x] x)
-     ([f] nil)))
+        (assoc protocol_signature__7485 :name protocol_method_name__7486 :ns *ns*))))
+  (defn maxf
+    ([f x y & more] (reduce (partial maxf f) (maxf x y) more))
+    ([f x y] (if (< (^clojure.lang.IFn f x) (^clojure.lang.IFn f y)) y x))
+    ([f x] x)
+    ([f] nil))
   (reset-meta!
     #'maxf
     (assoc
@@ -309,10 +308,9 @@
         (queue-index-jobs this)))
     (metrics [this] (merge {:MemoryIndexMB (quot (memidx-total this) (* 1000 1000))})))
   (clojure.core/import 'datomic.indexer.IndexerImpl)
-  (def ->IndexerImpl
-   (fn __GT_IndexerImpl
-     ([databases memidx_max_fn memidx_threshold_fn memidx_usage]
-       (datomic.indexer.IndexerImpl. databases memidx_max_fn memidx_threshold_fn memidx_usage))))
+  (defn ->IndexerImpl
+    ([databases memidx_max_fn memidx_threshold_fn memidx_usage]
+      (datomic.indexer.IndexerImpl. databases memidx_max_fn memidx_threshold_fn memidx_usage)))
   (reset-meta!
     #'->IndexerImpl
     (assoc
@@ -323,38 +321,37 @@
       '->IndexerImpl
       :ns
       *ns*))
-  (def create-indexer
-   (fn create_indexer
-     ([& p__28118]
-       (let [map__28119 p__28118
-             map__28119 (if (seq? map__28119)
-                          (if (next map__28119)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__28119))
-                            (if (seq map__28119) (first map__28119) {}))
-                          map__28119)
-             databases (get map__28119 :databases)
-             memidx_max_fn (get map__28119 :memidx-max-fn)
-             memidx_threshold_fn (get map__28119 :memidx-threshold-fn)
-             memidx_max_fn (or
-                             memidx_max_fn
-                             (fn fn__28120 ([] (config/property "datomic.memoryIndexMax"))))
-             memidx_threshold_fn (or
-                                   memidx_threshold_fn
-                                   (fn fn__28122
-                                     ([] (config/property "datomic.memoryIndexThreshold"))))]
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.indexer")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process
-                 {:event :indexer/create, :memidx-max (^clojure.lang.IFn memidx_max_fn)})))
-           nil)
-         (datomic.indexer.IndexerImpl.
-           databases
-           memidx_max_fn
-           memidx_threshold_fn
-           (atom {:total 0}))))))
+  (defn create-indexer
+    ([& p__28118]
+      (let [map__28119 p__28118
+            map__28119 (if (seq? map__28119)
+                         (if (next map__28119)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__28119))
+                           (if (seq map__28119) (first map__28119) {}))
+                         map__28119)
+            databases (get map__28119 :databases)
+            memidx_max_fn (get map__28119 :memidx-max-fn)
+            memidx_threshold_fn (get map__28119 :memidx-threshold-fn)
+            memidx_max_fn (or
+                            memidx_max_fn
+                            (fn fn__28120 ([] (config/property "datomic.memoryIndexMax"))))
+            memidx_threshold_fn (or
+                                  memidx_threshold_fn
+                                  (fn fn__28122
+                                    ([] (config/property "datomic.memoryIndexThreshold"))))]
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.indexer")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process
+                {:event :indexer/create, :memidx-max (^clojure.lang.IFn memidx_max_fn)})))
+          nil)
+        (datomic.indexer.IndexerImpl.
+          databases
+          memidx_max_fn
+          memidx_threshold_fn
+          (atom {:total 0})))))
   (reset-meta!
     #'create-indexer
     (assoc

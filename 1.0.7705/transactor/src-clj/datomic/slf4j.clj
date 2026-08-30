@@ -36,7 +36,7 @@
       "net.spy.log.LoggerImpl"
       "datomic.spy.memcached.compat.log.Log4JLogger"))
   (org.slf4j.MDC/put "pid" (str pid))
-  (def print-safely (fn print_safely ([o] (binding [*print-length* 100] (pr-str o)))))
+  (defn print-safely ([o] (binding [*print-length* 100] (pr-str o))))
   (reset-meta!
     #'print-safely
     (assoc
@@ -69,12 +69,11 @@
     :db/add-fulltext :DbAddFulltextMsec,
     :fressian/decompress :DecompressFressianMsec})
   (reset-meta! #'event->timing (assoc {:column (int 1)} :name 'event->timing :ns *ns*))
-  (def process
-   (fn process
-     ([msg]
-       (let [msg (if (map? msg) msg {:message msg})]
-         (print-safely
-           (assoc msg :pid pid :tid (long (.getId (java.lang.Thread/currentThread)))))))))
+  (defn process
+    ([msg]
+      (let [msg (if (map? msg) msg {:message msg})]
+        (print-safely
+          (assoc msg :pid pid :tid (long (.getId (java.lang.Thread/currentThread))))))))
   (reset-meta!
     #'process
     (assoc
@@ -83,13 +82,12 @@
       'process
       :ns
       *ns*))
-  (def caused-by
-   (fn caused_by
-     ([logger t]
-       (loop [t (.getCause ^java.lang.Throwable t)]
-         (when t
-           (.warn ^org.slf4j.Logger logger "... caused by ..." ^java.lang.Throwable t)
-           (recur (.getCause ^java.lang.Throwable t)))))))
+  (defn caused-by
+    ([logger t]
+      (loop [t (.getCause ^java.lang.Throwable t)]
+        (when t
+          (.warn ^org.slf4j.Logger logger "... caused by ..." ^java.lang.Throwable t)
+          (recur (.getCause ^java.lang.Throwable t))))))
   (reset-meta!
     #'caused-by
     (assoc
@@ -109,89 +107,88 @@
       'enabled-method
       :ns
       *ns*))
-  (def log-expr
-   (fn log_expr
-     ([level msg ex]
-       (seq
-         (concat
-           (clojure.core/list 'clojure.core/let)
-           (clojure.core/list
-             (apply
-               vector
-               (seq
-                 (concat
-                   (clojure.core/list 'logger)
-                   (clojure.core/list
-                     (seq
-                       (concat
-                         (clojure.core/list 'org.slf4j.LoggerFactory/getLogger)
-                         (clojure.core/list (str *ns*)))))
-                   (clojure.core/list 'ex)
-                   (clojure.core/list ex)))))
-           (clojure.core/list
-             (seq
-               (concat
-                 (clojure.core/list 'clojure.core/when)
-                 (-> (enabled-method level)
-                  (clojure.core/list)
-                  (concat (clojure.core/list 'logger))
-                  (seq)
-                  (clojure.core/list))
-                 (clojure.core/list
-                   (seq
-                     (concat
-                       (clojure.core/list '.)
-                       (clojure.core/list 'logger)
-                       (clojure.core/list level)
-                       (clojure.core/list
-                         (seq
-                           (concat
-                             (clojure.core/list 'datomic.slf4j/process)
-                             (clojure.core/list msg))))
-                       (clojure.core/list 'ex))))
-                 (clojure.core/list
-                   (seq
-                     (concat
-                       (clojure.core/list 'datomic.slf4j/caused-by)
-                       (clojure.core/list 'logger)
-                       (clojure.core/list 'ex)))))))
-           (clojure.core/list nil))))
-     ([level msg]
-       (seq
-         (concat
-           (clojure.core/list 'clojure.core/let)
-           (clojure.core/list
-             (apply
-               vector
-               (seq
-                 (concat
-                   (clojure.core/list 'logger)
-                   (clojure.core/list
-                     (seq
-                       (concat
-                         (clojure.core/list 'org.slf4j.LoggerFactory/getLogger)
-                         (clojure.core/list (str *ns*)))))))))
-           (clojure.core/list
-             (seq
-               (concat
-                 (clojure.core/list 'clojure.core/when)
-                 (-> (enabled-method level)
-                  (clojure.core/list)
-                  (concat (clojure.core/list 'logger))
-                  (seq)
-                  (clojure.core/list))
-                 (clojure.core/list
-                   (seq
-                     (concat
-                       (clojure.core/list '.)
-                       (clojure.core/list 'logger)
-                       (clojure.core/list level)
-                       (clojure.core/list
-                         (seq
-                           (concat
-                             (clojure.core/list 'datomic.slf4j/process)
-                             (clojure.core/list msg))))))))))
-           (clojure.core/list nil))))))
+  (defn log-expr
+    ([level msg ex]
+      (seq
+        (concat
+          (clojure.core/list 'clojure.core/let)
+          (clojure.core/list
+            (apply
+              vector
+              (seq
+                (concat
+                  (clojure.core/list 'logger)
+                  (clojure.core/list
+                    (seq
+                      (concat
+                        (clojure.core/list 'org.slf4j.LoggerFactory/getLogger)
+                        (clojure.core/list (str *ns*)))))
+                  (clojure.core/list 'ex)
+                  (clojure.core/list ex)))))
+          (clojure.core/list
+            (seq
+              (concat
+                (clojure.core/list 'clojure.core/when)
+                (-> (enabled-method level)
+                 (clojure.core/list)
+                 (concat (clojure.core/list 'logger))
+                 (seq)
+                 (clojure.core/list))
+                (clojure.core/list
+                  (seq
+                    (concat
+                      (clojure.core/list '.)
+                      (clojure.core/list 'logger)
+                      (clojure.core/list level)
+                      (clojure.core/list
+                        (seq
+                          (concat
+                            (clojure.core/list 'datomic.slf4j/process)
+                            (clojure.core/list msg))))
+                      (clojure.core/list 'ex))))
+                (clojure.core/list
+                  (seq
+                    (concat
+                      (clojure.core/list 'datomic.slf4j/caused-by)
+                      (clojure.core/list 'logger)
+                      (clojure.core/list 'ex)))))))
+          (clojure.core/list nil))))
+    ([level msg]
+      (seq
+        (concat
+          (clojure.core/list 'clojure.core/let)
+          (clojure.core/list
+            (apply
+              vector
+              (seq
+                (concat
+                  (clojure.core/list 'logger)
+                  (clojure.core/list
+                    (seq
+                      (concat
+                        (clojure.core/list 'org.slf4j.LoggerFactory/getLogger)
+                        (clojure.core/list (str *ns*)))))))))
+          (clojure.core/list
+            (seq
+              (concat
+                (clojure.core/list 'clojure.core/when)
+                (-> (enabled-method level)
+                 (clojure.core/list)
+                 (concat (clojure.core/list 'logger))
+                 (seq)
+                 (clojure.core/list))
+                (clojure.core/list
+                  (seq
+                    (concat
+                      (clojure.core/list '.)
+                      (clojure.core/list 'logger)
+                      (clojure.core/list level)
+                      (clojure.core/list
+                        (seq
+                          (concat
+                            (clojure.core/list 'datomic.slf4j/process)
+                            (clojure.core/list msg))))))))))
+          (clojure.core/list nil)))))
   (reset-meta!
     #'log-expr
     (assoc
@@ -263,12 +260,11 @@
       :ns
       *ns*))
   (.setMacro #'error)
-  (def exception-string
-   (fn exception_string
-     ([t]
-       (let [s (java.io.StringWriter.) p (java.io.PrintWriter. ^java.io.Writer s)]
-         (.printStackTrace ^java.lang.Throwable t ^java.io.PrintWriter p)
-         (str s)))))
+  (defn exception-string
+    ([t]
+      (let [s (java.io.StringWriter.) p (java.io.PrintWriter. ^java.io.Writer s)]
+        (.printStackTrace ^java.lang.Throwable t ^java.io.PrintWriter p)
+        (str s))))
   (reset-meta!
     #'exception-string
     (assoc

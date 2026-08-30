@@ -188,7 +188,7 @@
       'log-leaf-entries
       :ns
       *ns*))
-  (def t (fn t ([d] (long (.getT ^datomic.impl.db.IDatum d)))))
+  (defn t ([d] (long (.getT ^datomic.impl.db.IDatum d))))
   (reset-meta!
     #'t
     (assoc
@@ -199,7 +199,7 @@
       't
       :ns
       *ns*))
-  (def e (fn e ([d] (long (.getE ^datomic.impl.db.IDatum d)))))
+  (defn e ([d] (long (.getE ^datomic.impl.db.IDatum d))))
   (reset-meta!
     #'e
     (assoc
@@ -254,25 +254,24 @@
       nil
       nil
       nil))
-  (def build-leaf-segment
-   (fn build_leaf_segment
-     ([db initial_t boundary_t]
-       (mapv
-         (fn fn__21536
-           ([p__21535]
-             (let [vec__21537 p__21535
-                   t (nth vec__21537 (int 0) nil)
-                   data (nth vec__21537 (int 1) nil)]
-               (zipmap
-                 [:id :t :data]
-                 [(common/rand-uuid) t (java.util.ArrayList. ^java.util.Collection data)]))))
-         (sort-by
-           first
-           (group-by
-             t
-             (filter
-               (fn fn__21541 ([p1__21534#] (<= initial_t (t p1__21534#) (dec boundary_t))))
-               (db/datoms db :eavt nil))))))))
+  (defn build-leaf-segment
+    ([db initial_t boundary_t]
+      (mapv
+        (fn fn__21536
+          ([p__21535]
+            (let [vec__21537 p__21535
+                  t (nth vec__21537 (int 0) nil)
+                  data (nth vec__21537 (int 1) nil)]
+              (zipmap
+                [:id :t :data]
+                [(common/rand-uuid) t (java.util.ArrayList. ^java.util.Collection data)]))))
+        (sort-by
+          first
+          (group-by
+            t
+            (filter
+              (fn fn__21541 ([p1__21534#] (<= initial_t (t p1__21534#) (dec boundary_t))))
+              (db/datoms db :eavt nil)))))))
   (reset-meta!
     #'build-leaf-segment
     (assoc
@@ -450,33 +449,32 @@
       'rebuild-log-leaf
       :ns
       *ns*))
-  (def race-to-adopt
-   (fn race_to_adopt
-     ([cr root_id retry_limit]
-       (let [cluster (:cluster cr)]
-         (loop [n 0]
-           (do
-             (when (>= n retry_limit)
-               (throw (ex-info "Unable to update log root" {:attempts (long n)})))
-             (or
-               (try
-                 [(long n) (:desc (log/adopt-root (tools/log cr) cluster root_id nil))]
-                 (catch
-                   java.lang.Throwable
-                   t
-                   (do
-                     (let [logger (org.slf4j.LoggerFactory/getLogger
-                                    "datomic.tools.rebuild-log-leaf")
-                           ex t]
-                       (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                         (.info
-                           ^org.slf4j.Logger logger
-                           (logger/process "Lost race to replace log root")
-                           ^java.lang.Throwable ex)
-                         (logger/caused-by logger ex))
-                       nil)
-                     nil)))
-               (recur (inc n)))))))))
+  (defn race-to-adopt
+    ([cr root_id retry_limit]
+      (let [cluster (:cluster cr)]
+        (loop [n 0]
+          (do
+            (when (>= n retry_limit)
+              (throw (ex-info "Unable to update log root" {:attempts (long n)})))
+            (or
+              (try
+                [(long n) (:desc (log/adopt-root (tools/log cr) cluster root_id nil))]
+                (catch
+                  java.lang.Throwable
+                  t
+                  (do
+                    (let [logger (org.slf4j.LoggerFactory/getLogger
+                                   "datomic.tools.rebuild-log-leaf")
+                          ex t]
+                      (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                        (.info
+                          ^org.slf4j.Logger logger
+                          (logger/process "Lost race to replace log root")
+                          ^java.lang.Throwable ex)
+                        (logger/caused-by logger ex))
+                      nil)
+                    nil)))
+              (recur (inc n))))))))
   (reset-meta!
     #'race-to-adopt
     (assoc

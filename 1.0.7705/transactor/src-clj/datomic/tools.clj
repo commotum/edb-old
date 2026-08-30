@@ -66,26 +66,21 @@
   (reset-meta!
     #'TOOLS_VERSION
     (assoc {:const true, :column (int 1)} :name 'TOOLS_VERSION :ns *ns*))
-  (def datom-read-handler
-   (fn datom_read_handler
-     ([p__19687]
-       (let [vec__19688 p__19687
-             e (nth vec__19688 (int 0) nil)
-             a (nth vec__19688 (int 1) nil)
-             v (nth vec__19688 (int 2) nil)
-             tx (nth vec__19688 (int 3) nil)
-             op (nth vec__19688 (int 4) nil)]
-         (if op
-           (db/asserting-datum
-             (long ^java.lang.Number e)
-             (long ^java.lang.Number a)
-             v
-             (d/tx->t tx))
-           (db/retracting-datum
-             (long ^java.lang.Number e)
-             (long ^java.lang.Number a)
-             v
-             (d/tx->t tx)))))))
+  (defn datom-read-handler
+    ([p__19687]
+      (let [vec__19688 p__19687
+            e (nth vec__19688 (int 0) nil)
+            a (nth vec__19688 (int 1) nil)
+            v (nth vec__19688 (int 2) nil)
+            tx (nth vec__19688 (int 3) nil)
+            op (nth vec__19688 (int 4) nil)]
+        (if op
+          (db/asserting-datum (long ^java.lang.Number e) (long ^java.lang.Number a) v (d/tx->t tx))
+          (db/retracting-datum
+            (long ^java.lang.Number e)
+            (long ^java.lang.Number a)
+            v
+            (d/tx->t tx))))))
   (reset-meta!
     #'datom-read-handler
     (assoc
@@ -96,24 +91,20 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.tools" "serializer") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.tools" "serializer") (agent nil))
-  (def serialized
-   (fn serialized
-     ([f agt]
-       (fn fn__19692
-         ([& args]
-           (send-off
-             agt
-             (fn fn__19693
-               ([_]
-                 (try
-                   (apply f args)
-                   (catch
-                     java.lang.Throwable
-                     t
-                     (do (.printStackTrace ^java.lang.Throwable t) nil)))
-                 nil)))
-           nil)))
-     ([f] (serialized f serializer))))
+  (defn serialized
+    ([f agt]
+      (fn fn__19692
+        ([& args]
+          (send-off
+            agt
+            (fn fn__19693
+              ([_]
+                (try
+                  (apply f args)
+                  (catch java.lang.Throwable t (do (.printStackTrace ^java.lang.Throwable t) nil)))
+                nil)))
+          nil)))
+    ([f] (serialized f serializer)))
   (reset-meta!
     #'serialized
     (assoc
@@ -146,8 +137,7 @@
   (.bindRoot (clojure.lang.RT/var "datomic.tools" "log") db-io/log)
   (.setMeta (clojure.lang.RT/var "datomic.tools" "db-resources") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.tools" "db-resources") db-io/db-resources)
-  (def log-entry->next-t
-   (fn log_entry__GT_next_t ([log_entry] (inc (log/max-eidx (:data log_entry))))))
+  (defn log-entry->next-t ([log_entry] (inc (log/max-eidx (:data log_entry)))))
   (reset-meta!
     #'log-entry->next-t
     (assoc
@@ -218,14 +208,13 @@
       'get-index-ref
       :ns
       *ns*))
-  (def reset-index-ref
-   (fn reset_index_ref
-     ([cluster root_id]
-       (when-not (string? root_id)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'string? 'root-id))))))
-       (deref (cluster/reset-ref cluster (index/index-ref-key-name cluster) root_id)))))
+  (defn reset-index-ref
+    ([cluster root_id]
+      (when-not (string? root_id)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'string? 'root-id))))))
+      (deref (cluster/reset-ref cluster (index/index-ref-key-name cluster) root_id))))
   (reset-meta!
     #'reset-index-ref
     (assoc
@@ -234,49 +223,48 @@
       'reset-index-ref
       :ns
       *ns*))
-  (def replace-index
-   (fn replace_index
-     ([cluster index_id]
-       (when-not (string? index_id)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'string? 'index-id))))))
-       (let [m_19714 {:event :tools/replace-index, :id index_id}
-             ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.tools")]
-                               (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                 (.info
-                                   ^org.slf4j.Logger logger
-                                   (logger/process (assoc m_19714 :phase :begin))))
-                               nil)
-             start__8599__auto__ (java.lang.System/nanoTime)
-             result__8600__auto__ (try
-                                    {:returned
-                                     (loop [n 0]
-                                       (do
-                                         (when (< 10 n)
-                                           (throw
-                                             (java.lang.RuntimeException.
-                                               "Retry limit exceeded replacing index.")))
-                                         (if (= :ok (reset-index-ref cluster index_id))
-                                           true
-                                           (recur (inc n)))))}
-                                    (catch
-                                      java.lang.Throwable
-                                      t__8601__auto__
-                                      {:threw t__8601__auto__}))
-             elapsed_19715 (- (java.lang.System/nanoTime) start__8599__auto__)
-             msec_19716 (logger/format-as-msec (long elapsed_19715))]
-         (let [endmsg__8602__auto__ (merge
-                                      (assoc m_19714 :msec msec_19716 :phase :end)
-                                      (when (:threw result__8600__auto__)
-                                        {:threw (class (:threw result__8600__auto__))}))
-               logger (org.slf4j.LoggerFactory/getLogger "datomic.tools")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info ^org.slf4j.Logger logger (logger/process endmsg__8602__auto__)))
-           nil)
-         (if (contains? result__8600__auto__ :returned)
-           (:returned result__8600__auto__)
-           (do (throw (:threw result__8600__auto__)) nil))))))
+  (defn replace-index
+    ([cluster index_id]
+      (when-not (string? index_id)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'string? 'index-id))))))
+      (let [m_19714 {:event :tools/replace-index, :id index_id}
+            ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.tools")]
+                              (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                (.info
+                                  ^org.slf4j.Logger logger
+                                  (logger/process (assoc m_19714 :phase :begin))))
+                              nil)
+            start__8599__auto__ (java.lang.System/nanoTime)
+            result__8600__auto__ (try
+                                   {:returned
+                                    (loop [n 0]
+                                      (do
+                                        (when (< 10 n)
+                                          (throw
+                                            (java.lang.RuntimeException.
+                                              "Retry limit exceeded replacing index.")))
+                                        (if (= :ok (reset-index-ref cluster index_id))
+                                          true
+                                          (recur (inc n)))))}
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8601__auto__
+                                     {:threw t__8601__auto__}))
+            elapsed_19715 (- (java.lang.System/nanoTime) start__8599__auto__)
+            msec_19716 (logger/format-as-msec (long elapsed_19715))]
+        (let [endmsg__8602__auto__ (merge
+                                     (assoc m_19714 :msec msec_19716 :phase :end)
+                                     (when (:threw result__8600__auto__)
+                                       {:threw (class (:threw result__8600__auto__))}))
+              logger (org.slf4j.LoggerFactory/getLogger "datomic.tools")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info ^org.slf4j.Logger logger (logger/process endmsg__8602__auto__)))
+          nil)
+        (if (contains? result__8600__auto__ :returned)
+          (:returned result__8600__auto__)
+          (do (throw (:threw result__8600__auto__)) nil)))))
   (reset-meta!
     #'replace-index
     (assoc
@@ -313,21 +301,20 @@
   (reset-meta!
     #'log-size
     (assoc {:arglists (clojure.core/list ['uri 't]), :column (int 1)} :name 'log-size :ns *ns*))
-  (def get-index
-   (fn get_index
-     ([p__19731]
-       (let [map__19732 p__19731
-             map__19732 (if (seq? map__19732)
-                          (if (next map__19732)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19732))
-                            (if (seq map__19732) (first map__19732) {}))
-                          map__19732)
-             cluster (get map__19732 :cluster)
-             olookup (get map__19732 :olookup)]
-         (get
-           olookup
-           (:key (deref (cluster/get-ref cluster (index/index-ref-key-name cluster)))))))))
+  (defn get-index
+    ([p__19731]
+      (let [map__19732 p__19731
+            map__19732 (if (seq? map__19732)
+                         (if (next map__19732)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19732))
+                           (if (seq map__19732) (first map__19732) {}))
+                         map__19732)
+            cluster (get map__19732 :cluster)
+            olookup (get map__19732 :olookup)]
+        (get
+          olookup
+          (:key (deref (cluster/get-ref cluster (index/index-ref-key-name cluster))))))))
   (reset-meta!
     #'get-index
     (assoc
@@ -340,15 +327,14 @@
   (reset-meta!
     #'cr?
     (assoc {:arglists (clojure.core/list ['o]), :column (int 1)} :name 'cr? :ns *ns*))
-  (def tx-range-from-log
-   (fn tx_range_from_log
-     ([cr start end]
-       (when-not (cr? cr)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'cr? 'cr))))))
-       (let [s (iter/iter-seq (log/seek-tx (log/find-log (:cluster cr) (:olookup cr)) start))]
-         (if end (take-while (fn fn__19736 ([logentry] (< (:t logentry) end))) s) s)))))
+  (defn tx-range-from-log
+    ([cr start end]
+      (when-not (cr? cr)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'cr? 'cr))))))
+      (let [s (iter/iter-seq (log/seek-tx (log/find-log (:cluster cr) (:olookup cr)) start))]
+        (if end (take-while (fn fn__19736 ([logentry] (< (:t logentry) end))) s) s))))
   (reset-meta!
     #'tx-range-from-log
     (assoc
@@ -414,15 +400,14 @@
       'read-capacity-units
       :ns
       *ns*))
-  (def pace-msec-per-seg
-   (fn pace_msec_per_seg
-     ([provisioned_kbs]
-       (let [use_kbs (/ provisioned_kbs 2)
-             item_per_kb 0.03
-             msec_per_sec 1000.0
-             latency_msec 25
-             pace_msec (- (/ (/ msec_per_sec use_kbs) item_per_kb) latency_msec)]
-         (when (> pace_msec 0.0) (long pace_msec))))))
+  (defn pace-msec-per-seg
+    ([provisioned_kbs]
+      (let [use_kbs (/ provisioned_kbs 2)
+            item_per_kb 0.03
+            msec_per_sec 1000.0
+            latency_msec 25
+            pace_msec (- (/ (/ msec_per_sec use_kbs) item_per_kb) latency_msec)]
+        (when (> pace_msec 0.0) (long pace_msec)))))
   (reset-meta!
     #'pace-msec-per-seg
     (assoc
@@ -431,18 +416,17 @@
       'pace-msec-per-seg
       :ns
       *ns*))
-  (def pace-fn
-   (fn pace_fn
-     ([pace_msec]
-       (let [last_val_gets (atom (deref kvc/val-gets-ref))]
-         (fn fn__19749
-           ([]
-             (let [new_val_gets (deref kvc/val-gets-ref)
-                   msec (* (- new_val_gets (deref last_val_gets)) pace_msec)]
-               (when (< 10 msec)
-                 (monitor/add-stat :ToolsPaceReadMsec msec)
-                 (java.lang.Thread/sleep (long ^java.lang.Number msec))
-                 (reset! last_val_gets new_val_gets)))))))))
+  (defn pace-fn
+    ([pace_msec]
+      (let [last_val_gets (atom (deref kvc/val-gets-ref))]
+        (fn fn__19749
+          ([]
+            (let [new_val_gets (deref kvc/val-gets-ref)
+                  msec (* (- new_val_gets (deref last_val_gets)) pace_msec)]
+              (when (< 10 msec)
+                (monitor/add-stat :ToolsPaceReadMsec msec)
+                (java.lang.Thread/sleep (long ^java.lang.Number msec))
+                (reset! last_val_gets new_val_gets))))))))
   (reset-meta!
     #'pace-fn
     (assoc {:arglists (clojure.core/list ['pace-msec]), :column (int 1)} :name 'pace-fn :ns *ns*))
@@ -454,24 +438,23 @@
   (reset-meta!
     #'peer-diagnostics
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'peer-diagnostics :ns *ns*))
-  (def count-log-segs
-   (fn count_log_segs
-     ([p__19753]
-       (let [map__19754 p__19753
-             map__19754 (if (seq? map__19754)
-                          (if (next map__19754)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19754))
-                            (if (seq map__19754) (first map__19754) {}))
-                          map__19754)
-             cluster (get map__19754 :cluster)
-             olookup (get map__19754 :olookup)
-             temp__5825__auto__ (log/seek-tx (log/find-log cluster olookup) 0)]
-         (when temp__5825__auto__
-           (let [tree_iter temp__5825__auto__]
-             (+
-               (inc (count (log/log-dir-seq tree_iter)))
-               (apply + (map count (log/log-dir-seq tree_iter))))))))))
+  (defn count-log-segs
+    ([p__19753]
+      (let [map__19754 p__19753
+            map__19754 (if (seq? map__19754)
+                         (if (next map__19754)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19754))
+                           (if (seq map__19754) (first map__19754) {}))
+                         map__19754)
+            cluster (get map__19754 :cluster)
+            olookup (get map__19754 :olookup)
+            temp__5825__auto__ (log/seek-tx (log/find-log cluster olookup) 0)]
+        (when temp__5825__auto__
+          (let [tree_iter temp__5825__auto__]
+            (+
+              (inc (count (log/log-dir-seq tree_iter)))
+              (apply + (map count (log/log-dir-seq tree_iter)))))))))
   (reset-meta!
     #'count-log-segs
     (assoc
@@ -532,12 +515,11 @@
   (reset-meta!
     #'system-cluster
     (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'system-cluster :ns *ns*))
-  (def cause-chain
-   (fn cause_chain
-     ([t]
-       (take-while
-         identity
-         (iterate (fn fn__19769 ([p1__19768#] (.getCause ^java.lang.Throwable p1__19768#))) t)))))
+  (defn cause-chain
+    ([t]
+      (take-while
+        identity
+        (iterate (fn fn__19769 ([p1__19768#] (.getCause ^java.lang.Throwable p1__19768#))) t))))
   (reset-meta!
     #'cause-chain
     (assoc
@@ -550,23 +532,22 @@
   (reset-meta!
     #'class-sym
     (assoc {:arglists (clojure.core/list ['obj]), :column (int 1)} :name 'class-sym :ns *ns*))
-  (def tools-fault
-   (fn tools_fault
-     ([t]
-       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.tools") ex t]
-         (when (.isInfoEnabled ^org.slf4j.Logger logger)
-           (.info
-             ^org.slf4j.Logger logger
-             (logger/process "Exception running tools")
-             ^java.lang.Throwable ex)
-           (logger/caused-by logger ex))
-         nil)
-       (merge
-         {:cognitect.anomalies/category :cognitect.anomalies/fault,
-          :datomic.tools/cause (map class-sym (cause-chain t))}
-         (let [temp__5825__auto__ (.getMessage ^java.lang.Throwable t)]
-           (when temp__5825__auto__
-             (let [msg temp__5825__auto__] #:cognitect.anomalies{:message msg})))))))
+  (defn tools-fault
+    ([t]
+      (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.tools") ex t]
+        (when (.isInfoEnabled ^org.slf4j.Logger logger)
+          (.info
+            ^org.slf4j.Logger logger
+            (logger/process "Exception running tools")
+            ^java.lang.Throwable ex)
+          (logger/caused-by logger ex))
+        nil)
+      (merge
+        {:cognitect.anomalies/category :cognitect.anomalies/fault,
+         :datomic.tools/cause (map class-sym (cause-chain t))}
+        (let [temp__5825__auto__ (.getMessage ^java.lang.Throwable t)]
+          (when temp__5825__auto__
+            (let [msg temp__5825__auto__] #:cognitect.anomalies{:message msg}))))))
   (reset-meta!
     #'tools-fault
     (assoc
@@ -625,16 +606,15 @@
   (reset-meta!
     #'fulltexts
     (assoc {:arglists (clojure.core/list ['db]), :column (int 1)} :name 'fulltexts :ns *ns*))
-  (def pretty-datom
-   (fn pretty_datom
-     ([db datom]
-       (if datom
-         {:e (.e ^datomic.Datom datom),
-          :a (db/resolve-kw db (.a ^datomic.Datom datom)),
-          :v (.v ^datomic.Datom datom),
-          :t (long (d/tx->t (.tx ^datomic.Datom datom))),
-          :added (.added ^datomic.Datom datom)}
-         {}))))
+  (defn pretty-datom
+    ([db datom]
+      (if datom
+        {:e (.e ^datomic.Datom datom),
+         :a (db/resolve-kw db (.a ^datomic.Datom datom)),
+         :v (.v ^datomic.Datom datom),
+         :t (long (d/tx->t (.tx ^datomic.Datom datom))),
+         :added (.added ^datomic.Datom datom)}
+        {})))
   (reset-meta!
     #'pretty-datom
     (assoc
@@ -695,20 +675,19 @@
   (reset-meta!
     #'retract-entity
     (assoc {:arglists (clojure.core/list ['d]), :column (int 1)} :name 'retract-entity :ns *ns*))
-  (def rehome
-   (fn rehome
-     ([p__19811 to]
-       (let [map__19812 p__19811
-             map__19812 (if (seq? map__19812)
-                          (if (next map__19812)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19812))
-                            (if (seq map__19812) (first map__19812) {}))
-                          map__19812)
-             e (get map__19812 :e)
-             a (get map__19812 :a)
-             v (get map__19812 :v)]
-         [[:db/retract e a v] [:db/add to a v]]))))
+  (defn rehome
+    ([p__19811 to]
+      (let [map__19812 p__19811
+            map__19812 (if (seq? map__19812)
+                         (if (next map__19812)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19812))
+                           (if (seq map__19812) (first map__19812) {}))
+                         map__19812)
+            e (get map__19812 :e)
+            a (get map__19812 :a)
+            v (get map__19812 :v)]
+        [[:db/retract e a v] [:db/add to a v]])))
   (reset-meta!
     #'rehome
     (assoc
@@ -717,20 +696,19 @@
       'rehome
       :ns
       *ns*))
-  (def retarget
-   (fn retarget
-     ([p__19814 to]
-       (let [map__19815 p__19814
-             map__19815 (if (seq? map__19815)
-                          (if (next map__19815)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19815))
-                            (if (seq map__19815) (first map__19815) {}))
-                          map__19815)
-             e (get map__19815 :e)
-             a (get map__19815 :a)
-             v (get map__19815 :v)]
-         [[:db/retract e a v] [:db/add e a to]]))))
+  (defn retarget
+    ([p__19814 to]
+      (let [map__19815 p__19814
+            map__19815 (if (seq? map__19815)
+                         (if (next map__19815)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19815))
+                           (if (seq map__19815) (first map__19815) {}))
+                         map__19815)
+            e (get map__19815 :e)
+            a (get map__19815 :a)
+            v (get map__19815 :v)]
+        [[:db/retract e a v] [:db/add e a to]])))
   (reset-meta!
     #'retarget
     (assoc

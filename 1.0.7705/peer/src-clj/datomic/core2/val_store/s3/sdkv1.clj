@@ -33,7 +33,7 @@
         (clojure.core/import 'java.nio.ByteBuffer)
         (clojure.core/import 'java.util.concurrent.ExecutorService))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       Impl
       (-sync-get [_ k opts] "Returns {:val ByteBuffer (or nil iff not found)}  or anomaly.")
@@ -44,8 +44,8 @@
         "Wraps f in a retry, metric-handler, and exception->anom handler. Returns (f) or anomaly."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.core2.val-store.s3.sdkv1" "Impl")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Impl :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Impl :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -58,13 +58,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.core2.val-store.s3.sdkv1"
                                        "Impl"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.s3.sdkv1" "-sync-get")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -76,13 +76,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.core2.val-store.s3.sdkv1"
                                        "Impl"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.s3.sdkv1" "-sync-put")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*)))
-    (let [protocol_signature__7436 (assoc
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*)))
+    (let [protocol_signature__7468 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -94,13 +94,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.core2.val-store.s3.sdkv1"
                                        "Impl"))
-          protocol_method_name__7437 (with-meta
-                                       (:name protocol_signature__7436)
-                                       protocol_signature__7436)]
+          protocol_method_name__7469 (with-meta
+                                       (:name protocol_signature__7468)
+                                       protocol_signature__7468)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.s3.sdkv1" "-sync-delete")
-        (assoc protocol_signature__7436 :name protocol_method_name__7437 :ns *ns*)))
-    (let [protocol_signature__7438 (assoc
+        (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*)))
+    (let [protocol_signature__7470 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -114,12 +114,12 @@
                                      (clojure.lang.RT/var
                                        "datomic.core2.val-store.s3.sdkv1"
                                        "Impl"))
-          protocol_method_name__7439 (with-meta
-                                       (:name protocol_signature__7438)
-                                       protocol_signature__7438)]
+          protocol_method_name__7471 (with-meta
+                                       (:name protocol_signature__7470)
+                                       protocol_signature__7470)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.s3.sdkv1" "-wrap-op")
-        (assoc protocol_signature__7438 :name protocol_method_name__7439 :ns *ns*))))
+        (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
   (deftype
     ValStore
     [read_pool write_pool retry_fn client bucket prefix]
@@ -221,16 +221,15 @@
           context)
         op)))
   (clojure.core/import 'datomic.core2.val_store.s3.sdkv1.ValStore)
-  (def ->ValStore
-   (fn __GT_ValStore
-     ([read_pool write_pool retry_fn client bucket prefix]
-       (datomic.core2.val_store.s3.sdkv1.ValStore.
-         read_pool
-         write_pool
-         retry_fn
-         client
-         bucket
-         prefix))))
+  (defn ->ValStore
+    ([read_pool write_pool retry_fn client bucket prefix]
+      (datomic.core2.val_store.s3.sdkv1.ValStore.
+        read_pool
+        write_pool
+        retry_fn
+        client
+        bucket
+        prefix)))
   (reset-meta!
     #'->ValStore
     (assoc
@@ -240,37 +239,36 @@
       '->ValStore
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__22632]
-       (let [map__22633 p__22632
-             map__22633 (if (seq? map__22633)
-                          (if (next map__22633)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22633))
-                            (if (seq map__22633) (first map__22633) {}))
-                          map__22633)
-             read_pool (get map__22633 :read-pool)
-             write_pool (get map__22633 :write-pool)
-             retry_fn (get map__22633 :retry-fn)
-             bucket (get map__22633 :bucket)
-             client (get map__22633 :client)
-             prefix (get map__22633 :prefix)]
-         (when-not (and read_pool write_pool retry_fn bucket client prefix)
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 (pr-str
-                   (clojure.core/list
-                     'and
-                     'read-pool
-                     'write-pool
-                     'retry-fn
-                     'bucket
-                     'client
-                     'prefix))))))
-         (->ValStore read_pool write_pool retry_fn client bucket prefix)))))
+  (defn create
+    ([p__22632]
+      (let [map__22633 p__22632
+            map__22633 (if (seq? map__22633)
+                         (if (next map__22633)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22633))
+                           (if (seq map__22633) (first map__22633) {}))
+                         map__22633)
+            read_pool (get map__22633 :read-pool)
+            write_pool (get map__22633 :write-pool)
+            retry_fn (get map__22633 :retry-fn)
+            bucket (get map__22633 :bucket)
+            client (get map__22633 :client)
+            prefix (get map__22633 :prefix)]
+        (when-not (and read_pool write_pool retry_fn bucket client prefix)
+          (throw
+            (java.lang.AssertionError.
+              (str
+                "Assert failed: "
+                (pr-str
+                  (clojure.core/list
+                    'and
+                    'read-pool
+                    'write-pool
+                    'retry-fn
+                    'bucket
+                    'client
+                    'prefix))))))
+        (->ValStore read_pool write_pool retry_fn client bucket prefix))))
   (reset-meta!
     #'create
     (assoc

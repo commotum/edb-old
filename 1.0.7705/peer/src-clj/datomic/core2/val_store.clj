@@ -11,16 +11,15 @@
         (clojure.core/refer 'clojure.core :exclude ['get])
         (clojure.core/require ['datomic.core2.val-store.spi :as 'spi]))))
   (set! *warn-on-reflection* true)
-  (def put
-   (fn put
-     ([val_store k v opts]
-       (do
-         (when-not (:val v)
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str (clojure.core/list :val 'v))))))
-         (spi/-put val_store k v opts)))
-     ([val_store k v] (put val_store k v nil))))
+  (defn put
+    ([val_store k v opts]
+      (do
+        (when-not (:val v)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list :val 'v))))))
+        (spi/-put val_store k v opts)))
+    ([val_store k v] (put val_store k v nil)))
   (reset-meta!
     #'put
     (assoc
@@ -29,8 +28,7 @@
       'put
       :ns
       *ns*))
-  (def get
-   (fn get ([val_store k opts] (spi/-get val_store k opts)) ([val_store k] (get val_store k nil))))
+  (defn get ([val_store k opts] (spi/-get val_store k opts)) ([val_store k] (get val_store k nil)))
   (reset-meta!
     #'get
     (assoc
@@ -39,10 +37,9 @@
       'get
       :ns
       *ns*))
-  (def delete
-   (fn delete
-     ([val_store k opts] (spi/-delete val_store k opts))
-     ([val_store k] (delete val_store k nil))))
+  (defn delete
+    ([val_store k opts] (spi/-delete val_store k opts))
+    ([val_store k] (delete val_store k nil)))
   (reset-meta!
     #'delete
     (assoc

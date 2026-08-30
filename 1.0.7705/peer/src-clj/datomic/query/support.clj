@@ -80,45 +80,44 @@
   (reset-meta!
     #'parse-as
     (assoc {:arglists (clojure.core/list ['q]), :column (int 1)} :name 'parse-as :ns *ns*))
-  (def counted-seq
-   (fn counted_seq
-     ([base_seq ct meta]
-       (when-not (< ct 1)
-         (proxy
-           [clojure.lang.ASeq clojure.lang.Counted]
-           [^clojure.lang.IPersistentMap meta]
-           (more [] (rest base_seq))
-           (seq [] base_seq)
-           (next [] (next base_seq))
-           (contains [o] (.contains ^java.util.List base_seq o))
-           (count [] ct)
-           (listIterator
-             ([] (.listIterator ^java.util.List base_seq))
-             ([index] (.listIterator ^java.util.List base_seq (int ^java.lang.Number index))))
-           (cons [o] (cons o base_seq))
-           (iterator [] (.iterator ^java.util.List base_seq))
-           (subList
-             [from to]
-             (.subList
-               ^java.util.List base_seq
-               (int ^java.lang.Number from)
-               (int ^java.lang.Number to)))
-           (lastIndexOf
-             [o]
-             (java.lang.Integer/valueOf (int (.lastIndexOf ^java.util.List base_seq o))))
-           (withMeta [meta] (counted-seq base_seq ct meta))
-           (hashCode [] (java.lang.Integer/valueOf (int (.hashCode base_seq))))
-           (hasheq [] (hash base_seq))
-           (indexOf [o] (java.lang.Integer/valueOf (int (.indexOf ^java.util.List base_seq o))))
-           (toArray
-             ([] (.toArray ^java.util.List base_seq))
-             ([o] (.toArray ^java.util.List base_seq ^"[Ljava.lang.Object;" o)))
-           (get [index] (nth base_seq (int ^java.lang.Number index)))
-           (equals [o] (.equals base_seq o))
-           (equiv [o] (= base_seq o))
-           (containsAll [c] (.containsAll ^java.util.List base_seq ^java.util.Collection c))
-           (first [] (first base_seq)))))
-     ([base_seq ct] (counted-seq base_seq ct nil))))
+  (defn counted-seq
+    ([base_seq ct meta]
+      (when-not (< ct 1)
+        (proxy
+          [clojure.lang.ASeq clojure.lang.Counted]
+          [^clojure.lang.IPersistentMap meta]
+          (more [] (rest base_seq))
+          (seq [] base_seq)
+          (next [] (next base_seq))
+          (contains [o] (.contains ^java.util.List base_seq o))
+          (count [] ct)
+          (listIterator
+            ([] (.listIterator ^java.util.List base_seq))
+            ([index] (.listIterator ^java.util.List base_seq (int ^java.lang.Number index))))
+          (cons [o] (cons o base_seq))
+          (iterator [] (.iterator ^java.util.List base_seq))
+          (subList
+            [from to]
+            (.subList
+              ^java.util.List base_seq
+              (int ^java.lang.Number from)
+              (int ^java.lang.Number to)))
+          (lastIndexOf
+            [o]
+            (java.lang.Integer/valueOf (int (.lastIndexOf ^java.util.List base_seq o))))
+          (withMeta [meta] (counted-seq base_seq ct meta))
+          (hashCode [] (java.lang.Integer/valueOf (int (.hashCode base_seq))))
+          (hasheq [] (hash base_seq))
+          (indexOf [o] (java.lang.Integer/valueOf (int (.indexOf ^java.util.List base_seq o))))
+          (toArray
+            ([] (.toArray ^java.util.List base_seq))
+            ([o] (.toArray ^java.util.List base_seq ^"[Ljava.lang.Object;" o)))
+          (get [index] (nth base_seq (int ^java.lang.Number index)))
+          (equals [o] (.equals base_seq o))
+          (equiv [o] (= base_seq o))
+          (containsAll [c] (.containsAll ^java.util.List base_seq ^java.util.Collection c))
+          (first [] (first base_seq)))))
+    ([base_seq ct] (counted-seq base_seq ct nil)))
   (reset-meta!
     #'counted-seq
     (assoc

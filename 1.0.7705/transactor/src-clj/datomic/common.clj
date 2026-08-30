@@ -56,20 +56,19 @@
   (reset-meta!
     #'DEFAULT_SYSTEM_NAME
     (assoc {:const true, :column (int 1)} :name 'DEFAULT_SYSTEM_NAME :ns *ns*))
-  (def compare-byte-arrays
-   (fn compare_byte_arrays
-     (^long [a b]
-       (let [a a b b len (alength ^bytes a) lencomp (- len (alength ^bytes b))]
-         (if (= lencomp 0)
-           (loop [pos 0]
-             (if (= pos len)
-               0
-               (let [c (-
-                         (unchecked-long (java.lang.Byte/valueOf (byte (aget ^bytes a (int pos)))))
-                         (unchecked-long
-                           (java.lang.Byte/valueOf (byte (aget ^bytes b (int pos))))))]
-                 (if (= c 0) (recur (inc pos)) c))))
-           lencomp)))))
+  (defn compare-byte-arrays
+    (^long [a b]
+      (let [a a b b len (alength ^bytes a) lencomp (- len (alength ^bytes b))]
+        (if (= lencomp 0)
+          (loop [pos 0]
+            (if (= pos len)
+              0
+              (let [c (-
+                        (unchecked-long (java.lang.Byte/valueOf (byte (aget ^bytes a (int pos)))))
+                        (unchecked-long
+                          (java.lang.Byte/valueOf (byte (aget ^bytes b (int pos))))))]
+                (if (= c 0) (recur (inc pos)) c))))
+          lencomp))))
   (reset-meta!
     #'compare-byte-arrays
     (assoc
@@ -83,25 +82,24 @@
   (.setMeta
     (clojure.lang.RT/var "datomic.common" "coll-compare")
     {:private true, :declared true, :column (int 1)})
-  (def compare-ex
-   (fn compare_ex
-     (^long [a b]
-       (.longValue
-         (cond
-           (.equals a b) 0
-           (or
-             (instance? java.util.List a)
-             (and (instance? java.util.Map a) (not (instance? clojure.lang.IRecord a)))
-             (instance? java.util.Set a)) (long (coll-compare a b))
-           (identical? (.getClass a) (.getClass b)) (if (instance? BYTES a)
-                                                      (long (compare-byte-arrays a b))
-                                                      (java.lang.Integer/valueOf
-                                                        (int
-                                                          (.compareTo ^java.lang.Comparable a b))))
-           (or (instance? java.util.Collection b) (instance? java.util.Map b)) 1
-           :else (do
-                   (java.lang.Integer/valueOf
-                     (int (.compareTo (.getName (.getClass a)) (.getName (.getClass b)))))))))))
+  (defn compare-ex
+    (^long [a b]
+      (.longValue
+        (cond
+          (.equals a b) 0
+          (or
+            (instance? java.util.List a)
+            (and (instance? java.util.Map a) (not (instance? clojure.lang.IRecord a)))
+            (instance? java.util.Set a)) (long (coll-compare a b))
+          (identical? (.getClass a) (.getClass b)) (if (instance? BYTES a)
+                                                     (long (compare-byte-arrays a b))
+                                                     (java.lang.Integer/valueOf
+                                                       (int
+                                                         (.compareTo ^java.lang.Comparable a b))))
+          (or (instance? java.util.Collection b) (instance? java.util.Map b)) 1
+          :else (do
+                  (java.lang.Integer/valueOf
+                    (int (.compareTo (.getName (.getClass a)) (.getName (.getClass b))))))))))
   (reset-meta!
     #'compare-ex
     (assoc
@@ -113,28 +111,27 @@
       'compare-ex
       :ns
       *ns*))
-  (def compare
-   (fn compare
-     (^long [a b]
-       (.longValue
-         (cond
-           (identical? a b) 0
-           (nil? a) (if (nil? b) 0 -1)
-           (nil? b) 1
-           (instance? java.lang.Number a) (if (instance? java.lang.Number b)
-                                            (java.lang.Integer/valueOf
-                                              (int
-                                                (clojure.lang.Numbers/compare
-                                                  ^java.lang.Number a
-                                                  ^java.lang.Number b)))
-                                            -1)
-           (and (instance? java.lang.String a) (instance? java.lang.String b)) (java.lang.Integer/valueOf
-                                                                                 (int
-                                                                                   (.compareTo
-                                                                                     ^java.lang.Comparable a
-                                                                                     b)))
-           (instance? java.lang.Number b) 1
-           :else (do (long (compare-ex a b))))))))
+  (defn compare
+    (^long [a b]
+      (.longValue
+        (cond
+          (identical? a b) 0
+          (nil? a) (if (nil? b) 0 -1)
+          (nil? b) 1
+          (instance? java.lang.Number a) (if (instance? java.lang.Number b)
+                                           (java.lang.Integer/valueOf
+                                             (int
+                                               (clojure.lang.Numbers/compare
+                                                 ^java.lang.Number a
+                                                 ^java.lang.Number b)))
+                                           -1)
+          (and (instance? java.lang.String a) (instance? java.lang.String b)) (java.lang.Integer/valueOf
+                                                                                (int
+                                                                                  (.compareTo
+                                                                                    ^java.lang.Comparable a
+                                                                                    b)))
+          (instance? java.lang.Number b) 1
+          :else (do (long (compare-ex a b)))))))
   (reset-meta!
     #'compare
     (assoc
@@ -161,20 +158,19 @@
       'equals-with-strict-scale
       :ns
       *ns*))
-  (def cl
-   (fn cl
-     (^long [a b]
-       (.longValue
-         (loop [as (.iterator ^java.util.List a) bs (.iterator ^java.util.List b)]
-           (let [ha (.hasNext ^java.util.Iterator as) hb (.hasNext ^java.util.Iterator bs)]
-             (cond
-               (and ha hb) (let [c (compare
-                                     (.next ^java.util.Iterator as)
-                                     (.next ^java.util.Iterator bs))]
-                             (if (= c 0) (recur as bs) (long c)))
-               ha 1
-               hb -1
-               :else (do 0))))))))
+  (defn cl
+    (^long [a b]
+      (.longValue
+        (loop [as (.iterator ^java.util.List a) bs (.iterator ^java.util.List b)]
+          (let [ha (.hasNext ^java.util.Iterator as) hb (.hasNext ^java.util.Iterator bs)]
+            (cond
+              (and ha hb) (let [c (compare
+                                    (.next ^java.util.Iterator as)
+                                    (.next ^java.util.Iterator bs))]
+                            (if (= c 0) (recur as bs) (long c)))
+              ha 1
+              hb -1
+              :else (do 0)))))))
   (reset-meta!
     #'cl
     (assoc
@@ -187,28 +183,25 @@
       'cl
       :ns
       *ns*))
-  (def cx
-   (fn cx
-     (^long [a b]
-       (let [cmp (reify
-                   java.util.Comparator
-                   (^int compare
-                     [this a b]
-                     (int
-                       (if (and
-                             (instance? java.util.Map$Entry a)
-                             (instance? java.util.Map$Entry b))
-                         (let [kc (compare (key a) (key b))]
-                           (if (= kc 0) (compare (val a) (val b)) kc))
-                         (compare a b)))))
-             alist (fn alist
-                     ([x]
-                       (let [xs (seq x) G__8648 (java.util.ArrayList. ^java.util.Collection xs)]
-                         (Collections/sort ^java.util.List G__8648 ^java.util.Comparator cmp)
-                         G__8648)))
-             as (^clojure.lang.IFn alist a)
-             bs (^clojure.lang.IFn alist b)]
-         (cl as bs)))))
+  (defn cx
+    (^long [a b]
+      (let [cmp (reify
+                  java.util.Comparator
+                  (^int compare
+                    [this a b]
+                    (int
+                      (if (and (instance? java.util.Map$Entry a) (instance? java.util.Map$Entry b))
+                        (let [kc (compare (key a) (key b))]
+                          (if (= kc 0) (compare (val a) (val b)) kc))
+                        (compare a b)))))
+            alist (fn alist
+                    ([x]
+                      (let [xs (seq x) G__8648 (java.util.ArrayList. ^java.util.Collection xs)]
+                        (Collections/sort ^java.util.List G__8648 ^java.util.Comparator cmp)
+                        G__8648)))
+            as (^clojure.lang.IFn alist a)
+            bs (^clojure.lang.IFn alist b)]
+        (cl as bs))))
   (reset-meta!
     #'cx
     (assoc
@@ -219,17 +212,16 @@
       'cx
       :ns
       *ns*))
-  (def cc
-   (fn cc
-     (^long [a b]
-       (.longValue
-         (let [ca (count a) cb (count b)]
-           (cond
-             (< ca cb) -1
-             (> ca cb) 1
-             :else (do
-                     (let [ha (.hashCode a) hb (.hashCode b)]
-                       (if (= ha hb) (long (cx a b)) (long (- ha hb)))))))))))
+  (defn cc
+    (^long [a b]
+      (.longValue
+        (let [ca (count a) cb (count b)]
+          (cond
+            (< ca cb) -1
+            (> ca cb) 1
+            :else (do
+                    (let [ha (.hashCode a) hb (.hashCode b)]
+                      (if (= ha hb) (long (cx a b)) (long (- ha hb))))))))))
   (reset-meta!
     #'cc
     (assoc
@@ -240,17 +232,15 @@
       'cc
       :ns
       *ns*))
-  (def coll-compare
-   (fn coll_compare
-     (^long [a b]
-       (.longValue
-         (cond
-           (instance? java.util.List a) (if (instance? java.util.List b) (long (cl a b)) -1)
-           (instance? java.util.List b) 1
-           (instance? java.util.Map a) (if (instance? java.util.Map b) (long (cc a b)) -1)
-           (instance? java.util.Map b) 1
-           (instance? java.util.Set a) (do
-                                         (if (instance? java.util.Set b) (long (cc a b)) -1)))))))
+  (defn coll-compare
+    (^long [a b]
+      (.longValue
+        (cond
+          (instance? java.util.List a) (if (instance? java.util.List b) (long (cl a b)) -1)
+          (instance? java.util.List b) 1
+          (instance? java.util.Map a) (if (instance? java.util.Map b) (long (cc a b)) -1)
+          (instance? java.util.Map b) 1
+          (instance? java.util.Set a) (do (if (instance? java.util.Set b) (long (cc a b)) -1))))))
   (reset-meta!
     #'coll-compare
     (assoc
@@ -407,7 +397,7 @@
       'log-and-print
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       AsyncShutdown
       (async-shutdown
@@ -415,8 +405,8 @@
         "Returns an IBlockingDeref that will deref to some true value on successful\n    shutdown, or to a Throwable if shutdown is known to have failed."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.common" "AsyncShutdown")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'AsyncShutdown :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'AsyncShutdown :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -427,12 +417,12 @@
                                       "Returns an IBlockingDeref that will deref to some true value on successful\n    shutdown, or to a Throwable if shutdown is known to have failed."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.common" "AsyncShutdown"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.common" "async-shutdown")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (defn sync-shutdown ([x] (deref (async-shutdown x))))
   (reset-meta!
     #'sync-shutdown
@@ -486,47 +476,46 @@
       :ns
       *ns*))
   (.setMacro #'with-shutdown)
-  (def await-derefs
-   (fn await_derefs
-     ([msec coll]
-       (let [timed_out (java.lang.Object.)
-             limit (+ msec (java.lang.System/currentTimeMillis))
-             G__8715 coll
-             vec__8716 G__8715
-             seq__8717 (seq vec__8716)
-             first__8718 (first seq__8717)
-             seq__8717 (next seq__8717)
-             item first__8718
-             more seq__8717]
-         (loop [G__8715 G__8715]
-           (let [vec__8719 G__8715
-                 seq__8720 (seq vec__8719)
-                 first__8721 (first seq__8720)
-                 seq__8720 (next seq__8720)
-                 item first__8721
-                 more seq__8720]
-             (if item
-               (if (=
-                     timed_out
-                     (deref item (- limit (java.lang.System/currentTimeMillis)) timed_out))
-                 false
-                 (recur more))
-               true)))))
-     ([coll]
-       (do
-         (loop [seq_8708 (seq coll) chunk_8709 nil count_8710 0 i_8711 0]
-           (if (< i_8711 count_8710)
-             (let [c (.nth ^clojure.lang.Indexed chunk_8709 (unchecked-int i_8711))]
-               (deref c)
-               (recur seq_8708 chunk_8709 count_8710 (inc i_8711)))
-             (let [temp__5825__auto__ (seq seq_8708)]
-               (when temp__5825__auto__
-                 (let [seq_8708 temp__5825__auto__]
-                   (if (chunked-seq? seq_8708)
-                     (let [c__6090__auto__ (chunk-first seq_8708)]
-                       (recur (chunk-rest seq_8708) c__6090__auto__ (count c__6090__auto__) 0))
-                     (let [c (first seq_8708)] (deref c) (recur (next seq_8708) nil 0 0))))))))
-         true))))
+  (defn await-derefs
+    ([msec coll]
+      (let [timed_out (java.lang.Object.)
+            limit (+ msec (java.lang.System/currentTimeMillis))
+            G__8715 coll
+            vec__8716 G__8715
+            seq__8717 (seq vec__8716)
+            first__8718 (first seq__8717)
+            seq__8717 (next seq__8717)
+            item first__8718
+            more seq__8717]
+        (loop [G__8715 G__8715]
+          (let [vec__8719 G__8715
+                seq__8720 (seq vec__8719)
+                first__8721 (first seq__8720)
+                seq__8720 (next seq__8720)
+                item first__8721
+                more seq__8720]
+            (if item
+              (if (=
+                    timed_out
+                    (deref item (- limit (java.lang.System/currentTimeMillis)) timed_out))
+                false
+                (recur more))
+              true)))))
+    ([coll]
+      (do
+        (loop [seq_8708 (seq coll) chunk_8709 nil count_8710 0 i_8711 0]
+          (if (< i_8711 count_8710)
+            (let [c (.nth ^clojure.lang.Indexed chunk_8709 (unchecked-int i_8711))]
+              (deref c)
+              (recur seq_8708 chunk_8709 count_8710 (inc i_8711)))
+            (let [temp__5825__auto__ (seq seq_8708)]
+              (when temp__5825__auto__
+                (let [seq_8708 temp__5825__auto__]
+                  (if (chunked-seq? seq_8708)
+                    (let [c__6090__auto__ (chunk-first seq_8708)]
+                      (recur (chunk-rest seq_8708) c__6090__auto__ (count c__6090__auto__) 0))
+                    (let [c (first seq_8708)] (deref c) (recur (next seq_8708) nil 0 0))))))))
+        true)))
   (reset-meta!
     #'await-derefs
     (assoc
@@ -542,41 +531,40 @@
   (reset-meta!
     #'find-free-port
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'find-free-port :ns *ns*))
-  (def array-cat
-   (fn array_cat
-     ([& p__8726]
-       (let [vec__8727 p__8726 a (nth vec__8727 (unchecked-int 0) nil) as vec__8727]
-         (when a
-           (let [length (apply + (map count as))
-                 type (.getComponentType (class a))
-                 result (java.lang.reflect.Array/newInstance
-                          ^java.lang.Class type
-                          (unchecked-int length))]
-             (let [i 0
-                   G__8733 as
-                   vec__8734 G__8733
-                   seq__8735 (seq vec__8734)
-                   first__8736 (first seq__8735)
-                   seq__8735 (next seq__8735)
-                   a first__8736
-                   more seq__8735]
-               (loop [i i G__8733 G__8733]
-                 (let [i i
-                       vec__8737 G__8733
-                       seq__8738 (seq vec__8737)
-                       first__8739 (first seq__8738)
-                       seq__8738 (next seq__8738)
-                       a first__8739
-                       more seq__8738]
-                   (when a
-                     (java.lang.System/arraycopy
-                       a
-                       (unchecked-int 0)
-                       result
-                       (unchecked-int i)
-                       (int (count a)))
-                     (recur (+ i (count a)) more)))))
-             result))))))
+  (defn array-cat
+    ([& p__8726]
+      (let [vec__8727 p__8726 a (nth vec__8727 (unchecked-int 0) nil) as vec__8727]
+        (when a
+          (let [length (apply + (map count as))
+                type (.getComponentType (class a))
+                result (java.lang.reflect.Array/newInstance
+                         ^java.lang.Class type
+                         (unchecked-int length))]
+            (let [i 0
+                  G__8733 as
+                  vec__8734 G__8733
+                  seq__8735 (seq vec__8734)
+                  first__8736 (first seq__8735)
+                  seq__8735 (next seq__8735)
+                  a first__8736
+                  more seq__8735]
+              (loop [i i G__8733 G__8733]
+                (let [i i
+                      vec__8737 G__8733
+                      seq__8738 (seq vec__8737)
+                      first__8739 (first seq__8738)
+                      seq__8738 (next seq__8738)
+                      a first__8739
+                      more seq__8738]
+                  (when a
+                    (java.lang.System/arraycopy
+                      a
+                      (unchecked-int 0)
+                      result
+                      (unchecked-int i)
+                      (int (count a)))
+                    (recur (+ i (count a)) more)))))
+            result)))))
   (reset-meta!
     #'array-cat
     (assoc
@@ -598,15 +586,14 @@
   (reset-meta!
     #'squuid
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'squuid :ns *ns*))
-  (def squuid-time-ms
-   (fn squuid_time_ms
-     ([squuid]
-       (long
-         (*
-           1000
-           (bit-and
-             4294967295
-             (bit-shift-right (.getMostSignificantBits ^java.util.UUID squuid) 32)))))))
+  (defn squuid-time-ms
+    ([squuid]
+      (long
+        (*
+          1000
+          (bit-and
+            4294967295
+            (bit-shift-right (.getMostSignificantBits ^java.util.UUID squuid) 32))))))
   (reset-meta!
     #'squuid-time-ms
     (assoc
@@ -621,9 +608,8 @@
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'rand-uuid :ns *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.common" "run-uuid") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.common" "run-uuid") (rand-uuid))
-  (def root-cause
-   (fn root_cause
-     ([x] (when x (let [cause (.getCause ^java.lang.Throwable x)] (if cause (recur cause) x))))))
+  (defn root-cause
+    ([x] (when x (let [cause (.getCause ^java.lang.Throwable x)] (if cause (recur cause) x)))))
   (reset-meta!
     #'root-cause
     (assoc
@@ -699,23 +685,22 @@
   (reset-meta!
     #'throw-anom
     (assoc {:arglists (clojure.core/list ['anom]), :column (int 1)} :name 'throw-anom :ns *ns*))
-  (def key-comparator
-   (fn key_comparator
-     ([key_fn comp]
-       (reify
-         java.util.Comparator
-         (^int compare
-           [this o1 o2]
-           (.compare
-             ^java.util.Comparator comp
-             (^clojure.lang.IFn key_fn o1)
-             (^clojure.lang.IFn key_fn o2)))))
-     ([key_fn]
-       (reify
-         java.util.Comparator
-         (^int compare
-           [this o1 o2]
-           (.compareTo (^clojure.lang.IFn key_fn o1) (^clojure.lang.IFn key_fn o2)))))))
+  (defn key-comparator
+    ([key_fn comp]
+      (reify
+        java.util.Comparator
+        (^int compare
+          [this o1 o2]
+          (.compare
+            ^java.util.Comparator comp
+            (^clojure.lang.IFn key_fn o1)
+            (^clojure.lang.IFn key_fn o2)))))
+    ([key_fn]
+      (reify
+        java.util.Comparator
+        (^int compare
+          [this o1 o2]
+          (.compareTo (^clojure.lang.IFn key_fn o1) (^clojure.lang.IFn key_fn o2))))))
   (reset-meta!
     #'key-comparator
     (assoc
@@ -762,42 +747,41 @@
     #'fire
     (assoc {:arglists (clojure.core/list ['& 'body]), :column (int 1)} :name 'fire :ns *ns*))
   (.setMacro #'fire)
-  (def schedule
-   (fn schedule
-     ([taskname f msec & p__8767]
-       (let [map__8768 p__8767
-             map__8768 (if (seq? map__8768)
-                         (if (next map__8768)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8768))
-                           (if (seq map__8768) (first map__8768) {}))
-                         map__8768)
-             once (get map__8768 :once)
-             msec (long msec)
-             t (java.util.Timer. ^java.lang.String taskname (boolean (.booleanValue true)))
-             tt (proxy
-                  [java.util.TimerTask]
-                  []
-                  (run
-                    []
-                    (try
-                      (^clojure.lang.IFn f)
-                      (catch
-                        java.lang.Throwable
-                        t
-                        (do
-                          (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common") ex t]
-                            (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                              (.warn
-                                ^org.slf4j.Logger logger
-                                (logger/process "Scheduled task failed")
-                                ^java.lang.Throwable ex)
-                              (logger/caused-by logger ex))
-                            nil)
-                          (monitor/alarm :UnhandledException))))))]
-         (if once
-           (.schedule ^java.util.Timer t ^java.util.TimerTask tt (long msec))
-           (.schedule ^java.util.Timer t ^java.util.TimerTask tt (long msec) (long msec)))
-         (reify java.io.Closeable (^void close [this] (do (.cancel ^java.util.Timer t) nil)))))))
+  (defn schedule
+    ([taskname f msec & p__8767]
+      (let [map__8768 p__8767
+            map__8768 (if (seq? map__8768)
+                        (if (next map__8768)
+                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8768))
+                          (if (seq map__8768) (first map__8768) {}))
+                        map__8768)
+            once (get map__8768 :once)
+            msec (long msec)
+            t (java.util.Timer. ^java.lang.String taskname (boolean (.booleanValue true)))
+            tt (proxy
+                 [java.util.TimerTask]
+                 []
+                 (run
+                   []
+                   (try
+                     (^clojure.lang.IFn f)
+                     (catch
+                       java.lang.Throwable
+                       t
+                       (do
+                         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common") ex t]
+                           (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                             (.warn
+                               ^org.slf4j.Logger logger
+                               (logger/process "Scheduled task failed")
+                               ^java.lang.Throwable ex)
+                             (logger/caused-by logger ex))
+                           nil)
+                         (monitor/alarm :UnhandledException))))))]
+        (if once
+          (.schedule ^java.util.Timer t ^java.util.TimerTask tt (long msec))
+          (.schedule ^java.util.Timer t ^java.util.TimerTask tt (long msec) (long msec)))
+        (reify java.io.Closeable (^void close [this] (do (.cancel ^java.util.Timer t) nil))))))
   (reset-meta!
     #'schedule
     (assoc
@@ -836,23 +820,22 @@
       :ns
       *ns*))
   (.setMacro #'returning-throwable)
-  (def log-retry
-   (fn log_retry
-     ([result backoff attempts max_retries]
-       (let [m {:event :common/retry,
-                :backoff backoff,
-                :attempts attempts,
-                :max-retries max_retries}]
-         (if (instance? java.lang.Throwable result)
-           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common") ex result]
-             (when (.isInfoEnabled ^org.slf4j.Logger logger)
-               (.info ^org.slf4j.Logger logger (logger/process m) ex)
-               (logger/caused-by logger ex))
-             nil)
-           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common")]
-             (when (.isInfoEnabled ^org.slf4j.Logger logger)
-               (.info ^org.slf4j.Logger logger (logger/process (assoc m :result result))))
-             nil))))))
+  (defn log-retry
+    ([result backoff attempts max_retries]
+      (let [m {:event :common/retry,
+               :backoff backoff,
+               :attempts attempts,
+               :max-retries max_retries}]
+        (if (instance? java.lang.Throwable result)
+          (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common") ex result]
+            (when (.isInfoEnabled ^org.slf4j.Logger logger)
+              (.info ^org.slf4j.Logger logger (logger/process m) ex)
+              (logger/caused-by logger ex))
+            nil)
+          (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.common")]
+            (when (.isInfoEnabled ^org.slf4j.Logger logger)
+              (.info ^org.slf4j.Logger logger (logger/process (assoc m :result result))))
+            nil)))))
   (reset-meta!
     #'log-retry
     (assoc
@@ -910,36 +893,35 @@
       :ns
       *ns*))
   (.setMacro #'with-nano-time)
-  (def retry-fn
-   (fn retry_fn
-     ([f & p__8784]
-       (let [map__8785 p__8784
-             map__8785 (if (seq? map__8785)
-                         (if (next map__8785)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8785))
-                           (if (seq map__8785) (first map__8785) {}))
-                         map__8785)
-             pred (get map__8785 :pred)
-             backoff (get map__8785 :backoff)
-             max_retries (get map__8785 :max-retries)
-             log_retry (get map__8785 :log-retry)
-             backoff (if (number? backoff) (constantly backoff) backoff)]
-         (loop [attempts 1]
-           (let [result (try (^clojure.lang.IFn f) (catch java.lang.Throwable e e))]
-             (when (or
-                     (instance? java.lang.InterruptedException result)
-                     (instance? java.io.InterruptedIOException result))
-               (throw ^java.lang.Throwable result))
-             (if (^clojure.lang.IFn pred result)
-               (if (< attempts max_retries)
-                 (let [msec (^clojure.lang.IFn backoff (long attempts))]
-                   (when log_retry
-                     (^clojure.lang.IFn log_retry result msec (long attempts) max_retries))
-                   (when (clojure.lang.Numbers/isPos msec)
-                     (java.lang.Thread/sleep (unchecked-long ^java.lang.Number msec)))
-                   (recur (inc attempts)))
-                 (return-or-throw result))
-               (return-or-throw result))))))))
+  (defn retry-fn
+    ([f & p__8784]
+      (let [map__8785 p__8784
+            map__8785 (if (seq? map__8785)
+                        (if (next map__8785)
+                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8785))
+                          (if (seq map__8785) (first map__8785) {}))
+                        map__8785)
+            pred (get map__8785 :pred)
+            backoff (get map__8785 :backoff)
+            max_retries (get map__8785 :max-retries)
+            log_retry (get map__8785 :log-retry)
+            backoff (if (number? backoff) (constantly backoff) backoff)]
+        (loop [attempts 1]
+          (let [result (try (^clojure.lang.IFn f) (catch java.lang.Throwable e e))]
+            (when (or
+                    (instance? java.lang.InterruptedException result)
+                    (instance? java.io.InterruptedIOException result))
+              (throw ^java.lang.Throwable result))
+            (if (^clojure.lang.IFn pred result)
+              (if (< attempts max_retries)
+                (let [msec (^clojure.lang.IFn backoff (long attempts))]
+                  (when log_retry
+                    (^clojure.lang.IFn log_retry result msec (long attempts) max_retries))
+                  (when (clojure.lang.Numbers/isPos msec)
+                    (java.lang.Thread/sleep (unchecked-long ^java.lang.Number msec)))
+                  (recur (inc attempts)))
+                (return-or-throw result))
+              (return-or-throw result)))))))
   (reset-meta!
     #'retry-fn
     (assoc
@@ -969,26 +951,25 @@
       'create-temp-directory
       :ns
       *ns*))
-  (def delete-file-recursively
-   (fn delete_file_recursively
-     ([f & p__8793]
-       (let [vec__8794 p__8793 silently (nth vec__8794 (unchecked-int 0) nil) f (io/file f)]
-         (when (.isDirectory ^java.io.File f)
-           (loop [seq_8797 (seq (.listFiles ^java.io.File f)) chunk_8798 nil count_8799 0 i_8800 0]
-             (if (< i_8800 count_8799)
-               (let [child (.nth ^clojure.lang.Indexed chunk_8798 (unchecked-int i_8800))]
-                 (delete-file-recursively child silently)
-                 (recur seq_8797 chunk_8798 count_8799 (inc i_8800)))
-               (let [temp__5825__auto__ (seq seq_8797)]
-                 (when temp__5825__auto__
-                   (let [seq_8797 temp__5825__auto__]
-                     (if (chunked-seq? seq_8797)
-                       (let [c__6090__auto__ (chunk-first seq_8797)]
-                         (recur (chunk-rest seq_8797) c__6090__auto__ (count c__6090__auto__) 0))
-                       (let [child (first seq_8797)]
-                         (delete-file-recursively child silently)
-                         (recur (next seq_8797) nil 0 0)))))))))
-         (io/delete-file f silently)))))
+  (defn delete-file-recursively
+    ([f & p__8793]
+      (let [vec__8794 p__8793 silently (nth vec__8794 (unchecked-int 0) nil) f (io/file f)]
+        (when (.isDirectory ^java.io.File f)
+          (loop [seq_8797 (seq (.listFiles ^java.io.File f)) chunk_8798 nil count_8799 0 i_8800 0]
+            (if (< i_8800 count_8799)
+              (let [child (.nth ^clojure.lang.Indexed chunk_8798 (unchecked-int i_8800))]
+                (delete-file-recursively child silently)
+                (recur seq_8797 chunk_8798 count_8799 (inc i_8800)))
+              (let [temp__5825__auto__ (seq seq_8797)]
+                (when temp__5825__auto__
+                  (let [seq_8797 temp__5825__auto__]
+                    (if (chunked-seq? seq_8797)
+                      (let [c__6090__auto__ (chunk-first seq_8797)]
+                        (recur (chunk-rest seq_8797) c__6090__auto__ (count c__6090__auto__) 0))
+                      (let [child (first seq_8797)]
+                        (delete-file-recursively child silently)
+                        (recur (next seq_8797) nil 0 0)))))))))
+        (io/delete-file f silently))))
   (reset-meta!
     #'delete-file-recursively
     (assoc
@@ -997,27 +978,26 @@
       'delete-file-recursively
       :ns
       *ns*))
-  (def bean-setters
-   (fn bean_setters
-     ([bean_class]
-       (reduce
-         (fn fn__8804
-           ([m pd]
-             (let [name (.getName ^java.beans.FeatureDescriptor pd)
-                   method (.getWriteMethod ^java.beans.PropertyDescriptor pd)]
-               (if (and
-                     method
-                     (= 1 (long (alength (.getParameterTypes ^java.lang.reflect.Method method)))))
-                 (assoc
-                   m
-                   (keyword name)
-                   (fn fn__8805
-                     ([bean value]
-                       (.invoke ^java.lang.reflect.Method method bean (into-array [value])))))
-                 m))))
-         {}
-         (.getPropertyDescriptors
-           (java.beans.Introspector/getBeanInfo ^java.lang.Class bean_class))))))
+  (defn bean-setters
+    ([bean_class]
+      (reduce
+        (fn fn__8804
+          ([m pd]
+            (let [name (.getName ^java.beans.FeatureDescriptor pd)
+                  method (.getWriteMethod ^java.beans.PropertyDescriptor pd)]
+              (if (and
+                    method
+                    (= 1 (long (alength (.getParameterTypes ^java.lang.reflect.Method method)))))
+                (assoc
+                  m
+                  (keyword name)
+                  (fn fn__8805
+                    ([bean value]
+                      (.invoke ^java.lang.reflect.Method method bean (into-array [value])))))
+                m))))
+        {}
+        (.getPropertyDescriptors
+          (java.beans.Introspector/getBeanInfo ^java.lang.Class bean_class)))))
   (reset-meta!
     #'bean-setters
     (assoc
@@ -1067,13 +1047,12 @@
   (reset-meta!
     #'endpoint?
     (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'endpoint? :ns *ns*))
-  (def qualified-name
-   (fn qualified_name
-     ([k]
-       (let [temp__5823__auto__ (.getNamespace ^clojure.lang.Keyword k)]
-         (if temp__5823__auto__
-           (let [ns temp__5823__auto__] (str ns "/" (.getName ^clojure.lang.Keyword k)))
-           (.getName ^clojure.lang.Keyword k))))))
+  (defn qualified-name
+    ([k]
+      (let [temp__5823__auto__ (.getNamespace ^clojure.lang.Keyword k)]
+        (if temp__5823__auto__
+          (let [ns temp__5823__auto__] (str ns "/" (.getName ^clojure.lang.Keyword k)))
+          (.getName ^clojure.lang.Keyword k)))))
   (reset-meta!
     #'qualified-name
     (assoc
@@ -1123,14 +1102,13 @@
       'load-properties
       :ns
       *ns*))
-  (def store-properties
-   (fn store_properties
-     ([props filename]
-       (.store
-         ^java.util.Properties props
-         (io/output-stream (io/file filename))
-         "Generated Datomic Properties")
-       nil)))
+  (defn store-properties
+    ([props filename]
+      (.store
+        ^java.util.Properties props
+        (io/output-stream (io/file filename))
+        "Generated Datomic Properties")
+      nil))
   (reset-meta!
     #'store-properties
     (assoc
@@ -1161,14 +1139,13 @@
   (reset-meta!
     #'map->props
     (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'map->props :ns *ns*))
-  (def props->map
-   (fn props__GT_map
-     ([props]
-       (reduce
-         (fn fn__8846
-           ([m k] (assoc m k (.getProperty ^java.util.Properties props ^java.lang.String k))))
-         {}
-         (keys props)))))
+  (defn props->map
+    ([props]
+      (reduce
+        (fn fn__8846
+          ([m k] (assoc m k (.getProperty ^java.util.Properties props ^java.lang.String k))))
+        {}
+        (keys props))))
   (reset-meta!
     #'props->map
     (assoc
@@ -1186,8 +1163,7 @@
   (reset-meta!
     #'pop-atom!
     (assoc {:arglists (clojure.core/list ['atm]), :column (int 1)} :name 'pop-atom! :ns *ns*))
-  (def closing-watch
-   (fn closing_watch ([_ _ old _] (when old (.close ^java.lang.AutoCloseable old) nil))))
+  (defn closing-watch ([_ _ old _] (when old (.close ^java.lang.AutoCloseable old) nil)))
   (reset-meta!
     #'closing-watch
     (assoc
@@ -1197,26 +1173,25 @@
       'closing-watch
       :ns
       *ns*))
-  (def pfuture
-   (fn pfuture
-     ([exec f]
-       (let [fut (.submit
-                   ^java.util.concurrent.ExecutorService exec
-                   ((deref #'clojure.core/binding-conveyor-fn) f))]
-         (reify
-           clojure.lang.IPending
-           clojure.lang.IBlockingDeref
-           clojure.lang.IDeref
-           (deref
-             [this ^long timeout_ms timeout_val]
-             (try
-               (.get
-                 ^java.util.concurrent.Future fut
-                 (long timeout_ms)
-                 java.util.concurrent.TimeUnit/MILLISECONDS)
-               (catch java.util.concurrent.TimeoutException e timeout_val)))
-           (deref [this] (.get ^java.util.concurrent.Future fut))
-           (^boolean isRealized [this] (.isDone ^java.util.concurrent.Future fut)))))))
+  (defn pfuture
+    ([exec f]
+      (let [fut (.submit
+                  ^java.util.concurrent.ExecutorService exec
+                  ((deref #'clojure.core/binding-conveyor-fn) f))]
+        (reify
+          clojure.lang.IPending
+          clojure.lang.IBlockingDeref
+          clojure.lang.IDeref
+          (deref
+            [this ^long timeout_ms timeout_val]
+            (try
+              (.get
+                ^java.util.concurrent.Future fut
+                (long timeout_ms)
+                java.util.concurrent.TimeUnit/MILLISECONDS)
+              (catch java.util.concurrent.TimeoutException e timeout_val)))
+          (deref [this] (.get ^java.util.concurrent.Future fut))
+          (^boolean isRealized [this] (.isDone ^java.util.concurrent.Future fut))))))
   (reset-meta!
     #'pfuture
     (assoc
@@ -1237,15 +1212,14 @@
     thread/handoff-thread-pool)
   (.setMeta (clojure.lang.RT/var "datomic.common" "cached-thread-pool") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.common" "cached-thread-pool") thread/cached-thread-pool)
-  (def bounded-deref
-   (fn bounded_deref
-     ([ref timeout_ms]
-       (let [sentinel (java.lang.Object.) v (deref ref timeout_ms sentinel)]
-         (when (= v sentinel)
-           (throw
-             (java.util.concurrent.TimeoutException.
-               (str "Deref timed out after " timeout_ms " msec"))))
-         v))))
+  (defn bounded-deref
+    ([ref timeout_ms]
+      (let [sentinel (java.lang.Object.) v (deref ref timeout_ms sentinel)]
+        (when (= v sentinel)
+          (throw
+            (java.util.concurrent.TimeoutException.
+              (str "Deref timed out after " timeout_ms " msec"))))
+        v)))
   (reset-meta!
     #'bounded-deref
     (assoc
@@ -1254,18 +1228,17 @@
       'bounded-deref
       :ns
       *ns*))
-  (def pooled-mapv
-   (fn pooled_mapv
-     ([exec f coll]
-       (mapv
-         deref
-         (mapv
-           (fn fn__8856
-             ([p1__8855#]
-               (.submit
-                 ^java.util.concurrent.ExecutorService exec
-                 (bound-fn [] (^clojure.lang.IFn f p1__8855#)))))
-           coll)))))
+  (defn pooled-mapv
+    ([exec f coll]
+      (mapv
+        deref
+        (mapv
+          (fn fn__8856
+            ([p1__8855#]
+              (.submit
+                ^java.util.concurrent.ExecutorService exec
+                (bound-fn [] (^clojure.lang.IFn f p1__8855#)))))
+          coll))))
   (reset-meta!
     #'pooled-mapv
     (assoc
@@ -1275,42 +1248,41 @@
       'pooled-mapv
       :ns
       *ns*))
-  (def distinct-by
-   (fn distinct_by
-     ([f coll]
-       (let [step (fn step
-                    ([xs seen]
-                      (lazy-seq
-                        ((fn fn__8868
-                           ([p__8867 seen]
-                             (let [vec__8869 p__8867
-                                   fst (nth vec__8869 (unchecked-int 0) nil)
-                                   xs vec__8869
-                                   temp__5825__auto__ (seq xs)]
-                               (when temp__5825__auto__
-                                 (let [s temp__5825__auto__ k (^clojure.lang.IFn f fst)]
-                                   (if (contains? seen k)
-                                     (recur (rest s) seen)
-                                     (cons
-                                       fst
-                                       (^clojure.lang.IFn step (rest s) (conj seen k)))))))))
-                          xs
-                          seen))))]
-         (^clojure.lang.IFn step coll #{})))
-     ([f]
-       (fn fn__8861
-         ([rf]
-           (let [seen (volatile! #{})]
-             (fn fn__8862
-               ([] (^clojure.lang.IFn rf))
-               ([result] (^clojure.lang.IFn rf result))
-               ([result input]
-                 (let [k (^clojure.lang.IFn f input)]
-                   (if (contains? (deref seen) k)
-                     result
-                     (do
-                       (vswap! ^clojure.lang.Volatile seen conj k)
-                       (^clojure.lang.IFn rf result input))))))))))))
+  (defn distinct-by
+    ([f coll]
+      (let [step (fn step
+                   ([xs seen]
+                     (lazy-seq
+                       ((fn fn__8868
+                          ([p__8867 seen]
+                            (let [vec__8869 p__8867
+                                  fst (nth vec__8869 (unchecked-int 0) nil)
+                                  xs vec__8869
+                                  temp__5825__auto__ (seq xs)]
+                              (when temp__5825__auto__
+                                (let [s temp__5825__auto__ k (^clojure.lang.IFn f fst)]
+                                  (if (contains? seen k)
+                                    (recur (rest s) seen)
+                                    (cons
+                                      fst
+                                      (^clojure.lang.IFn step (rest s) (conj seen k)))))))))
+                         xs
+                         seen))))]
+        (^clojure.lang.IFn step coll #{})))
+    ([f]
+      (fn fn__8861
+        ([rf]
+          (let [seen (volatile! #{})]
+            (fn fn__8862
+              ([] (^clojure.lang.IFn rf))
+              ([result] (^clojure.lang.IFn rf result))
+              ([result input]
+                (let [k (^clojure.lang.IFn f input)]
+                  (if (contains? (deref seen) k)
+                    result
+                    (do
+                      (vswap! ^clojure.lang.Volatile seen conj k)
+                      (^clojure.lang.IFn rf result input)))))))))))
   (reset-meta!
     #'distinct-by
     (assoc
@@ -1327,17 +1299,16 @@
   (reset-meta!
     #'ensure-vector
     (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'ensure-vector :ns *ns*))
-  (def ensure-vectors-in-array
-   (fn ensure_vectors_in_array
-     ([vs]
-       (dotimes [i (alength ^"[Ljava.lang.Object;" vs)]
-         (let [elem (aget ^"[Ljava.lang.Object;" vs (int i))]
-           (when (instance? java.util.List elem)
-             (aset
-               ^"[Ljava.lang.Object;" vs
-               (int i)
-               (clojure.lang.PersistentVector/create ^java.util.List elem)))))
-       vs)))
+  (defn ensure-vectors-in-array
+    ([vs]
+      (dotimes [i (alength ^"[Ljava.lang.Object;" vs)]
+        (let [elem (aget ^"[Ljava.lang.Object;" vs (int i))]
+          (when (instance? java.util.List elem)
+            (aset
+              ^"[Ljava.lang.Object;" vs
+              (int i)
+              (clojure.lang.PersistentVector/create ^java.util.List elem)))))
+      vs))
   (reset-meta!
     #'ensure-vectors-in-array
     (assoc

@@ -17,10 +17,9 @@
           ['datomic.aws.client.api :as 'aws])
         (clojure.core/import 'software.amazon.awssdk.services.cloudwatch.CloudWatchClient))))
   (set! *warn-on-reflection* true)
-  (def client
-   (fn client
-     ([creds opts] (aws-helpers/sync-client (CloudWatchClient/builder) creds opts))
-     ([opts] (aws-helpers/sync-client (CloudWatchClient/builder) opts))))
+  (defn client
+    ([creds opts] (aws-helpers/sync-client (CloudWatchClient/builder) creds opts))
+    ([opts] (aws-helpers/sync-client (CloudWatchClient/builder) opts)))
   (reset-meta!
     #'client
     (assoc

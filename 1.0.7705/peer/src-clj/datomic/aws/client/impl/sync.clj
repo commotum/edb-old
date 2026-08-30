@@ -54,26 +54,25 @@
     (clojure.lang.RT/var "datomic.aws.client.impl.sync" "response-xformers")
     {:bytes (fn fn__14432 ([] (ResponseTransformer/toBytes))),
      :input-stream (fn fn__14434 ([] (ResponseTransformer/toInputStream)))})
-  (def process-result
-   (fn process_result
-     ([result blob_response? meta]
-       (if blob_response?
-         (cond->
-           {:ret (datafy/sdk->clj (datafy/response result)), :body (datafy/sdk->body result)}
-           meta
-           (assoc :datomic.aws.client.api/meta meta)
-           true
-           (update
-             :ret
-             assoc
-             :aws/RequestId
-             (datafy/response->request-id (datafy/response result))))
-         (cond->
-           (datafy/sdk->clj result)
-           meta
-           (assoc :datomic.aws.client.api/meta meta)
-           true
-           (assoc :aws/RequestId (datafy/response->request-id result)))))))
+  (defn process-result
+    ([result blob_response? meta]
+      (if blob_response?
+        (cond->
+          {:ret (datafy/sdk->clj (datafy/response result)), :body (datafy/sdk->body result)}
+          meta
+          (assoc :datomic.aws.client.api/meta meta)
+          true
+          (update
+            :ret
+            assoc
+            :aws/RequestId
+            (datafy/response->request-id (datafy/response result))))
+        (cond->
+          (datafy/sdk->clj result)
+          meta
+          (assoc :datomic.aws.client.api/meta meta)
+          true
+          (assoc :aws/RequestId (datafy/response->request-id result))))))
   (reset-meta!
     #'process-result
     (assoc
@@ -84,54 +83,53 @@
       'process-result
       :ns
       *ns*))
-  (def exec-op
-   (fn exec_op
-     ([client p__14439 p__14440]
-       (let [map__14441 p__14439
-             map__14441 (if (seq? map__14441)
-                          (if (next map__14441)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__14441))
-                            (if (seq map__14441) (first map__14441) {}))
-                          map__14441)
-             op_map map__14441
-             req (get map__14441 :req)
-             body (get map__14441 :body)
-             meta (get map__14441 :meta)
-             response_as (get map__14441 :response-as)
-             overrides (get map__14441 :overrides)
-             map__14442 p__14440
-             map__14442 (if (seq? map__14442)
-                          (if (next map__14442)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__14442))
-                            (if (seq map__14442) (first map__14442) {}))
-                          map__14442)
-             method (get map__14442 :method)
-             request_builder (get map__14442 :request-builder)
-             variant (get map__14442 :variant)
-             service (.serviceName ^software.amazon.awssdk.core.SdkClient client)]
-         (try
-           (let [request (cond->
-                           (^clojure.lang.IFn request_builder)
-                           true
-                           (datafy/clj->sdk req)
-                           (seq overrides)
-                           (datafy/override-config overrides))
-                 ret (let [G__14444 variant]
-                       (case
-                         G__14444
-                         :blob-response
-                         (^clojure.lang.IFn method
-                           client
-                           request
-                           ((get response-xformers response_as)))
-                         :request
-                         (^clojure.lang.IFn method client request)
-                         :blob-request
-                         (^clojure.lang.IFn method client request (request-body body))))]
-             (process-result ret (= :blob-response variant) meta))
-           (catch java.lang.Exception ex (anom/anomalize ex (assoc op_map :service service))))))))
+  (defn exec-op
+    ([client p__14439 p__14440]
+      (let [map__14441 p__14439
+            map__14441 (if (seq? map__14441)
+                         (if (next map__14441)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__14441))
+                           (if (seq map__14441) (first map__14441) {}))
+                         map__14441)
+            op_map map__14441
+            req (get map__14441 :req)
+            body (get map__14441 :body)
+            meta (get map__14441 :meta)
+            response_as (get map__14441 :response-as)
+            overrides (get map__14441 :overrides)
+            map__14442 p__14440
+            map__14442 (if (seq? map__14442)
+                         (if (next map__14442)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__14442))
+                           (if (seq map__14442) (first map__14442) {}))
+                         map__14442)
+            method (get map__14442 :method)
+            request_builder (get map__14442 :request-builder)
+            variant (get map__14442 :variant)
+            service (.serviceName ^software.amazon.awssdk.core.SdkClient client)]
+        (try
+          (let [request (cond->
+                          (^clojure.lang.IFn request_builder)
+                          true
+                          (datafy/clj->sdk req)
+                          (seq overrides)
+                          (datafy/override-config overrides))
+                ret (let [G__14444 variant]
+                      (case
+                        G__14444
+                        :blob-response
+                        (^clojure.lang.IFn method
+                          client
+                          request
+                          ((get response-xformers response_as)))
+                        :request
+                        (^clojure.lang.IFn method client request)
+                        :blob-request
+                        (^clojure.lang.IFn method client request (request-body body))))]
+            (process-result ret (= :blob-response variant) meta))
+          (catch java.lang.Exception ex (anom/anomalize ex (assoc op_map :service service)))))))
   (reset-meta!
     #'exec-op
     (assoc

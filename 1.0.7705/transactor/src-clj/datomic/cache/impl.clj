@@ -10,14 +10,14 @@
       (do
         (clojure.core/refer 'clojure.core :exclude ['remove])
         (clojure.core/import 'java.util.concurrent.ConcurrentMap))))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       FastCount
       (fast-count [_] "Count a collection, preferring speed over exact accuracy."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cache.impl" "FastCount")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'FastCount :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'FastCount :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'fast-count {:arglists (clojure.core/list ['_])}),
@@ -26,18 +26,18 @@
                                       "Count a collection, preferring speed over exact accuracy."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cache.impl" "FastCount"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cache.impl" "fast-count")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol CacheKeys (cache-keys [_] "Returns cache keys"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cache.impl" "CacheKeys")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'CacheKeys :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'CacheKeys :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'cache-keys {:arglists (clojure.core/list ['_])}),
@@ -45,18 +45,18 @@
                                       :doc "Returns cache keys"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cache.impl" "CacheKeys"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cache.impl" "cache-keys")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*))))
-  (let [protocol_metadata__7437 {:column (int 1)}]
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*))))
+  (let [protocol_metadata__7469 {:column (int 1)}]
     (defprotocol CachePut (put [c k v] "Put item into the cache. No useful return value."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cache.impl" "CachePut")
-      (assoc (assoc protocol_metadata__7437 :doc nil) :name 'CachePut :ns *ns*))
-    (let [protocol_signature__7438 (assoc
+      (assoc (assoc protocol_metadata__7469 :doc nil) :name 'CachePut :ns *ns*))
+    (let [protocol_signature__7470 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'put {:arglists (clojure.core/list ['c 'k 'v])}),
@@ -64,21 +64,21 @@
                                       :doc "Put item into the cache. No useful return value."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cache.impl" "CachePut"))
-          protocol_method_name__7439 (with-meta
-                                       (:name protocol_signature__7438)
-                                       protocol_signature__7438)]
+          protocol_method_name__7471 (with-meta
+                                       (:name protocol_signature__7470)
+                                       protocol_signature__7470)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cache.impl" "put")
-        (assoc protocol_signature__7438 :name protocol_method_name__7439 :ns *ns*))))
-  (let [protocol_metadata__7440 {:column (int 1)}]
+        (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
+  (let [protocol_metadata__7472 {:column (int 1)}]
     (defprotocol
       CacheRemove
       (remove [c k] "Remove item from cache, returning it.")
       (clear [c] "Remove all items from cache"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cache.impl" "CacheRemove")
-      (assoc (assoc protocol_metadata__7440 :doc nil) :name 'CacheRemove :ns *ns*))
-    (let [protocol_signature__7441 (assoc
+      (assoc (assoc protocol_metadata__7472 :doc nil) :name 'CacheRemove :ns *ns*))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'remove {:arglists (clojure.core/list ['c 'k])}),
@@ -86,13 +86,13 @@
                                       :doc "Remove item from cache, returning it."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cache.impl" "CacheRemove"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cache.impl" "remove")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'clear {:arglists (clojure.core/list ['c])}),
@@ -100,12 +100,12 @@
                                       :doc "Remove all items from cache"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cache.impl" "CacheRemove"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cache.impl" "clear")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*))))
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*))))
   (extend
     java.lang.Object
     FastCount

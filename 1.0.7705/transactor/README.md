@@ -19,6 +19,13 @@ JARs, and `datomic.index` received the same bytecode-verified
 available as exact source in their owning dependency JARs. Classify a file's
 origin before drawing conclusions about Datomic-specific design or style.
 
+Within the Datomic files, the decompiler safely restored 2,115 ordinary named
+functions as `defn`. Ambiguous macro-generated roots, namespace loaders, exact
+metadata resets, protocol scaffolding, and compiler temporaries remain
+explicit. The Datomic portion is therefore recovered initializer source, not
+an original-like source tree; the 86 manifest-listed archive sources are
+verbatim exceptions.
+
 The Java tree contains the same 43 source owners as the Peer plus
 `datomic_jetty.impl.ProxyHandler`, Jetty `EventSource`, and
 `EventSourceServlet`. All 46 files compile with Java 11 source/target settings.

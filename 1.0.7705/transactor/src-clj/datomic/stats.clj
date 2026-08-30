@@ -45,19 +45,18 @@
       'sparse-v-count
       :ns
       *ns*))
-  (def key-summary
-   (fn key_summary
-     ([des a_freqs?]
-       (when (seq des)
-         (let [sizes (map (comp size/memory-size :key) des) ms (math/mean-and-stddev sizes)]
-           (merge
-             {:key-size-min (apply min sizes),
-              :key-size-max (apply max sizes),
-              :key-size-mean (long (:mean ms)),
-              :key-size-stddev (long (:stddev ms)),
-              :sparse-vs (sparse-v-count des)}
-             (when a_freqs? {:a-freqs (frequencies (map (comp :a :key) des))})))))
-     ([des] (key-summary des false))))
+  (defn key-summary
+    ([des a_freqs?]
+      (when (seq des)
+        (let [sizes (map (comp size/memory-size :key) des) ms (math/mean-and-stddev sizes)]
+          (merge
+            {:key-size-min (apply min sizes),
+             :key-size-max (apply max sizes),
+             :key-size-mean (long (:mean ms)),
+             :key-size-stddev (long (:stddev ms)),
+             :sparse-vs (sparse-v-count des)}
+            (when a_freqs? {:a-freqs (frequencies (map (comp :a :key) des))})))))
+    ([des] (key-summary des false)))
   (reset-meta!
     #'key-summary
     (assoc
@@ -66,35 +65,34 @@
       'key-summary
       :ns
       *ns*))
-  (def index-summary
-   (fn index_summary
-     ([db index idx partfn]
-       (reduce
-         (fn fn__15101
-           ([acc entry]
-             (let [temp__5823__auto__ (some-> entry (:key) (^clojure.lang.IFn partfn))]
-               (if temp__5823__auto__
-                 (let [k temp__5823__auto__
-                       map__15103 (get acc k {:data-count 0, :seg-count 0})
-                       map__15103 (if (seq? map__15103)
-                                    (if (next map__15103)
-                                      (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                        (to-array map__15103))
-                                      (if (seq map__15103) (first map__15103) {}))
-                                    map__15103)
-                       m map__15103
-                       data_count (get map__15103 :data-count)
-                       seg_count (get map__15103 :seg-count)
-                       m (assoc
-                           m
-                           :seg-count
-                           (inc seg_count)
-                           :data-count
-                           (+ data_count (:count entry)))]
-                   (assoc acc k m))
-                 acc))))
-         {}
-         (^clojure.lang.IFn idx index)))))
+  (defn index-summary
+    ([db index idx partfn]
+      (reduce
+        (fn fn__15101
+          ([acc entry]
+            (let [temp__5823__auto__ (some-> entry (:key) (^clojure.lang.IFn partfn))]
+              (if temp__5823__auto__
+                (let [k temp__5823__auto__
+                      map__15103 (get acc k {:data-count 0, :seg-count 0})
+                      map__15103 (if (seq? map__15103)
+                                   (if (next map__15103)
+                                     (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                       (to-array map__15103))
+                                     (if (seq map__15103) (first map__15103) {}))
+                                   map__15103)
+                      m map__15103
+                      data_count (get map__15103 :data-count)
+                      seg_count (get map__15103 :seg-count)
+                      m (assoc
+                          m
+                          :seg-count
+                          (inc seg_count)
+                          :data-count
+                          (+ data_count (:count entry)))]
+                  (assoc acc k m))
+                acc))))
+        {}
+        (^clojure.lang.IFn idx index))))
   (reset-meta!
     #'index-summary
     (assoc
@@ -104,21 +102,19 @@
       'index-summary
       :ns
       *ns*))
-  (def avet
-   (fn avet
-     ([db index]
-       (index-summary
-         db
-         index
-         :avet
-         (fn fn__15108
-           ([p1__15107#]
-             (.ident
-               ^datomic.Database db
-               (db/resolve-kw
-                 db
-                 (java.lang.Integer/valueOf
-                   (int (.getA ^datomic.impl.db.IDatum p1__15107#)))))))))))
+  (defn avet
+    ([db index]
+      (index-summary
+        db
+        index
+        :avet
+        (fn fn__15108
+          ([p1__15107#]
+            (.ident
+              ^datomic.Database db
+              (db/resolve-kw
+                db
+                (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum p1__15107#))))))))))
   (reset-meta!
     #'avet
     (assoc
@@ -127,21 +123,19 @@
       'avet
       :ns
       *ns*))
-  (def aevt
-   (fn aevt
-     ([db index]
-       (index-summary
-         db
-         index
-         :aevt
-         (fn fn__15112
-           ([p1__15111#]
-             (.ident
-               ^datomic.Database db
-               (db/resolve-kw
-                 db
-                 (java.lang.Integer/valueOf
-                   (int (.getA ^datomic.impl.db.IDatum p1__15111#)))))))))))
+  (defn aevt
+    ([db index]
+      (index-summary
+        db
+        index
+        :aevt
+        (fn fn__15112
+          ([p1__15111#]
+            (.ident
+              ^datomic.Database db
+              (db/resolve-kw
+                db
+                (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum p1__15111#))))))))))
   (reset-meta!
     #'aevt
     (assoc
@@ -150,17 +144,16 @@
       'aevt
       :ns
       *ns*))
-  (def eavt
-   (fn eavt
-     ([db index]
-       (index-summary
-         db
-         index
-         :eavt
-         (fn fn__15116
-           ([p1__15115#]
-             (let [part (db/partition-eid (.getE ^datomic.impl.db.IDatum p1__15115#))]
-               (or (.ident ^datomic.Database db (long part)) (long part)))))))))
+  (defn eavt
+    ([db index]
+      (index-summary
+        db
+        index
+        :eavt
+        (fn fn__15116
+          ([p1__15115#]
+            (let [part (db/partition-eid (.getE ^datomic.impl.db.IDatum p1__15115#))]
+              (or (.ident ^datomic.Database db (long part)) (long part))))))))
   (reset-meta!
     #'eavt
     (assoc
@@ -169,17 +162,16 @@
       'eavt
       :ns
       *ns*))
-  (def raet
-   (fn raet
-     ([db index]
-       (index-summary
-         db
-         index
-         :raet
-         (fn fn__15121
-           ([p1__15120#]
-             (let [part (db/partition-eid (.getE ^datomic.impl.db.IDatum p1__15120#))]
-               (or (.ident ^datomic.Database db (long part)) (long part)))))))))
+  (defn raet
+    ([db index]
+      (index-summary
+        db
+        index
+        :raet
+        (fn fn__15121
+          ([p1__15120#]
+            (let [part (db/partition-eid (.getE ^datomic.impl.db.IDatum p1__15120#))]
+              (or (.ident ^datomic.Database db (long part)) (long part))))))))
   (reset-meta!
     #'raet
     (assoc
@@ -192,16 +184,15 @@
   (reset-meta!
     #'total
     (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'total :ns *ns*))
-  (def datom-counts
-   (fn datom_counts
-     ([summary_fn db]
-       (let [index (total (^clojure.lang.IFn summary_fn db (:index db)))
-             mid (total (^clojure.lang.IFn summary_fn db (:mid-index db)))
-             hist (total (^clojure.lang.IFn summary_fn db (:history db)))]
-         {:index-datoms index,
-          :mid-index-datoms mid,
-          :index+mid-datoms (+ index mid),
-          :history-datoms hist}))))
+  (defn datom-counts
+    ([summary_fn db]
+      (let [index (total (^clojure.lang.IFn summary_fn db (:index db)))
+            mid (total (^clojure.lang.IFn summary_fn db (:mid-index db)))
+            hist (total (^clojure.lang.IFn summary_fn db (:history db)))]
+        {:index-datoms index,
+         :mid-index-datoms mid,
+         :index+mid-datoms (+ index mid),
+         :history-datoms hist})))
   (reset-meta!
     #'datom-counts
     (assoc
@@ -241,56 +232,54 @@
   (reset-meta! #'memory-tiers (assoc {:column (int 1)} :name 'memory-tiers :ns *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.stats" "tiers") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.stats" "tiers") (into storage-tiers memory-tiers))
-  (def index-attr-stats
-   (fn index_attr_stats
-     ([db tier]
-       (cond
-         (storage-tiers tier) (algo.lazy/fred
-                                (fn fn__15135
-                                  ([acc entries]
+  (defn index-attr-stats
+    ([db tier]
+      (cond
+        (storage-tiers tier) (algo.lazy/fred
+                               (fn fn__15135
+                                 ([acc entries]
+                                   (let [temp__5823__auto__ (.ident
+                                                              ^datomic.Database db
+                                                              (:a (:key (first entries))))]
+                                     (if temp__5823__auto__
+                                       (let [k temp__5823__auto__]
+                                         (assoc acc k {:count (apply + (map :count entries))}))
+                                       acc))))
+                               {}
+                               (algo.lazy/fully-partition-by
+                                 (fn fn__15139
+                                   ([p__15138]
+                                     (let [map__15140 p__15138
+                                           map__15140 (if (seq? map__15140)
+                                                        (if (next map__15140)
+                                                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                            (to-array map__15140))
+                                                          (if (seq map__15140)
+                                                            (first map__15140)
+                                                            {}))
+                                                        map__15140)
+                                           key (get map__15140 :key)]
+                                       (:a key))))
+                                 (:aevt (^clojure.lang.IFn tier db))))
+        (memory-tiers tier) (do
+                              (algo.lazy/fred
+                                (fn fn__15142
+                                  ([acc datoms]
                                     (let [temp__5823__auto__ (.ident
                                                                ^datomic.Database db
-                                                               (:a (:key (first entries))))]
+                                                               (:a (first datoms)))]
                                       (if temp__5823__auto__
                                         (let [k temp__5823__auto__]
-                                          (assoc acc k {:count (apply + (map :count entries))}))
+                                          (assoc
+                                            acc
+                                            k
+                                            {:count
+                                             (java.lang.Integer/valueOf (int (count datoms)))}))
                                         acc))))
                                 {}
                                 (algo.lazy/fully-partition-by
-                                  (fn fn__15139
-                                    ([p__15138]
-                                      (let [map__15140 p__15138
-                                            map__15140 (if (seq? map__15140)
-                                                         (if (next map__15140)
-                                                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                             (to-array map__15140))
-                                                           (if
-                                                             (seq map__15140)
-                                                             (first map__15140)
-                                                             {}))
-                                                         map__15140)
-                                            key (get map__15140 :key)]
-                                        (:a key))))
-                                  (:aevt (^clojure.lang.IFn tier db))))
-         (memory-tiers tier) (do
-                               (algo.lazy/fred
-                                 (fn fn__15142
-                                   ([acc datoms]
-                                     (let [temp__5823__auto__ (.ident
-                                                                ^datomic.Database db
-                                                                (:a (first datoms)))]
-                                       (if temp__5823__auto__
-                                         (let [k temp__5823__auto__]
-                                           (assoc
-                                             acc
-                                             k
-                                             {:count
-                                              (java.lang.Integer/valueOf (int (count datoms)))}))
-                                         acc))))
-                                 {}
-                                 (algo.lazy/fully-partition-by
-                                   (fn fn__15145 ([datom] (:a datom)))
-                                   (:aevt (^clojure.lang.IFn tier db)))))))))
+                                  (fn fn__15145 ([datom] (:a datom)))
+                                  (:aevt (^clojure.lang.IFn tier db))))))))
   (reset-meta!
     #'index-attr-stats
     (assoc
@@ -315,76 +304,71 @@
   (reset-meta!
     #'db-stats
     (assoc {:arglists (clojure.core/list ['db]), :column (int 1)} :name 'db-stats :ns *ns*))
-  (def index-attr-splits
-   (fn index_attr_splits
-     ([db tier attr]
-       (let [a (.entid ^datomic.Database db attr)]
-         (cond
-           (memory-tiers tier) (let [temp__5825__auto__ (:aevt (^clojure.lang.IFn tier db))]
-                                 (when temp__5825__auto__
-                                   (let [idx temp__5825__auto__
-                                         split_n 1000
-                                         diter (iter/take-while
-                                                 (fn fn__15159
-                                                   ([p1__15153#] (= a (:a p1__15153#))))
-                                                 (.seek
-                                                   ^datomic.btset.IDataSet idx
-                                                   (db/datum db :a a)))
-                                         vec__15156 (iter/reduce
-                                                      (fn fn__15162
-                                                        ([p__15161 datom]
-                                                          (let [vec__15163 p__15161
-                                                                ret (nth vec__15163 (int 0) nil)
-                                                                nexte (nth vec__15163 (int 1) nil)
-                                                                c (nth vec__15163 (int 2) nil)]
-                                                            (if
-                                                              (= (long split_n) c)
-                                                              [(conj ret [nexte (long split_n)])
-                                                               (:e datom)
-                                                               1]
-                                                              [ret nexte (inc c)]))))
-                                                      [[] (:e (iter/iget diter)) 0]
-                                                      diter)
-                                         ret (nth vec__15156 (int 0) nil)
-                                         nexte (nth vec__15156 (int 1) nil)
-                                         c (nth vec__15156 (int 2) nil)]
-                                     (cond->
-                                       ret
-                                       (clojure.lang.Numbers/isPos c)
-                                       (conj [nexte c])))))
-           (storage-tiers tier) (do
-                                  (let [temp__5825__auto__ (seq
-                                                             (:aevt (^clojure.lang.IFn tier db)))]
-                                    (when temp__5825__auto__
-                                      (let [dirs temp__5825__auto__]
-                                        (into
-                                          []
-                                          (comp
-                                            (drop-while
-                                              (fn fn__15168
-                                                ([p1__15154#] (< (:a (:key p1__15154#)) a))))
-                                            (take-while
-                                              (fn fn__15170
-                                                ([p1__15155#] (= a (:a (:key p1__15155#))))))
-                                            (map
-                                              (fn fn__15173
-                                                ([p__15172]
-                                                  (let [map__15174 p__15172
-                                                        map__15174 (if
-                                                                     (seq? map__15174)
-                                                                     (if
-                                                                       (next map__15174)
-                                                                       (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                                         (to-array map__15174))
-                                                                       (if
-                                                                         (seq map__15174)
-                                                                         (first map__15174)
-                                                                         {}))
-                                                                     map__15174)
-                                                        key (get map__15174 :key)
-                                                        count (get map__15174 :count)]
-                                                    [(:e key) count])))))
-                                          dirs))))))))))
+  (defn index-attr-splits
+    ([db tier attr]
+      (let [a (.entid ^datomic.Database db attr)]
+        (cond
+          (memory-tiers tier) (let [temp__5825__auto__ (:aevt (^clojure.lang.IFn tier db))]
+                                (when temp__5825__auto__
+                                  (let [idx temp__5825__auto__
+                                        split_n 1000
+                                        diter (iter/take-while
+                                                (fn fn__15159 ([p1__15153#] (= a (:a p1__15153#))))
+                                                (.seek
+                                                  ^datomic.btset.IDataSet idx
+                                                  (db/datum db :a a)))
+                                        vec__15156 (iter/reduce
+                                                     (fn fn__15162
+                                                       ([p__15161 datom]
+                                                         (let [vec__15163 p__15161
+                                                               ret (nth vec__15163 (int 0) nil)
+                                                               nexte (nth vec__15163 (int 1) nil)
+                                                               c (nth vec__15163 (int 2) nil)]
+                                                           (if
+                                                             (= (long split_n) c)
+                                                             [(conj ret [nexte (long split_n)])
+                                                              (:e datom)
+                                                              1]
+                                                             [ret nexte (inc c)]))))
+                                                     [[] (:e (iter/iget diter)) 0]
+                                                     diter)
+                                        ret (nth vec__15156 (int 0) nil)
+                                        nexte (nth vec__15156 (int 1) nil)
+                                        c (nth vec__15156 (int 2) nil)]
+                                    (cond-> ret (clojure.lang.Numbers/isPos c) (conj [nexte c])))))
+          (storage-tiers tier) (do
+                                 (let [temp__5825__auto__ (seq
+                                                            (:aevt (^clojure.lang.IFn tier db)))]
+                                   (when temp__5825__auto__
+                                     (let [dirs temp__5825__auto__]
+                                       (into
+                                         []
+                                         (comp
+                                           (drop-while
+                                             (fn fn__15168
+                                               ([p1__15154#] (< (:a (:key p1__15154#)) a))))
+                                           (take-while
+                                             (fn fn__15170
+                                               ([p1__15155#] (= a (:a (:key p1__15155#))))))
+                                           (map
+                                             (fn fn__15173
+                                               ([p__15172]
+                                                 (let [map__15174 p__15172
+                                                       map__15174 (if
+                                                                    (seq? map__15174)
+                                                                    (if
+                                                                      (next map__15174)
+                                                                      (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                                        (to-array map__15174))
+                                                                      (if
+                                                                        (seq map__15174)
+                                                                        (first map__15174)
+                                                                        {}))
+                                                                    map__15174)
+                                                       key (get map__15174 :key)
+                                                       count (get map__15174 :count)]
+                                                   [(:e key) count])))))
+                                         dirs)))))))))
   (reset-meta!
     #'index-attr-splits
     (assoc
@@ -394,18 +378,17 @@
       'index-attr-splits
       :ns
       *ns*))
-  (def merge-data
-   (fn merge_data
-     ([cmp ds1 ds2]
-       (let [ds1 (seq ds1) ds2 (seq ds2)]
-         (if (and ds1 ds2)
-           (lazy-seq
-             (let [d1 (first ds1) d2 (first ds2) c (.compare ^java.util.Comparator cmp d1 d2)]
-               (cond
-                 (< c 0) (cons d1 (merge-data cmp (next ds1) ds2))
-                 (> c 0) (cons d2 (merge-data cmp ds1 (next ds2)))
-                 :else (do (cons d1 (cons d2 (merge-data cmp (next ds1) (next ds2))))))))
-           (or ds1 ds2))))))
+  (defn merge-data
+    ([cmp ds1 ds2]
+      (let [ds1 (seq ds1) ds2 (seq ds2)]
+        (if (and ds1 ds2)
+          (lazy-seq
+            (let [d1 (first ds1) d2 (first ds2) c (.compare ^java.util.Comparator cmp d1 d2)]
+              (cond
+                (< c 0) (cons d1 (merge-data cmp (next ds1) ds2))
+                (> c 0) (cons d2 (merge-data cmp ds1 (next ds2)))
+                :else (do (cons d1 (cons d2 (merge-data cmp (next ds1) (next ds2))))))))
+          (or ds1 ds2)))))
   (reset-meta!
     #'merge-data
     (assoc
@@ -485,170 +468,168 @@
       'attr-stats-from-splits
       :ns
       *ns*))
-  (def sizes
-   (fn sizes
-     ([db & p__15213]
-       (let [map__15214 p__15213
-             map__15214 (if (seq? map__15214)
-                          (if (next map__15214)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__15214))
-                            (if (seq map__15214) (first map__15214) {}))
-                          map__15214)
-             with_key_summary (get map__15214 :with-key-summary)
-             iter__6398__auto__ (fn iter__15215
-                                  ([s__15216]
-                                    (lazy-seq
-                                      (loop [s__15216 s__15216]
-                                        (let [temp__5825__auto__ (seq s__15216)]
-                                          (when temp__5825__auto__
-                                            (let [xs__6385__auto__ temp__5825__auto__
-                                                  index (first xs__6385__auto__)
-                                                  iterys__6394__auto__ (fn 
-                                                                         iter__15217
-                                                                         ([s__15218]
-                                                                           (lazy-seq
-                                                                             (let 
-                                                                               [s__15218 s__15218
+  (defn sizes
+    ([db & p__15213]
+      (let [map__15214 p__15213
+            map__15214 (if (seq? map__15214)
+                         (if (next map__15214)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__15214))
+                           (if (seq map__15214) (first map__15214) {}))
+                         map__15214)
+            with_key_summary (get map__15214 :with-key-summary)
+            iter__6398__auto__ (fn iter__15215
+                                 ([s__15216]
+                                   (lazy-seq
+                                     (loop [s__15216 s__15216]
+                                       (let [temp__5825__auto__ (seq s__15216)]
+                                         (when temp__5825__auto__
+                                           (let [xs__6385__auto__ temp__5825__auto__
+                                                 index (first xs__6385__auto__)
+                                                 iterys__6394__auto__ (fn 
+                                                                        iter__15217
+                                                                        ([s__15218]
+                                                                          (lazy-seq
+                                                                            (let 
+                                                                              [s__15218 s__15218
+                                                                               temp__5825__auto__
+                                                                               (seq s__15218)]
+                                                                              (when
                                                                                 temp__5825__auto__
-                                                                                (seq s__15218)]
-                                                                               (when
-                                                                                 temp__5825__auto__
-                                                                                 (let 
-                                                                                   [s__15218
-                                                                                    temp__5825__auto__]
-                                                                                   (if
-                                                                                     (chunked-seq?
-                                                                                       s__15218)
-                                                                                     (let 
-                                                                                       [c__6396__auto__
-                                                                                        (chunk-first
-                                                                                          s__15218)
-                                                                                        size__6397__auto__
-                                                                                        (int
-                                                                                          (count
-                                                                                            c__6396__auto__))
-                                                                                        b__15220
-                                                                                        (chunk-buffer
-                                                                                          (java.lang.Integer/valueOf
-                                                                                            (int
-                                                                                              size__6397__auto__)))]
-                                                                                       (if
-                                                                                         (loop 
-                                                                                           [i__15219
-                                                                                            (int
-                                                                                              0)]
-                                                                                           (if
-                                                                                             (<
-                                                                                               i__15219
-                                                                                               size__6397__auto__)
-                                                                                             (let 
-                                                                                               [tier
-                                                                                                (.nth
-                                                                                                  ^clojure.lang.Indexed c__6396__auto__
-                                                                                                  (int
-                                                                                                    i__15219))]
-                                                                                               (chunk-append
-                                                                                                 b__15220
-                                                                                                 (let 
-                                                                                                   [ks
-                                                                                                    (when
-                                                                                                      (and
-                                                                                                        with_key_summary
-                                                                                                        (not=
-                                                                                                          :fulltext
-                                                                                                          index))
-                                                                                                      (key-summary
-                                                                                                        (^clojure.lang.IFn index
+                                                                                (let 
+                                                                                  [s__15218
+                                                                                   temp__5825__auto__]
+                                                                                  (if
+                                                                                    (chunked-seq?
+                                                                                      s__15218)
+                                                                                    (let 
+                                                                                      [c__6396__auto__
+                                                                                       (chunk-first
+                                                                                         s__15218)
+                                                                                       size__6397__auto__
+                                                                                       (int
+                                                                                         (count
+                                                                                           c__6396__auto__))
+                                                                                       b__15220
+                                                                                       (chunk-buffer
+                                                                                         (java.lang.Integer/valueOf
+                                                                                           (int
+                                                                                             size__6397__auto__)))]
+                                                                                      (if
+                                                                                        (loop 
+                                                                                          [i__15219
+                                                                                           (int 0)]
+                                                                                          (if
+                                                                                            (<
+                                                                                              i__15219
+                                                                                              size__6397__auto__)
+                                                                                            (let 
+                                                                                              [tier
+                                                                                               (.nth
+                                                                                                 ^clojure.lang.Indexed c__6396__auto__
+                                                                                                 (int
+                                                                                                   i__15219))]
+                                                                                              (chunk-append
+                                                                                                b__15220
+                                                                                                (let 
+                                                                                                  [ks
+                                                                                                   (when
+                                                                                                     (and
+                                                                                                       with_key_summary
+                                                                                                       (not=
+                                                                                                         :fulltext
+                                                                                                         index))
+                                                                                                     (key-summary
+                                                                                                       (^clojure.lang.IFn index
+                                                                                                         (^clojure.lang.IFn tier
+                                                                                                           db))
+                                                                                                       (#{:aevt
+                                                                                                          :avet}
+                                                                                                         index)))]
+                                                                                                  (merge
+                                                                                                    (apply
+                                                                                                      merge-with
+                                                                                                      +
+                                                                                                      (vals
+                                                                                                        ((ns-resolve
+                                                                                                           'datomic.stats
+                                                                                                           (symbol
+                                                                                                             (name
+                                                                                                               index)))
+                                                                                                          db
                                                                                                           (^clojure.lang.IFn tier
-                                                                                                            db))
-                                                                                                        (#{:aevt
-                                                                                                           :avet}
-                                                                                                          index)))]
-                                                                                                   (merge
-                                                                                                     (apply
-                                                                                                       merge-with
-                                                                                                       +
-                                                                                                       (vals
-                                                                                                         ((ns-resolve
-                                                                                                            'datomic.stats
-                                                                                                            (symbol
-                                                                                                              (name
-                                                                                                                index)))
-                                                                                                           db
-                                                                                                           (^clojure.lang.IFn tier
-                                                                                                             db))))
-                                                                                                     {:index
-                                                                                                      index,
-                                                                                                      :tier
-                                                                                                      tier}
-                                                                                                     ks)))
-                                                                                               (recur
-                                                                                                 (inc
-                                                                                                   i__15219)))
-                                                                                             true))
-                                                                                         (chunk-cons
-                                                                                           (chunk
-                                                                                             b__15220)
-                                                                                           (^clojure.lang.IFn iter__15217
-                                                                                             (chunk-rest
-                                                                                               s__15218)))
-                                                                                         (chunk-cons
-                                                                                           (chunk
-                                                                                             b__15220)
-                                                                                           nil)))
-                                                                                     (let 
-                                                                                       [tier
-                                                                                        (first
-                                                                                          s__15218)]
-                                                                                       (cons
-                                                                                         (let 
-                                                                                           [ks
-                                                                                            (when
-                                                                                              (and
-                                                                                                with_key_summary
-                                                                                                (not=
-                                                                                                  :fulltext
-                                                                                                  index))
-                                                                                              (key-summary
-                                                                                                (^clojure.lang.IFn index
+                                                                                                            db))))
+                                                                                                    {:index
+                                                                                                     index,
+                                                                                                     :tier
+                                                                                                     tier}
+                                                                                                    ks)))
+                                                                                              (recur
+                                                                                                (inc
+                                                                                                  i__15219)))
+                                                                                            true))
+                                                                                        (chunk-cons
+                                                                                          (chunk
+                                                                                            b__15220)
+                                                                                          (^clojure.lang.IFn iter__15217
+                                                                                            (chunk-rest
+                                                                                              s__15218)))
+                                                                                        (chunk-cons
+                                                                                          (chunk
+                                                                                            b__15220)
+                                                                                          nil)))
+                                                                                    (let 
+                                                                                      [tier
+                                                                                       (first
+                                                                                         s__15218)]
+                                                                                      (cons
+                                                                                        (let 
+                                                                                          [ks
+                                                                                           (when
+                                                                                             (and
+                                                                                               with_key_summary
+                                                                                               (not=
+                                                                                                 :fulltext
+                                                                                                 index))
+                                                                                             (key-summary
+                                                                                               (^clojure.lang.IFn index
+                                                                                                 (^clojure.lang.IFn tier
+                                                                                                   db))
+                                                                                               (#{:aevt
+                                                                                                  :avet}
+                                                                                                 index)))]
+                                                                                          (merge
+                                                                                            (apply
+                                                                                              merge-with
+                                                                                              +
+                                                                                              (vals
+                                                                                                ((ns-resolve
+                                                                                                   'datomic.stats
+                                                                                                   (symbol
+                                                                                                     (name
+                                                                                                       index)))
+                                                                                                  db
                                                                                                   (^clojure.lang.IFn tier
-                                                                                                    db))
-                                                                                                (#{:aevt
-                                                                                                   :avet}
-                                                                                                  index)))]
-                                                                                           (merge
-                                                                                             (apply
-                                                                                               merge-with
-                                                                                               +
-                                                                                               (vals
-                                                                                                 ((ns-resolve
-                                                                                                    'datomic.stats
-                                                                                                    (symbol
-                                                                                                      (name
-                                                                                                        index)))
-                                                                                                   db
-                                                                                                   (^clojure.lang.IFn tier
-                                                                                                     db))))
-                                                                                             {:index
-                                                                                              index,
-                                                                                              :tier
-                                                                                              tier}
-                                                                                             ks))
-                                                                                         (^clojure.lang.IFn iter__15217
-                                                                                           (rest
-                                                                                             s__15218)))))))))))
-                                                  fs__6395__auto__ (seq
-                                                                     (^clojure.lang.IFn iterys__6394__auto__
-                                                                       [:index
-                                                                        :mid-index
-                                                                        :history]))]
-                                              (if fs__6395__auto__
-                                                (concat
-                                                  fs__6395__auto__
-                                                  (^clojure.lang.IFn iter__15215 (rest s__15216)))
-                                                (recur (rest s__15216))))))))))]
-         (^clojure.lang.IFn iter__6398__auto__ [:avet :aevt :eavt :raet :fulltext])))))
+                                                                                                    db))))
+                                                                                            {:index
+                                                                                             index,
+                                                                                             :tier
+                                                                                             tier}
+                                                                                            ks))
+                                                                                        (^clojure.lang.IFn iter__15217
+                                                                                          (rest
+                                                                                            s__15218)))))))))))
+                                                 fs__6395__auto__ (seq
+                                                                    (^clojure.lang.IFn iterys__6394__auto__
+                                                                      [:index
+                                                                       :mid-index
+                                                                       :history]))]
+                                             (if fs__6395__auto__
+                                               (concat
+                                                 fs__6395__auto__
+                                                 (^clojure.lang.IFn iter__15215 (rest s__15216)))
+                                               (recur (rest s__15216))))))))))]
+        (^clojure.lang.IFn iter__6398__auto__ [:avet :aevt :eavt :raet :fulltext]))))
   (reset-meta!
     #'sizes
     (assoc

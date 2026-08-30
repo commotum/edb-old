@@ -87,14 +87,13 @@
              :datomic.core2.log.mem/header header}
             header)))))
   (clojure.core/import 'datomic.core2.log.mem.Log)
-  (def ->Log (fn __GT_Log ([items_ref] (datomic.core2.log.mem.Log. items_ref))))
+  (defn ->Log ([items_ref] (datomic.core2.log.mem.Log. items_ref)))
   (reset-meta!
     #'->Log
     (assoc {:arglists (clojure.core/list ['items-ref]), :column (int 1)} :name '->Log :ns *ns*))
-  (def create
-   (fn create
-     ([header body] (datomic.core2.log.mem.Log. (atom [{:header header, :body body}])))
-     ([] (datomic.core2.log.mem.Log. (atom [])))))
+  (defn create
+    ([header body] (datomic.core2.log.mem.Log. (atom [{:header header, :body body}])))
+    ([] (datomic.core2.log.mem.Log. (atom []))))
   (reset-meta!
     #'create
     (assoc

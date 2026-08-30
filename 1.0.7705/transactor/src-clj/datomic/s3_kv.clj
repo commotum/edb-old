@@ -17,9 +17,8 @@
           ['datomic.io :as 'io]
           ['datomic.simple-kv :as 'skv]))))
   (set! *warn-on-reflection* true)
-  (def s3-storage-path
-   (fn s3_storage_path
-     ([base k] (str base "/" (when-not (.contains ^java.lang.String k "/") "data/") k))))
+  (defn s3-storage-path
+    ([base k] (str base "/" (when-not (.contains ^java.lang.String k "/") "data/") k)))
   (reset-meta!
     #'s3-storage-path
     (assoc
@@ -56,24 +55,23 @@
       '->S3Storage
       :ns
       *ns*))
-  (def s3-storage
-   (fn s3_storage
-     ([& p__30630]
-       (let [map__30631 p__30630
-             map__30631 (if (seq? map__30631)
-                          (if (next map__30631)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__30631))
-                            (if (seq map__30631) (first map__30631) {}))
-                          map__30631)
-             s3 (get map__30631 :s3)
-             bucket (get map__30631 :bucket)
-             base (get map__30631 :base)]
-         (when-not (and s3 bucket base)
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str (clojure.core/list 'and 's3 'bucket 'base))))))
-         (datomic.s3_kv.S3Storage. s3 bucket base)))))
+  (defn s3-storage
+    ([& p__30630]
+      (let [map__30631 p__30630
+            map__30631 (if (seq? map__30631)
+                         (if (next map__30631)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__30631))
+                           (if (seq map__30631) (first map__30631) {}))
+                         map__30631)
+            s3 (get map__30631 :s3)
+            bucket (get map__30631 :bucket)
+            base (get map__30631 :base)]
+        (when-not (and s3 bucket base)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list 'and 's3 'bucket 'base))))))
+        (datomic.s3_kv.S3Storage. s3 bucket base))))
   (reset-meta!
     #'s3-storage
     (assoc

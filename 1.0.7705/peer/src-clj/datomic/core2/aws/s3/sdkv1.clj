@@ -25,35 +25,34 @@
         (clojure.core/import 'com.amazonaws.retry.RetryPolicy)
         (clojure.core/import 'com.amazonaws.auth.DefaultAWSCredentialsProviderChain))))
   (set! *warn-on-reflection* true)
-  (def client
-   (fn client
-     ([p__21374]
-       (let [map__21375 p__21374
-             map__21375 (if (seq? map__21375)
-                          (if (next map__21375)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21375))
-                            (if (seq map__21375) (first map__21375) {}))
-                          map__21375)
-             region (get map__21375 :region)
-             retryPolicy (get map__21375 :retryPolicy)
-             client_conf (get map__21375 :client-conf (com.amazonaws.ClientConfiguration.))
-             creds_provider (get
-                              map__21375
-                              :creds-provider
-                              (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))]
-         (when retryPolicy
-           (.setRetryPolicy
-             ^com.amazonaws.ClientConfiguration client_conf
-             ^com.amazonaws.retry.RetryPolicy retryPolicy))
-         (.build
-           (.withRegion
-             (.withCredentials
-               (.withClientConfiguration
-                 (AmazonS3Client/builder)
-                 ^com.amazonaws.ClientConfiguration client_conf)
-               ^com.amazonaws.auth.AWSCredentialsProvider creds_provider)
-             (str region)))))))
+  (defn client
+    ([p__21374]
+      (let [map__21375 p__21374
+            map__21375 (if (seq? map__21375)
+                         (if (next map__21375)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21375))
+                           (if (seq map__21375) (first map__21375) {}))
+                         map__21375)
+            region (get map__21375 :region)
+            retryPolicy (get map__21375 :retryPolicy)
+            client_conf (get map__21375 :client-conf (com.amazonaws.ClientConfiguration.))
+            creds_provider (get
+                             map__21375
+                             :creds-provider
+                             (com.amazonaws.auth.DefaultAWSCredentialsProviderChain.))]
+        (when retryPolicy
+          (.setRetryPolicy
+            ^com.amazonaws.ClientConfiguration client_conf
+            ^com.amazonaws.retry.RetryPolicy retryPolicy))
+        (.build
+          (.withRegion
+            (.withCredentials
+              (.withClientConfiguration
+                (AmazonS3Client/builder)
+                ^com.amazonaws.ClientConfiguration client_conf)
+              ^com.amazonaws.auth.AWSCredentialsProvider creds_provider)
+            (str region))))))
   (reset-meta!
     #'client
     (assoc
@@ -89,15 +88,14 @@
       's3-service-with-default-retry
       :ns
       *ns*))
-  (def wrap-ex-handler
-   (fn wrap_ex_handler
-     ([f context]
-       (fn fn__21379
-         ([& args]
-           (try
-             (apply f args)
-             (catch java.lang.Throwable t (merge context (izer/throwable->anom t)))))))
-     ([f] (wrap-ex-handler f nil))))
+  (defn wrap-ex-handler
+    ([f context]
+      (fn fn__21379
+        ([& args]
+          (try
+            (apply f args)
+            (catch java.lang.Throwable t (merge context (izer/throwable->anom t)))))))
+    ([f] (wrap-ex-handler f nil)))
   (reset-meta!
     #'wrap-ex-handler
     (assoc
@@ -106,15 +104,14 @@
       'wrap-ex-handler
       :ns
       *ns*))
-  (def put-object
-   (fn put_object
-     ([s3 bucket path stream metadata]
-       (.putObject
-         ^com.amazonaws.services.s3.AmazonS3Client s3
-         ^java.lang.String bucket
-         ^java.lang.String path
-         ^java.io.InputStream stream
-         ^com.amazonaws.services.s3.model.ObjectMetadata metadata))))
+  (defn put-object
+    ([s3 bucket path stream metadata]
+      (.putObject
+        ^com.amazonaws.services.s3.AmazonS3Client s3
+        ^java.lang.String bucket
+        ^java.lang.String path
+        ^java.io.InputStream stream
+        ^com.amazonaws.services.s3.model.ObjectMetadata metadata)))
   (reset-meta!
     #'put-object
     (assoc
@@ -130,20 +127,19 @@
       'put-object
       :ns
       *ns*))
-  (def get-object
-   (fn get_object
-     ([s3 bucket path]
-       (try
-         (.getObject
-           ^com.amazonaws.services.s3.AmazonS3Client s3
-           ^java.lang.String bucket
-           ^java.lang.String path)
-         (catch
-           com.amazonaws.services.s3.model.AmazonS3Exception
-           se
-           (when-not (= 404 (.getStatusCode ^com.amazonaws.AmazonServiceException se))
-             (throw ^java.lang.Throwable se)
-             nil))))))
+  (defn get-object
+    ([s3 bucket path]
+      (try
+        (.getObject
+          ^com.amazonaws.services.s3.AmazonS3Client s3
+          ^java.lang.String bucket
+          ^java.lang.String path)
+        (catch
+          com.amazonaws.services.s3.model.AmazonS3Exception
+          se
+          (when-not (= 404 (.getStatusCode ^com.amazonaws.AmazonServiceException se))
+            (throw ^java.lang.Throwable se)
+            nil)))))
   (reset-meta!
     #'get-object
     (assoc
@@ -157,19 +153,17 @@
       'get-object
       :ns
       *ns*))
-  (def get-bytes
-   (fn get_bytes
-     ([s3 bucket path]
-       (let [temp__5825__auto__ (get-object s3 bucket path)]
-         (when temp__5825__auto__
-           (let [obj temp__5825__auto__]
-             (with-open [is (.getObjectContent ^com.amazonaws.services.s3.model.S3Object obj)]
-               (let [ba (byte-array
-                          (long
-                            (.getContentLength
-                              (.getObjectMetadata
-                                ^com.amazonaws.services.s3.model.S3Object obj))))]
-                 (dio/fill-from-stream! ba is)))))))))
+  (defn get-bytes
+    ([s3 bucket path]
+      (let [temp__5825__auto__ (get-object s3 bucket path)]
+        (when temp__5825__auto__
+          (let [obj temp__5825__auto__]
+            (with-open [is (.getObjectContent ^com.amazonaws.services.s3.model.S3Object obj)]
+              (let [ba (byte-array
+                         (long
+                           (.getContentLength
+                             (.getObjectMetadata ^com.amazonaws.services.s3.model.S3Object obj))))]
+                (dio/fill-from-stream! ba is))))))))
   (reset-meta!
     #'get-bytes
     (assoc
@@ -183,14 +177,13 @@
       'get-bytes
       :ns
       *ns*))
-  (def delete-object
-   (fn delete_object
-     ([s3 bucket path]
-       (.deleteObject
-         ^com.amazonaws.services.s3.AmazonS3Client s3
-         ^java.lang.String bucket
-         ^java.lang.String path)
-       nil)))
+  (defn delete-object
+    ([s3 bucket path]
+      (.deleteObject
+        ^com.amazonaws.services.s3.AmazonS3Client s3
+        ^java.lang.String bucket
+        ^java.lang.String path)
+      nil))
   (reset-meta!
     #'delete-object
     (assoc

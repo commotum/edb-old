@@ -1,7 +1,8 @@
 # Datomic Pro 1.0.7705 reference corpus
 
-This is the recovered source-reference corpus for the matched Datomic Pro
-1.0.7705 distribution. Recovery was completed on 2026-08-30.
+This is the recovered strict initializer-level source corpus for the matched
+Datomic Pro 1.0.7705 distribution. Artifact recovery was completed on
+2026-08-30; source-study normalization is intentionally partial.
 
 The source artifacts were retrieved from the official distribution at
 `https://datomic-pro-downloads.s3.amazonaws.com/1.0.7705/datomic-pro-1.0.7705.zip`.
@@ -42,6 +43,13 @@ closure; their presence is not an authorship claim.
   The 43 shared source renderings are identical in both directories, matching
   the fact that their official 1.0.7705 classes are byte-identical.
 
+The repaired decompiler also uses persisted function metadata to restore an
+ordinary `defn` when source names and fixed/variadic arities can be established
+safely across Clojure 1.11/1.12 bytecode shapes. This raised readable Datomic
+`defn` forms from 928 to 1,904 in the Peer and from 1,056 to 2,115 in the
+Transactor. Ambiguous macro-generated roots remain visibly compiler-shaped
+instead of being guessed.
+
 The current Peer and Transactor are substantially better aligned than the
 historical pair: every shared Java-origin class is byte-identical across the two
 1.0.7705 JARs, and both Clojure recoveries encountered the same single hard
@@ -59,13 +67,21 @@ differences have not disappeared entirely.
 - All 43 Peer and all 46 Transactor Java sources compile with the retained
   compiler helper using Java 11 source/target settings.
 - The repaired decompiler's retained regression suite passes, including its
-  Clojure 1.12 protocol-metadata regression.
+  Clojure 1.11/1.12 function/protocol metadata and JVM `invokedynamic`
+  regressions. A current-tool historical check also recovers all 142 Peer
+  namespaces from 1.0.7277.
 
 This does not mean the tree is the unpublished original source or that it
 rebuilds byte-for-byte identical JARs. Compilation erased comments, formatting,
 some names, and some macro choices. The local Java compiler also differs from
 the official build compiler. A complete source-only runtime, resource bundle,
 and executable oracle have not been rebuilt for this release.
+
+The Clojure remains initializer-level source: namespace-loading wrappers,
+exact Var metadata resets, protocol metadata scaffolding, and some compiler
+temporaries are still present. It is substantially easier to read than the raw
+first pass, but should not be treated as original-like source when inferring
+Rich Hickey's source formatting or macro choices.
 
 Only recovered source, source-boundary manifests, and concise provenance belong
 in this directory. The downloaded distribution, JARs, extracted classes,

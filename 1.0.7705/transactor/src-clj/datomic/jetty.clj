@@ -34,18 +34,17 @@
         (clojure.core/import 'org.eclipse.jetty.util.ssl.SslContextFactory)
         (clojure.core/require ['ring.util.servlet :as 'servlet]))))
   (set! *warn-on-reflection* true)
-  (def handle
-   (fn handle
-     ([handler base_request request response]
-       (let [request_map (servlet/build-request-map request)
-             response_map (^clojure.lang.IFn handler request_map)]
-         (when response_map
-           (.setCharacterEncoding ^org.eclipse.jetty.server.Response response "UTF-8")
-           (servlet/update-servlet-response response response_map)
-           (.setHandled
-             ^org.eclipse.jetty.server.Request base_request
-             (boolean (.booleanValue true)))
-           nil)))))
+  (defn handle
+    ([handler base_request request response]
+      (let [request_map (servlet/build-request-map request)
+            response_map (^clojure.lang.IFn handler request_map)]
+        (when response_map
+          (.setCharacterEncoding ^org.eclipse.jetty.server.Response response "UTF-8")
+          (servlet/update-servlet-response response response_map)
+          (.setHandled
+            ^org.eclipse.jetty.server.Request base_request
+            (boolean (.booleanValue true)))
+          nil))))
   (reset-meta!
     #'handle
     (assoc
@@ -123,15 +122,14 @@
       'ssl-context-factory
       :ns
       *ns*))
-  (def ssl-connector
-   (fn ssl_connector
-     ([server options]
-       (doto
-         (org.eclipse.jetty.server.ServerConnector.
-           ^org.eclipse.jetty.server.Server server
-           (ssl-context-factory options))
-         (.setPort (int (^clojure.lang.IFn options :ssl-port 443)))
-         (.setHost (^clojure.lang.IFn options :host))))))
+  (defn ssl-connector
+    ([server options]
+      (doto
+        (org.eclipse.jetty.server.ServerConnector.
+          ^org.eclipse.jetty.server.Server server
+          (ssl-context-factory options))
+        (.setPort (int (^clojure.lang.IFn options :ssl-port 443)))
+        (.setHost (^clojure.lang.IFn options :host)))))
   (reset-meta!
     #'ssl-connector
     (assoc

@@ -345,9 +345,8 @@
     (^java.lang.Object acceptDataCheck [^java.lang.Object arg0 ^java.lang.Object arg1])
     (^java.lang.Object getRawId []))
   (clojure.core/import 'datomic.db.IDbImpl)
-  (def make-eid
-   (fn make_eid
-     (^long [^long part ^long id] (bit-or (bit-shift-left part 42) (bit-and id 4398046511103)))))
+  (defn make-eid
+    (^long [^long part ^long id] (bit-or (bit-shift-left part 42) (bit-and id 4398046511103))))
   (reset-meta!
     #'make-eid
     (assoc
@@ -359,8 +358,7 @@
       'make-eid
       :ns
       *ns*))
-  (def eid->part
-   (fn eid__GT_part (^long [^long eid] (bit-shift-right (bit-and eid 4611686018427387903) 42))))
+  (defn eid->part (^long [^long eid] (bit-shift-right (bit-and eid 4611686018427387903) 42)))
   (reset-meta!
     #'eid->part
     (assoc
@@ -370,11 +368,10 @@
       'eid->part
       :ns
       *ns*))
-  (def eid->eidx
-   (fn eid__GT_eidx
-     (^long [^long eid]
-       (let [ret (bit-and eid 4398046511103)]
-         (if (= (bit-and ret 2199023255552) 0) ret (bit-or ret -4398046511104))))))
+  (defn eid->eidx
+    (^long [^long eid]
+      (let [ret (bit-and eid 4398046511103)]
+        (if (= (bit-and ret 2199023255552) 0) ret (bit-or ret -4398046511104)))))
   (reset-meta!
     #'eid->eidx
     (assoc
@@ -384,11 +381,10 @@
       'eid->eidx
       :ns
       *ns*))
-  (def partition-eid
-   (fn partition_eid
-     (^long [^long eid]
-       (let [partbits (datomic.db/eid->part eid)]
-         (if (< partbits 524288) partbits (datomic.db/make-eid partbits 0))))))
+  (defn partition-eid
+    (^long [^long eid]
+      (let [partbits (datomic.db/eid->part eid)]
+        (if (< partbits 524288) partbits (datomic.db/make-eid partbits 0)))))
   (reset-meta!
     #'partition-eid
     (assoc
@@ -398,8 +394,7 @@
       'partition-eid
       :ns
       *ns*))
-  (def get-part
-   (fn get_part (^long [datum] (datomic.db/eid->part (.getE ^datomic.impl.db.IDatum datum)))))
+  (defn get-part (^long [datum] (datomic.db/eid->part (.getE ^datomic.impl.db.IDatum datum))))
   (reset-meta!
     #'get-part
     (assoc
@@ -409,8 +404,7 @@
       'get-part
       :ns
       *ns*))
-  (def get-eidx
-   (fn get_eidx (^long [datum] (datomic.db/eid->eidx (.getE ^datomic.impl.db.IDatum datum)))))
+  (defn get-eidx (^long [datum] (datomic.db/eid->eidx (.getE ^datomic.impl.db.IDatum datum))))
   (reset-meta!
     #'get-eidx
     (assoc
@@ -420,15 +414,14 @@
       'get-eidx
       :ns
       *ns*))
-  (def implicit-part
-   (fn implicit_part
-     (^long [^long id]
-       (.longValue
-         (if (and (< id 524288) (>= id 0))
-           (long (datomic.db/make-eid (bit-or id 524288) 0))
-           (error/arg
-             :db.error/implicit-part-out-of-range
-             (str (long id) " out of implicit part range")))))))
+  (defn implicit-part
+    (^long [^long id]
+      (.longValue
+        (if (and (< id 524288) (>= id 0))
+          (long (datomic.db/make-eid (bit-or id 524288) 0))
+          (error/arg
+            :db.error/implicit-part-out-of-range
+            (str (long id) " out of implicit part range"))))))
   (reset-meta!
     #'implicit-part
     (assoc
@@ -451,9 +444,8 @@
       'implicit-part-id
       :ns
       *ns*))
-  (def make-tempid
-   (fn make_tempid
-     (^long [^long part ^long id] (bit-or -9223372036854775808 (datomic.db/make-eid part id)))))
+  (defn make-tempid
+    (^long [^long part ^long id] (bit-or -9223372036854775808 (datomic.db/make-eid part id))))
   (reset-meta!
     #'make-tempid
     (assoc
@@ -553,14 +545,13 @@
     #'id-literal
     (assoc {:arglists (clojure.core/list ['literal]), :column (int 1)} :name 'id-literal :ns *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.db" "resolve-id") {:declared true, :column (int 1)})
-  (def tempid
-   (fn tempid
-     ([db part]
-       (let [pid (datomic.db/resolve-id db part)]
-         (if pid
-           (datomic.db/tempid (unchecked-long ^java.lang.Number pid))
-           (error/arg :db.error/not-a-partition (str "Can't find partition with id: " part)))))
-     ([^long part] (long (datomic.db/make-tempid part (unchecked-long (datomic.db/next-id)))))))
+  (defn tempid
+    ([db part]
+      (let [pid (datomic.db/resolve-id db part)]
+        (if pid
+          (datomic.db/tempid (unchecked-long ^java.lang.Number pid))
+          (error/arg :db.error/not-a-partition (str "Can't find partition with id: " part)))))
+    ([^long part] (long (datomic.db/make-tempid part (unchecked-long (datomic.db/next-id))))))
   (reset-meta!
     #'tempid
     (assoc
@@ -569,7 +560,7 @@
       'tempid
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       LocalizeTempid
       (local-id
@@ -577,8 +568,8 @@
         "Given a tempid, ident, or lookup ref, returns a numeric id by resolving given in db,\n     intifying the given DbId, or interning given in local-tempids map (str -> int).\n     procargs, a positional nascent datom vector, when present, is used for error reporting"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.db" "LocalizeTempid")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'LocalizeTempid :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'LocalizeTempid :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -591,18 +582,18 @@
                                       "Given a tempid, ident, or lookup ref, returns a numeric id by resolving given in db,\n     intifying the given DbId, or interning given in local-tempids map (str -> int).\n     procargs, a positional nascent datom vector, when present, is used for error reporting"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.db" "LocalizeTempid"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "local-id")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol Symbolish (sym-name [s]) (sym-namespace [s]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.db" "Symbolish")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'Symbolish :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'Symbolish :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'sym-name {:arglists (clojure.core/list ['s])}),
@@ -610,13 +601,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.db" "Symbolish"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "sym-name")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*)))
-    (let [protocol_signature__7437 (assoc
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*)))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -626,12 +617,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.db" "Symbolish"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "sym-namespace")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*))))
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*))))
   (defn system-eid ([db ident] (get (:system-eids db) ident)))
   (reset-meta!
     #'system-eid
@@ -641,22 +632,21 @@
       'system-eid
       :ns
       *ns*))
-  (def add-system-eids
-   (fn add_system_eids
-     ([db]
-       (assoc
-         db
-         :system-eids
-         (into
-           {}
-           (comp
-             (map
-               (fn fn__11361
-                 ([ident]
-                   (let [temp__5804__auto__ (.entid ^datomic.Database db ident)]
-                     (when temp__5804__auto__ (let [eid temp__5804__auto__] [ident eid]))))))
-             (remove nil?))
-           [:db.type/tuple :db.attr/preds :db/ensure :db.tuple/discontinued])))))
+  (defn add-system-eids
+    ([db]
+      (assoc
+        db
+        :system-eids
+        (into
+          {}
+          (comp
+            (map
+              (fn fn__11361
+                ([ident]
+                  (let [temp__5804__auto__ (.entid ^datomic.Database db ident)]
+                    (when temp__5804__auto__ (let [eid temp__5804__auto__] [ident eid]))))))
+            (remove nil?))
+          [:db.type/tuple :db.attr/preds :db/ensure :db.tuple/discontinued]))))
   (reset-meta!
     #'add-system-eids
     (assoc
@@ -867,13 +857,12 @@
      :arglists (clojure.core/list [(.withMeta 'iter {:tag 'Iter})]),
      :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.db" "dget") (fn dget ([iter] (iter/iget iter))))
-  (def assertion-policy-compare
-   (fn assertion_policy_compare
-     ([a b]
-       (cond
-         (= (.isAssertion ^datomic.impl.db.IDatum a) (.isAssertion ^datomic.impl.db.IDatum b)) 0
-         (.isAssertion ^datomic.impl.db.IDatum a) -1
-         :else (do 1)))))
+  (defn assertion-policy-compare
+    ([a b]
+      (cond
+        (= (.isAssertion ^datomic.impl.db.IDatum a) (.isAssertion ^datomic.impl.db.IDatum b)) 0
+        (.isAssertion ^datomic.impl.db.IDatum a) -1
+        :else (do 1))))
   (reset-meta!
     #'assertion-policy-compare
     (assoc
@@ -1100,12 +1089,11 @@
       'map->Attribute
       :ns
       *ns*))
-  (def attribute
-   (fn attribute
-     ([db attrid]
-       (let [temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db attrid)]
-         (when temp__5804__auto__
-           (let [attr temp__5804__auto__] (when (instance? datomic.db.Attribute attr) attr)))))))
+  (defn attribute
+    ([db attrid]
+      (let [temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db attrid)]
+        (when temp__5804__auto__
+          (let [attr temp__5804__auto__] (when (instance? datomic.db.Attribute attr) attr))))))
   (reset-meta!
     #'attribute
     (assoc
@@ -1117,29 +1105,28 @@
       'attribute
       :ns
       *ns*))
-  (def resolve-lookup-ref
-   (fn resolve_lookup_ref
-     ([db x]
-       (when-not (= 2 (count x))
-         (error/arg :db.error/invalid-lookup-ref (str "Invalid list form: " x)))
-       (let [a (.get ^java.util.List x (unchecked-int 0))
-             v (.get ^java.util.List x (unchecked-int 1))
-             aid (datomic.db/require-attrid db a)
-             attr (datomic.db/attribute db aid)]
-         (when (= 27 (.-vtypeid ^datomic.db.Attribute attr))
-           (error/arg
-             :db.error/lookup-ref-not-supported
-             (str "Lookup ref not supported for " (.kw ^datomic.db.Attribute attr))))
-         (if (.-unique ^datomic.db.Attribute attr)
-           (if (= aid 10)
-             (.idOf ^datomic.db.IDb db v)
-             (let [temp__5804__auto__ (iter/iget (datomic.db/attr-index-range db a v nil))]
-               (when temp__5804__auto__
-                 (let [datum temp__5804__auto__]
-                   (when (= v (.v ^datomic.Datom datum)) (.e ^datomic.Datom datum))))))
-           (error/arg
-             :db.error/lookup-ref-attr-not-unique
-             (str "Attribute values not unique: " (.kw ^datomic.db.Attribute attr))))))))
+  (defn resolve-lookup-ref
+    ([db x]
+      (when-not (= 2 (count x))
+        (error/arg :db.error/invalid-lookup-ref (str "Invalid list form: " x)))
+      (let [a (.get ^java.util.List x (unchecked-int 0))
+            v (.get ^java.util.List x (unchecked-int 1))
+            aid (datomic.db/require-attrid db a)
+            attr (datomic.db/attribute db aid)]
+        (when (= 27 (.-vtypeid ^datomic.db.Attribute attr))
+          (error/arg
+            :db.error/lookup-ref-not-supported
+            (str "Lookup ref not supported for " (.kw ^datomic.db.Attribute attr))))
+        (if (.-unique ^datomic.db.Attribute attr)
+          (if (= aid 10)
+            (.idOf ^datomic.db.IDb db v)
+            (let [temp__5804__auto__ (iter/iget (datomic.db/attr-index-range db a v nil))]
+              (when temp__5804__auto__
+                (let [datum temp__5804__auto__]
+                  (when (= v (.v ^datomic.Datom datum)) (.e ^datomic.Datom datum))))))
+          (error/arg
+            :db.error/lookup-ref-attr-not-unique
+            (str "Attribute values not unique: " (.kw ^datomic.db.Attribute attr)))))))
   (reset-meta!
     #'resolve-lookup-ref
     (assoc
@@ -1148,16 +1135,15 @@
       'resolve-lookup-ref
       :ns
       *ns*))
-  (def partbits
-   (fn partbits
-     ([db kw_or_parteid]
-       (let [temp__5802__auto__ (datomic.db/resolve-id db kw_or_parteid)]
-         (if temp__5802__auto__
-           (let [id temp__5802__auto__
-                 part (datomic.db/eid->part (unchecked-long ^java.lang.Number id))
-                 eidx (datomic.db/eid->eidx (unchecked-long ^java.lang.Number id))]
-             (cond (= part 0) (long eidx) (= eidx 0) (do (long part))))
-           (error/arg :db.error/not-a-db-id (str "Invalid db/id: " kw_or_parteid)))))))
+  (defn partbits
+    ([db kw_or_parteid]
+      (let [temp__5802__auto__ (datomic.db/resolve-id db kw_or_parteid)]
+        (if temp__5802__auto__
+          (let [id temp__5802__auto__
+                part (datomic.db/eid->part (unchecked-long ^java.lang.Number id))
+                eidx (datomic.db/eid->eidx (unchecked-long ^java.lang.Number id))]
+            (cond (= part 0) (long eidx) (= eidx 0) (do (long part))))
+          (error/arg :db.error/not-a-db-id (str "Invalid db/id: " kw_or_parteid))))))
   (reset-meta!
     #'partbits
     (assoc
@@ -1166,28 +1152,27 @@
       'partbits
       :ns
       *ns*))
-  (def resolve-dbid
-   (fn resolve_dbid
-     ([db x]
-       (let [map__11471 x
-             map__11471 (if (seq? map__11471)
-                          (if (next map__11471)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11471))
-                            (if (seq map__11471) (first map__11471) {}))
-                          map__11471)
-             part (get map__11471 :part)
-             idx (get map__11471 :idx)
-             part (datomic.db/partbits db part)]
-         (if (neg? idx)
-           (long
-             (datomic.db/make-tempid
-               (unchecked-long ^java.lang.Number part)
-               (unchecked-long ^java.lang.Number idx)))
-           (long
-             (datomic.db/make-eid
-               (unchecked-long ^java.lang.Number part)
-               (unchecked-long ^java.lang.Number idx))))))))
+  (defn resolve-dbid
+    ([db x]
+      (let [map__11471 x
+            map__11471 (if (seq? map__11471)
+                         (if (next map__11471)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11471))
+                           (if (seq map__11471) (first map__11471) {}))
+                         map__11471)
+            part (get map__11471 :part)
+            idx (get map__11471 :idx)
+            part (datomic.db/partbits db part)]
+        (if (neg? idx)
+          (long
+            (datomic.db/make-tempid
+              (unchecked-long ^java.lang.Number part)
+              (unchecked-long ^java.lang.Number idx)))
+          (long
+            (datomic.db/make-eid
+              (unchecked-long ^java.lang.Number part)
+              (unchecked-long ^java.lang.Number idx)))))))
   (reset-meta!
     #'resolve-dbid
     (assoc
@@ -1196,14 +1181,13 @@
       'resolve-dbid
       :ns
       *ns*))
-  (def extended-resolve-id
-   (fn extended_resolve_id
-     ([db x]
-       (cond
-         (instance? datomic.db.DbId x) (datomic.db/resolve-dbid db x)
-         (instance? java.util.List x) (datomic.db/resolve-lookup-ref db x)
-         (integer? x) (long x)
-         :else (do (.idOf ^datomic.db.IDb db x))))))
+  (defn extended-resolve-id
+    ([db x]
+      (cond
+        (instance? datomic.db.DbId x) (datomic.db/resolve-dbid db x)
+        (instance? java.util.List x) (datomic.db/resolve-lookup-ref db x)
+        (integer? x) (long x)
+        :else (do (.idOf ^datomic.db.IDb db x)))))
   (reset-meta!
     #'extended-resolve-id
     (assoc
@@ -1212,13 +1196,12 @@
       'extended-resolve-id
       :ns
       *ns*))
-  (def resolve-id
-   (fn resolve_id
-     ([db x]
-       (cond
-         (instance? java.lang.Long x) x
-         (keyword? x) (.idOf ^datomic.db.IDb db x)
-         :else (do (datomic.db/extended-resolve-id db x))))))
+  (defn resolve-id
+    ([db x]
+      (cond
+        (instance? java.lang.Long x) x
+        (keyword? x) (.idOf ^datomic.db.IDb db x)
+        :else (do (datomic.db/extended-resolve-id db x)))))
   (reset-meta!
     #'resolve-id
     (assoc
@@ -1231,28 +1214,24 @@
   (reset-meta!
     #'string-tempid?
     (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'string-tempid? :ns *ns*))
-  (def require-id
-   (fn require_id
-     ([db x procargs]
-       (or
-         (when (datomic.db/string-tempid? x) x)
-         (datomic.db/resolve-id db x)
-         (error/arg
-           :db.error/not-an-entity
-           (str
-             "Unable to resolve entity: "
-             x
-             " in datom "
-             (datomic.db/datom-error-desc db (drop 1 procargs)))
-           {:entity x, :datom (datomic.db/datom-error-desc db (drop 1 procargs))})))
-     (^long [db x]
-       (.longValue
-         (or
-           (datomic.db/resolve-id db x)
-           (error/arg
-             :db.error/not-an-entity
-             (str "Unable to resolve entity: " x)
-             {:entity x}))))))
+  (defn require-id
+    ([db x procargs]
+      (or
+        (when (datomic.db/string-tempid? x) x)
+        (datomic.db/resolve-id db x)
+        (error/arg
+          :db.error/not-an-entity
+          (str
+            "Unable to resolve entity: "
+            x
+            " in datom "
+            (datomic.db/datom-error-desc db (drop 1 procargs)))
+          {:entity x, :datom (datomic.db/datom-error-desc db (drop 1 procargs))})))
+    (^long [db x]
+      (.longValue
+        (or
+          (datomic.db/resolve-id db x)
+          (error/arg :db.error/not-an-entity (str "Unable to resolve entity: " x) {:entity x})))))
   (reset-meta!
     #'require-id
     (assoc
@@ -1262,39 +1241,38 @@
       'require-id
       :ns
       *ns*))
-  (def require-tuple-ids
-   (fn require_tuple_ids
-     ([db attr tup]
-       (if (or (nil? attr) (nil? tup))
-         tup
-         (let [resolve (fn resolve
-                         ([id]
-                           (if (nil? id)
-                             id
-                             (or
-                               (if (datomic.db/string-tempid? id) id (datomic.db/resolve-id db id))
-                               (error/arg
-                                 :db.error/not-an-entity
-                                 (str "Unable to resolve entity: " id " in tuple")
-                                 {:tuple tup})))))]
-           (cond
-             (= :db.type/ref (:tupleType attr)) (mapv resolve tup)
-             (and
-               (some (fn fn__11485 ([p1__11481#] (= :db.type/ref p1__11481#))) (:tupleTypes attr))
-               (= (long (count (:tupleTypes attr))) (long (count tup)))) (mapv
-                                                                           (fn 
-                                                                             fn__11487
-                                                                             ([type v]
-                                                                               (if
-                                                                                 (=
-                                                                                   type
-                                                                                   :db.type/ref)
-                                                                                 (^clojure.lang.IFn resolve
-                                                                                   v)
-                                                                                 v)))
-                                                                           (:tupleTypes attr)
-                                                                           tup)
-             :default (do tup)))))))
+  (defn require-tuple-ids
+    ([db attr tup]
+      (if (or (nil? attr) (nil? tup))
+        tup
+        (let [resolve (fn resolve
+                        ([id]
+                          (if (nil? id)
+                            id
+                            (or
+                              (if (datomic.db/string-tempid? id) id (datomic.db/resolve-id db id))
+                              (error/arg
+                                :db.error/not-an-entity
+                                (str "Unable to resolve entity: " id " in tuple")
+                                {:tuple tup})))))]
+          (cond
+            (= :db.type/ref (:tupleType attr)) (mapv resolve tup)
+            (and
+              (some (fn fn__11485 ([p1__11481#] (= :db.type/ref p1__11481#))) (:tupleTypes attr))
+              (= (long (count (:tupleTypes attr))) (long (count tup)))) (mapv
+                                                                          (fn 
+                                                                            fn__11487
+                                                                            ([type v]
+                                                                              (if
+                                                                                (=
+                                                                                  type
+                                                                                  :db.type/ref)
+                                                                                (^clojure.lang.IFn resolve
+                                                                                  v)
+                                                                                v)))
+                                                                          (:tupleTypes attr)
+                                                                          tup)
+            :default (do tup))))))
   (reset-meta!
     #'require-tuple-ids
     (assoc
@@ -1305,23 +1283,22 @@
       'require-tuple-ids
       :ns
       *ns*))
-  (def maybe-require-ids
-   (fn maybe_require_ids
-     ([db a v reverse?]
-       (cond
-         reverse? (and v (long (datomic.db/require-id db v)))
-         (or (nil? a) (nil? v)) v
-         :else (do
-                 (let [aid (datomic.db/require-attrid db a)
-                       attr (datomic.db/attribute db aid)
-                       vtypeid (.-vtypeid ^datomic.db.Attribute attr)]
-                   (cond
-                     (= 20 vtypeid) (long (datomic.db/require-id db v))
-                     (= (datomic.db/system-eid db :db.type/tuple) vtypeid) (datomic.db/require-tuple-ids
-                                                                             db
-                                                                             attr
-                                                                             v)
-                     :default (do v))))))))
+  (defn maybe-require-ids
+    ([db a v reverse?]
+      (cond
+        reverse? (and v (long (datomic.db/require-id db v)))
+        (or (nil? a) (nil? v)) v
+        :else (do
+                (let [aid (datomic.db/require-attrid db a)
+                      attr (datomic.db/attribute db aid)
+                      vtypeid (.-vtypeid ^datomic.db.Attribute attr)]
+                  (cond
+                    (= 20 vtypeid) (long (datomic.db/require-id db v))
+                    (= (datomic.db/system-eid db :db.type/tuple) vtypeid) (datomic.db/require-tuple-ids
+                                                                            db
+                                                                            attr
+                                                                            v)
+                    :default (do v)))))))
   (reset-meta!
     #'maybe-require-ids
     (assoc
@@ -1354,9 +1331,8 @@
          (if procargs
            (long (datomic.db/require-id db this))
            (datomic.db/require-id db this procargs))))})
-  (def resolve-kw
-   (fn resolve_kw
-     ([db x] (if (instance? java.lang.Number x) (.keywordOf ^datomic.db.IDb db x) x))))
+  (defn resolve-kw
+    ([db x] (if (instance? java.lang.Number x) (.keywordOf ^datomic.db.IDb db x) x)))
   (reset-meta!
     #'resolve-kw
     (assoc
@@ -1365,40 +1341,39 @@
       'resolve-kw
       :ns
       *ns*))
-  (def datum
-   (fn datum
-     ([db & p__11501]
-       (let [map__11502 p__11501
-             map__11502 (if (seq? map__11502)
-                          (if (next map__11502)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11502))
-                            (if (seq map__11502) (first map__11502) {}))
-                          map__11502)
-             asserting (get map__11502 :asserting true)
-             e (get map__11502 :e)
-             a (get map__11502 :a)
-             v (get map__11502 :v)
-             t (get map__11502 :t)
-             e (datomic.db/resolve-id db (or e (long java.lang.Long/MIN_VALUE)))
-             a (or (datomic.db/resolve-id db a) -1)]
-         (if t
-           (if asserting
-             (datomic.db/asserting-datum
-               (unchecked-long ^java.lang.Number e)
-               (unchecked-long ^java.lang.Number a)
-               v
-               (unchecked-long ^java.lang.Number t))
-             (datomic.db/retracting-datum
-               (unchecked-long ^java.lang.Number e)
-               (unchecked-long ^java.lang.Number a)
-               v
-               (unchecked-long ^java.lang.Number t)))
-           (datomic.db.Datum.
-             (unchecked-long ^java.lang.Number e)
-             (unchecked-int ^java.lang.Number a)
-             v
-             (long (- (quot java.lang.Long/MAX_VALUE 4) (if asserting 0 1)))))))))
+  (defn datum
+    ([db & p__11501]
+      (let [map__11502 p__11501
+            map__11502 (if (seq? map__11502)
+                         (if (next map__11502)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11502))
+                           (if (seq map__11502) (first map__11502) {}))
+                         map__11502)
+            asserting (get map__11502 :asserting true)
+            e (get map__11502 :e)
+            a (get map__11502 :a)
+            v (get map__11502 :v)
+            t (get map__11502 :t)
+            e (datomic.db/resolve-id db (or e (long java.lang.Long/MIN_VALUE)))
+            a (or (datomic.db/resolve-id db a) -1)]
+        (if t
+          (if asserting
+            (datomic.db/asserting-datum
+              (unchecked-long ^java.lang.Number e)
+              (unchecked-long ^java.lang.Number a)
+              v
+              (unchecked-long ^java.lang.Number t))
+            (datomic.db/retracting-datum
+              (unchecked-long ^java.lang.Number e)
+              (unchecked-long ^java.lang.Number a)
+              v
+              (unchecked-long ^java.lang.Number t)))
+          (datomic.db.Datum.
+            (unchecked-long ^java.lang.Number e)
+            (unchecked-int ^java.lang.Number a)
+            v
+            (long (- (quot java.lang.Long/MAX_VALUE 4) (if asserting 0 1))))))))
   (reset-meta!
     #'datum
     (assoc
@@ -1431,42 +1406,41 @@
       '->SkippingIter
       :ns
       *ns*))
-  (def filter-retractions
-   (fn filter_retractions
-     ([iter]
-       (let [eat_past (fn eat_past
-                        ([d i]
-                          (when i
-                            (let [j (iter/inext i) n (datomic.db/dget j)]
-                              (if (and
-                                    n
-                                    (=
-                                      (long (.getE ^datomic.impl.db.IDatum d))
-                                      (long (.getE ^datomic.impl.db.IDatum n)))
-                                    (=
-                                      (long (.getA ^datomic.impl.db.IDatum d))
-                                      (long (.getA ^datomic.impl.db.IDatum n)))
-                                    (zero?
-                                      (common/compare
-                                        (.getV ^datomic.impl.db.IDatum d)
-                                        (.getV ^datomic.impl.db.IDatum n)))
-                                    (<=
-                                      (.getT ^datomic.impl.db.IDatum n)
-                                      (.getT ^datomic.impl.db.IDatum d)))
-                                (recur d j)
-                                j)))))
-             skip (fn skip
-                    ([i]
-                      (let [temp__5804__auto__ (datomic.db/dget i)]
-                        (when temp__5804__auto__
-                          (let [d temp__5804__auto__]
-                            (if (.isAssertion ^datomic.impl.db.IDatum d)
-                              i
-                              (recur (^clojure.lang.IFn eat_past d i))))))))
-             iter (^clojure.lang.IFn skip iter)
-             next_skip (fn next_skip
-                         ([p1__11512#] (^clojure.lang.IFn skip (iter/inext p1__11512#))))]
-         (when iter (datomic.db.SkippingIter. iter next_skip))))))
+  (defn filter-retractions
+    ([iter]
+      (let [eat_past (fn eat_past
+                       ([d i]
+                         (when i
+                           (let [j (iter/inext i) n (datomic.db/dget j)]
+                             (if (and
+                                   n
+                                   (=
+                                     (long (.getE ^datomic.impl.db.IDatum d))
+                                     (long (.getE ^datomic.impl.db.IDatum n)))
+                                   (=
+                                     (long (.getA ^datomic.impl.db.IDatum d))
+                                     (long (.getA ^datomic.impl.db.IDatum n)))
+                                   (zero?
+                                     (common/compare
+                                       (.getV ^datomic.impl.db.IDatum d)
+                                       (.getV ^datomic.impl.db.IDatum n)))
+                                   (<=
+                                     (.getT ^datomic.impl.db.IDatum n)
+                                     (.getT ^datomic.impl.db.IDatum d)))
+                               (recur d j)
+                               j)))))
+            skip (fn skip
+                   ([i]
+                     (let [temp__5804__auto__ (datomic.db/dget i)]
+                       (when temp__5804__auto__
+                         (let [d temp__5804__auto__]
+                           (if (.isAssertion ^datomic.impl.db.IDatum d)
+                             i
+                             (recur (^clojure.lang.IFn eat_past d i))))))))
+            iter (^clojure.lang.IFn skip iter)
+            next_skip (fn next_skip
+                        ([p1__11512#] (^clojure.lang.IFn skip (iter/inext p1__11512#))))]
+        (when iter (datomic.db.SkippingIter. iter next_skip)))))
   (reset-meta!
     #'filter-retractions
     (assoc
@@ -1497,12 +1471,11 @@
       'map->Partition
       :ns
       *ns*))
-  (def explicit-partition
-   (fn explicit_partition
-     ([db eid]
-       (let [temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db eid)]
-         (when temp__5804__auto__
-           (let [part temp__5804__auto__] (when (instance? datomic.db.Partition part) part)))))))
+  (defn explicit-partition
+    ([db eid]
+      (let [temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db eid)]
+        (when temp__5804__auto__
+          (let [part temp__5804__auto__] (when (instance? datomic.db.Partition part) part))))))
   (reset-meta!
     #'explicit-partition
     (assoc
@@ -1526,8 +1499,7 @@
   (.setMeta (clojure.lang.RT/var "datomic.db" "map->ValueType") {:declared true, :column (int 1)})
   (defrecord ValueType [id kw fressian-tag] datomic.db.IElementImpl (id [this] id) (kw [this] kw))
   (clojure.core/import 'datomic.db.ValueType)
-  (def ->ValueType
-   (fn __GT_ValueType ([id kw fressian_tag] (datomic.db.ValueType. id kw fressian_tag))))
+  (defn ->ValueType ([id kw fressian_tag] (datomic.db.ValueType. id kw fressian_tag)))
   (reset-meta!
     #'->ValueType
     (assoc
@@ -1550,12 +1522,11 @@
       'map->ValueType
       :ns
       *ns*))
-  (def value-type
-   (fn value_type
-     ([db attrid]
-       (let [temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db attrid)]
-         (when temp__5804__auto__
-           (let [vt temp__5804__auto__] (when (instance? datomic.db.ValueType vt) vt)))))))
+  (defn value-type
+    ([db attrid]
+      (let [temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db attrid)]
+        (when temp__5804__auto__
+          (let [vt temp__5804__auto__] (when (instance? datomic.db.ValueType vt) vt))))))
   (reset-meta!
     #'value-type
     (assoc
@@ -1581,8 +1552,7 @@
       'require-attrid
       :ns
       *ns*))
-  (def require-attr
-   (fn require_attr ([db x] (.elementAt ^datomic.db.IDbImpl db (datomic.db/require-attrid db x)))))
+  (defn require-attr ([db x] (.elementAt ^datomic.db.IDbImpl db (datomic.db/require-attrid db x))))
   (reset-meta!
     #'require-attr
     (assoc
@@ -1696,7 +1666,7 @@
           :ident
           (:kw attr)))))
   (clojure.core/import 'datomic.db.AttrInfo)
-  (def ->AttrInfo (fn __GT_AttrInfo ([attr vtype_kw] (datomic.db.AttrInfo. attr vtype_kw))))
+  (defn ->AttrInfo ([attr vtype_kw] (datomic.db.AttrInfo. attr vtype_kw)))
   (reset-meta!
     #'->AttrInfo
     (assoc
@@ -1735,16 +1705,15 @@
       (print-method (:tuple-discontinued ai) w)
       (.write ^java.io.Writer w "}")
       nil))
-  (def attr-info
-   (fn attr_info
-     ([db attrid]
-       (let [temp__5804__auto__ (let [G__11601 (datomic.db/resolve-id db attrid)]
-                                  (when-not (nil? G__11601) (datomic.db/attribute db G__11601)))]
-         (when temp__5804__auto__
-           (let [attr temp__5804__auto__]
-             (datomic.db.AttrInfo.
-               attr
-               (:kw (.elementAt ^datomic.db.IDbImpl db (:vtypeid attr))))))))))
+  (defn attr-info
+    ([db attrid]
+      (let [temp__5804__auto__ (let [G__11601 (datomic.db/resolve-id db attrid)]
+                                 (when-not (nil? G__11601) (datomic.db/attribute db G__11601)))]
+        (when temp__5804__auto__
+          (let [attr temp__5804__auto__]
+            (datomic.db.AttrInfo.
+              attr
+              (:kw (.elementAt ^datomic.db.IDbImpl db (:vtypeid attr)))))))))
   (reset-meta!
     #'attr-info
     (assoc
@@ -1817,28 +1786,27 @@
       (datomic.btset/btset datomic.db/aevt-cmp)
       (datomic.btset/btset datomic.db/raet-cmp)
       nil))
-  (def windowed
-   (fn windowed
-     ([db whilep iter]
-       ((if (.getRaw ^datomic.db.IDb db) identity datomic.db/filter-retractions)
-         (let [asof (.getAsOfT ^datomic.db.IDb db)
-               since (.getSinceT ^datomic.db.IDb db)
-               iter (if whilep (iter/take-while whilep iter) iter)
-               iter (if (or asof since)
-                      (iter/filter
-                        (fn fn__11670
-                          ([d]
-                            (and
-                              (or (nil? asof) (<= (.getT ^datomic.impl.db.IDatum d) asof))
-                              (or (nil? since) (> (.getT ^datomic.impl.db.IDatum d) since)))))
-                        iter)
-                      iter)
-               iter (if (.getFilter ^datomic.db.IDb db)
-                      (iter/filter
-                        (partial (.getFilter ^datomic.db.IDb db) (assoc db :filt nil))
-                        iter)
-                      iter)]
-           iter)))))
+  (defn windowed
+    ([db whilep iter]
+      ((if (.getRaw ^datomic.db.IDb db) identity datomic.db/filter-retractions)
+        (let [asof (.getAsOfT ^datomic.db.IDb db)
+              since (.getSinceT ^datomic.db.IDb db)
+              iter (if whilep (iter/take-while whilep iter) iter)
+              iter (if (or asof since)
+                     (iter/filter
+                       (fn fn__11670
+                         ([d]
+                           (and
+                             (or (nil? asof) (<= (.getT ^datomic.impl.db.IDatum d) asof))
+                             (or (nil? since) (> (.getT ^datomic.impl.db.IDatum d) since)))))
+                       iter)
+                     iter)
+              iter (if (.getFilter ^datomic.db.IDb db)
+                     (iter/filter
+                       (partial (.getFilter ^datomic.db.IDb db) (assoc db :filt nil))
+                       iter)
+                     iter)]
+          iter))))
   (reset-meta!
     #'windowed
     (assoc
@@ -1927,20 +1895,19 @@
       'seek-datoms
       :ns
       *ns*))
-  (def index-sort->cmp
-   (fn index_sort__GT_cmp
-     ([index_sort]
-       (let [G__11713 index_sort]
-         (case
-           G__11713
-           :aevt
-           datomic.db/aevt-cmp
-           :avet
-           datomic.db/avet-cmp
-           :eavt
-           datomic.db/eavt-cmp
-           :vaet
-           datomic.db/raet-cmp)))))
+  (defn index-sort->cmp
+    ([index_sort]
+      (let [G__11713 index_sort]
+        (case
+          G__11713
+          :aevt
+          datomic.db/aevt-cmp
+          :avet
+          datomic.db/avet-cmp
+          :eavt
+          datomic.db/eavt-cmp
+          :vaet
+          datomic.db/raet-cmp))))
   (reset-meta!
     #'index-sort->cmp
     (assoc
@@ -1950,12 +1917,11 @@
       'index-sort->cmp
       :ns
       *ns*))
-  (def reverse-comparator
-   (fn reverse_comparator
-     ([cmp]
-       (reify
-         java.util.Comparator
-         (^int compare [this x y] (.compare ^java.util.Comparator cmp y x))))))
+  (defn reverse-comparator
+    ([cmp]
+      (reify
+        java.util.Comparator
+        (^int compare [this x y] (.compare ^java.util.Comparator cmp y x)))))
   (reset-meta!
     #'reverse-comparator
     (assoc
@@ -1968,40 +1934,39 @@
       'reverse-comparator
       :ns
       *ns*))
-  (def rseek-index
-   (fn rseek_index
-     ([p__11719 index_sort d]
-       (let [map__11720 p__11719
-             map__11720 (if (seq? map__11720)
-                          (if (next map__11720)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11720))
-                            (if (seq map__11720) (first map__11720) {}))
-                          map__11720)
-             raw (get map__11720 :raw)
-             asOfT (get map__11720 :asOfT)
-             indexBasisT (get map__11720 :indexBasisT)
-             memidx (get map__11720 :memidx)
-             indexing (get map__11720 :indexing)
-             mid_index (get map__11720 :mid-index)
-             index (get map__11720 :index)
-             history (get map__11720 :history)
-             cmp (datomic.db/index-sort->cmp index_sort)
-             rseek (fn rseek
-                     ([idx d]
-                       (iter/reversed-iter
-                         (or (datomic.btset/seek idx d) (datomic.btset/seek-last idx)))))
-             idx_key (if (= index_sort :vaet) :raet index_sort)]
-         (iter/drop-while
-           (fn fn__11724 ([p1__11718#] (neg? (.compare ^java.util.Comparator cmp d p1__11718#))))
-           (iter/merge-iters
-             (datomic.db/reverse-comparator (datomic.db/index-sort->cmp index_sort))
-             (^clojure.lang.IFn rseek (get memidx idx_key) d)
-             (^clojure.lang.IFn rseek (and indexing (get indexing idx_key)) d)
-             (^clojure.lang.IFn rseek (and mid_index (get mid_index idx_key)) d)
-             (^clojure.lang.IFn rseek (and index (get index idx_key)) d)
-             (when (or raw (and asOfT (< asOfT indexBasisT)))
-               (^clojure.lang.IFn rseek (and history (get history idx_key)) d))))))))
+  (defn rseek-index
+    ([p__11719 index_sort d]
+      (let [map__11720 p__11719
+            map__11720 (if (seq? map__11720)
+                         (if (next map__11720)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11720))
+                           (if (seq map__11720) (first map__11720) {}))
+                         map__11720)
+            raw (get map__11720 :raw)
+            asOfT (get map__11720 :asOfT)
+            indexBasisT (get map__11720 :indexBasisT)
+            memidx (get map__11720 :memidx)
+            indexing (get map__11720 :indexing)
+            mid_index (get map__11720 :mid-index)
+            index (get map__11720 :index)
+            history (get map__11720 :history)
+            cmp (datomic.db/index-sort->cmp index_sort)
+            rseek (fn rseek
+                    ([idx d]
+                      (iter/reversed-iter
+                        (or (datomic.btset/seek idx d) (datomic.btset/seek-last idx)))))
+            idx_key (if (= index_sort :vaet) :raet index_sort)]
+        (iter/drop-while
+          (fn fn__11724 ([p1__11718#] (neg? (.compare ^java.util.Comparator cmp d p1__11718#))))
+          (iter/merge-iters
+            (datomic.db/reverse-comparator (datomic.db/index-sort->cmp index_sort))
+            (^clojure.lang.IFn rseek (get memidx idx_key) d)
+            (^clojure.lang.IFn rseek (and indexing (get indexing idx_key)) d)
+            (^clojure.lang.IFn rseek (and mid_index (get mid_index idx_key)) d)
+            (^clojure.lang.IFn rseek (and index (get index idx_key)) d)
+            (when (or raw (and asOfT (< asOfT indexBasisT)))
+              (^clojure.lang.IFn rseek (and history (get history idx_key)) d)))))))
   (reset-meta!
     #'rseek-index
     (assoc
@@ -2043,32 +2008,31 @@
       'distinct-last-by
       :ns
       *ns*))
-  (def reverse-datum-spec
-   (fn reverse_datum_spec
-     ([db index & p__11743]
-       (let [map__11744 p__11743
-             map__11744 (if (seq? map__11744)
-                          (if (next map__11744)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11744))
-                            (if (seq map__11744) (first map__11744) {}))
-                          map__11744)
-             e (get map__11744 :e)
-             a (get map__11744 :a)
-             v (get map__11744 :v)
-             t (get map__11744 :t)
-             asserting (get map__11744 :asserting false)
-             e (if (and (= index :aevt) (nil? v) (not (nil? e)))
-                 (inc (datomic.db/resolve-id db e))
-                 (or (datomic.db/resolve-id db e) (long java.lang.Long/MAX_VALUE)))
-             a (if (and (or (= index :avet) (= index :eavt)) (nil? v) (not (nil? a)))
-                 (inc (datomic.db/resolve-id db a))
-                 (or
-                   (datomic.db/resolve-id db a)
-                   (java.lang.Integer/valueOf (int java.lang.Integer/MAX_VALUE))))
-             v (if (and (= index :vaet) (not v)) (long java.lang.Long/MAX_VALUE) v)
-             t (or t 0)]
-         [:e e :a a :v v :t t :asserting asserting]))))
+  (defn reverse-datum-spec
+    ([db index & p__11743]
+      (let [map__11744 p__11743
+            map__11744 (if (seq? map__11744)
+                         (if (next map__11744)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11744))
+                           (if (seq map__11744) (first map__11744) {}))
+                         map__11744)
+            e (get map__11744 :e)
+            a (get map__11744 :a)
+            v (get map__11744 :v)
+            t (get map__11744 :t)
+            asserting (get map__11744 :asserting false)
+            e (if (and (= index :aevt) (nil? v) (not (nil? e)))
+                (inc (datomic.db/resolve-id db e))
+                (or (datomic.db/resolve-id db e) (long java.lang.Long/MAX_VALUE)))
+            a (if (and (or (= index :avet) (= index :eavt)) (nil? v) (not (nil? a)))
+                (inc (datomic.db/resolve-id db a))
+                (or
+                  (datomic.db/resolve-id db a)
+                  (java.lang.Integer/valueOf (int java.lang.Integer/MAX_VALUE))))
+            v (if (and (= index :vaet) (not v)) (long java.lang.Long/MAX_VALUE) v)
+            t (or t 0)]
+        [:e e :a a :v v :t t :asserting asserting])))
   (reset-meta!
     #'reverse-datum-spec
     (assoc
@@ -2080,69 +2044,68 @@
       'reverse-datum-spec
       :ns
       *ns*))
-  (def rseek-datoms
-   (fn rseek_datoms
-     ([db index components]
-       (let [vec__11756 (let [G__11759 index]
-                          (case
-                            G__11759
-                            :aevt
-                            (let [vec__11760 components
-                                  a (nth vec__11760 (unchecked-int 0) nil)
-                                  e (nth vec__11760 (unchecked-int 1) nil)
-                                  v (nth vec__11760 (unchecked-int 2) nil)
-                                  t (nth vec__11760 (unchecked-int 3) nil)]
-                              [e a v t])
-                            :avet
-                            (let [vec__11763 components
-                                  a (nth vec__11763 (unchecked-int 0) nil)
-                                  v (nth vec__11763 (unchecked-int 1) nil)
-                                  e (nth vec__11763 (unchecked-int 2) nil)
-                                  t (nth vec__11763 (unchecked-int 3) nil)]
-                              [e a v t])
-                            :eavt
-                            components
-                            :vaet
-                            (let [vec__11766 components
-                                  v (nth vec__11766 (unchecked-int 0) nil)
-                                  a (nth vec__11766 (unchecked-int 1) nil)
-                                  e (nth vec__11766 (unchecked-int 2) nil)
-                                  t (nth vec__11766 (unchecked-int 3) nil)]
-                              [e a v t])))
-             e (nth vec__11756 (unchecked-int 0) nil)
-             a (nth vec__11756 (unchecked-int 1) nil)
-             v (nth vec__11756 (unchecked-int 2) nil)
-             t (nth vec__11756 (unchecked-int 3) nil)
-             attrid (if a (datomic.db/resolve-id db a) 0)
-             _ (when (and (= :avet index) a attrid)
-                 (let [temp__5804__auto__ (datomic.db/attribute db attrid)]
-                   (when temp__5804__auto__
-                     (let [attr temp__5804__auto__]
-                       (when-not (.hasAVET ^datomic.db.Attribute attr)
-                         (error/arg
-                           :db.error/attribute-not-indexed
-                           (str "attribute: " a " is not indexed")))))))
-             v (datomic.db/maybe-require-ids db a v (= index :vaet))
-             t (when t (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t))))
-             seek_d (apply
-                      datomic.db/datum
-                      db
-                      (datomic.db/reverse-datum-spec db index :e e :a a :v v :t t))
-             datoms (datomic.db/windowed
-                      (.history ^datomic.Database db)
-                      nil
-                      (datomic.db/rseek-index db index seek_d))]
-         (if (.isHistory ^datomic.Database db)
-           (iter/iter-seq datoms)
-           (filter
-             (fn fn__11769 ([p1__11755#] (.isAssertion ^datomic.impl.db.IDatum p1__11755#)))
-             (datomic.db/distinct-last-by
-               (fn fn__11771
-                 ([d]
-                   [(long (.getE ^datomic.impl.db.IDatum d))
-                    (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))
-                    (.getV ^datomic.impl.db.IDatum d)]))
-               (iter/iter-seq datoms))))))))
+  (defn rseek-datoms
+    ([db index components]
+      (let [vec__11756 (let [G__11759 index]
+                         (case
+                           G__11759
+                           :aevt
+                           (let [vec__11760 components
+                                 a (nth vec__11760 (unchecked-int 0) nil)
+                                 e (nth vec__11760 (unchecked-int 1) nil)
+                                 v (nth vec__11760 (unchecked-int 2) nil)
+                                 t (nth vec__11760 (unchecked-int 3) nil)]
+                             [e a v t])
+                           :avet
+                           (let [vec__11763 components
+                                 a (nth vec__11763 (unchecked-int 0) nil)
+                                 v (nth vec__11763 (unchecked-int 1) nil)
+                                 e (nth vec__11763 (unchecked-int 2) nil)
+                                 t (nth vec__11763 (unchecked-int 3) nil)]
+                             [e a v t])
+                           :eavt
+                           components
+                           :vaet
+                           (let [vec__11766 components
+                                 v (nth vec__11766 (unchecked-int 0) nil)
+                                 a (nth vec__11766 (unchecked-int 1) nil)
+                                 e (nth vec__11766 (unchecked-int 2) nil)
+                                 t (nth vec__11766 (unchecked-int 3) nil)]
+                             [e a v t])))
+            e (nth vec__11756 (unchecked-int 0) nil)
+            a (nth vec__11756 (unchecked-int 1) nil)
+            v (nth vec__11756 (unchecked-int 2) nil)
+            t (nth vec__11756 (unchecked-int 3) nil)
+            attrid (if a (datomic.db/resolve-id db a) 0)
+            _ (when (and (= :avet index) a attrid)
+                (let [temp__5804__auto__ (datomic.db/attribute db attrid)]
+                  (when temp__5804__auto__
+                    (let [attr temp__5804__auto__]
+                      (when-not (.hasAVET ^datomic.db.Attribute attr)
+                        (error/arg
+                          :db.error/attribute-not-indexed
+                          (str "attribute: " a " is not indexed")))))))
+            v (datomic.db/maybe-require-ids db a v (= index :vaet))
+            t (when t (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t))))
+            seek_d (apply
+                     datomic.db/datum
+                     db
+                     (datomic.db/reverse-datum-spec db index :e e :a a :v v :t t))
+            datoms (datomic.db/windowed
+                     (.history ^datomic.Database db)
+                     nil
+                     (datomic.db/rseek-index db index seek_d))]
+        (if (.isHistory ^datomic.Database db)
+          (iter/iter-seq datoms)
+          (filter
+            (fn fn__11769 ([p1__11755#] (.isAssertion ^datomic.impl.db.IDatum p1__11755#)))
+            (datomic.db/distinct-last-by
+              (fn fn__11771
+                ([d]
+                  [(long (.getE ^datomic.impl.db.IDatum d))
+                   (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))
+                   (.getV ^datomic.impl.db.IDatum d)]))
+              (iter/iter-seq datoms)))))))
   (reset-meta!
     #'rseek-datoms
     (assoc
@@ -2240,25 +2203,24 @@
       'datoms
       :ns
       *ns*))
-  (def attr-index-range
-   (fn attr_index_range
-     ([db a start end]
-       (let [attrid (datomic.db/require-id db a)
-             attr (.elementAt ^datomic.db.IDbImpl db (long attrid))
-             _ (when-not (and attr (.hasAVET ^datomic.db.Attribute attr))
-                 (error/arg
-                   :db.error/attribute-not-indexed
-                   (str "attribute: " a " is not indexed")))]
-         (datomic.db/windowed
-           db
-           (fn fn__11824
-             ([p1__11823#]
-               (and
-                 (= (long attrid) (long (.getA ^datomic.impl.db.IDatum p1__11823#)))
-                 (or
-                   (nil? end)
-                   (neg? (common/compare (.getV ^datomic.impl.db.IDatum p1__11823#) end))))))
-           (.seekAVET ^datomic.db.IDb db (datomic.db/datum db :a (long attrid) :v start)))))))
+  (defn attr-index-range
+    ([db a start end]
+      (let [attrid (datomic.db/require-id db a)
+            attr (.elementAt ^datomic.db.IDbImpl db (long attrid))
+            _ (when-not (and attr (.hasAVET ^datomic.db.Attribute attr))
+                (error/arg
+                  :db.error/attribute-not-indexed
+                  (str "attribute: " a " is not indexed")))]
+        (datomic.db/windowed
+          db
+          (fn fn__11824
+            ([p1__11823#]
+              (and
+                (= (long attrid) (long (.getA ^datomic.impl.db.IDatum p1__11823#)))
+                (or
+                  (nil? end)
+                  (neg? (common/compare (.getV ^datomic.impl.db.IDatum p1__11823#) end))))))
+          (.seekAVET ^datomic.db.IDb db (datomic.db/datum db :a (long attrid) :v start))))))
   (reset-meta!
     #'attr-index-range
     (assoc
@@ -2392,53 +2354,48 @@
                   (or (nil? a) (= attrid (long (.getA ^datomic.impl.db.IDatum it)))))
             iter)))
       ([db r] (datomic.db/find-raet db r nil))))
-  (def get-entity
-   (fn get_entity
-     ([db ent & p__11884]
-       (let [map__11885 p__11884
-             map__11885 (if (seq? map__11885)
-                          (if (next map__11885)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11885))
-                            (if (seq map__11885) (first map__11885) {}))
-                          map__11885)
-             raw (get map__11885 :raw)
-             eid (datomic.db/resolve-id db ent)]
-         (loop [iter (datomic.db/windowed
-                       db
-                       (fn fn__11886
-                         ([p1__11883#] (= eid (long (.getE ^datomic.impl.db.IDatum p1__11883#)))))
-                       (.seekEAVT ^datomic.db.IDb db (datomic.db/datum db :e eid)))
-                ret nil]
-           (if iter
-             (let [d (datomic.db/dget iter)
-                   attrid (.getA ^datomic.impl.db.IDatum d)
-                   attr (.elementAt
-                          ^datomic.db.IDbImpl db
-                          (java.lang.Integer/valueOf (int attrid)))
-                   attrk (if attr
-                           (.kw ^datomic.db.Attribute attr)
-                           (.keywordOf
-                             ^datomic.db.IDb db
-                             (java.lang.Integer/valueOf (int attrid))))
-                   v (.getV ^datomic.impl.db.IDatum d)
-                   vtypeid (and attr (.-vtypeid ^datomic.db.Attribute attr))
-                   val (cond
-                         raw v
-                         (and attr (.-isComponent ^datomic.db.Attribute attr)) (datomic.db/get-entity
-                                                                                 db
-                                                                                 v)
-                         (and vtypeid (= vtypeid 20)) (or (datomic.db/resolve-kw db v) v)
-                         :else (do v))]
-               (recur
-                 (iter/inext iter)
-                 (assoc
-                   (or ret #:db{:id eid})
-                   attrk
-                   (if (and attr (= 36 (.-cardinality ^datomic.db.Attribute attr)))
-                     (conj (get ret attrk #{}) val)
-                     val))))
-             ret))))))
+  (defn get-entity
+    ([db ent & p__11884]
+      (let [map__11885 p__11884
+            map__11885 (if (seq? map__11885)
+                         (if (next map__11885)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11885))
+                           (if (seq map__11885) (first map__11885) {}))
+                         map__11885)
+            raw (get map__11885 :raw)
+            eid (datomic.db/resolve-id db ent)]
+        (loop [iter (datomic.db/windowed
+                      db
+                      (fn fn__11886
+                        ([p1__11883#] (= eid (long (.getE ^datomic.impl.db.IDatum p1__11883#)))))
+                      (.seekEAVT ^datomic.db.IDb db (datomic.db/datum db :e eid)))
+               ret nil]
+          (if iter
+            (let [d (datomic.db/dget iter)
+                  attrid (.getA ^datomic.impl.db.IDatum d)
+                  attr (.elementAt ^datomic.db.IDbImpl db (java.lang.Integer/valueOf (int attrid)))
+                  attrk (if attr
+                          (.kw ^datomic.db.Attribute attr)
+                          (.keywordOf ^datomic.db.IDb db (java.lang.Integer/valueOf (int attrid))))
+                  v (.getV ^datomic.impl.db.IDatum d)
+                  vtypeid (and attr (.-vtypeid ^datomic.db.Attribute attr))
+                  val (cond
+                        raw v
+                        (and attr (.-isComponent ^datomic.db.Attribute attr)) (datomic.db/get-entity
+                                                                                db
+                                                                                v)
+                        (and vtypeid (= vtypeid 20)) (or (datomic.db/resolve-kw db v) v)
+                        :else (do v))]
+              (recur
+                (iter/inext iter)
+                (assoc
+                  (or ret #:db{:id eid})
+                  attrk
+                  (if (and attr (= 36 (.-cardinality ^datomic.db.Attribute attr)))
+                    (conj (get ret attrk #{}) val)
+                    val))))
+            ret)))))
   (reset-meta!
     #'get-entity
     (assoc
@@ -2448,8 +2405,7 @@
       'get-entity
       :ns
       *ns*))
-  (def entity-error-desc
-   (fn entity_error_desc ([db eid] (or (.ident ^datomic.Database db eid) eid))))
+  (defn entity-error-desc ([db eid] (or (.ident ^datomic.Database db eid) eid)))
   (reset-meta!
     #'entity-error-desc
     (assoc
@@ -2469,24 +2425,23 @@
       'v-error-desc
       :ns
       *ns*))
-  (def datom-error-desc
-   (fn datom_error_desc
-     ([db p__11898]
-       (let [vec__11899 p__11898
-             e (nth vec__11899 (unchecked-int 0) nil)
-             a (nth vec__11899 (unchecked-int 1) nil)
-             v (nth vec__11899 (unchecked-int 2) nil)
-             tx (nth vec__11899 (unchecked-int 3) nil)
-             added (nth vec__11899 (unchecked-int 4) nil)
-             attr (let [G__11902 (.entid ^datomic.Database db a)]
-                    (when-not (nil? G__11902) (datomic.db/attribute db G__11902)))]
-         (into
-           [(datomic.db/entity-error-desc db e)
-            (datomic.db/entity-error-desc db a)
-            (if (and attr (= 20 (.-vtypeid ^datomic.db.Attribute attr)))
-              (datomic.db/entity-error-desc db v)
-              (datomic.db/v-error-desc v))]
-           (when tx [tx added]))))))
+  (defn datom-error-desc
+    ([db p__11898]
+      (let [vec__11899 p__11898
+            e (nth vec__11899 (unchecked-int 0) nil)
+            a (nth vec__11899 (unchecked-int 1) nil)
+            v (nth vec__11899 (unchecked-int 2) nil)
+            tx (nth vec__11899 (unchecked-int 3) nil)
+            added (nth vec__11899 (unchecked-int 4) nil)
+            attr (let [G__11902 (.entid ^datomic.Database db a)]
+                   (when-not (nil? G__11902) (datomic.db/attribute db G__11902)))]
+        (into
+          [(datomic.db/entity-error-desc db e)
+           (datomic.db/entity-error-desc db a)
+           (if (and attr (= 20 (.-vtypeid ^datomic.db.Attribute attr)))
+             (datomic.db/entity-error-desc db v)
+             (datomic.db/v-error-desc v))]
+          (when tx [tx added])))))
   (reset-meta!
     #'datom-error-desc
     (assoc
@@ -2497,27 +2452,26 @@
       'datom-error-desc
       :ns
       *ns*))
-  (def validate-hook-target
-   (fn validate_hook_target
-     ([db d]
-       (when-not (= (.getE ^datomic.impl.db.IDatum d) 0)
-         (let [a (datomic.db/entity-error-desc
-                   db
-                   (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))
-               e (datomic.db/entity-error-desc db (long (.getE ^datomic.impl.db.IDatum d)))]
-           (error/arg
-             :db.error/invalid-datom
-             (str a " must be set on entity :db.part/db, found " e)
-             {:a e, :e e})))
-       (when-not (= (datomic.db/eid->part (unchecked-long (.getV ^datomic.impl.db.IDatum d))) 0)
-         (let [a (datomic.db/entity-error-desc
-                   db
-                   (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))
-               v (datomic.db/entity-error-desc db (.getV ^datomic.impl.db.IDatum d))]
-           (error/arg
-             :db.error/not-in-system-partition
-             (str "Value of " a " must be in :db.part/db partition, found " v)
-             {:a a, :v v}))))))
+  (defn validate-hook-target
+    ([db d]
+      (when-not (= (.getE ^datomic.impl.db.IDatum d) 0)
+        (let [a (datomic.db/entity-error-desc
+                  db
+                  (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))
+              e (datomic.db/entity-error-desc db (long (.getE ^datomic.impl.db.IDatum d)))]
+          (error/arg
+            :db.error/invalid-datom
+            (str a " must be set on entity :db.part/db, found " e)
+            {:a e, :e e})))
+      (when-not (= (datomic.db/eid->part (unchecked-long (.getV ^datomic.impl.db.IDatum d))) 0)
+        (let [a (datomic.db/entity-error-desc
+                  db
+                  (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))
+              v (datomic.db/entity-error-desc db (.getV ^datomic.impl.db.IDatum d))]
+          (error/arg
+            :db.error/not-in-system-partition
+            (str "Value of " a " must be in :db.part/db partition, found " v)
+            {:a a, :v v})))))
   (reset-meta!
     #'validate-hook-target
     (assoc
@@ -2527,20 +2481,19 @@
       'validate-hook-target
       :ns
       *ns*))
-  (def prevent-ident-retarget!
-   (fn prevent_ident_retarget_BANG_
-     ([db e v]
-       (let [past_e (.entid ^datomic.Database db v)]
-         (when (and past_e (not= past_e e) (get (:constituents db) past_e))
-           (error/arg
-             :db.error/cannot-retarget-ident
-             (str
-               "Ident "
-               v
-               " cannot be used for entity "
-               (datomic.db/entity-error-desc db e)
-               ", already used for "
-               (datomic.db/entity-error-desc db past_e))))))))
+  (defn prevent-ident-retarget!
+    ([db e v]
+      (let [past_e (.entid ^datomic.Database db v)]
+        (when (and past_e (not= past_e e) (get (:constituents db) past_e))
+          (error/arg
+            :db.error/cannot-retarget-ident
+            (str
+              "Ident "
+              v
+              " cannot be used for entity "
+              (datomic.db/entity-error-desc db e)
+              ", already used for "
+              (datomic.db/entity-error-desc db past_e)))))))
   (reset-meta!
     #'prevent-ident-retarget!
     (assoc
@@ -2551,26 +2504,25 @@
       'prevent-ident-retarget!
       :ns
       *ns*))
-  (def key-hook
-   (fn key_hook
-     ([_ db d _]
-       (let [db (if (= (.getP ^datomic.impl.db.IDatum d) 0)
-                  (update-in
-                    (.growElements ^datomic.db.IDbImpl db (long (.getE ^datomic.impl.db.IDatum d)))
-                    [:elements (long (.getE ^datomic.impl.db.IDatum d))]
-                    (fn fn__11910
-                      ([p1__11909#]
-                        (when p1__11909#
-                          (assoc p1__11909# :kw (.getV ^datomic.impl.db.IDatum d))))))
-                  db)]
-         (datomic.db/prevent-ident-retarget!
-           db
-           (long (.getE ^datomic.impl.db.IDatum d))
-           (.getV ^datomic.impl.db.IDatum d))
-         (.addKeyword
-           ^datomic.db.IDbImpl db
-           (.getV ^datomic.impl.db.IDatum d)
-           (long (.getE ^datomic.impl.db.IDatum d)))))))
+  (defn key-hook
+    ([_ db d _]
+      (let [db (if (= (.getP ^datomic.impl.db.IDatum d) 0)
+                 (update-in
+                   (.growElements ^datomic.db.IDbImpl db (long (.getE ^datomic.impl.db.IDatum d)))
+                   [:elements (long (.getE ^datomic.impl.db.IDatum d))]
+                   (fn fn__11910
+                     ([p1__11909#]
+                       (when p1__11909#
+                         (assoc p1__11909# :kw (.getV ^datomic.impl.db.IDatum d))))))
+                 db)]
+        (datomic.db/prevent-ident-retarget!
+          db
+          (long (.getE ^datomic.impl.db.IDatum d))
+          (.getV ^datomic.impl.db.IDatum d))
+        (.addKeyword
+          ^datomic.db.IDbImpl db
+          (.getV ^datomic.impl.db.IDatum d)
+          (long (.getE ^datomic.impl.db.IDatum d))))))
   (reset-meta!
     #'key-hook
     (assoc
@@ -2582,14 +2534,13 @@
       'key-hook
       :ns
       *ns*))
-  (def install-partition-hook
-   (fn install_partition_hook
-     ([_ db d check?]
-       (when check? (datomic.db/validate-hook-target db d))
-       (let [partid (.getV ^datomic.impl.db.IDatum d)]
-         (.addElement
-           ^datomic.db.IDbImpl db
-           (datomic.db.Partition. partid (.keywordOf ^datomic.db.IDb db partid)))))))
+  (defn install-partition-hook
+    ([_ db d check?]
+      (when check? (datomic.db/validate-hook-target db d))
+      (let [partid (.getV ^datomic.impl.db.IDatum d)]
+        (.addElement
+          ^datomic.db.IDbImpl db
+          (datomic.db.Partition. partid (.keywordOf ^datomic.db.IDb db partid))))))
   (reset-meta!
     #'install-partition-hook
     (assoc
@@ -2602,30 +2553,29 @@
       'install-partition-hook
       :ns
       *ns*))
-  (def install-vtype-hook
-   (fn install_vtype_hook
-     ([_ db d check?]
-       (when check? (datomic.db/validate-hook-target db d))
-       (let [id (.getV ^datomic.impl.db.IDatum d)
-             map__11914 (datomic.db/get-entity db id :raw true)
-             map__11914 (if (seq? map__11914)
-                          (if (next map__11914)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11914))
-                            (if (seq map__11914) (first map__11914) {}))
-                          map__11914)
-             ent map__11914
-             key (get map__11914 :db/ident)
-             fressian_tag (get map__11914 :fressian/tag)]
-         (when-not (every? identity [key fressian_tag])
-           (error/arg
-             :db.error/invalid-value-type
-             (str
-               "The entity "
-               (or key id)
-               " must specify :db/ident and :fressian/tag to be installed as a valueType")
-             {:entity ent}))
-         (.addElement ^datomic.db.IDbImpl db (datomic.db.ValueType. id key fressian_tag))))))
+  (defn install-vtype-hook
+    ([_ db d check?]
+      (when check? (datomic.db/validate-hook-target db d))
+      (let [id (.getV ^datomic.impl.db.IDatum d)
+            map__11914 (datomic.db/get-entity db id :raw true)
+            map__11914 (if (seq? map__11914)
+                         (if (next map__11914)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11914))
+                           (if (seq map__11914) (first map__11914) {}))
+                         map__11914)
+            ent map__11914
+            key (get map__11914 :db/ident)
+            fressian_tag (get map__11914 :fressian/tag)]
+        (when-not (every? identity [key fressian_tag])
+          (error/arg
+            :db.error/invalid-value-type
+            (str
+              "The entity "
+              (or key id)
+              " must specify :db/ident and :fressian/tag to be installed as a valueType")
+            {:entity ent}))
+        (.addElement ^datomic.db.IDbImpl db (datomic.db.ValueType. id key fressian_tag)))))
   (reset-meta!
     #'install-vtype-hook
     (assoc
@@ -2647,26 +2597,25 @@
       'needs-avet?
       :ns
       *ns*))
-  (def attr-hook-attr-ids
-   (fn attr_hook_attr_ids
-     ([db]
-       (into
-         #{}
-         (comp
-           (map (fn fn__11920 ([p1__11919#] (.entid ^datomic.Database db p1__11919#))))
-           (filter identity))
-         [42
-          41
-          40
-          43
-          51
-          45
-          44
-          :db.attr/preds
-          :db/tupleType
-          :db/tupleTypes
-          :db/tupleAttrs
-          :db.tuple/discontinued]))))
+  (defn attr-hook-attr-ids
+    ([db]
+      (into
+        #{}
+        (comp
+          (map (fn fn__11920 ([p1__11919#] (.entid ^datomic.Database db p1__11919#))))
+          (filter identity))
+        [42
+         41
+         40
+         43
+         51
+         45
+         44
+         :db.attr/preds
+         :db/tupleType
+         :db/tupleTypes
+         :db/tupleAttrs
+         :db.tuple/discontinued])))
   (reset-meta!
     #'attr-hook-attr-ids
     (assoc
@@ -2715,8 +2664,7 @@
               :uri java.net.URI,
               :uuid java.util.UUID,
               :boolean java.lang.Boolean})
-  (def installed-attribute?
-   (fn installed_attribute_QMARK_ ([db eid] (datomic.db/attribute db eid))))
+  (defn installed-attribute? ([db eid] (datomic.db/attribute db eid)))
   (reset-meta!
     #'installed-attribute?
     (assoc
@@ -2735,17 +2683,16 @@
   (reset-meta!
     #'TUP_MAX_ELEMS
     (assoc {:const true, :column (int 1)} :name 'TUP_MAX_ELEMS :ns *ns*))
-  (def tuple-attr-value-type
-   (fn tuple_attr_value_type
-     ([db attr_id]
-       (let [attr (let [G__11925 (datomic.db/resolve-id db attr_id)]
-                    (when-not (nil? G__11925) (datomic.db/attribute db G__11925)))
-             type (let [G__11926 attr G__11926 (some-> G__11926 (.-vtypeid))]
-                    (when-not (nil? G__11926) (.ident ^datomic.Database db G__11926)))]
-         (when (and
-                 (contains? datomic.db/tuple-value-types type)
-                 (= 35 (.-cardinality ^datomic.db.Attribute attr)))
-           type)))))
+  (defn tuple-attr-value-type
+    ([db attr_id]
+      (let [attr (let [G__11925 (datomic.db/resolve-id db attr_id)]
+                   (when-not (nil? G__11925) (datomic.db/attribute db G__11925)))
+            type (let [G__11926 attr G__11926 (some-> G__11926 (.-vtypeid))]
+                   (when-not (nil? G__11926) (.ident ^datomic.Database db G__11926)))]
+        (when (and
+                (contains? datomic.db/tuple-value-types type)
+                (= 35 (.-cardinality ^datomic.db.Attribute attr)))
+          type))))
   (reset-meta!
     #'tuple-attr-value-type
     (assoc
@@ -2765,12 +2712,11 @@
       'attr-tuple-attrs
       :ns
       *ns*))
-  (def datom-tuple-attrs
-   (fn datom_tuple_attrs
-     ([db d]
-       (datomic.db/attr-tuple-attrs
-         db
-         (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))))))
+  (defn datom-tuple-attrs
+    ([db d]
+      (datomic.db/attr-tuple-attrs
+        db
+        (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))))
   (reset-meta!
     #'datom-tuple-attrs
     (assoc
@@ -2873,52 +2819,51 @@
       'tuple-install-errors
       :ns
       *ns*))
-  (def install-attribute-errors
-   (fn install_attribute_errors
-     ([before after eid]
-       (let [eafter (datomic.db/get-entity after eid :raw true)
-             errors (reduce
-                      (fn fn__11951
-                        ([errs k]
-                          (if (get eafter k)
-                            errs
-                            (cons
-                              {:db/error :db.error/schema-attribute-missing,
-                               :attribute k,
-                               :entity eafter}
-                              errs))))
-                      nil
-                      (map
-                        (fn fn__11953 ([p1__11949#] (.ident ^datomic.Database after p1__11949#)))
-                        datomic.db/required-schema-attrs))
-             errors (seq (concat (datomic.db/tuple-install-errors after eafter) errors))
-             errors (if (and (get eafter :db/unique) (= 27 (get eafter :db/valueType)))
-                      (cons {:db/error :db.error/unique-not-allowed, :entity eafter} errors)
-                      errors)
-             errors (if (and (get eafter :db/isComponent) (not= 20 (get eafter :db/valueType)))
-                      (cons {:db/error :db.error/components-must-be-refs, :entity eafter} errors)
-                      errors)]
-         (if (and before (datomic.db/installed-attribute? before eid))
-           (let [ebefore (datomic.db/get-entity before eid :raw true)]
-             (reduce
-               (fn fn__11955
-                 ([errs k]
-                   (if (and
-                         (or (^clojure.lang.IFn ebefore k) (^clojure.lang.IFn eafter k))
-                         (not= (^clojure.lang.IFn ebefore k) (^clojure.lang.IFn eafter k)))
-                     (cons
-                       {:db/error :db.error/incompatible-schema-install,
-                        :entity (.ident ^datomic.Database before eid),
-                        :attribute k,
-                        :was (.ident ^datomic.Database before (^clojure.lang.IFn ebefore k)),
-                        :requested (.ident ^datomic.Database after (^clojure.lang.IFn eafter k))}
-                       errs)
-                     errs)))
-               errors
-               (map
-                 (fn fn__11959 ([p1__11950#] (.ident ^datomic.Database before p1__11950#)))
-                 (datomic.db/functional-attr-ids before))))
-           errors)))))
+  (defn install-attribute-errors
+    ([before after eid]
+      (let [eafter (datomic.db/get-entity after eid :raw true)
+            errors (reduce
+                     (fn fn__11951
+                       ([errs k]
+                         (if (get eafter k)
+                           errs
+                           (cons
+                             {:db/error :db.error/schema-attribute-missing,
+                              :attribute k,
+                              :entity eafter}
+                             errs))))
+                     nil
+                     (map
+                       (fn fn__11953 ([p1__11949#] (.ident ^datomic.Database after p1__11949#)))
+                       datomic.db/required-schema-attrs))
+            errors (seq (concat (datomic.db/tuple-install-errors after eafter) errors))
+            errors (if (and (get eafter :db/unique) (= 27 (get eafter :db/valueType)))
+                     (cons {:db/error :db.error/unique-not-allowed, :entity eafter} errors)
+                     errors)
+            errors (if (and (get eafter :db/isComponent) (not= 20 (get eafter :db/valueType)))
+                     (cons {:db/error :db.error/components-must-be-refs, :entity eafter} errors)
+                     errors)]
+        (if (and before (datomic.db/installed-attribute? before eid))
+          (let [ebefore (datomic.db/get-entity before eid :raw true)]
+            (reduce
+              (fn fn__11955
+                ([errs k]
+                  (if (and
+                        (or (^clojure.lang.IFn ebefore k) (^clojure.lang.IFn eafter k))
+                        (not= (^clojure.lang.IFn ebefore k) (^clojure.lang.IFn eafter k)))
+                    (cons
+                      {:db/error :db.error/incompatible-schema-install,
+                       :entity (.ident ^datomic.Database before eid),
+                       :attribute k,
+                       :was (.ident ^datomic.Database before (^clojure.lang.IFn ebefore k)),
+                       :requested (.ident ^datomic.Database after (^clojure.lang.IFn eafter k))}
+                      errs)
+                    errs)))
+              errors
+              (map
+                (fn fn__11959 ([p1__11950#] (.ident ^datomic.Database before p1__11950#)))
+                (datomic.db/functional-attr-ids before))))
+          errors))))
   (reset-meta!
     #'install-attribute-errors
     (assoc
@@ -2943,65 +2888,60 @@
       'reserved-keyword?
       :ns
       *ns*))
-  (def create-attr-pred
-   (fn create_attr_pred
-     ([kw fn_names]
-       (let [fn_map (into
-                      {}
-                      (map (fn fn__11968 ([name] [name (common/requiring-resolve! name)])))
-                      fn_names)]
-         (fn fn__11970
-           ([e v idmap]
-             (loop [seq_11971 (seq fn_map) chunk_11972 nil count_11973 0 i_11974 0]
-               (if (< i_11974 count_11973)
-                 (let [vec__11975 (.nth ^clojure.lang.Indexed chunk_11972 (unchecked-int i_11974))
-                       name (nth vec__11975 (unchecked-int 0) nil)
-                       pred (nth vec__11975 (unchecked-int 1) nil)]
-                   (let [result (^clojure.lang.IFn pred v)]
-                     (when-not (true? result)
-                       (throw
-                         (error/arg
-                           :db.error/attr-pred
-                           (str
-                             "Entity "
-                             (get (set/map-invert idmap) e e)
-                             " attribute "
-                             kw
-                             " value "
-                             v
-                             " failed pred "
-                             name)
-                           #:db.error{:pred-return result}))))
-                   (recur seq_11971 chunk_11972 count_11973 (inc i_11974)))
-                 (let [temp__5804__auto__ (seq seq_11971)]
-                   (when temp__5804__auto__
-                     (let [seq_11971 temp__5804__auto__]
-                       (if (chunked-seq? seq_11971)
-                         (let [c__6065__auto__ (chunk-first seq_11971)]
-                           (recur
-                             (chunk-rest seq_11971)
-                             c__6065__auto__
-                             (count c__6065__auto__)
-                             0))
-                         (let [vec__11978 (first seq_11971)
-                               name (nth vec__11978 (unchecked-int 0) nil)
-                               pred (nth vec__11978 (unchecked-int 1) nil)]
-                           (let [result (^clojure.lang.IFn pred v)]
-                             (when-not (true? result)
-                               (throw
-                                 (error/arg
-                                   :db.error/attr-pred
-                                   (str
-                                     "Entity "
-                                     (get (set/map-invert idmap) e e)
-                                     " attribute "
-                                     kw
-                                     " value "
-                                     v
-                                     " failed pred "
-                                     name)
-                                   #:db.error{:pred-return result}))))
-                           (recur (next seq_11971) nil 0 0))))))))))))))
+  (defn create-attr-pred
+    ([kw fn_names]
+      (let [fn_map (into
+                     {}
+                     (map (fn fn__11968 ([name] [name (common/requiring-resolve! name)])))
+                     fn_names)]
+        (fn fn__11970
+          ([e v idmap]
+            (loop [seq_11971 (seq fn_map) chunk_11972 nil count_11973 0 i_11974 0]
+              (if (< i_11974 count_11973)
+                (let [vec__11975 (.nth ^clojure.lang.Indexed chunk_11972 (unchecked-int i_11974))
+                      name (nth vec__11975 (unchecked-int 0) nil)
+                      pred (nth vec__11975 (unchecked-int 1) nil)]
+                  (let [result (^clojure.lang.IFn pred v)]
+                    (when-not (true? result)
+                      (throw
+                        (error/arg
+                          :db.error/attr-pred
+                          (str
+                            "Entity "
+                            (get (set/map-invert idmap) e e)
+                            " attribute "
+                            kw
+                            " value "
+                            v
+                            " failed pred "
+                            name)
+                          #:db.error{:pred-return result}))))
+                  (recur seq_11971 chunk_11972 count_11973 (inc i_11974)))
+                (let [temp__5804__auto__ (seq seq_11971)]
+                  (when temp__5804__auto__
+                    (let [seq_11971 temp__5804__auto__]
+                      (if (chunked-seq? seq_11971)
+                        (let [c__6065__auto__ (chunk-first seq_11971)]
+                          (recur (chunk-rest seq_11971) c__6065__auto__ (count c__6065__auto__) 0))
+                        (let [vec__11978 (first seq_11971)
+                              name (nth vec__11978 (unchecked-int 0) nil)
+                              pred (nth vec__11978 (unchecked-int 1) nil)]
+                          (let [result (^clojure.lang.IFn pred v)]
+                            (when-not (true? result)
+                              (throw
+                                (error/arg
+                                  :db.error/attr-pred
+                                  (str
+                                    "Entity "
+                                    (get (set/map-invert idmap) e e)
+                                    " attribute "
+                                    kw
+                                    " value "
+                                    v
+                                    " failed pred "
+                                    name)
+                                  #:db.error{:pred-return result}))))
+                          (recur (next seq_11971) nil 0 0)))))))))))))
   (reset-meta!
     #'create-attr-pred
     (assoc
@@ -3010,74 +2950,73 @@
       'create-attr-pred
       :ns
       *ns*))
-  (def create-attribute
-   (fn create_attribute
-     ([db p__11985]
-       (let [map__11986 p__11985
-             map__11986 (if (seq? map__11986)
-                          (if (next map__11986)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11986))
-                            (if (seq map__11986) (first map__11986) {}))
-                          map__11986)
-             cardinality (get map__11986 :cardinality)
-             attrPreds (get map__11986 :attrPreds)
-             unique (get map__11986 :unique)
-             vtypeid (get map__11986 :vtypeid)
-             index (get map__11986 :index)
-             storageHasAVET (get map__11986 :storageHasAVET)
-             tupleType (get map__11986 :tupleType)
-             tupleTypes (get map__11986 :tupleTypes)
-             fulltext (get map__11986 :fulltext)
-             noHistory (get map__11986 :noHistory)
-             isComponent (get map__11986 :isComponent)
-             kw (get map__11986 :kw)
-             tupleDiscontinued (get map__11986 :tupleDiscontinued)
-             needsAVET (get map__11986 :needsAVET)
-             id (get map__11986 :id)
-             tupleAttrs (get map__11986 :tupleAttrs)
-             norm (fn norm ([x] (if (nil? x) false x)))
-             tupleRefOffsets (cond
-                               (= :db.type/ref tupleType) (range 8)
-                               tupleTypes (keep-indexed
-                                            (fn fn__11989
-                                              ([idx item] (when (= :db.type/ref item) idx)))
-                                            tupleTypes)
-                               tupleAttrs (do
-                                            (keep-indexed
-                                              (fn fn__11991
-                                                ([idx item]
-                                                  (when (=
-                                                          20
-                                                          (.-vtypeid
-                                                            (datomic.db/require-attr db item)))
-                                                    idx)))
-                                              tupleAttrs)))]
-         (cond->
-           (datomic.db/map->Attribute
-             {:unique unique,
-              :vtypeid vtypeid,
-              :storageHasAVET (^clojure.lang.IFn norm storageHasAVET),
-              :index (^clojure.lang.IFn norm index),
-              :fulltext (^clojure.lang.IFn norm fulltext),
-              :noHistory (^clojure.lang.IFn norm noHistory),
-              :isComponent (^clojure.lang.IFn norm isComponent),
-              :kw kw,
-              :needsAVET (^clojure.lang.IFn norm needsAVET),
-              :id id,
-              :cardinality cardinality})
-           attrPreds
-           (assoc :attrPred (delay (datomic.db/create-attr-pred kw attrPreds)))
-           tupleType
-           (assoc :tupleType tupleType)
-           tupleTypes
-           (assoc :tupleTypes tupleTypes)
-           tupleRefOffsets
-           (assoc :tupleRefOffsets (set tupleRefOffsets))
-           tupleAttrs
-           (assoc :tupleAttrs tupleAttrs)
-           tupleDiscontinued
-           (assoc :tupleDiscontinued tupleDiscontinued))))))
+  (defn create-attribute
+    ([db p__11985]
+      (let [map__11986 p__11985
+            map__11986 (if (seq? map__11986)
+                         (if (next map__11986)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11986))
+                           (if (seq map__11986) (first map__11986) {}))
+                         map__11986)
+            cardinality (get map__11986 :cardinality)
+            attrPreds (get map__11986 :attrPreds)
+            unique (get map__11986 :unique)
+            vtypeid (get map__11986 :vtypeid)
+            index (get map__11986 :index)
+            storageHasAVET (get map__11986 :storageHasAVET)
+            tupleType (get map__11986 :tupleType)
+            tupleTypes (get map__11986 :tupleTypes)
+            fulltext (get map__11986 :fulltext)
+            noHistory (get map__11986 :noHistory)
+            isComponent (get map__11986 :isComponent)
+            kw (get map__11986 :kw)
+            tupleDiscontinued (get map__11986 :tupleDiscontinued)
+            needsAVET (get map__11986 :needsAVET)
+            id (get map__11986 :id)
+            tupleAttrs (get map__11986 :tupleAttrs)
+            norm (fn norm ([x] (if (nil? x) false x)))
+            tupleRefOffsets (cond
+                              (= :db.type/ref tupleType) (range 8)
+                              tupleTypes (keep-indexed
+                                           (fn fn__11989
+                                             ([idx item] (when (= :db.type/ref item) idx)))
+                                           tupleTypes)
+                              tupleAttrs (do
+                                           (keep-indexed
+                                             (fn fn__11991
+                                               ([idx item]
+                                                 (when (=
+                                                         20
+                                                         (.-vtypeid
+                                                           (datomic.db/require-attr db item)))
+                                                   idx)))
+                                             tupleAttrs)))]
+        (cond->
+          (datomic.db/map->Attribute
+            {:unique unique,
+             :vtypeid vtypeid,
+             :storageHasAVET (^clojure.lang.IFn norm storageHasAVET),
+             :index (^clojure.lang.IFn norm index),
+             :fulltext (^clojure.lang.IFn norm fulltext),
+             :noHistory (^clojure.lang.IFn norm noHistory),
+             :isComponent (^clojure.lang.IFn norm isComponent),
+             :kw kw,
+             :needsAVET (^clojure.lang.IFn norm needsAVET),
+             :id id,
+             :cardinality cardinality})
+          attrPreds
+          (assoc :attrPred (delay (datomic.db/create-attr-pred kw attrPreds)))
+          tupleType
+          (assoc :tupleType tupleType)
+          tupleTypes
+          (assoc :tupleTypes tupleTypes)
+          tupleRefOffsets
+          (assoc :tupleRefOffsets (set tupleRefOffsets))
+          tupleAttrs
+          (assoc :tupleAttrs tupleAttrs)
+          tupleDiscontinued
+          (assoc :tupleDiscontinued tupleDiscontinued)))))
   (reset-meta!
     #'create-attribute
     (assoc
@@ -3106,16 +3045,15 @@
       'create-attribute
       :ns
       *ns*))
-  (def add-constituents
-   (fn add_constituents
-     ([db comp_id constituents]
-       (let [m (into
-                 {}
-                 (map
-                   (fn fn__11998
-                     ([constituent] [(datomic.db/require-attrid db constituent) #{comp_id}])))
-                 constituents)]
-         (update db :constituents (fn fn__12000 ([p1__11997#] (merge-with into p1__11997# m))))))))
+  (defn add-constituents
+    ([db comp_id constituents]
+      (let [m (into
+                {}
+                (map
+                  (fn fn__11998
+                    ([constituent] [(datomic.db/require-attrid db constituent) #{comp_id}])))
+                constituents)]
+        (update db :constituents (fn fn__12000 ([p1__11997#] (merge-with into p1__11997# m)))))))
   (reset-meta!
     #'add-constituents
     (assoc
@@ -3124,81 +3062,80 @@
       'add-constituents
       :ns
       *ns*))
-  (def install-attribute-hook
-   (fn install_attribute_hook
-     ([before after d check?]
-       (when check? (datomic.db/validate-hook-target after d))
-       (let [id (.getV ^datomic.impl.db.IDatum d)
-             map__12003 (datomic.db/get-entity after id :raw true)
-             map__12003 (if (seq? map__12003)
-                          (if (next map__12003)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12003))
-                            (if (seq map__12003) (first map__12003) {}))
-                          map__12003)
-             ent map__12003
-             cardinality (get map__12003 :db/cardinality)
-             attrPreds (get map__12003 :db.attr/preds)
-             unique (get map__12003 :db/unique)
-             vtypeid (get map__12003 :db/valueType)
-             index (get map__12003 :db/index)
-             tupleType (get map__12003 :db/tupleType)
-             tupleTypes (get map__12003 :db/tupleTypes)
-             fulltext (get map__12003 :db/fulltext)
-             noHistory (get map__12003 :db/noHistory)
-             isComponent (get map__12003 :db/isComponent)
-             kw (get map__12003 :db/ident)
-             tupleDiscontinued (get map__12003 :db.tuple/discontinued)
-             tupleAttrs (get map__12003 :db/tupleAttrs)
-             kw (or kw (datomic.db/resolve-kw after id))
-             fulltext (and fulltext (= vtypeid (get datomic.db/BOOT-IDS :db.type/string)))
-             avet (datomic.db/needs-avet? ent)]
-         (when check?
-           (when-not kw
-             (error/arg
-               :db.error/attribute-ident-missing
-               (str "Missing :db/ident for " ent)
-               {:entity ent}))
-           (let [temp__5804__auto__ (datomic.db/install-attribute-errors before after id)]
-             (when temp__5804__auto__
-               (let [errors temp__5804__auto__]
-                 (error/arg
-                   :db.error/invalid-install-attribute
-                   (str "First error: " (:db/error (first errors)))
-                   #:db{:errors errors}))))
-           (when-not (datomic.db/value-type before vtypeid)
-             (error/arg
-               :db.error/not-a-value-type
-               (str "Not a value type: " (datomic.db/entity-error-desc before vtypeid))
-               {:entity ent}))
-           (when-not (or (= 36 cardinality) (= 35 cardinality))
-             (error/arg
-               :db.error/not-a-cardinality
-               (str "Not a cardinality: " (datomic.db/entity-error-desc before cardinality))
-               {:entity ent})))
-         (let [always_indexed (:cloud-compat before)
-               attr (datomic.db/create-attribute
-                      after
-                      {:unique unique,
-                       :vtypeid vtypeid,
-                       :storageHasAVET (or avet always_indexed),
-                       :index (or index always_indexed),
-                       :tupleType tupleType,
-                       :tupleTypes tupleTypes,
-                       :fulltext fulltext,
-                       :noHistory noHistory,
-                       :isComponent isComponent,
-                       :kw kw,
-                       :tupleDiscontinued tupleDiscontinued,
-                       :needsAVET (or avet always_indexed),
-                       :id id,
-                       :tupleAttrs tupleAttrs,
-                       :cardinality cardinality,
-                       :attrPreds attrPreds})
-               db (.addElement ^datomic.db.IDbImpl after ^datomic.db.IElementImpl attr)]
-           (if (and tupleAttrs (not tupleDiscontinued))
-             (datomic.db/add-constituents db id tupleAttrs)
-             db))))))
+  (defn install-attribute-hook
+    ([before after d check?]
+      (when check? (datomic.db/validate-hook-target after d))
+      (let [id (.getV ^datomic.impl.db.IDatum d)
+            map__12003 (datomic.db/get-entity after id :raw true)
+            map__12003 (if (seq? map__12003)
+                         (if (next map__12003)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12003))
+                           (if (seq map__12003) (first map__12003) {}))
+                         map__12003)
+            ent map__12003
+            cardinality (get map__12003 :db/cardinality)
+            attrPreds (get map__12003 :db.attr/preds)
+            unique (get map__12003 :db/unique)
+            vtypeid (get map__12003 :db/valueType)
+            index (get map__12003 :db/index)
+            tupleType (get map__12003 :db/tupleType)
+            tupleTypes (get map__12003 :db/tupleTypes)
+            fulltext (get map__12003 :db/fulltext)
+            noHistory (get map__12003 :db/noHistory)
+            isComponent (get map__12003 :db/isComponent)
+            kw (get map__12003 :db/ident)
+            tupleDiscontinued (get map__12003 :db.tuple/discontinued)
+            tupleAttrs (get map__12003 :db/tupleAttrs)
+            kw (or kw (datomic.db/resolve-kw after id))
+            fulltext (and fulltext (= vtypeid (get datomic.db/BOOT-IDS :db.type/string)))
+            avet (datomic.db/needs-avet? ent)]
+        (when check?
+          (when-not kw
+            (error/arg
+              :db.error/attribute-ident-missing
+              (str "Missing :db/ident for " ent)
+              {:entity ent}))
+          (let [temp__5804__auto__ (datomic.db/install-attribute-errors before after id)]
+            (when temp__5804__auto__
+              (let [errors temp__5804__auto__]
+                (error/arg
+                  :db.error/invalid-install-attribute
+                  (str "First error: " (:db/error (first errors)))
+                  #:db{:errors errors}))))
+          (when-not (datomic.db/value-type before vtypeid)
+            (error/arg
+              :db.error/not-a-value-type
+              (str "Not a value type: " (datomic.db/entity-error-desc before vtypeid))
+              {:entity ent}))
+          (when-not (or (= 36 cardinality) (= 35 cardinality))
+            (error/arg
+              :db.error/not-a-cardinality
+              (str "Not a cardinality: " (datomic.db/entity-error-desc before cardinality))
+              {:entity ent})))
+        (let [always_indexed (:cloud-compat before)
+              attr (datomic.db/create-attribute
+                     after
+                     {:unique unique,
+                      :vtypeid vtypeid,
+                      :storageHasAVET (or avet always_indexed),
+                      :index (or index always_indexed),
+                      :tupleType tupleType,
+                      :tupleTypes tupleTypes,
+                      :fulltext fulltext,
+                      :noHistory noHistory,
+                      :isComponent isComponent,
+                      :kw kw,
+                      :tupleDiscontinued tupleDiscontinued,
+                      :needsAVET (or avet always_indexed),
+                      :id id,
+                      :tupleAttrs tupleAttrs,
+                      :cardinality cardinality,
+                      :attrPreds attrPreds})
+              db (.addElement ^datomic.db.IDbImpl after ^datomic.db.IElementImpl attr)]
+          (if (and tupleAttrs (not tupleDiscontinued))
+            (datomic.db/add-constituents db id tupleAttrs)
+            db)))))
   (reset-meta!
     #'install-attribute-hook
     (assoc
@@ -3214,18 +3151,17 @@
       'install-attribute-hook
       :ns
       *ns*))
-  (def card-one-violator
-   (fn card_one_violator
-     ([db aid]
-       (let [result (reduce
-                      (fn fn__12013
-                        ([d1 d2]
-                          (if (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
-                            (reduced [d1 d2])
-                            d2)))
-                      (datomic.db/asserting-datum -1 -1 -1 -1)
-                      (.datoms ^datomic.Database db :aevt (to-array [aid])))]
-         (when (vector? result) result)))))
+  (defn card-one-violator
+    ([db aid]
+      (let [result (reduce
+                     (fn fn__12013
+                       ([d1 d2]
+                         (if (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
+                           (reduced [d1 d2])
+                           d2)))
+                     (datomic.db/asserting-datum -1 -1 -1 -1)
+                     (.datoms ^datomic.Database db :aevt (to-array [aid])))]
+        (when (vector? result) result))))
   (reset-meta!
     #'card-one-violator
     (assoc
@@ -3236,18 +3172,17 @@
       'card-one-violator
       :ns
       *ns*))
-  (def unique-violator
-   (fn unique_violator
-     ([db aid]
-       (let [result (reduce
-                      (fn fn__12016
-                        ([d1 d2]
-                          (if (= (common/compare (.v ^datomic.Datom d1) (.v ^datomic.Datom d2)) 0)
-                            (reduced [d1 d2])
-                            d2)))
-                      (datomic.db/asserting-datum -1 -1 -1 -1)
-                      (.datoms ^datomic.Database db :avet (to-array [aid])))]
-         (when (vector? result) result)))))
+  (defn unique-violator
+    ([db aid]
+      (let [result (reduce
+                     (fn fn__12016
+                       ([d1 d2]
+                         (if (= (common/compare (.v ^datomic.Datom d1) (.v ^datomic.Datom d2)) 0)
+                           (reduced [d1 d2])
+                           d2)))
+                     (datomic.db/asserting-datum -1 -1 -1 -1)
+                     (.datoms ^datomic.Database db :avet (to-array [aid])))]
+        (when (vector? result) result))))
   (reset-meta!
     #'unique-violator
     (assoc
@@ -3269,14 +3204,13 @@
       'set-element-fields
       :ns
       *ns*))
-  (def card-many->card-one
-   (fn card_many__GT_card_one
-     ([db aid _ _]
-       (let [temp__5802__auto__ (datomic.db/card-one-violator db aid)]
-         (if temp__5802__auto__
-           (let [problem temp__5802__auto__]
-             [db [{:db/error :db.error/cardinality-violation, :datoms problem}]])
-           [(datomic.db/set-element-fields db aid :cardinality 35)])))))
+  (defn card-many->card-one
+    ([db aid _ _]
+      (let [temp__5802__auto__ (datomic.db/card-one-violator db aid)]
+        (if temp__5802__auto__
+          (let [problem temp__5802__auto__]
+            [db [{:db/error :db.error/cardinality-violation, :datoms problem}]])
+          [(datomic.db/set-element-fields db aid :cardinality 35)]))))
   (reset-meta!
     #'card-many->card-one
     (assoc
@@ -3287,23 +3221,22 @@
       'card-many->card-one
       :ns
       *ns*))
-  (def constituent-of
-   (fn constituent_of
-     ([db aid]
-       (when (datomic.db/supports-tuples? db)
-         (Circular/q
-           [:find
-            ['?ident '...]
-            :in
-            '$
-            '?aid
-            :where
-            ['?aid :db/ident '?attr]
-            ['?comp :db/tupleAttrs '?attrs]
-            [(clojure.core/list 'set '?attrs) '?attr-set]
-            [(clojure.core/list 'contains? '?attr-set '?attr)]
-            ['?comp :db/ident '?ident]]
-           [db aid])))))
+  (defn constituent-of
+    ([db aid]
+      (when (datomic.db/supports-tuples? db)
+        (Circular/q
+          [:find
+           ['?ident '...]
+           :in
+           '$
+           '?aid
+           :where
+           ['?aid :db/ident '?attr]
+           ['?comp :db/tupleAttrs '?attrs]
+           [(clojure.core/list 'set '?attrs) '?attr-set]
+           [(clojure.core/list 'contains? '?attr-set '?attr)]
+           ['?comp :db/ident '?ident]]
+          [db aid]))))
   (reset-meta!
     #'constituent-of
     (assoc
@@ -3337,20 +3270,19 @@
       'discontinue-composite
       :ns
       *ns*))
-  (def card-one->card-many
-   (fn card_one__GT_card_many
-     ([db aid _ vafter]
-       (if (:tupleAttrs (datomic.db/attribute db aid))
-         [db
-          [{:db/error :db.error/tuple-of-attrs-must-be-card-one,
-            :attribute (.ident ^datomic.Database db aid)}]]
-         (let [temp__5802__auto__ (seq (datomic.db/constituent-of db aid))]
-           (if temp__5802__auto__
-             (let [composites temp__5802__auto__]
-               [db
-                [{:db/error :db.error/constituent-of-a-composite-must-be-card-one,
-                  :attribute (.ident ^datomic.Database db aid)}]])
-             [(assoc-in db [:elements aid :cardinality] vafter)]))))))
+  (defn card-one->card-many
+    ([db aid _ vafter]
+      (if (:tupleAttrs (datomic.db/attribute db aid))
+        [db
+         [{:db/error :db.error/tuple-of-attrs-must-be-card-one,
+           :attribute (.ident ^datomic.Database db aid)}]]
+        (let [temp__5802__auto__ (seq (datomic.db/constituent-of db aid))]
+          (if temp__5802__auto__
+            (let [composites temp__5802__auto__]
+              [db
+               [{:db/error :db.error/constituent-of-a-composite-must-be-card-one,
+                 :attribute (.ident ^datomic.Database db aid)}]])
+            [(assoc-in db [:elements aid :cardinality] vafter)])))))
   (reset-meta!
     #'card-one->card-many
     (assoc
@@ -3389,10 +3321,9 @@
       'drop-unique
       :ns
       *ns*))
-  (def has-values?
-   (fn has_values_QMARK_
-     ([db attrid]
-       (boolean (seq (datomic.db/datoms (.history ^datomic.Database db) :aevt [attrid]))))))
+  (defn has-values?
+    ([db attrid]
+      (boolean (seq (datomic.db/datoms (.history ^datomic.Database db) :aevt [attrid])))))
   (reset-meta!
     #'has-values?
     (assoc
@@ -3461,21 +3392,20 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.db" "memory-db")
     (fn memory_db ([db] (assoc db :index nil :mid-index nil :indexing nil :history nil))))
-  (def t-needing-avet
-   (fn t_needing_avet
-     ([db d]
-       (let [a (.a ^datomic.Datom d)]
-         (and
-           (or (= a 44) (= a 42))
-           (.v ^datomic.Datom d)
-           (.added ^datomic.Datom d)
-           (let [prior (.asOf ^datomic.Database db (dec (.tx ^datomic.Datom d)))
-                 ent (.entity ^datomic.Database prior (.e ^datomic.Datom d))]
-             (and
-               (not (:db/unique ent))
-               (not (:db/index ent))
-               (datomic.db/has-values? prior (.e ^datomic.Datom d))
-               (long (datomic.db/eid->eidx (unchecked-long (.tx ^datomic.Datom d)))))))))))
+  (defn t-needing-avet
+    ([db d]
+      (let [a (.a ^datomic.Datom d)]
+        (and
+          (or (= a 44) (= a 42))
+          (.v ^datomic.Datom d)
+          (.added ^datomic.Datom d)
+          (let [prior (.asOf ^datomic.Database db (dec (.tx ^datomic.Datom d)))
+                ent (.entity ^datomic.Database prior (.e ^datomic.Datom d))]
+            (and
+              (not (:db/unique ent))
+              (not (:db/index ent))
+              (datomic.db/has-values? prior (.e ^datomic.Datom d))
+              (long (datomic.db/eid->eidx (unchecked-long (.tx ^datomic.Datom d))))))))))
   (reset-meta!
     #'t-needing-avet
     (assoc
@@ -3486,12 +3416,11 @@
       't-needing-avet
       :ns
       *ns*))
-  (def t-needing-excise
-   (fn t_needing_excise
-     ([db d]
-       (and
-         (= (.a ^datomic.Datom d) 15)
-         (long (datomic.db/eid->eidx (unchecked-long (.tx ^datomic.Datom d))))))))
+  (defn t-needing-excise
+    ([db d]
+      (and
+        (= (.a ^datomic.Datom d) 15)
+        (long (datomic.db/eid->eidx (unchecked-long (.tx ^datomic.Datom d)))))))
   (reset-meta!
     #'t-needing-excise
     (assoc
@@ -3502,9 +3431,8 @@
       't-needing-excise
       :ns
       *ns*))
-  (def t-needing-index-job
-   (fn t_needing_index_job
-     ([db d] (or (datomic.db/t-needing-avet db d) (datomic.db/t-needing-excise db d)))))
+  (defn t-needing-index-job
+    ([db d] (or (datomic.db/t-needing-avet db d) (datomic.db/t-needing-excise db d))))
   (reset-meta!
     #'t-needing-index-job
     (assoc
@@ -3515,13 +3443,12 @@
       't-needing-index-job
       :ns
       *ns*))
-  (def data-needs-index?
-   (fn data_needs_index_QMARK_
-     ([db datoms]
-       (reduce
-         (fn fn__12052 ([x d] (if (datomic.db/t-needing-index-job db d) (reduced true) x)))
-         false
-         datoms))))
+  (defn data-needs-index?
+    ([db datoms]
+      (reduce
+        (fn fn__12052 ([x d] (if (datomic.db/t-needing-index-job db d) (reduced true) x)))
+        false
+        datoms)))
   (reset-meta!
     #'data-needs-index?
     (assoc
@@ -3539,16 +3466,15 @@
       'system-schema-namespace?
       :ns
       *ns*))
-  (def system-schema-datom?
-   (fn system_schema_datom_QMARK_
-     ([db d]
-       (let [temp__5804__auto__ (some->
-                                  (.ident
-                                    ^datomic.Database db
-                                    (long (.getE ^datomic.impl.db.IDatum d)))
-                                  (namespace))]
-         (when temp__5804__auto__
-           (let [n temp__5804__auto__] (datomic.db/system-schema-namespace? n)))))))
+  (defn system-schema-datom?
+    ([db d]
+      (let [temp__5804__auto__ (some->
+                                 (.ident
+                                   ^datomic.Database db
+                                   (long (.getE ^datomic.impl.db.IDatum d)))
+                                 (namespace))]
+        (when temp__5804__auto__
+          (let [n temp__5804__auto__] (datomic.db/system-schema-namespace? n))))))
   (reset-meta!
     #'system-schema-datom?
     (assoc
@@ -3559,14 +3485,13 @@
       'system-schema-datom?
       :ns
       *ns*))
-  (def system-datom?
-   (fn system_datom_QMARK_
-     ([db d]
-       (or
-         (datomic.db/system-schema-datom? db d)
-         (contains?
-           datomic.db/SYSTEM_ATTRS
-           (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))))))
+  (defn system-datom?
+    ([db d]
+      (or
+        (datomic.db/system-schema-datom? db d)
+        (contains?
+          datomic.db/SYSTEM_ATTRS
+          (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))))))
   (reset-meta!
     #'system-datom?
     (assoc
@@ -3577,19 +3502,18 @@
       'system-datom?
       :ns
       *ns*))
-  (def memdb-needs-index?
-   (fn memdb_needs_index_QMARK_
-     ([db]
-       (let [mdb (datomic.db/memory-db db)]
-         (or
-           (datomic.db/data-needs-index?
-             db
-             (.datoms ^datomic.Database mdb :aevt (object-array [15])))
-           (datomic.db/data-needs-index?
-             db
-             (remove
-               (fn fn__12064 ([p1__12063#] (datomic.db/system-datom? db p1__12063#)))
-               (.datoms ^datomic.Database mdb :aevt (object-array [44])))))))))
+  (defn memdb-needs-index?
+    ([db]
+      (let [mdb (datomic.db/memory-db db)]
+        (or
+          (datomic.db/data-needs-index?
+            db
+            (.datoms ^datomic.Database mdb :aevt (object-array [15])))
+          (datomic.db/data-needs-index?
+            db
+            (remove
+              (fn fn__12064 ([p1__12063#] (datomic.db/system-datom? db p1__12063#)))
+              (.datoms ^datomic.Database mdb :aevt (object-array [44]))))))))
   (reset-meta!
     #'memdb-needs-index?
     (assoc
@@ -3598,25 +3522,24 @@
       'memdb-needs-index?
       :ns
       *ns*))
-  (def ts-needing-index
-   (fn ts_needing_index
-     ([db type limit_t]
-       (let [mdb (.asOf (datomic.db/memory-db db) limit_t)
-             pred (let [G__12068 type]
-                    (case
-                      G__12068
-                      :excise
-                      datomic.db/t-needing-excise
-                      :schema
-                      datomic.db/t-needing-avet))]
-         (filter
-           identity
-           (map
-             (partial pred db)
-             (.datoms
-               ^datomic.Database mdb
-               :aevt
-               (object-array [(let [G__12069 type] (case G__12069 :excise 15 :schema 44))]))))))))
+  (defn ts-needing-index
+    ([db type limit_t]
+      (let [mdb (.asOf (datomic.db/memory-db db) limit_t)
+            pred (let [G__12068 type]
+                   (case
+                     G__12068
+                     :excise
+                     datomic.db/t-needing-excise
+                     :schema
+                     datomic.db/t-needing-avet))]
+        (filter
+          identity
+          (map
+            (partial pred db)
+            (.datoms
+              ^datomic.Database mdb
+              :aevt
+              (object-array [(let [G__12069 type] (case G__12069 :excise 15 :schema 44))])))))))
   (reset-meta!
     #'ts-needing-index
     (assoc
@@ -3663,12 +3586,11 @@
       'add-avet
       :ns
       *ns*))
-  (def create-simple-alter
-   (fn create_simple_alter
-     ([elem_key]
-       (fn fn__12077
-         ([db aid _ vafter]
-           [(assoc-in db [:elements aid elem_key] (if (= :disabled vafter) false vafter))])))))
+  (defn create-simple-alter
+    ([elem_key]
+      (fn fn__12077
+        ([db aid _ vafter]
+          [(assoc-in db [:elements aid elem_key] (if (= :disabled vafter) false vafter))]))))
   (reset-meta!
     #'create-simple-alter
     (assoc
@@ -3743,39 +3665,38 @@
       'find-alter-fn
       :ns
       *ns*))
-  (def alter-attribute
-   (fn alter_attribute
-     ([before after d]
-       (let [eid (.getV ^datomic.impl.db.IDatum d)
-             ebefore (datomic.db/get-entity before eid :raw true)
-             eafter (datomic.db/get-entity after eid :raw true)
-             attr (fn attr
-                    ([db ent id]
-                      (let [temp__5802__auto__ (get ent (.ident ^datomic.Database db id))]
-                        (if temp__5802__auto__ (let [e temp__5802__auto__] e) :disabled))))]
-         (when (and
-                 (get eafter :db.attr/preds)
-                 (datomic.db/reserved-keyword? (get eafter :db/ident)))
-           (error/arg
-             :db.error/attr-pred-on-system-attr
-             (str
-               ":db.attr/preds cannot be added to system attribute "
-               (datomic.db/entity-error-desc after eid))))
-         (reduce
-           (fn fn__12097
-             ([p__12096 fid]
-               (let [vec__12098 p__12096
-                     db (nth vec__12098 (unchecked-int 0) nil)
-                     prev_errors (nth vec__12098 (unchecked-int 1) nil)
-                     vbefore (^clojure.lang.IFn attr before ebefore fid)
-                     vafter (^clojure.lang.IFn attr after eafter fid)
-                     f (datomic.db/find-alter-fn before eid fid vbefore vafter)
-                     vec__12101 (^clojure.lang.IFn f db eid vbefore vafter)
-                     db (nth vec__12101 (unchecked-int 0) nil)
-                     errors (nth vec__12101 (unchecked-int 1) nil)]
-                 [db (concat errors prev_errors)])))
-           [after nil]
-           (datomic.db/attr-hook-attr-ids before))))))
+  (defn alter-attribute
+    ([before after d]
+      (let [eid (.getV ^datomic.impl.db.IDatum d)
+            ebefore (datomic.db/get-entity before eid :raw true)
+            eafter (datomic.db/get-entity after eid :raw true)
+            attr (fn attr
+                   ([db ent id]
+                     (let [temp__5802__auto__ (get ent (.ident ^datomic.Database db id))]
+                       (if temp__5802__auto__ (let [e temp__5802__auto__] e) :disabled))))]
+        (when (and
+                (get eafter :db.attr/preds)
+                (datomic.db/reserved-keyword? (get eafter :db/ident)))
+          (error/arg
+            :db.error/attr-pred-on-system-attr
+            (str
+              ":db.attr/preds cannot be added to system attribute "
+              (datomic.db/entity-error-desc after eid))))
+        (reduce
+          (fn fn__12097
+            ([p__12096 fid]
+              (let [vec__12098 p__12096
+                    db (nth vec__12098 (unchecked-int 0) nil)
+                    prev_errors (nth vec__12098 (unchecked-int 1) nil)
+                    vbefore (^clojure.lang.IFn attr before ebefore fid)
+                    vafter (^clojure.lang.IFn attr after eafter fid)
+                    f (datomic.db/find-alter-fn before eid fid vbefore vafter)
+                    vec__12101 (^clojure.lang.IFn f db eid vbefore vafter)
+                    db (nth vec__12101 (unchecked-int 0) nil)
+                    errors (nth vec__12101 (unchecked-int 1) nil)]
+                [db (concat errors prev_errors)])))
+          [after nil]
+          (datomic.db/attr-hook-attr-ids before)))))
   (reset-meta!
     #'alter-attribute
     (assoc
@@ -3789,27 +3710,26 @@
       'alter-attribute
       :ns
       *ns*))
-  (def alter-attribute-hook
-   (fn alter_attribute_hook
-     ([before after d check?]
-       (when check?
-         (datomic.db/validate-hook-target after d)
-         (let [eid (.getV ^datomic.impl.db.IDatum d)]
-           (when-not (datomic.db/installed-attribute? before eid)
-             (error/arg
-               :db.error/invalid-alter-attribute
-               (str
-                 "Cannot alter attribute that does not exist: "
-                 (datomic.db/entity-error-desc before eid))))))
-       (let [vec__12107 (datomic.db/alter-attribute before after d)
-             db (nth vec__12107 (unchecked-int 0) nil)
-             errors (nth vec__12107 (unchecked-int 1) nil)]
-         (when (and check? (seq errors))
-           (error/arg
-             :db.error/invalid-alter-attribute
-             (str "Error: " (first errors))
-             #:db{:errors errors}))
-         db))))
+  (defn alter-attribute-hook
+    ([before after d check?]
+      (when check?
+        (datomic.db/validate-hook-target after d)
+        (let [eid (.getV ^datomic.impl.db.IDatum d)]
+          (when-not (datomic.db/installed-attribute? before eid)
+            (error/arg
+              :db.error/invalid-alter-attribute
+              (str
+                "Cannot alter attribute that does not exist: "
+                (datomic.db/entity-error-desc before eid))))))
+      (let [vec__12107 (datomic.db/alter-attribute before after d)
+            db (nth vec__12107 (unchecked-int 0) nil)
+            errors (nth vec__12107 (unchecked-int 1) nil)]
+        (when (and check? (seq errors))
+          (error/arg
+            :db.error/invalid-alter-attribute
+            (str "Error: " (first errors))
+            #:db{:errors errors}))
+        db)))
   (reset-meta!
     #'alter-attribute-hook
     (assoc
@@ -3824,11 +3744,10 @@
       'alter-attribute-hook
       :ns
       *ns*))
-  (def system-tx-hook
-   (fn system_tx_hook
-     ([_ after d check?]
-       (let [G__12112 (.getV ^datomic.impl.db.IDatum d)]
-         (case G__12112 :schema (datomic.db/update-schema-level after) after)))))
+  (defn system-tx-hook
+    ([_ after d check?]
+      (let [G__12112 (.getV ^datomic.impl.db.IDatum d)]
+        (case G__12112 :schema (datomic.db/update-schema-level after) after))))
   (reset-meta!
     #'system-tx-hook
     (assoc
@@ -3876,39 +3795,38 @@
       'safe-compile-function
       :ns
       *ns*))
-  (def install-function-hook
-   (fn install_function_hook
-     ([_ db d check?]
-       (when-not (= (.getE ^datomic.impl.db.IDatum d) 0)
-         (throw
-           (java.lang.AssertionError.
-             (str
-               "Assert failed: "
-               (pr-str (clojure.core/list 'zero? (clojure.core/list '.getE 'd)))))))
-       (let [id (.getV ^datomic.impl.db.IDatum d)
-             map__12124 (datomic.db/get-entity db id :raw true)
-             map__12124 (if (seq? map__12124)
-                          (if (next map__12124)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12124))
-                            (if (seq map__12124) (first map__12124) {}))
-                          map__12124)
-             ent map__12124
-             key (get map__12124 :db/ident)
-             lang (get map__12124 :db/lang)
-             code (get map__12124 :db/code)]
-         (when check?
-           (when-not (every? identity [key lang code])
-             (error/arg
-               :db.error/invalid-data-function
-               (str
-                 "The entity "
-                 (or key id)
-                 " must specify :db/ident, :db/lang, and :db/code to be installed as a function.")
-               {:entity ent})))
-         (let [code (.replaceAll ^java.lang.String code "momentic" "datomic")
-               f (datomic.db/safe-compile-function db lang code)]
-           (.addElement ^datomic.db.IDbImpl db (datomic.db.Function. id key lang code f)))))))
+  (defn install-function-hook
+    ([_ db d check?]
+      (when-not (= (.getE ^datomic.impl.db.IDatum d) 0)
+        (throw
+          (java.lang.AssertionError.
+            (str
+              "Assert failed: "
+              (pr-str (clojure.core/list 'zero? (clojure.core/list '.getE 'd)))))))
+      (let [id (.getV ^datomic.impl.db.IDatum d)
+            map__12124 (datomic.db/get-entity db id :raw true)
+            map__12124 (if (seq? map__12124)
+                         (if (next map__12124)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12124))
+                           (if (seq map__12124) (first map__12124) {}))
+                         map__12124)
+            ent map__12124
+            key (get map__12124 :db/ident)
+            lang (get map__12124 :db/lang)
+            code (get map__12124 :db/code)]
+        (when check?
+          (when-not (every? identity [key lang code])
+            (error/arg
+              :db.error/invalid-data-function
+              (str
+                "The entity "
+                (or key id)
+                " must specify :db/ident, :db/lang, and :db/code to be installed as a function.")
+              {:entity ent})))
+        (let [code (.replaceAll ^java.lang.String code "momentic" "datomic")
+              f (datomic.db/safe-compile-function db lang code)]
+          (.addElement ^datomic.db.IDbImpl db (datomic.db.Function. id key lang code f))))))
   (reset-meta!
     #'install-function-hook
     (assoc
@@ -3963,15 +3881,14 @@
   (datomic.db/add-hook 14 datomic.db/install-function-hook)
   (datomic.db/add-hook 19 datomic.db/alter-attribute-hook)
   (datomic.db/add-hook 7 datomic.db/system-tx-hook)
-  (def fulltext?
-   (fn fulltext_QMARK_
-     ([db attr]
-       (let [temp__5804__auto__ (datomic.db/resolve-id db attr)]
-         (when temp__5804__auto__
-           (let [attrid temp__5804__auto__
-                 temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db attrid)]
-             (when temp__5804__auto__
-               (let [a temp__5804__auto__] (.-fulltext ^datomic.db.Attribute a)))))))))
+  (defn fulltext?
+    ([db attr]
+      (let [temp__5804__auto__ (datomic.db/resolve-id db attr)]
+        (when temp__5804__auto__
+          (let [attrid temp__5804__auto__
+                temp__5804__auto__ (.elementAt ^datomic.db.IDbImpl db attrid)]
+            (when temp__5804__auto__
+              (let [a temp__5804__auto__] (.-fulltext ^datomic.db.Attribute a))))))))
   (reset-meta!
     #'fulltext?
     (assoc
@@ -4006,24 +3923,23 @@
             (datomic.btset/seek aevt d))))))
   (.setMeta (clojure.lang.RT/var "datomic.db" "with-tx+opts") {:declared true, :column (int 1)})
   (.setMeta (clojure.lang.RT/var "datomic.db" "add-fulltext") {:declared true, :column (int 1)})
-  (def as-of-t
-   (fn as_of_t
-     ([db t_or_date]
-       (if (instance? java.util.Date t_or_date)
-         (let [d (datomic.db/dget
-                   (.seekAVET
-                     ^datomic.db.IDb db
-                     (datomic.db/datum db :a :db/txInstant :v t_or_date)))]
-           (if (and
-                 d
-                 (=
-                   (datomic.db/resolve-id db :db/txInstant)
-                   (long (.getA ^datomic.impl.db.IDatum d))))
-             (if (= (.getV ^datomic.impl.db.IDatum d) t_or_date)
-               (long (.getT ^datomic.impl.db.IDatum d))
-               (long (dec (.getT ^datomic.impl.db.IDatum d))))
-             (:nextT db)))
-         (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date)))))))
+  (defn as-of-t
+    ([db t_or_date]
+      (if (instance? java.util.Date t_or_date)
+        (let [d (datomic.db/dget
+                  (.seekAVET
+                    ^datomic.db.IDb db
+                    (datomic.db/datum db :a :db/txInstant :v t_or_date)))]
+          (if (and
+                d
+                (=
+                  (datomic.db/resolve-id db :db/txInstant)
+                  (long (.getA ^datomic.impl.db.IDatum d))))
+            (if (= (.getV ^datomic.impl.db.IDatum d) t_or_date)
+              (long (.getT ^datomic.impl.db.IDatum d))
+              (long (dec (.getT ^datomic.impl.db.IDatum d))))
+            (:nextT db)))
+        (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date))))))
   (reset-meta!
     #'as-of-t
     (assoc
@@ -4032,22 +3948,21 @@
       'as-of-t
       :ns
       *ns*))
-  (def t-at-or-since
-   (fn t_at_or_since
-     ([db t_or_date]
-       (if (instance? java.util.Date t_or_date)
-         (let [d (datomic.db/dget
-                   (.seekAVET
-                     ^datomic.db.IDb db
-                     (datomic.db/datum db :a :db/txInstant :v t_or_date)))]
-           (if (and
-                 d
-                 (=
-                   (datomic.db/resolve-id db :db/txInstant)
-                   (long (.getA ^datomic.impl.db.IDatum d))))
-             (long (.getT ^datomic.impl.db.IDatum d))
-             (:nextT db)))
-         (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date)))))))
+  (defn t-at-or-since
+    ([db t_or_date]
+      (if (instance? java.util.Date t_or_date)
+        (let [d (datomic.db/dget
+                  (.seekAVET
+                    ^datomic.db.IDb db
+                    (datomic.db/datum db :a :db/txInstant :v t_or_date)))]
+          (if (and
+                d
+                (=
+                  (datomic.db/resolve-id db :db/txInstant)
+                  (long (.getA ^datomic.impl.db.IDatum d))))
+            (long (.getT ^datomic.impl.db.IDatum d))
+            (:nextT db)))
+        (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date))))))
   (reset-meta!
     #'t-at-or-since
     (assoc
@@ -4056,36 +3971,33 @@
       't-at-or-since
       :ns
       *ns*))
-  (def entid-at
-   (fn entid_at
-     ([db partition t_or_date]
-       (let [partition (datomic.db/partbits db partition)
-             t (if (instance? java.util.Date t_or_date)
-                 (let [d (datomic.db/dget
-                           (.seekAVET
-                             ^datomic.db.IDb db
-                             (datomic.db/datum db :a 50 :v t_or_date)))]
-                   (if (and d (= 50 (long (.getA ^datomic.impl.db.IDatum d))))
-                     (long (.getT ^datomic.impl.db.IDatum d))
-                     (:nextT db)))
-                 (let [tpart (datomic.db/eid->part (unchecked-long ^java.lang.Number t_or_date))]
-                   (when-not (or (zero? tpart) (= 3 (long tpart)))
-                     (throw
-                       (java.lang.AssertionError.
-                         (str
-                           "Assert failed: "
-                           "t must be raw t or txid"
-                           "\n"
-                           (pr-str
-                             (clojure.core/list
-                               'or
-                               (clojure.core/list 'zero? 'tpart)
-                               (clojure.core/list '= 'PART_TX 'tpart)))))))
-                   (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date)))))]
-         (long
-           (datomic.db/make-eid
-             (unchecked-long ^java.lang.Number partition)
-             (unchecked-long ^java.lang.Number t)))))))
+  (defn entid-at
+    ([db partition t_or_date]
+      (let [partition (datomic.db/partbits db partition)
+            t (if (instance? java.util.Date t_or_date)
+                (let [d (datomic.db/dget
+                          (.seekAVET ^datomic.db.IDb db (datomic.db/datum db :a 50 :v t_or_date)))]
+                  (if (and d (= 50 (long (.getA ^datomic.impl.db.IDatum d))))
+                    (long (.getT ^datomic.impl.db.IDatum d))
+                    (:nextT db)))
+                (let [tpart (datomic.db/eid->part (unchecked-long ^java.lang.Number t_or_date))]
+                  (when-not (or (zero? tpart) (= 3 (long tpart)))
+                    (throw
+                      (java.lang.AssertionError.
+                        (str
+                          "Assert failed: "
+                          "t must be raw t or txid"
+                          "\n"
+                          (pr-str
+                            (clojure.core/list
+                              'or
+                              (clojure.core/list 'zero? 'tpart)
+                              (clojure.core/list '= 'PART_TX 'tpart)))))))
+                  (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date)))))]
+        (long
+          (datomic.db/make-eid
+            (unchecked-long ^java.lang.Number partition)
+            (unchecked-long ^java.lang.Number t))))))
   (reset-meta!
     #'entid-at
     (assoc
@@ -4095,8 +4007,7 @@
       'entid-at
       :ns
       *ns*))
-  (def invoke
-   (fn invoke ([db eid_or_ident & args] (apply (.getFn ^datomic.db.IDb db eid_or_ident) args))))
+  (defn invoke ([db eid_or_ident & args] (apply (.getFn ^datomic.db.IDb db eid_or_ident) args)))
   (reset-meta!
     #'invoke
     (assoc
@@ -4394,21 +4305,20 @@
   (reset-meta!
     #'on-prem-only-vts
     (assoc {:private true, :column (int 1)} :name 'on-prem-only-vts :ns *ns*))
-  (def cloud-compat-validator
-   (fn cloud_compat_validator
-     ([db d]
-       (let [a (.a ^datomic.Datom d)
-             temp__5802__auto__ (or
-                                  (datomic.db/on-prem-only-aids a)
-                                  (and
-                                    (= 40 a)
-                                    (datomic.db/on-prem-only-vts (.v ^datomic.Datom d))))]
-         (if temp__5802__auto__
-           (let [problem temp__5802__auto__]
-             (error/arg
-               :db.error/not-supported-in-cloud
-               (str (.ident ^datomic.Database db problem) " is not supported in Datomic Cloud.")))
-           true)))))
+  (defn cloud-compat-validator
+    ([db d]
+      (let [a (.a ^datomic.Datom d)
+            temp__5802__auto__ (or
+                                 (datomic.db/on-prem-only-aids a)
+                                 (and
+                                   (= 40 a)
+                                   (datomic.db/on-prem-only-vts (.v ^datomic.Datom d))))]
+        (if temp__5802__auto__
+          (let [problem temp__5802__auto__]
+            (error/arg
+              :db.error/not-supported-in-cloud
+              (str (.ident ^datomic.Database db problem) " is not supported in Datomic Cloud.")))
+          true))))
   (reset-meta!
     #'cloud-compat-validator
     (assoc
@@ -4433,63 +4343,62 @@
       'create-cloud-compat-validator
       :ns
       *ns*))
-  (def filter-assess-tx-datoms
-   (fn filter_assess_tx_datoms
-     ([db check_installs? datoms]
-       (let [p0 (datomic.db/create-schema-validator db)
-             p1 (datomic.db/create-deduper)
-             p2 (datomic.db/create-op-validator db)
-             p3 (datomic.db/create-card-one-validator db)
-             p4 (datomic.db/create-unique-value-validator db)
-             p5 (datomic.db/create-cloud-compat-validator db)
-             result (filterv
-                      (fn fn__12228
-                        ([p1__12227#]
-                          (and
-                            (^clojure.lang.IFn p0 p1__12227#)
-                            (^clojure.lang.IFn p1 p1__12227#)
-                            (^clojure.lang.IFn p2 p1__12227#)
-                            (^clojure.lang.IFn p3 p1__12227#)
-                            (^clojure.lang.IFn p4 p1__12227#)
-                            (^clojure.lang.IFn p5 p1__12227#))))
-                      datoms)
-             result (reduce
-                      (fn fn__12235
-                        ([result aid]
-                          (let [hook_attr (if (datomic.db/attribute db aid) 19 13)]
-                            (conj
-                              result
-                              (datomic.db/asserting-datum
-                                0
-                                hook_attr
-                                aid
-                                (.getT (first result)))))))
-                      result
-                      (sort (datomic.db/attrs-missing-hooks db result)))]
-         (when check_installs?
-           (let [temp__5804__auto__ (datomic.db/new-ents-not-installed db result)]
-             (when temp__5804__auto__
-               (let [es temp__5804__auto__]
-                 (error/argd
-                   :db.error/schema-without-install
-                   "Only schema components can be installed in partition :db.part/db"
-                   {:datoms
-                    (mapv
-                      (partial datomic.db/datom-error-desc db)
-                      (filterv
-                        (fn fn__12238
-                          ([p__12237]
-                            (let [map__12239 p__12237
-                                  map__12239 (if (seq? map__12239)
-                                               (if (next map__12239)
-                                                 (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                   (to-array map__12239))
-                                                 (if (seq map__12239) (first map__12239) {}))
-                                               map__12239)
-                                  e (get map__12239 :e)]
-                              (contains? es e))))
-                        result))})))))
-         result))))
+  (defn filter-assess-tx-datoms
+    ([db check_installs? datoms]
+      (let [p0 (datomic.db/create-schema-validator db)
+            p1 (datomic.db/create-deduper)
+            p2 (datomic.db/create-op-validator db)
+            p3 (datomic.db/create-card-one-validator db)
+            p4 (datomic.db/create-unique-value-validator db)
+            p5 (datomic.db/create-cloud-compat-validator db)
+            result (filterv
+                     (fn fn__12228
+                       ([p1__12227#]
+                         (and
+                           (^clojure.lang.IFn p0 p1__12227#)
+                           (^clojure.lang.IFn p1 p1__12227#)
+                           (^clojure.lang.IFn p2 p1__12227#)
+                           (^clojure.lang.IFn p3 p1__12227#)
+                           (^clojure.lang.IFn p4 p1__12227#)
+                           (^clojure.lang.IFn p5 p1__12227#))))
+                     datoms)
+            result (reduce
+                     (fn fn__12235
+                       ([result aid]
+                         (let [hook_attr (if (datomic.db/attribute db aid) 19 13)]
+                           (conj
+                             result
+                             (datomic.db/asserting-datum
+                               0
+                               hook_attr
+                               aid
+                               (.getT (first result)))))))
+                     result
+                     (sort (datomic.db/attrs-missing-hooks db result)))]
+        (when check_installs?
+          (let [temp__5804__auto__ (datomic.db/new-ents-not-installed db result)]
+            (when temp__5804__auto__
+              (let [es temp__5804__auto__]
+                (error/argd
+                  :db.error/schema-without-install
+                  "Only schema components can be installed in partition :db.part/db"
+                  {:datoms
+                   (mapv
+                     (partial datomic.db/datom-error-desc db)
+                     (filterv
+                       (fn fn__12238
+                         ([p__12237]
+                           (let [map__12239 p__12237
+                                 map__12239 (if (seq? map__12239)
+                                              (if (next map__12239)
+                                                (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                  (to-array map__12239))
+                                                (if (seq map__12239) (first map__12239) {}))
+                                              map__12239)
+                                 e (get map__12239 :e)]
+                             (contains? es e))))
+                       result))})))))
+        result)))
   (reset-meta!
     #'filter-assess-tx-datoms
     (assoc
@@ -4551,16 +4460,15 @@
   (reset-meta!
     #'trim-log
     (assoc {:arglists (clojure.core/list ['memlog 't]), :column (int 1)} :name 'trim-log :ns *ns*))
-  (def retracts?
-   (fn retracts_QMARK_
-     ([d1 d2]
-       (and
-         (not (.added ^datomic.Datom d1))
-         (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
-         (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
-         (zero? (common/compare (.v ^datomic.Datom d1) (.v ^datomic.Datom d2)))
-         (.added ^datomic.Datom d2)
-         (< (.tx ^datomic.Datom d2) (.tx ^datomic.Datom d1))))))
+  (defn retracts?
+    ([d1 d2]
+      (and
+        (not (.added ^datomic.Datom d1))
+        (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
+        (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
+        (zero? (common/compare (.v ^datomic.Datom d1) (.v ^datomic.Datom d2)))
+        (.added ^datomic.Datom d2)
+        (< (.tx ^datomic.Datom d2) (.tx ^datomic.Datom d1)))))
   (reset-meta!
     #'retracts?
     (assoc
@@ -4571,16 +4479,15 @@
       'retracts?
       :ns
       *ns*))
-  (def updates-v?
-   (fn updates_v_QMARK_
-     ([d1 d2]
-       (and
-         (.added ^datomic.Datom d1)
-         (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
-         (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
-         (not (zero? (common/compare (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))))
-         (.added ^datomic.Datom d2)
-         (< (.tx ^datomic.Datom d2) (.tx ^datomic.Datom d1))))))
+  (defn updates-v?
+    ([d1 d2]
+      (and
+        (.added ^datomic.Datom d1)
+        (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
+        (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
+        (not (zero? (common/compare (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))))
+        (.added ^datomic.Datom d2)
+        (< (.tx ^datomic.Datom d2) (.tx ^datomic.Datom d1)))))
   (reset-meta!
     #'updates-v?
     (assoc
@@ -4631,22 +4538,21 @@
    #{:dedup-tx-ms :tx-fn-ms :dedup-pf-ms :comp-tx-ms :res-pf-ms :ucheck-tx-ms :ucheck-pf-ms
      :comp-pf-ms :res-tx-ms})
   (reset-meta! #'timing-key? (assoc {:column (int 1)} :name 'timing-key? :ns *ns*))
-  (def summarize-tx-stats
-   (fn summarize_tx_stats
-     ([tx_stat_registers]
-       (persistent!
-         (reduce-kv
-           (fn fn__12286
-             ([m k adder]
-               (assoc!
-                 m
-                 k
-                 (let [G__12287 (.sum ^java.util.concurrent.atomic.LongAdder adder)]
-                   (if (datomic.db/timing-key? k)
-                     (java.lang.Double/valueOf (double (monitor/ns->ms G__12287)))
-                     (long G__12287))))))
-           (transient {})
-           tx_stat_registers)))))
+  (defn summarize-tx-stats
+    ([tx_stat_registers]
+      (persistent!
+        (reduce-kv
+          (fn fn__12286
+            ([m k adder]
+              (assoc!
+                m
+                k
+                (let [G__12287 (.sum ^java.util.concurrent.atomic.LongAdder adder)]
+                  (if (datomic.db/timing-key? k)
+                    (java.lang.Double/valueOf (double (monitor/ns->ms G__12287)))
+                    (long G__12287))))))
+          (transient {})
+          tx_stat_registers))))
   (reset-meta!
     #'summarize-tx-stats
     (assoc
@@ -4655,8 +4561,7 @@
       'summarize-tx-stats
       :ns
       *ns*))
-  (def long-add!
-   (fn long_add_BANG_ ([a ^long v] (.add ^java.util.concurrent.atomic.LongAdder a (long v)) nil)))
+  (defn long-add! ([a ^long v] (.add ^java.util.concurrent.atomic.LongAdder a (long v)) nil))
   (reset-meta!
     #'long-add!
     (assoc
@@ -5134,49 +5039,48 @@
     (^long basisT [this] basisT)
     (^java.lang.String id [this] (str id)))
   (clojure.core/import 'datomic.db.Db)
-  (def ->Db
-   (fn __GT_Db
-     ([id
-       memidx
-       indexing
-       mid_index
-       index
-       history
-       memlog
-       basisT
-       nextT
-       indexBasisT
-       indexingNextT
-       elements
-       keys
-       ids
-       index_root_id
-       index_rev
-       asOfT
-       sinceT
-       raw
-       filt]
-       (datomic.db.Db.
-         id
-         memidx
-         indexing
-         mid_index
-         index
-         history
-         memlog
-         (unchecked-long ^java.lang.Number basisT)
-         (unchecked-long ^java.lang.Number nextT)
-         (unchecked-long ^java.lang.Number indexBasisT)
-         indexingNextT
-         elements
-         keys
-         ids
-         index_root_id
-         index_rev
-         asOfT
-         sinceT
-         raw
-         filt))))
+  (defn ->Db
+    ([id
+      memidx
+      indexing
+      mid_index
+      index
+      history
+      memlog
+      basisT
+      nextT
+      indexBasisT
+      indexingNextT
+      elements
+      keys
+      ids
+      index_root_id
+      index_rev
+      asOfT
+      sinceT
+      raw
+      filt]
+      (datomic.db.Db.
+        id
+        memidx
+        indexing
+        mid_index
+        index
+        history
+        memlog
+        (unchecked-long ^java.lang.Number basisT)
+        (unchecked-long ^java.lang.Number nextT)
+        (unchecked-long ^java.lang.Number indexBasisT)
+        indexingNextT
+        elements
+        keys
+        ids
+        index_root_id
+        index_rev
+        asOfT
+        sinceT
+        raw
+        filt)))
   (reset-meta!
     #'->Db
     (assoc
@@ -5277,7 +5181,7 @@
           (select-keys db [:id :basisT :indexBasisT :index-root-id :asOfT :sinceT :raw])
           :type
           'datomic.db.Db))))
-  (def assertion? (fn assertion_QMARK_ ([d] (.isAssertion ^datomic.impl.db.IDatum d))))
+  (defn assertion? ([d] (.isAssertion ^datomic.impl.db.IDatum d)))
   (reset-meta!
     #'assertion?
     (assoc
@@ -5288,23 +5192,22 @@
       'assertion?
       :ns
       *ns*))
-  (def ident-setting-datoms
-   (fn ident_setting_datoms
-     ([db index]
-       (sort-by
-         (fn fn__12451 ([p1__12450#] (long (.getTx ^datomic.impl.db.IDatum p1__12450#))))
-         (iter/iter-seq
-           (iter/take-while
-             (fn fn__12453 ([p1__12449#] (= 10 (long (.getA ^datomic.impl.db.IDatum p1__12449#)))))
-             (iter/filter
-               datomic.db/assertion?
-               (iter/merge-iters
-                 datomic.db/aevt-cmp
-                 (.seek (.-aevt ^datomic.db.IndexSet index) (datomic.db/datum db :a 10))
-                 (when (and (:mid-index db) (.-aevt (:mid-index db)))
-                   (.seek (.-aevt (:mid-index db)) (datomic.db/datum db :a 10)))
-                 (when (and (:history db) (.-aevt (:history db)))
-                   (.seek (.-aevt (:history db)) (datomic.db/datum db :a 10)))))))))))
+  (defn ident-setting-datoms
+    ([db index]
+      (sort-by
+        (fn fn__12451 ([p1__12450#] (long (.getTx ^datomic.impl.db.IDatum p1__12450#))))
+        (iter/iter-seq
+          (iter/take-while
+            (fn fn__12453 ([p1__12449#] (= 10 (long (.getA ^datomic.impl.db.IDatum p1__12449#)))))
+            (iter/filter
+              datomic.db/assertion?
+              (iter/merge-iters
+                datomic.db/aevt-cmp
+                (.seek (.-aevt ^datomic.db.IndexSet index) (datomic.db/datum db :a 10))
+                (when (and (:mid-index db) (.-aevt (:mid-index db)))
+                  (.seek (.-aevt (:mid-index db)) (datomic.db/datum db :a 10)))
+                (when (and (:history db) (.-aevt (:history db)))
+                  (.seek (.-aevt (:history db)) (datomic.db/datum db :a 10))))))))))
   (reset-meta!
     #'ident-setting-datoms
     (assoc
@@ -5315,44 +5218,43 @@
       'ident-setting-datoms
       :ns
       *ns*))
-  (def run-hooks
-   (fn run_hooks
-     ([db index]
-       (let [fhooks (assoc (assoc datomic.db/hooks 19 datomic.db/install-attribute-hook) 10 nil)
-             ret (reduce
-                   (fn fn__12460 ([db datom] (datomic.db/key-hook nil db datom false)))
-                   db
-                   (datomic.db/ident-setting-datoms db index))
-             ret (datomic.db/update-schema-level ret)
-             ret (reduce
-                   (fn fn__12463
-                     ([db p__12462]
-                       (let [vec__12464 p__12462
-                             attrid (nth vec__12464 (unchecked-int 0) nil)
-                             f (nth vec__12464 (unchecked-int 1) nil)]
-                         (loop [db db
-                                iter (iter/filter
-                                       datomic.db/assertion?
-                                       (iter/merge-iters
-                                         datomic.db/aevt-cmp
-                                         (.seek
-                                           (.-aevt ^datomic.db.IndexSet index)
-                                           (datomic.db/datum db :a attrid))
-                                         (when (and (:mid-index db) (.-aevt (:mid-index db)))
-                                           (.seek
-                                             (.-aevt (:mid-index db))
-                                             (datomic.db/datum db :a attrid)))))]
-                           (if (and iter (= attrid (long (.getA (datomic.db/dget iter)))))
-                             (recur
-                               (^clojure.lang.IFn f nil db (datomic.db/dget iter) false)
-                               (iter/inext iter))
-                             db)))))
-                   ret
-                   (keep-indexed
-                     (fn fn__12470
-                       ([p1__12459# p2__12458#] (when p2__12458# [p1__12459# p2__12458#])))
-                     fhooks))]
-         ret))))
+  (defn run-hooks
+    ([db index]
+      (let [fhooks (assoc (assoc datomic.db/hooks 19 datomic.db/install-attribute-hook) 10 nil)
+            ret (reduce
+                  (fn fn__12460 ([db datom] (datomic.db/key-hook nil db datom false)))
+                  db
+                  (datomic.db/ident-setting-datoms db index))
+            ret (datomic.db/update-schema-level ret)
+            ret (reduce
+                  (fn fn__12463
+                    ([db p__12462]
+                      (let [vec__12464 p__12462
+                            attrid (nth vec__12464 (unchecked-int 0) nil)
+                            f (nth vec__12464 (unchecked-int 1) nil)]
+                        (loop [db db
+                               iter (iter/filter
+                                      datomic.db/assertion?
+                                      (iter/merge-iters
+                                        datomic.db/aevt-cmp
+                                        (.seek
+                                          (.-aevt ^datomic.db.IndexSet index)
+                                          (datomic.db/datum db :a attrid))
+                                        (when (and (:mid-index db) (.-aevt (:mid-index db)))
+                                          (.seek
+                                            (.-aevt (:mid-index db))
+                                            (datomic.db/datum db :a attrid)))))]
+                          (if (and iter (= attrid (long (.getA (datomic.db/dget iter)))))
+                            (recur
+                              (^clojure.lang.IFn f nil db (datomic.db/dget iter) false)
+                              (iter/inext iter))
+                            db)))))
+                  ret
+                  (keep-indexed
+                    (fn fn__12470
+                      ([p1__12459# p2__12458#] (when p2__12458# [p1__12459# p2__12458#])))
+                    fhooks))]
+        ret)))
   (reset-meta!
     #'run-hooks
     (assoc
@@ -5361,39 +5263,38 @@
       'run-hooks
       :ns
       *ns*))
-  (def find-last-tx
-   (fn find_last_tx
-     (^long [^long nextT index mid_index]
-       (let [d (some
-                 identity
-                 (map
-                   (fn fn__12474
-                     ([t]
-                       (let [eid (datomic.db/make-eid 3 (unchecked-long ^java.lang.Number t))
-                             d (datomic.db/asserting-datum eid 50 nil eid)
-                             G__12475 (iter/merge-iters
-                                        datomic.db/eavt-cmp
-                                        (datomic.btset/seek (.-eavt ^datomic.db.IndexSet index) d)
-                                        (datomic.btset/seek
-                                          (and mid_index (.-eavt ^datomic.db.IndexSet mid_index))
-                                          d))]
-                         (some->
-                           (when-not (nil? G__12475)
-                             (iter/take-while
-                               (fn fn__12476
-                                 ([p1__12473#]
-                                   (and
-                                     (=
-                                       (long eid)
-                                       (long (.getE ^datomic.impl.db.IDatum p1__12473#)))
-                                     (= 50 (long (.getA ^datomic.impl.db.IDatum p1__12473#)))
-                                     (=
-                                       (long eid)
-                                       (long (.getTx ^datomic.impl.db.IDatum p1__12473#))))))
-                               G__12475))
-                           (.get)))))
-                   (range (long (dec nextT)) 0 -1)))]
-         (.getT ^datomic.impl.db.IDatum d)))))
+  (defn find-last-tx
+    (^long [^long nextT index mid_index]
+      (let [d (some
+                identity
+                (map
+                  (fn fn__12474
+                    ([t]
+                      (let [eid (datomic.db/make-eid 3 (unchecked-long ^java.lang.Number t))
+                            d (datomic.db/asserting-datum eid 50 nil eid)
+                            G__12475 (iter/merge-iters
+                                       datomic.db/eavt-cmp
+                                       (datomic.btset/seek (.-eavt ^datomic.db.IndexSet index) d)
+                                       (datomic.btset/seek
+                                         (and mid_index (.-eavt ^datomic.db.IndexSet mid_index))
+                                         d))]
+                        (some->
+                          (when-not (nil? G__12475)
+                            (iter/take-while
+                              (fn fn__12476
+                                ([p1__12473#]
+                                  (and
+                                    (=
+                                      (long eid)
+                                      (long (.getE ^datomic.impl.db.IDatum p1__12473#)))
+                                    (= 50 (long (.getA ^datomic.impl.db.IDatum p1__12473#)))
+                                    (=
+                                      (long eid)
+                                      (long (.getTx ^datomic.impl.db.IDatum p1__12473#))))))
+                              G__12475))
+                          (.get)))))
+                  (range (long (dec nextT)) 0 -1)))]
+        (.getT ^datomic.impl.db.IDatum d))))
   (reset-meta!
     #'find-last-tx
     (assoc
@@ -5429,42 +5330,41 @@
       'bootstrap-maybe-resolve
       :ns
       *ns*))
-  (def add-upgrade-data
-   (fn add_upgrade_data
-     ([db system_data]
-       (let [map__12492 db
-             map__12492 (if (seq? map__12492)
-                          (if (next map__12492)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12492))
-                            (if (seq map__12492) (first map__12492) {}))
-                          map__12492)
-             basisT (get map__12492 :basisT)
-             nextT (get map__12492 :nextT)
-             epoch (java.util.Date. 0)]
-         (assoc
-           (reduce
-             (fn fn__12494
-               ([db p__12493]
-                 (let [vec__12495 p__12493
-                       k (nth vec__12495 (unchecked-int 0) nil)
-                       data (nth vec__12495 (unchecked-int 1) nil)]
-                   (if (let [G__12498 (datomic.db/resolve-id db k)]
-                         (when-not (nil? G__12498) (.elementAt ^datomic.db.IDbImpl db G__12498)))
-                     db
-                     (:db-after
-                       (.with
-                         (assoc db :basisT -1 :nextT 0)
-                         (cons
-                           #:db{:id (DbId/create {:idx -1000001, :part :db.part/tx}),
-                                :txInstant epoch}
-                           data)))))))
-             db
-             (partition 2 system_data))
-           :basisT
-           basisT
-           :nextT
-           nextT)))))
+  (defn add-upgrade-data
+    ([db system_data]
+      (let [map__12492 db
+            map__12492 (if (seq? map__12492)
+                         (if (next map__12492)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12492))
+                           (if (seq map__12492) (first map__12492) {}))
+                         map__12492)
+            basisT (get map__12492 :basisT)
+            nextT (get map__12492 :nextT)
+            epoch (java.util.Date. 0)]
+        (assoc
+          (reduce
+            (fn fn__12494
+              ([db p__12493]
+                (let [vec__12495 p__12493
+                      k (nth vec__12495 (unchecked-int 0) nil)
+                      data (nth vec__12495 (unchecked-int 1) nil)]
+                  (if (let [G__12498 (datomic.db/resolve-id db k)]
+                        (when-not (nil? G__12498) (.elementAt ^datomic.db.IDbImpl db G__12498)))
+                    db
+                    (:db-after
+                      (.with
+                        (assoc db :basisT -1 :nextT 0)
+                        (cons
+                          #:db{:id (DbId/create {:idx -1000001, :part :db.part/tx}),
+                               :txInstant epoch}
+                          data)))))))
+            db
+            (partition 2 system_data))
+          :basisT
+          basisT
+          :nextT
+          nextT))))
   (reset-meta!
     #'add-upgrade-data
     (assoc
@@ -5485,58 +5385,57 @@
       'finish-init
       :ns
       *ns*))
-  (def db
-   (fn db
-     ([id p__12502]
-       (let [map__12503 p__12502
-             map__12503 (if (seq? map__12503)
-                          (if (next map__12503)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12503))
-                            (if (seq map__12503) (first map__12503) {}))
-                          map__12503)
-             root_id (get map__12503 :root-id)
-             birth_level (get map__12503 :birth-level)
-             nextT (get map__12503 :nextT)
-             mid_index (get map__12503 :mid-index)
-             schema_level (get map__12503 :schema-level)
-             index (get map__12503 :index)
-             basisT (get map__12503 :basisT)
-             history (get map__12503 :history)
-             rev (get map__12503 :rev)]
-         (deref datomic.db/load-builtins)
-         (let [basisT (if basisT
-                        basisT
-                        (long
-                          (datomic.db/find-last-tx
-                            (unchecked-long ^java.lang.Number nextT)
-                            index
-                            mid_index)))
-               db (datomic.db.Db.
-                    id
-                    datomic.db/mem-index-set
-                    nil
-                    mid_index
-                    index
-                    history
-                    (datomic.db/memlog)
-                    (unchecked-long ^java.lang.Number basisT)
-                    (unchecked-long ^java.lang.Number nextT)
-                    (unchecked-long ^java.lang.Number basisT)
-                    nil
-                    []
-                    {}
-                    {}
-                    root_id
-                    rev
-                    nil
-                    nil
-                    nil
-                    nil)]
-           (datomic.db/finish-init
-             (datomic.db/run-hooks
-               (assoc db :schema-level schema_level :birth-level birth_level)
-               index)))))))
+  (defn db
+    ([id p__12502]
+      (let [map__12503 p__12502
+            map__12503 (if (seq? map__12503)
+                         (if (next map__12503)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12503))
+                           (if (seq map__12503) (first map__12503) {}))
+                         map__12503)
+            root_id (get map__12503 :root-id)
+            birth_level (get map__12503 :birth-level)
+            nextT (get map__12503 :nextT)
+            mid_index (get map__12503 :mid-index)
+            schema_level (get map__12503 :schema-level)
+            index (get map__12503 :index)
+            basisT (get map__12503 :basisT)
+            history (get map__12503 :history)
+            rev (get map__12503 :rev)]
+        (deref datomic.db/load-builtins)
+        (let [basisT (if basisT
+                       basisT
+                       (long
+                         (datomic.db/find-last-tx
+                           (unchecked-long ^java.lang.Number nextT)
+                           index
+                           mid_index)))
+              db (datomic.db.Db.
+                   id
+                   datomic.db/mem-index-set
+                   nil
+                   mid_index
+                   index
+                   history
+                   (datomic.db/memlog)
+                   (unchecked-long ^java.lang.Number basisT)
+                   (unchecked-long ^java.lang.Number nextT)
+                   (unchecked-long ^java.lang.Number basisT)
+                   nil
+                   []
+                   {}
+                   {}
+                   root_id
+                   rev
+                   nil
+                   nil
+                   nil
+                   nil)]
+          (datomic.db/finish-init
+            (datomic.db/run-hooks
+              (assoc db :schema-level schema_level :birth-level birth_level)
+              index))))))
   (reset-meta!
     #'db
     (assoc
@@ -5554,12 +5453,11 @@
   (reset-meta!
     #'unfiltered
     (assoc {:arglists (clojure.core/list ['db]), :column (int 1)} :name 'unfiltered :ns *ns*))
-  (def has-memory-index?
-   (fn has_memory_index_QMARK_
-     ([db]
-       (or
-         (not (nil? (.-indexing ^datomic.db.Db db)))
-         (not (= datomic.db/mem-index-set (.-memidx ^datomic.db.Db db)))))))
+  (defn has-memory-index?
+    ([db]
+      (or
+        (not (nil? (.-indexing ^datomic.db.Db db)))
+        (not (= datomic.db/mem-index-set (.-memidx ^datomic.db.Db db))))))
   (reset-meta!
     #'has-memory-index?
     (assoc
@@ -5568,22 +5466,21 @@
       'has-memory-index?
       :ns
       *ns*))
-  (def recalc-elements
-   (fn recalc_elements
-     ([db basisT]
-       (let [basis_db (.asOf ^datomic.Database db basisT)]
-         (assoc
-           db
-           :elements
-           (mapv
-             (fn fn__12508
-               ([e]
-                 (if (instance? datomic.db.Attribute e)
-                   (let [ent (.entity ^datomic.Database basis_db (:id e))
-                         has_attr? (seq (:db.install/_attribute ent))]
-                     (if has_attr? (assoc e :storageHasAVET (datomic.db/needs-avet? ent)) e))
-                   e)))
-             (:elements db)))))))
+  (defn recalc-elements
+    ([db basisT]
+      (let [basis_db (.asOf ^datomic.Database db basisT)]
+        (assoc
+          db
+          :elements
+          (mapv
+            (fn fn__12508
+              ([e]
+                (if (instance? datomic.db.Attribute e)
+                  (let [ent (.entity ^datomic.Database basis_db (:id e))
+                        has_attr? (seq (:db.install/_attribute ent))]
+                    (if has_attr? (assoc e :storageHasAVET (datomic.db/needs-avet? ent)) e))
+                  e)))
+            (:elements db))))))
   (reset-meta!
     #'recalc-elements
     (assoc
@@ -5592,19 +5489,18 @@
       'recalc-elements
       :ns
       *ns*))
-  (def prepare-for-indexing
-   (fn prepare_for_indexing
-     ([db]
-       (if (.-indexing ^datomic.db.Db db)
-         db
-         (assoc
-           db
-           :indexing
-           (.-memidx ^datomic.db.Db db)
-           :memidx
-           datomic.db/mem-index-set
-           :indexingNextT
-           (:nextT db))))))
+  (defn prepare-for-indexing
+    ([db]
+      (if (.-indexing ^datomic.db.Db db)
+        db
+        (assoc
+          db
+          :indexing
+          (.-memidx ^datomic.db.Db db)
+          :memidx
+          datomic.db/mem-index-set
+          :indexingNextT
+          (:nextT db)))))
   (reset-meta!
     #'prepare-for-indexing
     (assoc
@@ -5613,55 +5509,54 @@
       'prepare-for-indexing
       :ns
       *ns*))
-  (def complete-indexing
-   (fn complete_indexing
-     ([db p__12512]
-       (let [map__12513 p__12512
-             map__12513 (if (seq? map__12513)
-                          (if (next map__12513)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12513))
-                            (if (seq map__12513) (first map__12513) {}))
-                          map__12513)
-             new_index map__12513
-             root_id (get map__12513 :root-id)
-             index (get map__12513 :index)
-             mid_index (get map__12513 :mid-index)
-             history (get map__12513 :history)
-             basisT (get map__12513 :basisT)
-             nextT (get map__12513 :nextT)
-             rev (get map__12513 :rev)]
-         (if (and (.-indexing ^datomic.db.Db db) (> rev (.-index-rev ^datomic.db.Db db)))
-           (if (= (.-indexingNextT ^datomic.db.Db db) nextT)
-             (datomic.db/recalc-elements
-               (assoc
-                 db
-                 :indexing
-                 nil
-                 :indexingNextT
-                 nil
-                 :memlog
-                 (datomic.db/trim-log (.-memlog ^datomic.db.Db db) basisT)
-                 :index
-                 index
-                 :mid-index
-                 mid_index
-                 :indexBasisT
-                 basisT
-                 :history
-                 history
-                 :index-root-id
-                 root_id
-                 :index-rev
-                 rev)
-               basisT)
-             (do
-               (throw
-                 (ex-info
-                   "Indexing surpassed by another indexing process"
-                   {:local-index-basis (:indexBasisT db), :stored-index-basis basisT}))
-               nil))
-           db)))))
+  (defn complete-indexing
+    ([db p__12512]
+      (let [map__12513 p__12512
+            map__12513 (if (seq? map__12513)
+                         (if (next map__12513)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12513))
+                           (if (seq map__12513) (first map__12513) {}))
+                         map__12513)
+            new_index map__12513
+            root_id (get map__12513 :root-id)
+            index (get map__12513 :index)
+            mid_index (get map__12513 :mid-index)
+            history (get map__12513 :history)
+            basisT (get map__12513 :basisT)
+            nextT (get map__12513 :nextT)
+            rev (get map__12513 :rev)]
+        (if (and (.-indexing ^datomic.db.Db db) (> rev (.-index-rev ^datomic.db.Db db)))
+          (if (= (.-indexingNextT ^datomic.db.Db db) nextT)
+            (datomic.db/recalc-elements
+              (assoc
+                db
+                :indexing
+                nil
+                :indexingNextT
+                nil
+                :memlog
+                (datomic.db/trim-log (.-memlog ^datomic.db.Db db) basisT)
+                :index
+                index
+                :mid-index
+                mid_index
+                :indexBasisT
+                basisT
+                :history
+                history
+                :index-root-id
+                root_id
+                :index-rev
+                rev)
+              basisT)
+            (do
+              (throw
+                (ex-info
+                  "Indexing surpassed by another indexing process"
+                  {:local-index-basis (:indexBasisT db), :stored-index-basis basisT}))
+              nil))
+          db))))
   (reset-meta!
     #'complete-indexing
     (assoc
@@ -5674,158 +5569,156 @@
       'complete-indexing
       :ns
       *ns*))
-  (def accept-index
-   (fn accept_index
-     ([db p__12517]
-       (let [map__12518 p__12517
-             map__12518 (if (seq? map__12518)
-                          (if (next map__12518)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12518))
-                            (if (seq map__12518) (first map__12518) {}))
-                          map__12518)
-             root_id (get map__12518 :root-id)
-             mid_index (get map__12518 :mid-index)
-             index (get map__12518 :index)
-             history (get map__12518 :history)
-             basisT (get map__12518 :basisT)
-             nextT (get map__12518 :nextT)
-             rev (get map__12518 :rev)]
-         (when-not (nil? (.-indexing ^datomic.db.Db db))
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 (pr-str (clojure.core/list 'nil? (clojure.core/list '.indexing 'db)))))))
-         (if (> rev (.-index-rev ^datomic.db.Db db))
-           (let [m_12519 {:event :db/accept-index, :basis-t :basisT}
-                 ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.db")]
-                                   (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                     (.info
-                                       ^org.slf4j.Logger logger
-                                       (logger/process (assoc m_12519 :phase :begin))))
-                                   nil)
-                 start__8553__auto__ (java.lang.System/nanoTime)
-                 result__8554__auto__ (try
-                                        {:returned
-                                         (let [new_memidx datomic.db/mem-index-set
-                                               adopt (fn adopt
-                                                       ([nidx idx]
-                                                         (loop [nidx nidx
-                                                                iter (datomic.btset/seek idx)]
-                                                           (let 
-                                                             [temp__5802__auto__
-                                                              (datomic.db/dget iter)]
-                                                             (if
-                                                               temp__5802__auto__
-                                                               (let 
-                                                                 [d temp__5802__auto__]
-                                                                 (recur
-                                                                   (if
-                                                                     (<
-                                                                       (.getT
-                                                                         ^datomic.impl.db.IDatum d)
-                                                                       nextT)
-                                                                     nidx
-                                                                     (conj nidx d))
-                                                                   (iter/inext iter)))
-                                                               nidx)))))
-                                               iset (.-memidx ^datomic.db.Db db)
-                                               eavtr (future-call
-                                                       (fn fn__12526
-                                                         ([]
-                                                           (^clojure.lang.IFn adopt
-                                                             (.-eavt
-                                                               ^datomic.db.IndexSet new_memidx)
-                                                             (.-eavt ^datomic.db.IndexSet iset)))))
-                                               avetr (future-call
-                                                       (fn fn__12528
-                                                         ([]
-                                                           (^clojure.lang.IFn adopt
-                                                             (.-avet
-                                                               ^datomic.db.IndexSet new_memidx)
-                                                             (.-avet ^datomic.db.IndexSet iset)))))
-                                               aevtr (future-call
-                                                       (fn fn__12530
-                                                         ([]
-                                                           (^clojure.lang.IFn adopt
-                                                             (.-aevt
-                                                               ^datomic.db.IndexSet new_memidx)
-                                                             (.-aevt ^datomic.db.IndexSet iset)))))
-                                               raetr (future-call
-                                                       (fn fn__12532
-                                                         ([]
-                                                           (^clojure.lang.IFn adopt
-                                                             (.-raet
-                                                               ^datomic.db.IndexSet new_memidx)
-                                                             (.-raet ^datomic.db.IndexSet iset)))))
-                                               eavt (deref eavtr)
-                                               avet (deref avetr)
-                                               aevt (deref aevtr)
-                                               raet (deref raetr)
-                                               ft_basis (assoc
-                                                          db
-                                                          :memidx
-                                                          (datomic.db.IndexSet.
-                                                            eavt
-                                                            avet
-                                                            aevt
-                                                            raet
-                                                            nil)
-                                                          :memlog
-                                                          (datomic.db/trim-log
-                                                            (.-memlog ^datomic.db.Db db)
-                                                            basisT)
-                                                          :index
-                                                          index
-                                                          :mid-index
-                                                          mid_index
-                                                          :indexBasisT
-                                                          basisT
-                                                          :history
-                                                          history
-                                                          :index-root-id
-                                                          root_id
-                                                          :index-rev
-                                                          rev)
-                                               ft (ftindex/update-fulltext
-                                                    nil
-                                                    (iter/iter-seq
-                                                      (iter/filter
-                                                        (fn fn__12534
-                                                          ([p1__12516#]
-                                                            (datomic.db/fulltext?
-                                                              ft_basis
-                                                              (java.lang.Integer/valueOf
-                                                                (int
-                                                                  (.getA
-                                                                    ^datomic.impl.db.IDatum p1__12516#))))))
-                                                        (datomic.btset/seek aevt))))]
-                                           (datomic.db/recalc-elements
-                                             (assoc
-                                               ft_basis
-                                               :memidx
-                                               (datomic.db.IndexSet. eavt avet aevt raet ft))
-                                             basisT))}
-                                        (catch
-                                          java.lang.Throwable
-                                          t__8555__auto__
-                                          {:threw t__8555__auto__}))
-                 elapsed_12520 (- (java.lang.System/nanoTime) start__8553__auto__)
-                 msec_12521 (logger/format-as-msec (long elapsed_12520))]
-             (monitor/add-stat :AcceptIndexMsec msec_12521)
-             (let [endmsg__8556__auto__ (merge
-                                          (assoc m_12519 :msec msec_12521 :phase :end)
-                                          (when (:threw result__8554__auto__)
-                                            {:threw (class (:threw result__8554__auto__))}))
-                   logger (org.slf4j.LoggerFactory/getLogger "datomic.db")]
-               (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                 (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-               nil)
-             (if (contains? result__8554__auto__ :returned)
-               (:returned result__8554__auto__)
-               (do (throw (:threw result__8554__auto__)) nil)))
-           db)))))
+  (defn accept-index
+    ([db p__12517]
+      (let [map__12518 p__12517
+            map__12518 (if (seq? map__12518)
+                         (if (next map__12518)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12518))
+                           (if (seq map__12518) (first map__12518) {}))
+                         map__12518)
+            root_id (get map__12518 :root-id)
+            mid_index (get map__12518 :mid-index)
+            index (get map__12518 :index)
+            history (get map__12518 :history)
+            basisT (get map__12518 :basisT)
+            nextT (get map__12518 :nextT)
+            rev (get map__12518 :rev)]
+        (when-not (nil? (.-indexing ^datomic.db.Db db))
+          (throw
+            (java.lang.AssertionError.
+              (str
+                "Assert failed: "
+                (pr-str (clojure.core/list 'nil? (clojure.core/list '.indexing 'db)))))))
+        (if (> rev (.-index-rev ^datomic.db.Db db))
+          (let [m_12519 {:event :db/accept-index, :basis-t :basisT}
+                ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.db")]
+                                  (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                    (.info
+                                      ^org.slf4j.Logger logger
+                                      (logger/process (assoc m_12519 :phase :begin))))
+                                  nil)
+                start__8553__auto__ (java.lang.System/nanoTime)
+                result__8554__auto__ (try
+                                       {:returned
+                                        (let [new_memidx datomic.db/mem-index-set
+                                              adopt (fn adopt
+                                                      ([nidx idx]
+                                                        (loop [nidx nidx
+                                                               iter (datomic.btset/seek idx)]
+                                                          (let [temp__5802__auto__
+                                                                (datomic.db/dget iter)]
+                                                            (if
+                                                              temp__5802__auto__
+                                                              (let 
+                                                                [d temp__5802__auto__]
+                                                                (recur
+                                                                  (if
+                                                                    (<
+                                                                      (.getT
+                                                                        ^datomic.impl.db.IDatum d)
+                                                                      nextT)
+                                                                    nidx
+                                                                    (conj nidx d))
+                                                                  (iter/inext iter)))
+                                                              nidx)))))
+                                              iset (.-memidx ^datomic.db.Db db)
+                                              eavtr (future-call
+                                                      (fn fn__12526
+                                                        ([]
+                                                          (^clojure.lang.IFn adopt
+                                                            (.-eavt
+                                                              ^datomic.db.IndexSet new_memidx)
+                                                            (.-eavt ^datomic.db.IndexSet iset)))))
+                                              avetr (future-call
+                                                      (fn fn__12528
+                                                        ([]
+                                                          (^clojure.lang.IFn adopt
+                                                            (.-avet
+                                                              ^datomic.db.IndexSet new_memidx)
+                                                            (.-avet ^datomic.db.IndexSet iset)))))
+                                              aevtr (future-call
+                                                      (fn fn__12530
+                                                        ([]
+                                                          (^clojure.lang.IFn adopt
+                                                            (.-aevt
+                                                              ^datomic.db.IndexSet new_memidx)
+                                                            (.-aevt ^datomic.db.IndexSet iset)))))
+                                              raetr (future-call
+                                                      (fn fn__12532
+                                                        ([]
+                                                          (^clojure.lang.IFn adopt
+                                                            (.-raet
+                                                              ^datomic.db.IndexSet new_memidx)
+                                                            (.-raet ^datomic.db.IndexSet iset)))))
+                                              eavt (deref eavtr)
+                                              avet (deref avetr)
+                                              aevt (deref aevtr)
+                                              raet (deref raetr)
+                                              ft_basis (assoc
+                                                         db
+                                                         :memidx
+                                                         (datomic.db.IndexSet.
+                                                           eavt
+                                                           avet
+                                                           aevt
+                                                           raet
+                                                           nil)
+                                                         :memlog
+                                                         (datomic.db/trim-log
+                                                           (.-memlog ^datomic.db.Db db)
+                                                           basisT)
+                                                         :index
+                                                         index
+                                                         :mid-index
+                                                         mid_index
+                                                         :indexBasisT
+                                                         basisT
+                                                         :history
+                                                         history
+                                                         :index-root-id
+                                                         root_id
+                                                         :index-rev
+                                                         rev)
+                                              ft (ftindex/update-fulltext
+                                                   nil
+                                                   (iter/iter-seq
+                                                     (iter/filter
+                                                       (fn fn__12534
+                                                         ([p1__12516#]
+                                                           (datomic.db/fulltext?
+                                                             ft_basis
+                                                             (java.lang.Integer/valueOf
+                                                               (int
+                                                                 (.getA
+                                                                   ^datomic.impl.db.IDatum p1__12516#))))))
+                                                       (datomic.btset/seek aevt))))]
+                                          (datomic.db/recalc-elements
+                                            (assoc
+                                              ft_basis
+                                              :memidx
+                                              (datomic.db.IndexSet. eavt avet aevt raet ft))
+                                            basisT))}
+                                       (catch
+                                         java.lang.Throwable
+                                         t__8555__auto__
+                                         {:threw t__8555__auto__}))
+                elapsed_12520 (- (java.lang.System/nanoTime) start__8553__auto__)
+                msec_12521 (logger/format-as-msec (long elapsed_12520))]
+            (monitor/add-stat :AcceptIndexMsec msec_12521)
+            (let [endmsg__8556__auto__ (merge
+                                         (assoc m_12519 :msec msec_12521 :phase :end)
+                                         (when (:threw result__8554__auto__)
+                                           {:threw (class (:threw result__8554__auto__))}))
+                  logger (org.slf4j.LoggerFactory/getLogger "datomic.db")]
+              (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+              nil)
+            (if (contains? result__8554__auto__ :returned)
+              (:returned result__8554__auto__)
+              (do (throw (:threw result__8554__auto__)) nil)))
+          db))))
   (reset-meta!
     #'accept-index
     (assoc
@@ -6020,9 +5913,8 @@
               (when-not (zero? existing) (.put ^java.util.HashMap id_>part id partbits)))
             (.put ^java.util.HashMap id_>part id partbits))))))
   (clojure.core/import 'datomic.db.PartitionRequests)
-  (def ->PartitionRequests
-   (fn __GT_PartitionRequests
-     ([id_>part id_>match] (datomic.db.PartitionRequests. id_>part id_>match))))
+  (defn ->PartitionRequests
+    ([id_>part id_>match] (datomic.db.PartitionRequests. id_>part id_>match)))
   (reset-meta!
     #'->PartitionRequests
     (assoc
@@ -6056,20 +5948,19 @@
       :ns
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.db" "expand-map") {:declared true, :column (int 1)})
-  (def expand-submap
-   (fn expand_submap
-     ([db parentid attrid v part_reqs local_tempids]
-       (let [v (datomic.db/force-map-keywords db (datomic.db/normalize-map v))
-             childid (datomic.db/local-id
-                       (or (:db/id v) (datomic.db/make-child-id db parentid attrid v))
-                       db
-                       nil
-                       local_tempids)]
-         (when (.-isComponent (datomic.db/attribute db attrid))
-           (.matchPart ^datomic.db.AssignPartitions part_reqs childid parentid))
-         (cons
-           [:db/add parentid attrid childid]
-           (datomic.db/expand-map db (assoc v :db/id childid) part_reqs local_tempids))))))
+  (defn expand-submap
+    ([db parentid attrid v part_reqs local_tempids]
+      (let [v (datomic.db/force-map-keywords db (datomic.db/normalize-map v))
+            childid (datomic.db/local-id
+                      (or (:db/id v) (datomic.db/make-child-id db parentid attrid v))
+                      db
+                      nil
+                      local_tempids)]
+        (when (.-isComponent (datomic.db/attribute db attrid))
+          (.matchPart ^datomic.db.AssignPartitions part_reqs childid parentid))
+        (cons
+          [:db/add parentid attrid childid]
+          (datomic.db/expand-map db (assoc v :db/id childid) part_reqs local_tempids)))))
   (reset-meta!
     #'expand-submap
     (assoc
@@ -6098,23 +5989,22 @@
   (reset-meta!
     #'forward-attr
     (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'forward-attr :ns *ns*))
-  (def process-force-partition
-   (fn process_force_partition
-     ([forcemap db part_reqs local_tempids]
-       (if (map? forcemap)
-         (reduce-kv
-           (fn fn__12602
-             ([_ id part]
-               (.forcePart
-                 ^datomic.db.AssignPartitions part_reqs
-                 (datomic.db/local-id id db nil local_tempids)
-                 (datomic.db/partbits db part))))
-           nil
-           forcemap)
-         (error/arg
-           :db.error/invalid-force-partition-map
-           "Value of :db/force-partition must be a map"
-           {:input forcemap})))))
+  (defn process-force-partition
+    ([forcemap db part_reqs local_tempids]
+      (if (map? forcemap)
+        (reduce-kv
+          (fn fn__12602
+            ([_ id part]
+              (.forcePart
+                ^datomic.db.AssignPartitions part_reqs
+                (datomic.db/local-id id db nil local_tempids)
+                (datomic.db/partbits db part))))
+          nil
+          forcemap)
+        (error/arg
+          :db.error/invalid-force-partition-map
+          "Value of :db/force-partition must be a map"
+          {:input forcemap}))))
   (reset-meta!
     #'process-force-partition
     (assoc
@@ -6126,23 +6016,22 @@
       'process-force-partition
       :ns
       *ns*))
-  (def process-match-partition
-   (fn process_match_partition
-     ([matchmap db part_reqs local_tempids]
-       (if (map? matchmap)
-         (reduce-kv
-           (fn fn__12605
-             ([_ id primary_id]
-               (.matchPart
-                 ^datomic.db.AssignPartitions part_reqs
-                 (datomic.db/local-id id db nil local_tempids)
-                 (datomic.db/local-id primary_id db nil local_tempids))))
-           nil
-           matchmap)
-         (error/arg
-           :db.error/invalid-match-partition-map
-           "Value of :db/match-partition must be a map"
-           {:input matchmap})))))
+  (defn process-match-partition
+    ([matchmap db part_reqs local_tempids]
+      (if (map? matchmap)
+        (reduce-kv
+          (fn fn__12605
+            ([_ id primary_id]
+              (.matchPart
+                ^datomic.db.AssignPartitions part_reqs
+                (datomic.db/local-id id db nil local_tempids)
+                (datomic.db/local-id primary_id db nil local_tempids))))
+          nil
+          matchmap)
+        (error/arg
+          :db.error/invalid-match-partition-map
+          "Value of :db/match-partition must be a map"
+          {:input matchmap}))))
   (reset-meta!
     #'process-match-partition
     (assoc
@@ -6154,63 +6043,62 @@
       'process-match-partition
       :ns
       *ns*))
-  (def expand-map
-   (fn expand_map
-     ([db m part_reqs local_tempids]
-       (let [dbid (datomic.db/local-id
-                    (or (get m :db/id) (datomic.db/tempid 16))
-                    db
-                    nil
-                    local_tempids)
-             hook_entry? (fn hook_entry_QMARK_
-                           ([p1__12608#]
-                             (contains?
-                               #{"db.alter" "db.install"}
-                               (namespace
-                                 (datomic.db/resolve-kw
-                                   db
-                                   (.getKey ^java.util.Map$Entry p1__12608#))))))]
-         (reduce
-           (fn fn__12612
-             ([result p__12611]
-               (let [vec__12613 p__12611
-                     k (nth vec__12613 (unchecked-int 0) nil)
-                     v (nth vec__12613 (unchecked-int 1) nil)
-                     G__12616 k]
-                 (case
-                   G__12616
-                   :db/match-partition
-                   (do (datomic.db/process-match-partition v db part_reqs local_tempids) result)
-                   :db/force-partition
-                   (do (datomic.db/process-force-partition v db part_reqs local_tempids) result)
-                   :db/id
-                   result
-                   (let [attr (datomic.db/forward-attr k)
-                         attrib (datomic.db/require-attr db attr)
-                         attrid (.id ^datomic.db.Attribute attrib)]
-                     (if (= attr k)
-                       (reduce
-                         (fn fn__12617
-                           ([result v]
-                             (if (datomic.db/nested-entity-map? db attrid v)
-                               (into
-                                 result
-                                 (datomic.db/expand-submap
-                                   db
-                                   dbid
-                                   attrid
-                                   v
-                                   part_reqs
-                                   local_tempids))
-                               (conj result [:db/add dbid attrid v]))))
-                         result
-                         (cond
-                           (and (instance? java.util.List v) (= 36 (:cardinality attrib))) v
-                           (instance? java.util.Set v) (seq v)
-                           :default (do [v])))
-                       (conj result [:db/add v attrid dbid])))))))
-           []
-           (concat (remove hook_entry? m) (filter hook_entry? m)))))))
+  (defn expand-map
+    ([db m part_reqs local_tempids]
+      (let [dbid (datomic.db/local-id
+                   (or (get m :db/id) (datomic.db/tempid 16))
+                   db
+                   nil
+                   local_tempids)
+            hook_entry? (fn hook_entry_QMARK_
+                          ([p1__12608#]
+                            (contains?
+                              #{"db.alter" "db.install"}
+                              (namespace
+                                (datomic.db/resolve-kw
+                                  db
+                                  (.getKey ^java.util.Map$Entry p1__12608#))))))]
+        (reduce
+          (fn fn__12612
+            ([result p__12611]
+              (let [vec__12613 p__12611
+                    k (nth vec__12613 (unchecked-int 0) nil)
+                    v (nth vec__12613 (unchecked-int 1) nil)
+                    G__12616 k]
+                (case
+                  G__12616
+                  :db/match-partition
+                  (do (datomic.db/process-match-partition v db part_reqs local_tempids) result)
+                  :db/force-partition
+                  (do (datomic.db/process-force-partition v db part_reqs local_tempids) result)
+                  :db/id
+                  result
+                  (let [attr (datomic.db/forward-attr k)
+                        attrib (datomic.db/require-attr db attr)
+                        attrid (.id ^datomic.db.Attribute attrib)]
+                    (if (= attr k)
+                      (reduce
+                        (fn fn__12617
+                          ([result v]
+                            (if (datomic.db/nested-entity-map? db attrid v)
+                              (into
+                                result
+                                (datomic.db/expand-submap
+                                  db
+                                  dbid
+                                  attrid
+                                  v
+                                  part_reqs
+                                  local_tempids))
+                              (conj result [:db/add dbid attrid v]))))
+                        result
+                        (cond
+                          (and (instance? java.util.List v) (= 36 (:cardinality attrib))) v
+                          (instance? java.util.Set v) (seq v)
+                          :default (do [v])))
+                      (conj result [:db/add v attrid dbid])))))))
+          []
+          (concat (remove hook_entry? m) (filter hook_entry? m))))))
   (reset-meta!
     #'expand-map
     (assoc
@@ -6254,12 +6142,12 @@
       'canonicalize-v
       :ns
       *ns*))
-  (let [protocol_metadata__7439 {:column (int 1)}]
+  (let [protocol_metadata__7471 {:column (int 1)}]
     (defprotocol TupleElem (tuple-elem? [v] "Returns true iff v is a valid tuple element."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.db" "TupleElem")
-      (assoc (assoc protocol_metadata__7439 :doc nil) :name 'TupleElem :ns *ns*))
-    (let [protocol_signature__7440 (assoc
+      (assoc (assoc protocol_metadata__7471 :doc nil) :name 'TupleElem :ns *ns*))
+    (let [protocol_signature__7472 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -6269,12 +6157,12 @@
                                       :doc "Returns true iff v is a valid tuple element."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.db" "TupleElem"))
-          protocol_method_name__7441 (with-meta
-                                       (:name protocol_signature__7440)
-                                       protocol_signature__7440)]
+          protocol_method_name__7473 (with-meta
+                                       (:name protocol_signature__7472)
+                                       protocol_signature__7472)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "tuple-elem?")
-        (assoc protocol_signature__7440 :name protocol_method_name__7441 :ns *ns*))))
+        (assoc protocol_signature__7472 :name protocol_method_name__7473 :ns *ns*))))
   (extend nil datomic.db/TupleElem {:tuple-elem? (fn fn__12643 ([_] true))})
   (extend java.lang.Object datomic.db/TupleElem {:tuple-elem? (fn fn__12645 ([_] false))})
   (extend
@@ -6297,7 +6185,7 @@
   (extend clojure.lang.Keyword datomic.db/TupleElem {:tuple-elem? (fn fn__12663 ([_] true))})
   (extend java.lang.Long datomic.db/TupleElem {:tuple-elem? (fn fn__12665 ([_] true))})
   (extend clojure.lang.Symbol datomic.db/TupleElem {:tuple-elem? (fn fn__12667 ([_] true))})
-  (let [protocol_metadata__7442 {:column (int 1)}]
+  (let [protocol_metadata__7474 {:column (int 1)}]
     (defprotocol
       CoerceV
       (coerce-v
@@ -6305,8 +6193,8 @@
         "Coerce v to a type used by Datomic. Returns nil\nif coercion is not necessary or possible."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.db" "CoerceV")
-      (assoc (assoc protocol_metadata__7442 :doc nil) :name 'CoerceV :ns *ns*))
-    (let [protocol_signature__7443 (assoc
+      (assoc (assoc protocol_metadata__7474 :doc nil) :name 'CoerceV :ns *ns*))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'coerce-v {:arglists (clojure.core/list ['v])}),
@@ -6315,12 +6203,12 @@
                                       "Coerce v to a type used by Datomic. Returns nil\nif coercion is not necessary or possible."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.db" "CoerceV"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "coerce-v")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*))))
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*))))
   (extend nil datomic.db/CoerceV {:coerce-v (fn fn__12685 ([_] nil))})
   (extend java.lang.Object datomic.db/CoerceV {:coerce-v (fn fn__12687 ([_] nil))})
   (extend
@@ -6351,43 +6239,42 @@
       'coerce-tuple
       :ns
       *ns*))
-  (def valid-tuple-assert?
-   (fn valid_tuple_assert_QMARK_
-     ([attr tup]
-       (let [valid? (fn valid_QMARK_
-                      ([kw elem]
-                        (let [cl (datomic.db/tuple-value-types kw)]
-                          (and
-                            cl
-                            (or
-                              (nil? elem)
-                              (instance? cl elem)
-                              (and (= kw :db.type/ref) (string? elem)))))))]
-         (cond
-           (:tupleAttrs attr) (and
+  (defn valid-tuple-assert?
+    ([attr tup]
+      (let [valid? (fn valid_QMARK_
+                     ([kw elem]
+                       (let [cl (datomic.db/tuple-value-types kw)]
+                         (and
+                           cl
+                           (or
+                             (nil? elem)
+                             (instance? cl elem)
+                             (and (= kw :db.type/ref) (string? elem)))))))]
+        (cond
+          (:tupleAttrs attr) (and
+                               (vector? tup)
+                               (= (long (count tup)) (long (count (:tupleAttrs attr)))))
+          (:tupleType attr) (let [kw (:tupleType attr)]
+                              (and
                                 (vector? tup)
-                                (= (long (count tup)) (long (count (:tupleAttrs attr)))))
-           (:tupleType attr) (let [kw (:tupleType attr)]
-                               (and
-                                 (vector? tup)
-                                 (every?
-                                   (fn fn__12709
-                                     ([p1__12700#] (^clojure.lang.IFn valid? kw p1__12700#)))
-                                   tup)
-                                 (<= 2 (java.lang.Integer/valueOf (int (count tup))) 8)))
-           (:tupleTypes attr) (do
-                                (let [kws (seq (:tupleTypes attr))]
-                                  (and
-                                    (vector? tup)
-                                    (= (long (count kws)) (long (count tup)))
-                                    (every?
-                                      true?
-                                      (map
-                                        (fn fn__12711
-                                          ([p1__12701# p2__12702#]
-                                            (^clojure.lang.IFn valid? p1__12701# p2__12702#)))
-                                        kws
-                                        tup))))))))))
+                                (every?
+                                  (fn fn__12709
+                                    ([p1__12700#] (^clojure.lang.IFn valid? kw p1__12700#)))
+                                  tup)
+                                (<= 2 (java.lang.Integer/valueOf (int (count tup))) 8)))
+          (:tupleTypes attr) (do
+                               (let [kws (seq (:tupleTypes attr))]
+                                 (and
+                                   (vector? tup)
+                                   (= (long (count kws)) (long (count tup)))
+                                   (every?
+                                     true?
+                                     (map
+                                       (fn fn__12711
+                                         ([p1__12701# p2__12702#]
+                                           (^clojure.lang.IFn valid? p1__12701# p2__12702#)))
+                                       kws
+                                       tup)))))))))
   (reset-meta!
     #'valid-tuple-assert?
     (assoc
@@ -6398,17 +6285,16 @@
       'valid-tuple-assert?
       :ns
       *ns*))
-  (def validated-tuple
-   (fn validated_tuple
-     ([db op attr v]
-       (let [tup (datomic.db/coerce-tuple (datomic.db/require-tuple-ids db attr v))]
-         (if (= 1 op)
-           (and
-             tup
-             (every? datomic.db/tuple-elem? tup)
-             (datomic.db/valid-tuple-assert? attr tup)
-             tup)
-           tup)))))
+  (defn validated-tuple
+    ([db op attr v]
+      (let [tup (datomic.db/coerce-tuple (datomic.db/require-tuple-ids db attr v))]
+        (if (= 1 op)
+          (and
+            tup
+            (every? datomic.db/tuple-elem? tup)
+            (datomic.db/valid-tuple-assert? attr tup)
+            tup)
+          tup))))
   (reset-meta!
     #'validated-tuple
     (assoc
@@ -6421,25 +6307,24 @@
       'validated-tuple
       :ns
       *ns*))
-  (def inject-retracts!
-   (fn inject_retracts_BANG_
-     ([nextp db eid attrid local_tempids]
-       (reduce
-         (fn fn__12724
-           ([proc p__12723]
-             (let [map__12725 p__12723
-                   map__12725 (if (seq? map__12725)
-                                (if (next map__12725)
-                                  (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                    (to-array map__12725))
-                                  (if (seq map__12725) (first map__12725) {}))
-                                map__12725)
-                   e (get map__12725 :e)
-                   a (get map__12725 :a)
-                   v (get map__12725 :v)]
-               (.inject ^datomic.db.IProcess proc [2 e a v] ^java.util.Map local_tempids))))
-         nextp
-         (datomic.db/datoms db :aevt [attrid eid])))))
+  (defn inject-retracts!
+    ([nextp db eid attrid local_tempids]
+      (reduce
+        (fn fn__12724
+          ([proc p__12723]
+            (let [map__12725 p__12723
+                  map__12725 (if (seq? map__12725)
+                               (if (next map__12725)
+                                 (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                   (to-array map__12725))
+                                 (if (seq map__12725) (first map__12725) {}))
+                               map__12725)
+                  e (get map__12725 :e)
+                  a (get map__12725 :a)
+                  v (get map__12725 :v)]
+              (.inject ^datomic.db.IProcess proc [2 e a v] ^java.util.Map local_tempids))))
+        nextp
+        (datomic.db/datoms db :aevt [attrid eid]))))
   (reset-meta!
     #'inject-retracts!
     (assoc
@@ -6451,61 +6336,59 @@
       'inject-retracts!
       :ns
       *ns*))
-  (def validated-v-for-attr
-   (fn validated_v_for_attr
-     ([db attr v procargs procid]
-       (let [vt (.elementAt ^datomic.db.Db db (.-vtypeid ^datomic.db.Attribute attr))]
-         (cond
-           (nil? v) (error/arg
-                      :db.error/nil-value
-                      "Nil is not a legal value"
-                      {:data procargs,
-                       :attribute (datomic.db/resolve-kw db (.id ^datomic.db.Attribute attr))})
-           (= (.-vtypeid ^datomic.db.Attribute attr) 20) (if procargs
-                                                           (datomic.db/require-id db v procargs)
-                                                           (long (datomic.db/require-id db v)))
-           (= (.-vtypeid ^datomic.db.Attribute attr) 21) (let [kw (datomic.db/to-kw v)]
-                                                           (if
-                                                             (keyword? kw)
-                                                             kw
-                                                             (datomic.db/wrong-type-for-attribute
-                                                               db
-                                                               (.id ^datomic.db.Attribute attr)
-                                                               (:fressian-tag vt)
-                                                               v)))
-           (= (.-vtypeid ^datomic.db.Attribute attr) (datomic.db/system-eid db :db.type/tuple)) (let 
-                                                                                                  [temp__5802__auto__
-                                                                                                   (datomic.db/validated-tuple
-                                                                                                     db
-                                                                                                     (or
-                                                                                                       procid
-                                                                                                       1)
-                                                                                                     attr
-                                                                                                     v)]
-                                                                                                  (if
-                                                                                                    temp__5802__auto__
-                                                                                                    (let 
-                                                                                                      [tup
-                                                                                                       temp__5802__auto__]
-                                                                                                      tup)
-                                                                                                    (error/arg
-                                                                                                      :db.error/invalid-tuple-value
-                                                                                                      "Invalid tuple value"
-                                                                                                      {:value
-                                                                                                       v,
-                                                                                                       :attribute
-                                                                                                       (datomic.db/resolve-kw
-                                                                                                         db
-                                                                                                         (.id
-                                                                                                           ^datomic.db.Attribute attr))})))
-           (.getWriteHandler datomic.db/write-handler-lookup (subs (str (:fressian-tag vt)) 1) v) v
-           :else (do
-                   (datomic.db/canonicalize-v
-                     db
-                     (.id ^datomic.db.Attribute attr)
-                     v
-                     (:fressian-tag vt))))))
-     ([db attr v] (datomic.db/validated-v-for-attr db attr v nil nil))))
+  (defn validated-v-for-attr
+    ([db attr v procargs procid]
+      (let [vt (.elementAt ^datomic.db.Db db (.-vtypeid ^datomic.db.Attribute attr))]
+        (cond
+          (nil? v) (error/arg
+                     :db.error/nil-value
+                     "Nil is not a legal value"
+                     {:data procargs,
+                      :attribute (datomic.db/resolve-kw db (.id ^datomic.db.Attribute attr))})
+          (= (.-vtypeid ^datomic.db.Attribute attr) 20) (if procargs
+                                                          (datomic.db/require-id db v procargs)
+                                                          (long (datomic.db/require-id db v)))
+          (= (.-vtypeid ^datomic.db.Attribute attr) 21) (let [kw (datomic.db/to-kw v)]
+                                                          (if (keyword? kw)
+                                                            kw
+                                                            (datomic.db/wrong-type-for-attribute
+                                                              db
+                                                              (.id ^datomic.db.Attribute attr)
+                                                              (:fressian-tag vt)
+                                                              v)))
+          (= (.-vtypeid ^datomic.db.Attribute attr) (datomic.db/system-eid db :db.type/tuple)) (let 
+                                                                                                 [temp__5802__auto__
+                                                                                                  (datomic.db/validated-tuple
+                                                                                                    db
+                                                                                                    (or
+                                                                                                      procid
+                                                                                                      1)
+                                                                                                    attr
+                                                                                                    v)]
+                                                                                                 (if
+                                                                                                   temp__5802__auto__
+                                                                                                   (let 
+                                                                                                     [tup
+                                                                                                      temp__5802__auto__]
+                                                                                                     tup)
+                                                                                                   (error/arg
+                                                                                                     :db.error/invalid-tuple-value
+                                                                                                     "Invalid tuple value"
+                                                                                                     {:value
+                                                                                                      v,
+                                                                                                      :attribute
+                                                                                                      (datomic.db/resolve-kw
+                                                                                                        db
+                                                                                                        (.id
+                                                                                                          ^datomic.db.Attribute attr))})))
+          (.getWriteHandler datomic.db/write-handler-lookup (subs (str (:fressian-tag vt)) 1) v) v
+          :else (do
+                  (datomic.db/canonicalize-v
+                    db
+                    (.id ^datomic.db.Attribute attr)
+                    v
+                    (:fressian-tag vt))))))
+    ([db attr v] (datomic.db/validated-v-for-attr db attr v nil nil)))
   (reset-meta!
     #'validated-v-for-attr
     (assoc
@@ -6603,8 +6486,7 @@
                        (str "Transaction data element must be a List or Map, got " procargs))))
         this)))
   (clojure.core/import 'datomic.db.ProcessInpoint)
-  (def ->ProcessInpoint
-   (fn __GT_ProcessInpoint ([db part_reqs nextp] (datomic.db.ProcessInpoint. db part_reqs nextp))))
+  (defn ->ProcessInpoint ([db part_reqs nextp] (datomic.db.ProcessInpoint. db part_reqs nextp)))
   (reset-meta!
     #'->ProcessInpoint
     (assoc
@@ -6630,188 +6512,183 @@
       'default-partition
       :ns
       *ns*))
-  (def get-ids
-   (fn get_ids
-     ([db data part_reqs]
-       (let [default_part_ref (delay (datomic.db/default-partition db))
-             genid (fn genid
-                     ([e p__12752]
-                       (let [vec__12754 p__12752
-                             m (nth vec__12754 (unchecked-int 0) nil)
-                             p (nth vec__12754 (unchecked-int 1) nil)
-                             t (nth vec__12754 (unchecked-int 2) nil)
-                             u (nth vec__12754 (unchecked-int 3) nil)
-                             z (nth vec__12754 (unchecked-int 4) nil)
-                             mpt vec__12754]
-                         (if (contains? m e)
-                           mpt
-                           (let [part (.getPart ^datomic.db.GetPartition part_reqs e)
-                                 part (if (= part 16) (deref default_part_ref) part)]
-                             (cond
-                               (zero? part) [(assoc
-                                               m
-                                               e
-                                               (long
-                                                 (datomic.db/make-eid
-                                                   (unchecked-long ^java.lang.Number part)
-                                                   (unchecked-long ^java.lang.Number p))))
-                                             (inc p)
-                                             t
-                                             u
-                                             true]
-                               (= 3 part) [(assoc
-                                             m
-                                             e
-                                             (long
-                                               (datomic.db/make-eid
-                                                 (unchecked-long ^java.lang.Number part)
-                                                 (.nextT ^datomic.db.Db db))))
-                                           p
-                                           t
-                                           u
-                                           z]
-                               (datomic.db/valid-partbits?
-                                 db
-                                 (unchecked-long ^java.lang.Number part)) [(assoc
-                                                                             m
-                                                                             e
-                                                                             (long
-                                                                               (datomic.db/make-eid
-                                                                                 (unchecked-long
-                                                                                   ^java.lang.Number part)
-                                                                                 (unchecked-long
-                                                                                   ^java.lang.Number t))))
-                                                                           p
-                                                                           (inc t)
-                                                                           u
-                                                                           z]
-                               :else (do
-                                       (error/arg
-                                         :db.error/not-a-partition
-                                         (str
-                                           "Entity id "
-                                           e
-                                           " is not in a valid partition")))))))))
-             vec__12747 (reduce
-                          (fn fn__12759
-                            ([p__12758 d]
-                              (let [vec__12760 p__12758
-                                    m (nth vec__12760 (unchecked-int 0) nil)
-                                    p (nth vec__12760 (unchecked-int 1) nil)
-                                    t (nth vec__12760 (unchecked-int 2) nil)
-                                    u (nth vec__12760 (unchecked-int 3) nil)
-                                    z (nth vec__12760 (unchecked-int 4) nil)
-                                    mpt vec__12760
-                                    e (.getE ^datomic.impl.db.IDatum d)
-                                    a (.getA ^datomic.impl.db.IDatum d)]
-                                (cond
-                                  (datomic.db/tempid? e) (let [attr
-                                                               (datomic.db/require-attr
-                                                                 db
-                                                                 (java.lang.Integer/valueOf
-                                                                   (int a)))
-                                                               v (.getV ^datomic.impl.db.IDatum d)]
-                                                           (if
-                                                             (=
-                                                               (.-unique
-                                                                 ^datomic.db.Attribute attr)
-                                                               38)
-                                                             (let 
-                                                               [temp__5802__auto__
-                                                                (datomic.db/dget
-                                                                  (datomic.db/find-avet
-                                                                    db
-                                                                    (java.lang.Integer/valueOf
-                                                                      (int a))
-                                                                    v))]
-                                                               (if
-                                                                 temp__5802__auto__
-                                                                 (let 
-                                                                   [it temp__5802__auto__]
-                                                                   [(assoc
-                                                                      m
-                                                                      (long e)
-                                                                      (long
-                                                                        (.getE
-                                                                          ^datomic.impl.db.IDatum it)))
-                                                                    p
-                                                                    t
-                                                                    u
-                                                                    z])
-                                                                 (let 
-                                                                   [temp__5802__auto__
-                                                                    (get-in
-                                                                      u
-                                                                      [(java.lang.Integer/valueOf
-                                                                         (int a))
-                                                                       v])]
-                                                                   (if
-                                                                     temp__5802__auto__
-                                                                     (let 
-                                                                       [ue temp__5802__auto__]
-                                                                       [(assoc m (long e) ue)
-                                                                        p
-                                                                        t
-                                                                        u
-                                                                        z])
-                                                                     (let 
-                                                                       [vec__12763
-                                                                        (^clojure.lang.IFn genid
-                                                                          (long e)
-                                                                          mpt)
-                                                                        m
-                                                                        (nth
-                                                                          vec__12763
-                                                                          (unchecked-int 0)
-                                                                          nil)
-                                                                        p
-                                                                        (nth
-                                                                          vec__12763
-                                                                          (unchecked-int 1)
-                                                                          nil)
-                                                                        t
-                                                                        (nth
-                                                                          vec__12763
-                                                                          (unchecked-int 2)
-                                                                          nil)
-                                                                        u
-                                                                        (nth
-                                                                          vec__12763
-                                                                          (unchecked-int 3)
-                                                                          nil)]
-                                                                       [m
-                                                                        p
-                                                                        t
-                                                                        (assoc-in
+  (defn get-ids
+    ([db data part_reqs]
+      (let [default_part_ref (delay (datomic.db/default-partition db))
+            genid (fn genid
+                    ([e p__12752]
+                      (let [vec__12754 p__12752
+                            m (nth vec__12754 (unchecked-int 0) nil)
+                            p (nth vec__12754 (unchecked-int 1) nil)
+                            t (nth vec__12754 (unchecked-int 2) nil)
+                            u (nth vec__12754 (unchecked-int 3) nil)
+                            z (nth vec__12754 (unchecked-int 4) nil)
+                            mpt vec__12754]
+                        (if (contains? m e)
+                          mpt
+                          (let [part (.getPart ^datomic.db.GetPartition part_reqs e)
+                                part (if (= part 16) (deref default_part_ref) part)]
+                            (cond
+                              (zero? part) [(assoc
+                                              m
+                                              e
+                                              (long
+                                                (datomic.db/make-eid
+                                                  (unchecked-long ^java.lang.Number part)
+                                                  (unchecked-long ^java.lang.Number p))))
+                                            (inc p)
+                                            t
+                                            u
+                                            true]
+                              (= 3 part) [(assoc
+                                            m
+                                            e
+                                            (long
+                                              (datomic.db/make-eid
+                                                (unchecked-long ^java.lang.Number part)
+                                                (.nextT ^datomic.db.Db db))))
+                                          p
+                                          t
+                                          u
+                                          z]
+                              (datomic.db/valid-partbits?
+                                db
+                                (unchecked-long ^java.lang.Number part)) [(assoc
+                                                                            m
+                                                                            e
+                                                                            (long
+                                                                              (datomic.db/make-eid
+                                                                                (unchecked-long
+                                                                                  ^java.lang.Number part)
+                                                                                (unchecked-long
+                                                                                  ^java.lang.Number t))))
+                                                                          p
+                                                                          (inc t)
                                                                           u
-                                                                          [(java.lang.Integer/valueOf
-                                                                             (int a))
-                                                                           v]
-                                                                          (get m (long e)))
-                                                                        z])))))
-                                                             (^clojure.lang.IFn genid
-                                                               (long e)
-                                                               mpt)))
-                                  (and
-                                    (>= (datomic.db/eid->eidx e) (.nextT ^datomic.db.Db db))
-                                    (<= 1000 (.nextT ^datomic.db.Db db))) (error/arg
-                                                                            :db.error/invalid-entity-id
-                                                                            (str
-                                                                              "Invalid entity id: "
-                                                                              (long e)))
-                                  :else (do mpt)))))
-                          [{}
-                           (java.lang.Integer/valueOf (int (count (.-elements ^datomic.db.Db db))))
-                           (long (inc (.nextT ^datomic.db.Db db)))
-                           {}
-                           false]
-                          data)
-             m (nth vec__12747 (unchecked-int 0) nil)
-             p (nth vec__12747 (unchecked-int 1) nil)
-             t (nth vec__12747 (unchecked-int 2) nil)
-             u (nth vec__12747 (unchecked-int 3) nil)
-             z (nth vec__12747 (unchecked-int 4) nil)]
-         [m z]))))
+                                                                          z]
+                              :else (do
+                                      (error/arg
+                                        :db.error/not-a-partition
+                                        (str "Entity id " e " is not in a valid partition")))))))))
+            vec__12747 (reduce
+                         (fn fn__12759
+                           ([p__12758 d]
+                             (let [vec__12760 p__12758
+                                   m (nth vec__12760 (unchecked-int 0) nil)
+                                   p (nth vec__12760 (unchecked-int 1) nil)
+                                   t (nth vec__12760 (unchecked-int 2) nil)
+                                   u (nth vec__12760 (unchecked-int 3) nil)
+                                   z (nth vec__12760 (unchecked-int 4) nil)
+                                   mpt vec__12760
+                                   e (.getE ^datomic.impl.db.IDatum d)
+                                   a (.getA ^datomic.impl.db.IDatum d)]
+                               (cond
+                                 (datomic.db/tempid? e) (let [attr
+                                                              (datomic.db/require-attr
+                                                                db
+                                                                (java.lang.Integer/valueOf
+                                                                  (int a)))
+                                                              v (.getV ^datomic.impl.db.IDatum d)]
+                                                          (if (=
+                                                                (.-unique
+                                                                  ^datomic.db.Attribute attr)
+                                                                38)
+                                                            (let 
+                                                              [temp__5802__auto__
+                                                               (datomic.db/dget
+                                                                 (datomic.db/find-avet
+                                                                   db
+                                                                   (java.lang.Integer/valueOf
+                                                                     (int a))
+                                                                   v))]
+                                                              (if
+                                                                temp__5802__auto__
+                                                                (let 
+                                                                  [it temp__5802__auto__]
+                                                                  [(assoc
+                                                                     m
+                                                                     (long e)
+                                                                     (long
+                                                                       (.getE
+                                                                         ^datomic.impl.db.IDatum it)))
+                                                                   p
+                                                                   t
+                                                                   u
+                                                                   z])
+                                                                (let 
+                                                                  [temp__5802__auto__
+                                                                   (get-in
+                                                                     u
+                                                                     [(java.lang.Integer/valueOf
+                                                                        (int a))
+                                                                      v])]
+                                                                  (if
+                                                                    temp__5802__auto__
+                                                                    (let 
+                                                                      [ue temp__5802__auto__]
+                                                                      [(assoc m (long e) ue)
+                                                                       p
+                                                                       t
+                                                                       u
+                                                                       z])
+                                                                    (let 
+                                                                      [vec__12763
+                                                                       (^clojure.lang.IFn genid
+                                                                         (long e)
+                                                                         mpt)
+                                                                       m
+                                                                       (nth
+                                                                         vec__12763
+                                                                         (unchecked-int 0)
+                                                                         nil)
+                                                                       p
+                                                                       (nth
+                                                                         vec__12763
+                                                                         (unchecked-int 1)
+                                                                         nil)
+                                                                       t
+                                                                       (nth
+                                                                         vec__12763
+                                                                         (unchecked-int 2)
+                                                                         nil)
+                                                                       u
+                                                                       (nth
+                                                                         vec__12763
+                                                                         (unchecked-int 3)
+                                                                         nil)]
+                                                                      [m
+                                                                       p
+                                                                       t
+                                                                       (assoc-in
+                                                                         u
+                                                                         [(java.lang.Integer/valueOf
+                                                                            (int a))
+                                                                          v]
+                                                                         (get m (long e)))
+                                                                       z])))))
+                                                            (^clojure.lang.IFn genid
+                                                              (long e)
+                                                              mpt)))
+                                 (and
+                                   (>= (datomic.db/eid->eidx e) (.nextT ^datomic.db.Db db))
+                                   (<= 1000 (.nextT ^datomic.db.Db db))) (error/arg
+                                                                           :db.error/invalid-entity-id
+                                                                           (str
+                                                                             "Invalid entity id: "
+                                                                             (long e)))
+                                 :else (do mpt)))))
+                         [{}
+                          (java.lang.Integer/valueOf (int (count (.-elements ^datomic.db.Db db))))
+                          (long (inc (.nextT ^datomic.db.Db db)))
+                          {}
+                          false]
+                         data)
+            m (nth vec__12747 (unchecked-int 0) nil)
+            p (nth vec__12747 (unchecked-int 1) nil)
+            t (nth vec__12747 (unchecked-int 2) nil)
+            u (nth vec__12747 (unchecked-int 3) nil)
+            z (nth vec__12747 (unchecked-int 4) nil)]
+        [m z])))
   (reset-meta!
     #'get-ids
     (assoc
@@ -6823,46 +6700,45 @@
       'get-ids
       :ns
       *ns*))
-  (def has-tx-inst?
-   (fn has_tx_inst_QMARK_
-     ([db now datoms]
-       (reduce
-         (fn fn__12771
-           ([result d]
-             (if (and
-                   (= 50 (long (.getA ^datomic.impl.db.IDatum d)))
-                   (= 3 (long (datomic.db/get-part d))))
-               (let [basis (.nextT ^datomic.Database db) v (.getV ^datomic.impl.db.IDatum d)]
-                 (when result
-                   (error/arg
-                     :db.error/multiple-tx-instants
-                     (str "Time conflict: :db/txInstant specified more than once")))
-                 (when-not (= basis (datomic.db/get-eidx d))
-                   (error/arg
-                     :db.error/reset-tx-instant
-                     (str "You can set :db/txInstant only on the current transaction.")))
-                 (when (< (common/compare now v) 0)
-                   (error/arg
-                     :db.error/future-tx-instant
-                     (str "Time conflict: " v " is in the future")))
-                 (let [temp__5804__auto__ (datomic.db/dget
-                                            (datomic.db/find-eavt
-                                              db
-                                              (long
-                                                (datomic.db/make-eid
-                                                  3
-                                                  (.basisT ^datomic.Database db)))
-                                              50))]
-                   (when temp__5804__auto__
-                     (let [basis_inst temp__5804__auto__]
-                       (when (< (common/compare v (.getV ^datomic.impl.db.IDatum basis_inst)) 0)
-                         (error/arg
-                           :db.error/past-tx-instant
-                           (str "Time conflict: " v " is older than database basis"))))))
-                 true)
-               result)))
-         false
-         datoms))))
+  (defn has-tx-inst?
+    ([db now datoms]
+      (reduce
+        (fn fn__12771
+          ([result d]
+            (if (and
+                  (= 50 (long (.getA ^datomic.impl.db.IDatum d)))
+                  (= 3 (long (datomic.db/get-part d))))
+              (let [basis (.nextT ^datomic.Database db) v (.getV ^datomic.impl.db.IDatum d)]
+                (when result
+                  (error/arg
+                    :db.error/multiple-tx-instants
+                    (str "Time conflict: :db/txInstant specified more than once")))
+                (when-not (= basis (datomic.db/get-eidx d))
+                  (error/arg
+                    :db.error/reset-tx-instant
+                    (str "You can set :db/txInstant only on the current transaction.")))
+                (when (< (common/compare now v) 0)
+                  (error/arg
+                    :db.error/future-tx-instant
+                    (str "Time conflict: " v " is in the future")))
+                (let [temp__5804__auto__ (datomic.db/dget
+                                           (datomic.db/find-eavt
+                                             db
+                                             (long
+                                               (datomic.db/make-eid
+                                                 3
+                                                 (.basisT ^datomic.Database db)))
+                                             50))]
+                  (when temp__5804__auto__
+                    (let [basis_inst temp__5804__auto__]
+                      (when (< (common/compare v (.getV ^datomic.impl.db.IDatum basis_inst)) 0)
+                        (error/arg
+                          :db.error/past-tx-instant
+                          (str "Time conflict: " v " is older than database basis"))))))
+                true)
+              result)))
+        false
+        datoms)))
   (reset-meta!
     #'has-tx-inst?
     (assoc
@@ -6872,16 +6748,15 @@
       'has-tx-inst?
       :ns
       *ns*))
-  (def next-valid-inst
-   (fn next_valid_inst
-     ([db now]
-       (let [basis_inst (.getV
-                          (datomic.db/dget
-                            (datomic.db/find-eavt
-                              db
-                              (long (datomic.db/make-eid 3 (.basisT ^datomic.db.Db db)))
-                              50)))]
-         (if (> (common/compare now basis_inst) 0) now basis_inst)))))
+  (defn next-valid-inst
+    ([db now]
+      (let [basis_inst (.getV
+                         (datomic.db/dget
+                           (datomic.db/find-eavt
+                             db
+                             (long (datomic.db/make-eid 3 (.basisT ^datomic.db.Db db)))
+                             50)))]
+        (if (> (common/compare now basis_inst) 0) now basis_inst))))
   (reset-meta!
     #'next-valid-inst
     (assoc
@@ -6909,14 +6784,14 @@
       'resolve-procid
       :ns
       *ns*))
-  (let [protocol_metadata__7445 {:column (int 1)}]
+  (let [protocol_metadata__7477 {:column (int 1)}]
     (defprotocol
       LocalDb
       (local-db [db] "Wrap db in an object implementing the client API locally"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.db" "LocalDb")
-      (assoc (assoc protocol_metadata__7445 :doc nil) :name 'LocalDb :ns *ns*))
-    (let [protocol_signature__7446 (assoc
+      (assoc (assoc protocol_metadata__7477 :doc nil) :name 'LocalDb :ns *ns*))
+    (let [protocol_signature__7478 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'local-db {:arglists (clojure.core/list ['db])}),
@@ -6925,27 +6800,26 @@
                                       "Wrap db in an object implementing the client API locally"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.db" "LocalDb"))
-          protocol_method_name__7447 (with-meta
-                                       (:name protocol_signature__7446)
-                                       protocol_signature__7446)]
+          protocol_method_name__7479 (with-meta
+                                       (:name protocol_signature__7478)
+                                       protocol_signature__7478)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "local-db")
-        (assoc protocol_signature__7446 :name protocol_method_name__7447 :ns *ns*))))
-  (def local-tuple
-   (fn local_tuple
-     ([attr v db procargs local_tempids]
-       (let [ref_offset? (:tupleRefOffsets attr)
-             result (into
-                      []
-                      (map-indexed
-                        (fn fn__12795
-                          ([idx elem]
-                            (when-not (nil? elem)
-                              (if (^clojure.lang.IFn ref_offset? idx)
-                                (datomic.db/local-id elem db procargs local_tempids)
-                                elem)))))
-                      v)]
-         result))))
+        (assoc protocol_signature__7478 :name protocol_method_name__7479 :ns *ns*))))
+  (defn local-tuple
+    ([attr v db procargs local_tempids]
+      (let [ref_offset? (:tupleRefOffsets attr)
+            result (into
+                     []
+                     (map-indexed
+                       (fn fn__12795
+                         ([idx elem]
+                           (when-not (nil? elem)
+                             (if (^clojure.lang.IFn ref_offset? idx)
+                               (datomic.db/local-id elem db procargs local_tempids)
+                               elem)))))
+                     v)]
+        result)))
   (reset-meta!
     #'local-tuple
     (assoc
@@ -6965,59 +6839,58 @@
       'ea->v
       :ns
       *ns*))
-  (def create-composite
-   (fn create_composite
-     ([db eaop_map p__12799]
-       (let [vec__12800 p__12799
-             e (nth vec__12800 (unchecked-int 0) nil)
-             a (nth vec__12800 (unchecked-int 1) nil)
-             attrs (:tupleAttrs (datomic.db/attribute db a))
-             t (.nextT ^datomic.Database db)
-             v (mapv
-                 (fn fn__12803
-                   ([attr]
-                     (let [aid (.entid ^datomic.Database db attr)
-                           db_v (datomic.db/ea->v db e aid)
-                           tx_retract (.get
-                                        ^java.util.Map eaop_map
-                                        (datomic.db/->EAOpof
-                                          (datomic.db/retracting-datum
-                                            (unchecked-long ^java.lang.Number e)
-                                            (unchecked-long ^java.lang.Number aid)
-                                            nil
-                                            t)))
-                           tx_assert (.get
+  (defn create-composite
+    ([db eaop_map p__12799]
+      (let [vec__12800 p__12799
+            e (nth vec__12800 (unchecked-int 0) nil)
+            a (nth vec__12800 (unchecked-int 1) nil)
+            attrs (:tupleAttrs (datomic.db/attribute db a))
+            t (.nextT ^datomic.Database db)
+            v (mapv
+                (fn fn__12803
+                  ([attr]
+                    (let [aid (.entid ^datomic.Database db attr)
+                          db_v (datomic.db/ea->v db e aid)
+                          tx_retract (.get
                                        ^java.util.Map eaop_map
                                        (datomic.db/->EAOpof
-                                         (datomic.db/asserting-datum
+                                         (datomic.db/retracting-datum
                                            (unchecked-long ^java.lang.Number e)
                                            (unchecked-long ^java.lang.Number aid)
                                            nil
-                                           t)))]
-                       (if tx_assert
-                         (.getV ^datomic.impl.db.IDatum tx_assert)
-                         (when-not (and
-                                     tx_retract
-                                     (zero?
-                                       (common/compare
-                                         db_v
-                                         (.getV ^datomic.impl.db.IDatum tx_retract))))
-                           db_v)))))
-                 attrs)]
-         (if (every? nil? v)
-           (let [temp__5804__auto__ (datomic.db/ea->v db e a)]
-             (when temp__5804__auto__
-               (let [composite_v temp__5804__auto__]
-                 (datomic.db/retracting-datum
-                   (unchecked-long ^java.lang.Number e)
-                   (unchecked-long ^java.lang.Number a)
-                   composite_v
-                   t))))
-           (datomic.db/asserting-datum
-             (unchecked-long ^java.lang.Number e)
-             (unchecked-long ^java.lang.Number a)
-             v
-             t))))))
+                                           t)))
+                          tx_assert (.get
+                                      ^java.util.Map eaop_map
+                                      (datomic.db/->EAOpof
+                                        (datomic.db/asserting-datum
+                                          (unchecked-long ^java.lang.Number e)
+                                          (unchecked-long ^java.lang.Number aid)
+                                          nil
+                                          t)))]
+                      (if tx_assert
+                        (.getV ^datomic.impl.db.IDatum tx_assert)
+                        (when-not (and
+                                    tx_retract
+                                    (zero?
+                                      (common/compare
+                                        db_v
+                                        (.getV ^datomic.impl.db.IDatum tx_retract))))
+                          db_v)))))
+                attrs)]
+        (if (every? nil? v)
+          (let [temp__5804__auto__ (datomic.db/ea->v db e a)]
+            (when temp__5804__auto__
+              (let [composite_v temp__5804__auto__]
+                (datomic.db/retracting-datum
+                  (unchecked-long ^java.lang.Number e)
+                  (unchecked-long ^java.lang.Number a)
+                  composite_v
+                  t))))
+          (datomic.db/asserting-datum
+            (unchecked-long ^java.lang.Number e)
+            (unchecked-long ^java.lang.Number a)
+            v
+            t)))))
   (reset-meta!
     #'create-composite
     (assoc
@@ -7030,12 +6903,11 @@
       'create-composite
       :ns
       *ns*))
-  (def ensure-datom?
-   (fn ensure_datom_QMARK_
-     ([db d]
-       (and
-         (= (datomic.db/system-eid db :db/ensure) (long (.getA ^datomic.impl.db.IDatum d)))
-         (.isAssertion ^datomic.impl.db.IDatum d)))))
+  (defn ensure-datom?
+    ([db d]
+      (and
+        (= (datomic.db/system-eid db :db/ensure) (long (.getA ^datomic.impl.db.IDatum d)))
+        (.isAssertion ^datomic.impl.db.IDatum d))))
   (reset-meta!
     #'ensure-datom?
     (assoc
@@ -7049,8 +6921,7 @@
     (^java.lang.Object prefetch1 [^java.lang.Object arg0])
     (^java.lang.Object close []))
   (clojure.core/import 'datomic.db.PrefetchDispatcher)
-  (def prefetch!
-   (fn prefetch_BANG_ ([dispatcher f] (.prefetch1 ^datomic.db.PrefetchDispatcher dispatcher f))))
+  (defn prefetch! ([dispatcher f] (.prefetch1 ^datomic.db.PrefetchDispatcher dispatcher f)))
   (reset-meta!
     #'prefetch!
     (assoc
@@ -7060,8 +6931,7 @@
       'prefetch!
       :ns
       *ns*))
-  (def pf-close!
-   (fn pf_close_BANG_ ([dispatcher] (.close ^datomic.db.PrefetchDispatcher dispatcher))))
+  (defn pf-close! ([dispatcher] (.close ^datomic.db.PrefetchDispatcher dispatcher)))
   (reset-meta!
     #'pf-close!
     (assoc
@@ -7104,30 +6974,29 @@
       'for-side-effects
       :ns
       *ns*))
-  (def composites-prefetcher
-   (fn composites_prefetcher
-     ([dispatcher tx_stat_registers db]
-       (let [needed_eas (java.util.HashSet.)
-             constituents (:constituents db)
-             adder (:comp-pf-ms tx_stat_registers)]
-         (fn fn__12825
-           ([d]
-             (let [e (.getE ^datomic.impl.db.IDatum d)
-                   a (.getA ^datomic.impl.db.IDatum d)
-                   temp__5804__auto__ (get constituents (java.lang.Integer/valueOf (int a)))]
-               (when temp__5804__auto__
-                 (let [composites temp__5804__auto__]
-                   (run!
-                     (fn fn__12826
-                       ([p1__12824#]
-                         (when (.add ^java.util.HashSet needed_eas [(long e) p1__12824#])
-                           (datomic.db/prefetch-constituents
-                             dispatcher
-                             adder
-                             db
-                             (long e)
-                             p1__12824#))))
-                     composites))))))))))
+  (defn composites-prefetcher
+    ([dispatcher tx_stat_registers db]
+      (let [needed_eas (java.util.HashSet.)
+            constituents (:constituents db)
+            adder (:comp-pf-ms tx_stat_registers)]
+        (fn fn__12825
+          ([d]
+            (let [e (.getE ^datomic.impl.db.IDatum d)
+                  a (.getA ^datomic.impl.db.IDatum d)
+                  temp__5804__auto__ (get constituents (java.lang.Integer/valueOf (int a)))]
+              (when temp__5804__auto__
+                (let [composites temp__5804__auto__]
+                  (run!
+                    (fn fn__12826
+                      ([p1__12824#]
+                        (when (.add ^java.util.HashSet needed_eas [(long e) p1__12824#])
+                          (datomic.db/prefetch-constituents
+                            dispatcher
+                            adder
+                            db
+                            (long e)
+                            p1__12824#))))
+                    composites)))))))))
   (reset-meta!
     #'composites-prefetcher
     (assoc
@@ -7136,56 +7005,55 @@
       'composites-prefetcher
       :ns
       *ns*))
-  (def generate-composites
-   (fn generate_composites
-     ([db datoms tx_stat_registers]
-       (let [eaop_map (java.util.HashMap.)
-             needed_eas (java.util.HashSet.)
-             constituents (:constituents db)]
-         (dotimes [i (count datoms)]
-           (let [d (nth datoms (unchecked-int i))]
-             (.put ^java.util.HashMap eaop_map (datomic.db.EAOpof. d) d)
-             (let [temp__5804__auto__ (get
-                                        constituents
-                                        (java.lang.Integer/valueOf
-                                          (int (.getA ^datomic.impl.db.IDatum d))))]
-               (when temp__5804__auto__
-                 (let [composites temp__5804__auto__]
-                   (loop [seq_12832 (seq composites) chunk_12833 nil count_12834 0 i_12835 0]
-                     (if (< i_12835 count_12834)
-                       (let [c (.nth ^clojure.lang.Indexed chunk_12833 (unchecked-int i_12835))]
-                         (.add
-                           ^java.util.HashSet needed_eas
-                           [(long (.getE ^datomic.impl.db.IDatum d)) c])
-                         (recur seq_12832 chunk_12833 count_12834 (inc i_12835)))
-                       (let [temp__5804__auto__ (seq seq_12832)]
-                         (when temp__5804__auto__
-                           (let [seq_12832 temp__5804__auto__]
-                             (if (chunked-seq? seq_12832)
-                               (let [c__6065__auto__ (chunk-first seq_12832)]
-                                 (recur
-                                   (chunk-rest seq_12832)
-                                   c__6065__auto__
-                                   (count c__6065__auto__)
-                                   0))
-                               (let [c (first seq_12832)]
-                                 (.add
-                                   ^java.util.HashSet needed_eas
-                                   [(long (.getE ^datomic.impl.db.IDatum d)) c])
-                                 (recur (next seq_12832) nil 0 0)))))))))))))
-         (datomic.db/long-add! (:comp-ct tx_stat_registers) (count needed_eas))
-         (let [start__12291__auto__ (java.lang.System/nanoTime)
-               ret__12292__auto__ (into
-                                    []
-                                    (keep
-                                      (fn fn__12836
-                                        ([p1__12831#]
-                                          (datomic.db/create-composite db eaop_map p1__12831#))))
-                                    needed_eas)]
-           (datomic.db/long-add!
-             (:comp-tx-ms tx_stat_registers)
-             (- (java.lang.System/nanoTime) start__12291__auto__))
-           ret__12292__auto__)))))
+  (defn generate-composites
+    ([db datoms tx_stat_registers]
+      (let [eaop_map (java.util.HashMap.)
+            needed_eas (java.util.HashSet.)
+            constituents (:constituents db)]
+        (dotimes [i (count datoms)]
+          (let [d (nth datoms (unchecked-int i))]
+            (.put ^java.util.HashMap eaop_map (datomic.db.EAOpof. d) d)
+            (let [temp__5804__auto__ (get
+                                       constituents
+                                       (java.lang.Integer/valueOf
+                                         (int (.getA ^datomic.impl.db.IDatum d))))]
+              (when temp__5804__auto__
+                (let [composites temp__5804__auto__]
+                  (loop [seq_12832 (seq composites) chunk_12833 nil count_12834 0 i_12835 0]
+                    (if (< i_12835 count_12834)
+                      (let [c (.nth ^clojure.lang.Indexed chunk_12833 (unchecked-int i_12835))]
+                        (.add
+                          ^java.util.HashSet needed_eas
+                          [(long (.getE ^datomic.impl.db.IDatum d)) c])
+                        (recur seq_12832 chunk_12833 count_12834 (inc i_12835)))
+                      (let [temp__5804__auto__ (seq seq_12832)]
+                        (when temp__5804__auto__
+                          (let [seq_12832 temp__5804__auto__]
+                            (if (chunked-seq? seq_12832)
+                              (let [c__6065__auto__ (chunk-first seq_12832)]
+                                (recur
+                                  (chunk-rest seq_12832)
+                                  c__6065__auto__
+                                  (count c__6065__auto__)
+                                  0))
+                              (let [c (first seq_12832)]
+                                (.add
+                                  ^java.util.HashSet needed_eas
+                                  [(long (.getE ^datomic.impl.db.IDatum d)) c])
+                                (recur (next seq_12832) nil 0 0)))))))))))))
+        (datomic.db/long-add! (:comp-ct tx_stat_registers) (count needed_eas))
+        (let [start__12291__auto__ (java.lang.System/nanoTime)
+              ret__12292__auto__ (into
+                                   []
+                                   (keep
+                                     (fn fn__12836
+                                       ([p1__12831#]
+                                         (datomic.db/create-composite db eaop_map p1__12831#))))
+                                   needed_eas)]
+          (datomic.db/long-add!
+            (:comp-tx-ms tx_stat_registers)
+            (- (java.lang.System/nanoTime) start__12291__auto__))
+          ret__12292__auto__))))
   (reset-meta!
     #'generate-composites
     (assoc
@@ -7196,20 +7064,19 @@
       'generate-composites
       :ns
       *ns*))
-  (def calc-tempids
-   (fn calc_tempids
-     ([gid_>lid lid_>eid]
-       (let [lid_>gid (set/map-invert gid_>lid)]
-         (persistent!
-           (reduce
-             (fn fn__12846
-               ([m p__12845]
-                 (let [vec__12847 p__12845
-                       lid (nth vec__12847 (unchecked-int 0) nil)
-                       eid (nth vec__12847 (unchecked-int 1) nil)]
-                   (assoc! m (get lid_>gid lid lid) eid))))
-             (transient {})
-             lid_>eid))))))
+  (defn calc-tempids
+    ([gid_>lid lid_>eid]
+      (let [lid_>gid (set/map-invert gid_>lid)]
+        (persistent!
+          (reduce
+            (fn fn__12846
+              ([m p__12845]
+                (let [vec__12847 p__12845
+                      lid (nth vec__12847 (unchecked-int 0) nil)
+                      eid (nth vec__12847 (unchecked-int 1) nil)]
+                  (assoc! m (get lid_>gid lid lid) eid))))
+            (transient {})
+            lid_>eid)))))
   (reset-meta!
     #'calc-tempids
     (assoc
@@ -7218,36 +7085,33 @@
       'calc-tempids
       :ns
       *ns*))
-  (def add-tempids-to-errors
-   (fn add_tempids_to_errors
-     ([f get_tempids]
-       (try
-         (^clojure.lang.IFn f)
-         (catch
-           java.lang.Throwable
-           t
-           (let [temp__5802__auto__ (some->
-                                      (ex-data t)
-                                      (assoc :tempids (^clojure.lang.IFn get_tempids)))]
-             (if temp__5802__auto__
-               (let [data temp__5802__auto__
-                     cls (class t)
-                     msg (.getMessage ^java.lang.Throwable t)]
-                 (when (= cls datomic.impl.Exceptions$IllegalArgumentExceptionInfo)
-                   (throw
-                     (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
-                       ^java.lang.String msg
-                       ^clojure.lang.IPersistentMap data
-                       ^java.lang.Throwable t)))
-                 (when (= cls datomic.impl.Exceptions$IllegalStateExceptionInfo)
-                   (throw
-                     (datomic.impl.Exceptions$IllegalStateExceptionInfo.
-                       ^java.lang.String msg
-                       ^clojure.lang.IPersistentMap data
-                       ^java.lang.Throwable t)))
-                 (when :default (throw (ex-info msg data t)))
-                 nil)
-               (do (throw ^java.lang.Throwable t) nil))))))))
+  (defn add-tempids-to-errors
+    ([f get_tempids]
+      (try
+        (^clojure.lang.IFn f)
+        (catch
+          java.lang.Throwable
+          t
+          (let [temp__5802__auto__ (some->
+                                     (ex-data t)
+                                     (assoc :tempids (^clojure.lang.IFn get_tempids)))]
+            (if temp__5802__auto__
+              (let [data temp__5802__auto__ cls (class t) msg (.getMessage ^java.lang.Throwable t)]
+                (when (= cls datomic.impl.Exceptions$IllegalArgumentExceptionInfo)
+                  (throw
+                    (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
+                      ^java.lang.String msg
+                      ^clojure.lang.IPersistentMap data
+                      ^java.lang.Throwable t)))
+                (when (= cls datomic.impl.Exceptions$IllegalStateExceptionInfo)
+                  (throw
+                    (datomic.impl.Exceptions$IllegalStateExceptionInfo.
+                      ^java.lang.String msg
+                      ^clojure.lang.IPersistentMap data
+                      ^java.lang.Throwable t)))
+                (when :default (throw (ex-info msg data t)))
+                nil)
+              (do (throw ^java.lang.Throwable t) nil)))))))
   (reset-meta!
     #'add-tempids-to-errors
     (assoc
@@ -7256,76 +7120,73 @@
       'add-tempids-to-errors
       :ns
       *ns*))
-  (def prefetch-redundancy+uniqueness
-   (fn prefetch_redundancy_PLUS_uniqueness
-     ([dispatcher tx_stat_registers db datoms]
-       (let [basis (:nextT db)
-             map__12855 tx_stat_registers
-             map__12855 (if (seq? map__12855)
-                          (if (next map__12855)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12855))
-                            (if (seq map__12855) (first map__12855) {}))
-                          map__12855)
-             redundancy (get map__12855 :dedup-pf-ms)
-             uniqueness (get map__12855 :ucheck-pf-ms)]
-         (run!
-           (fn fn__12856
-             ([d]
-               (datomic.db/prefetch!
-                 dispatcher
-                 (fn fn__12857
-                   ([]
-                     (let [eidx (.eidx ^datomic.db.IDatumImpl d)
-                           attrid (.getA ^datomic.impl.db.IDatum d)
-                           v (.getV ^datomic.impl.db.IDatum d)
-                           attr (.elementAt
-                                  ^datomic.db.IDbImpl db
-                                  (java.lang.Integer/valueOf (int attrid)))
-                           card_one? (= (.-cardinality ^datomic.db.Attribute attr) 35)
-                           ed (and
-                                (or (zero? basis) (< eidx basis))
-                                (let [start__12291__auto__ (java.lang.System/nanoTime)
-                                      ret__12292__auto__ (datomic.db/dget
-                                                           (datomic.db/find-aevt
-                                                             db
-                                                             (java.lang.Integer/valueOf
-                                                               (int
-                                                                 (.getA
-                                                                   ^datomic.impl.db.IDatum d)))
-                                                             (long
-                                                               (.getE ^datomic.impl.db.IDatum d))
-                                                             (when-not
-                                                               card_one?
-                                                               (.getV
-                                                                 ^datomic.impl.db.IDatum d))))]
-                                  (datomic.db/long-add!
-                                    redundancy
-                                    (- (java.lang.System/nanoTime) start__12291__auto__))
-                                  ret__12292__auto__))
-                           there? (and
-                                    ed
-                                    (common/equals-with-strict-scale
-                                      v
-                                      (.getV ^datomic.impl.db.IDatum ed)))
-                           redundant? (if (.isAssertion ^datomic.impl.db.IDatum d)
-                                        there?
-                                        (not there?))]
-                       (when (and
-                               (not redundant?)
-                               (.-unique ^datomic.db.Attribute attr)
-                               (.isAssertion ^datomic.impl.db.IDatum d))
-                         (let [start__12291__auto__ (java.lang.System/nanoTime)
-                               ret__12292__auto__ (datomic.db/dget
-                                                    (datomic.db/find-avet
-                                                      db
-                                                      (java.lang.Integer/valueOf (int attrid))
-                                                      v))]
-                           (datomic.db/long-add!
-                             uniqueness
-                             (- (java.lang.System/nanoTime) start__12291__auto__))
-                           ret__12292__auto__))))))))
-           datoms)))))
+  (defn prefetch-redundancy+uniqueness
+    ([dispatcher tx_stat_registers db datoms]
+      (let [basis (:nextT db)
+            map__12855 tx_stat_registers
+            map__12855 (if (seq? map__12855)
+                         (if (next map__12855)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12855))
+                           (if (seq map__12855) (first map__12855) {}))
+                         map__12855)
+            redundancy (get map__12855 :dedup-pf-ms)
+            uniqueness (get map__12855 :ucheck-pf-ms)]
+        (run!
+          (fn fn__12856
+            ([d]
+              (datomic.db/prefetch!
+                dispatcher
+                (fn fn__12857
+                  ([]
+                    (let [eidx (.eidx ^datomic.db.IDatumImpl d)
+                          attrid (.getA ^datomic.impl.db.IDatum d)
+                          v (.getV ^datomic.impl.db.IDatum d)
+                          attr (.elementAt
+                                 ^datomic.db.IDbImpl db
+                                 (java.lang.Integer/valueOf (int attrid)))
+                          card_one? (= (.-cardinality ^datomic.db.Attribute attr) 35)
+                          ed (and
+                               (or (zero? basis) (< eidx basis))
+                               (let [start__12291__auto__ (java.lang.System/nanoTime)
+                                     ret__12292__auto__ (datomic.db/dget
+                                                          (datomic.db/find-aevt
+                                                            db
+                                                            (java.lang.Integer/valueOf
+                                                              (int
+                                                                (.getA ^datomic.impl.db.IDatum d)))
+                                                            (long
+                                                              (.getE ^datomic.impl.db.IDatum d))
+                                                            (when-not
+                                                              card_one?
+                                                              (.getV ^datomic.impl.db.IDatum d))))]
+                                 (datomic.db/long-add!
+                                   redundancy
+                                   (- (java.lang.System/nanoTime) start__12291__auto__))
+                                 ret__12292__auto__))
+                          there? (and
+                                   ed
+                                   (common/equals-with-strict-scale
+                                     v
+                                     (.getV ^datomic.impl.db.IDatum ed)))
+                          redundant? (if (.isAssertion ^datomic.impl.db.IDatum d)
+                                       there?
+                                       (not there?))]
+                      (when (and
+                              (not redundant?)
+                              (.-unique ^datomic.db.Attribute attr)
+                              (.isAssertion ^datomic.impl.db.IDatum d))
+                        (let [start__12291__auto__ (java.lang.System/nanoTime)
+                              ret__12292__auto__ (datomic.db/dget
+                                                   (datomic.db/find-avet
+                                                     db
+                                                     (java.lang.Integer/valueOf (int attrid))
+                                                     v))]
+                          (datomic.db/long-add!
+                            uniqueness
+                            (- (java.lang.System/nanoTime) start__12291__auto__))
+                          ret__12292__auto__))))))))
+          datoms))))
   (reset-meta!
     #'prefetch-redundancy+uniqueness
     (assoc
@@ -7337,20 +7198,19 @@
       'prefetch-redundancy+uniqueness
       :ns
       *ns*))
-  (def prefetch-identity
-   (fn prefetch_identity
-     ([dispatcher tx_stat_registers db e a v]
-       (datomic.db/prefetch!
-         dispatcher
-         (fn fn__12870
-           ([]
-             (when (datomic.db/tempid? (unchecked-long ^java.lang.Number e))
-               (let [start__12291__auto__ (java.lang.System/nanoTime)
-                     ret__12292__auto__ (datomic.db/dget (datomic.db/find-avet db a v))]
-                 (datomic.db/long-add!
-                   (:res-pf-ms tx_stat_registers)
-                   (- (java.lang.System/nanoTime) start__12291__auto__))
-                 ret__12292__auto__))))))))
+  (defn prefetch-identity
+    ([dispatcher tx_stat_registers db e a v]
+      (datomic.db/prefetch!
+        dispatcher
+        (fn fn__12870
+          ([]
+            (when (datomic.db/tempid? (unchecked-long ^java.lang.Number e))
+              (let [start__12291__auto__ (java.lang.System/nanoTime)
+                    ret__12292__auto__ (datomic.db/dget (datomic.db/find-avet db a v))]
+                (datomic.db/long-add!
+                  (:res-pf-ms tx_stat_registers)
+                  (- (java.lang.System/nanoTime) start__12291__auto__))
+                ret__12292__auto__)))))))
   (reset-meta!
     #'prefetch-identity
     (assoc
@@ -7553,16 +7413,15 @@
                 data))))
         this)))
   (clojure.core/import 'datomic.db.ProcessExpander)
-  (def ->ProcessExpander
-   (fn __GT_ProcessExpander
-     ([db part_reqs arraylist attr_hook_attrs prefetch_dispatcher tx_stat_registers]
-       (datomic.db.ProcessExpander.
-         db
-         part_reqs
-         arraylist
-         attr_hook_attrs
-         prefetch_dispatcher
-         tx_stat_registers))))
+  (defn ->ProcessExpander
+    ([db part_reqs arraylist attr_hook_attrs prefetch_dispatcher tx_stat_registers]
+      (datomic.db.ProcessExpander.
+        db
+        part_reqs
+        arraylist
+        attr_hook_attrs
+        prefetch_dispatcher
+        tx_stat_registers)))
   (reset-meta!
     #'->ProcessExpander
     (assoc
@@ -7738,39 +7597,38 @@
       'missing-attrs
       :ns
       *ns*))
-  (def ensure-entity!
-   (fn ensure_entity_BANG_
-     ([db_before db_after e spec idmap]
-       (let [spec_ent (.entity ^datomic.Database db_before spec)
-             required (:db.entity/attrs spec_ent)
-             preds (:db.entity/preds spec_ent)
-             entity (.entity ^datomic.Database db_after e)
-             missing (datomic.db/missing-attrs entity required)]
-         (when (seq missing)
-           (error/arg
-             :db.error/entity-attr
-             (str
-               "Entity "
-               (get (set/map-invert idmap) e e)
-               " missing attributes "
-               missing
-               " of spec "
-               (datomic.db/entity-error-desc db_before spec))))
-         (when (seq preds)
-           (loop [seq_12953 (seq preds) chunk_12954 nil count_12955 0 i_12956 0]
-             (if (< i_12956 count_12955)
-               (let [pred (.nth ^clojure.lang.Indexed chunk_12954 (unchecked-int i_12956))]
-                 (datomic.db/ensure-pred pred db_after e spec idmap)
-                 (recur seq_12953 chunk_12954 count_12955 (inc i_12956)))
-               (let [temp__5804__auto__ (seq seq_12953)]
-                 (when temp__5804__auto__
-                   (let [seq_12953 temp__5804__auto__]
-                     (if (chunked-seq? seq_12953)
-                       (let [c__6065__auto__ (chunk-first seq_12953)]
-                         (recur (chunk-rest seq_12953) c__6065__auto__ (count c__6065__auto__) 0))
-                       (let [pred (first seq_12953)]
-                         (datomic.db/ensure-pred pred db_after e spec idmap)
-                         (recur (next seq_12953) nil 0 0)))))))))))))
+  (defn ensure-entity!
+    ([db_before db_after e spec idmap]
+      (let [spec_ent (.entity ^datomic.Database db_before spec)
+            required (:db.entity/attrs spec_ent)
+            preds (:db.entity/preds spec_ent)
+            entity (.entity ^datomic.Database db_after e)
+            missing (datomic.db/missing-attrs entity required)]
+        (when (seq missing)
+          (error/arg
+            :db.error/entity-attr
+            (str
+              "Entity "
+              (get (set/map-invert idmap) e e)
+              " missing attributes "
+              missing
+              " of spec "
+              (datomic.db/entity-error-desc db_before spec))))
+        (when (seq preds)
+          (loop [seq_12953 (seq preds) chunk_12954 nil count_12955 0 i_12956 0]
+            (if (< i_12956 count_12955)
+              (let [pred (.nth ^clojure.lang.Indexed chunk_12954 (unchecked-int i_12956))]
+                (datomic.db/ensure-pred pred db_after e spec idmap)
+                (recur seq_12953 chunk_12954 count_12955 (inc i_12956)))
+              (let [temp__5804__auto__ (seq seq_12953)]
+                (when temp__5804__auto__
+                  (let [seq_12953 temp__5804__auto__]
+                    (if (chunked-seq? seq_12953)
+                      (let [c__6065__auto__ (chunk-first seq_12953)]
+                        (recur (chunk-rest seq_12953) c__6065__auto__ (count c__6065__auto__) 0))
+                      (let [pred (first seq_12953)]
+                        (datomic.db/ensure-pred pred db_after e spec idmap)
+                        (recur (next seq_12953) nil 0 0))))))))))))
   (reset-meta!
     #'ensure-entity!
     (assoc
@@ -7781,82 +7639,80 @@
       'ensure-entity!
       :ns
       *ns*))
-  (def ensure-tx
-   (fn ensure_tx
-     ([db_before db_after data idmap]
-       (loop [seq_12960 (seq data) chunk_12961 nil count_12962 0 i_12963 0]
-         (if (< i_12963 count_12962)
-           (let [d (.nth ^clojure.lang.Indexed chunk_12961 (unchecked-int i_12963))]
-             (cond
-               (datomic.db/ensure-datom? db_before d) (datomic.db/ensure-entity!
-                                                        db_before
-                                                        db_after
-                                                        (long (.getE ^datomic.impl.db.IDatum d))
-                                                        (.getV ^datomic.impl.db.IDatum d)
-                                                        idmap)
-               (.isAssertion ^datomic.impl.db.IDatum d) (do
-                                                          (let [attr
-                                                                (.elementAt
-                                                                  ^datomic.db.IDbImpl db_before
-                                                                  (java.lang.Integer/valueOf
-                                                                    (int
-                                                                      (.getA
-                                                                        ^datomic.impl.db.IDatum d))))
-                                                                temp__5804__auto__
-                                                                (some-> attr (:attrPred) (deref))]
-                                                            (when
-                                                              temp__5804__auto__
-                                                              (let 
-                                                                [pred temp__5804__auto__]
-                                                                (^clojure.lang.IFn pred
-                                                                  (long
-                                                                    (.getE
-                                                                      ^datomic.impl.db.IDatum d))
-                                                                  (.getV ^datomic.impl.db.IDatum d)
-                                                                  idmap))))))
-             (recur seq_12960 chunk_12961 count_12962 (inc i_12963)))
-           (let [temp__5804__auto__ (seq seq_12960)]
-             (when temp__5804__auto__
-               (let [seq_12960 temp__5804__auto__]
-                 (if (chunked-seq? seq_12960)
-                   (let [c__6065__auto__ (chunk-first seq_12960)]
-                     (recur (chunk-rest seq_12960) c__6065__auto__ (count c__6065__auto__) 0))
-                   (let [d (first seq_12960)]
-                     (cond
-                       (datomic.db/ensure-datom? db_before d) (datomic.db/ensure-entity!
-                                                                db_before
-                                                                db_after
-                                                                (long
-                                                                  (.getE
-                                                                    ^datomic.impl.db.IDatum d))
-                                                                (.getV ^datomic.impl.db.IDatum d)
-                                                                idmap)
-                       (.isAssertion ^datomic.impl.db.IDatum d) (do
-                                                                  (let 
-                                                                    [attr
-                                                                     (.elementAt
-                                                                       ^datomic.db.IDbImpl db_before
-                                                                       (java.lang.Integer/valueOf
-                                                                         (int
-                                                                           (.getA
-                                                                             ^datomic.impl.db.IDatum d))))
+  (defn ensure-tx
+    ([db_before db_after data idmap]
+      (loop [seq_12960 (seq data) chunk_12961 nil count_12962 0 i_12963 0]
+        (if (< i_12963 count_12962)
+          (let [d (.nth ^clojure.lang.Indexed chunk_12961 (unchecked-int i_12963))]
+            (cond
+              (datomic.db/ensure-datom? db_before d) (datomic.db/ensure-entity!
+                                                       db_before
+                                                       db_after
+                                                       (long (.getE ^datomic.impl.db.IDatum d))
+                                                       (.getV ^datomic.impl.db.IDatum d)
+                                                       idmap)
+              (.isAssertion ^datomic.impl.db.IDatum d) (do
+                                                         (let [attr
+                                                               (.elementAt
+                                                                 ^datomic.db.IDbImpl db_before
+                                                                 (java.lang.Integer/valueOf
+                                                                   (int
+                                                                     (.getA
+                                                                       ^datomic.impl.db.IDatum d))))
+                                                               temp__5804__auto__
+                                                               (some-> attr (:attrPred) (deref))]
+                                                           (when
+                                                             temp__5804__auto__
+                                                             (let 
+                                                               [pred temp__5804__auto__]
+                                                               (^clojure.lang.IFn pred
+                                                                 (long
+                                                                   (.getE
+                                                                     ^datomic.impl.db.IDatum d))
+                                                                 (.getV ^datomic.impl.db.IDatum d)
+                                                                 idmap))))))
+            (recur seq_12960 chunk_12961 count_12962 (inc i_12963)))
+          (let [temp__5804__auto__ (seq seq_12960)]
+            (when temp__5804__auto__
+              (let [seq_12960 temp__5804__auto__]
+                (if (chunked-seq? seq_12960)
+                  (let [c__6065__auto__ (chunk-first seq_12960)]
+                    (recur (chunk-rest seq_12960) c__6065__auto__ (count c__6065__auto__) 0))
+                  (let [d (first seq_12960)]
+                    (cond
+                      (datomic.db/ensure-datom? db_before d) (datomic.db/ensure-entity!
+                                                               db_before
+                                                               db_after
+                                                               (long
+                                                                 (.getE ^datomic.impl.db.IDatum d))
+                                                               (.getV ^datomic.impl.db.IDatum d)
+                                                               idmap)
+                      (.isAssertion ^datomic.impl.db.IDatum d) (do
+                                                                 (let 
+                                                                   [attr
+                                                                    (.elementAt
+                                                                      ^datomic.db.IDbImpl db_before
+                                                                      (java.lang.Integer/valueOf
+                                                                        (int
+                                                                          (.getA
+                                                                            ^datomic.impl.db.IDatum d))))
+                                                                    temp__5804__auto__
+                                                                    (some->
+                                                                      attr
+                                                                      (:attrPred)
+                                                                      (deref))]
+                                                                   (when
                                                                      temp__5804__auto__
-                                                                     (some->
-                                                                       attr
-                                                                       (:attrPred)
-                                                                       (deref))]
-                                                                    (when
-                                                                      temp__5804__auto__
-                                                                      (let 
-                                                                        [pred temp__5804__auto__]
-                                                                        (^clojure.lang.IFn pred
-                                                                          (long
-                                                                            (.getE
-                                                                              ^datomic.impl.db.IDatum d))
-                                                                          (.getV
-                                                                            ^datomic.impl.db.IDatum d)
-                                                                          idmap))))))
-                     (recur (next seq_12960) nil 0 0)))))))))))
+                                                                     (let 
+                                                                       [pred temp__5804__auto__]
+                                                                       (^clojure.lang.IFn pred
+                                                                         (long
+                                                                           (.getE
+                                                                             ^datomic.impl.db.IDatum d))
+                                                                         (.getV
+                                                                           ^datomic.impl.db.IDatum d)
+                                                                         idmap))))))
+                    (recur (next seq_12960) nil 0 0))))))))))
   (reset-meta!
     #'ensure-tx
     (assoc
@@ -7868,20 +7724,19 @@
       'ensure-tx
       :ns
       *ns*))
-  (def add-ensured-data
-   (fn add_ensured_data
-     ([db_before data added idmap tx_stat_registers]
-       (let [db_after (.addData
-                        ^datomic.db.IDbImpl db_before
-                        (remove
-                          (fn fn__12972
-                            ([p1__12971#] (datomic.db/ensure-datom? db_before p1__12971#)))
-                          data)
-                        ^java.util.ArrayList added
-                        tx_stat_registers)]
-         (datomic.db/long-add! (:considered-datoms tx_stat_registers) (count data))
-         (datomic.db/ensure-tx db_before db_after data idmap)
-         db_after))))
+  (defn add-ensured-data
+    ([db_before data added idmap tx_stat_registers]
+      (let [db_after (.addData
+                       ^datomic.db.IDbImpl db_before
+                       (remove
+                         (fn fn__12972
+                           ([p1__12971#] (datomic.db/ensure-datom? db_before p1__12971#)))
+                         data)
+                       ^java.util.ArrayList added
+                       tx_stat_registers)]
+        (datomic.db/long-add! (:considered-datoms tx_stat_registers) (count data))
+        (datomic.db/ensure-tx db_before db_after data idmap)
+        db_after)))
   (reset-meta!
     #'add-ensured-data
     (assoc
@@ -7935,41 +7790,40 @@
       'with-tx
       :ns
       *ns*))
-  (def with-tx+opts
-   (fn with_tx_PLUS_opts
-     ([db txdata p__12985]
-       (let [map__12986 p__12985
-             map__12986 (if (seq? map__12986)
-                          (if (next map__12986)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__12986))
-                            (if (seq map__12986) (first map__12986) {}))
-                          map__12986)
-             return_hints (get map__12986 :return-hints)
-             io_context (get map__12986 :io-context)
-             f (fn f ([] (datomic.db/with-tx db (datomic.db/get-prefetch-dispatcher) txdata)))
-             f (if return_hints
-                 (fn fn__12989
-                   ([]
-                     (let [vec__12990 (io-trace/tracing-keys f)
-                           ret (nth vec__12990 (unchecked-int 0) nil)
-                           segments (nth vec__12990 (unchecked-int 1) nil)]
-                       (update ret :hints merge {:segments segments}))))
-                 f)
-             ret (if (or return_hints io_context)
-                   (let [ctx {:io-context (or io_context :datomic.db/trace), :api :with}
-                         map__12994 (io-stats/throw-if-ex! (io-stats/with-io-stats f ctx))
-                         map__12994 (if (seq? map__12994)
-                                      (if (next map__12994)
-                                        (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                          (to-array map__12994))
-                                        (if (seq map__12994) (first map__12994) {}))
-                                      map__12994)
-                         ret (get map__12994 :ret)
-                         io_stats (get map__12994 :io-stats)]
-                     (assoc ret :io-stats io_stats))
-                   (^clojure.lang.IFn f))]
-         (dissoc ret :tx-stats)))))
+  (defn with-tx+opts
+    ([db txdata p__12985]
+      (let [map__12986 p__12985
+            map__12986 (if (seq? map__12986)
+                         (if (next map__12986)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__12986))
+                           (if (seq map__12986) (first map__12986) {}))
+                         map__12986)
+            return_hints (get map__12986 :return-hints)
+            io_context (get map__12986 :io-context)
+            f (fn f ([] (datomic.db/with-tx db (datomic.db/get-prefetch-dispatcher) txdata)))
+            f (if return_hints
+                (fn fn__12989
+                  ([]
+                    (let [vec__12990 (io-trace/tracing-keys f)
+                          ret (nth vec__12990 (unchecked-int 0) nil)
+                          segments (nth vec__12990 (unchecked-int 1) nil)]
+                      (update ret :hints merge {:segments segments}))))
+                f)
+            ret (if (or return_hints io_context)
+                  (let [ctx {:io-context (or io_context :datomic.db/trace), :api :with}
+                        map__12994 (io-stats/throw-if-ex! (io-stats/with-io-stats f ctx))
+                        map__12994 (if (seq? map__12994)
+                                     (if (next map__12994)
+                                       (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                         (to-array map__12994))
+                                       (if (seq map__12994) (first map__12994) {}))
+                                     map__12994)
+                        ret (get map__12994 :ret)
+                        io_stats (get map__12994 :io-stats)]
+                    (assoc ret :io-stats io_stats))
+                  (^clojure.lang.IFn f))]
+        (dissoc ret :tx-stats))))
   (reset-meta!
     #'with-tx+opts
     (assoc
@@ -8334,19 +8188,18 @@
       'on-schema-level
       :ns
       *ns*))
-  (def update-schema-level
-   (fn update_schema_level
-     ([db]
-       (loop [level (get db :schema-level datomic.db/MIN_SCHEMA_LEVEL) db db]
-         (if (= level (long (count datomic.db/bootstrap-txes)))
-           (assoc db :schema-level level)
-           (let [kw (:db/ident
-                      (first
-                        (nth datomic.db/bootstrap-txes (unchecked-int ^java.lang.Number level))))]
-             (when-not kw (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'kw)))))
-             (if (.entid ^datomic.Database db kw)
-               (let [nlevel (inc level)] (recur nlevel (datomic.db/on-schema-level db nlevel)))
-               (assoc db :schema-level level))))))))
+  (defn update-schema-level
+    ([db]
+      (loop [level (get db :schema-level datomic.db/MIN_SCHEMA_LEVEL) db db]
+        (if (= level (long (count datomic.db/bootstrap-txes)))
+          (assoc db :schema-level level)
+          (let [kw (:db/ident
+                     (first
+                       (nth datomic.db/bootstrap-txes (unchecked-int ^java.lang.Number level))))]
+            (when-not kw (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'kw)))))
+            (if (.entid ^datomic.Database db kw)
+              (let [nlevel (inc level)] (recur nlevel (datomic.db/on-schema-level db nlevel)))
+              (assoc db :schema-level level)))))))
   (reset-meta!
     #'update-schema-level
     (assoc
@@ -8404,61 +8257,60 @@
       'init-db
       :ns
       *ns*))
-  (def bootstrap-db*
-   (fn bootstrap_db_STAR_
-     ([id]
-       (let [db (datomic.db/init-db id)
-             ad (fn ad
-                  ([p__13026]
-                    (let [vec__13028 p__13026
-                          e (nth vec__13028 (unchecked-int 0) nil)
-                          a (nth vec__13028 (unchecked-int 1) nil)
-                          v (nth vec__13028 (unchecked-int 2) nil)]
-                      (datomic.db/asserting-datum
-                        (unchecked-long (datomic.db/resolve-id db e))
-                        (unchecked-long (datomic.db/resolve-id db a))
-                        (datomic.db/bootstrap-maybe-resolve db a v)
-                        (.nextT ^datomic.db.Db db)))))
-             data (map ad datomic.db/bootstrap-data)
-             db (datomic.db/add-fulltext (.acceptDataCheck ^datomic.db.Db db data false) data)
-             epoch (java.util.Date. 0)
-             db (reduce
-                  (fn fn__13032
-                    ([p1__13024# p2__13025#]
-                      (:db-after
-                        (.with
-                          ^datomic.Database p1__13024#
-                          (conj
-                            p2__13025#
-                            #:db{:id (DbId/create {:idx -1000004, :part :db.part/tx}),
-                                 :txInstant epoch})))))
-                  db
-                  datomic.db/bootstrap-txes)
-             db (datomic.db/run-hooks db (:memidx db))
-             db (datomic.db/finish-init db)
-             midx (:memidx db)
-             avet (reduce
-                    (fn fn__13034
-                      ([ret d]
-                        (let [a (.getA ^datomic.impl.db.IDatum d)
-                              attr (.elementAt
-                                     ^datomic.db.IDbImpl db
-                                     (java.lang.Integer/valueOf (int a)))]
-                          (if (.-needsAVET ^datomic.db.Attribute attr) (conj ret d) ret))))
-                    (:avet midx)
-                    (seq (:aevt midx)))
-             raet (reduce
-                    (fn fn__13036
-                      ([ret d]
-                        (let [a (.getA ^datomic.impl.db.IDatum d)
-                              attr (.elementAt
-                                     ^datomic.db.IDbImpl db
-                                     (java.lang.Integer/valueOf (int a)))]
-                          (if (= (.-vtypeid ^datomic.db.Attribute attr) 20) (conj ret d) ret))))
-                    (:raet midx)
-                    (seq (:aevt midx)))]
-         (assoc db :memidx (assoc midx :avet avet :raet raet) :nextT 1000)))
-     ([] (datomic.db/bootstrap-db* "bootstrap"))))
+  (defn bootstrap-db*
+    ([id]
+      (let [db (datomic.db/init-db id)
+            ad (fn ad
+                 ([p__13026]
+                   (let [vec__13028 p__13026
+                         e (nth vec__13028 (unchecked-int 0) nil)
+                         a (nth vec__13028 (unchecked-int 1) nil)
+                         v (nth vec__13028 (unchecked-int 2) nil)]
+                     (datomic.db/asserting-datum
+                       (unchecked-long (datomic.db/resolve-id db e))
+                       (unchecked-long (datomic.db/resolve-id db a))
+                       (datomic.db/bootstrap-maybe-resolve db a v)
+                       (.nextT ^datomic.db.Db db)))))
+            data (map ad datomic.db/bootstrap-data)
+            db (datomic.db/add-fulltext (.acceptDataCheck ^datomic.db.Db db data false) data)
+            epoch (java.util.Date. 0)
+            db (reduce
+                 (fn fn__13032
+                   ([p1__13024# p2__13025#]
+                     (:db-after
+                       (.with
+                         ^datomic.Database p1__13024#
+                         (conj
+                           p2__13025#
+                           #:db{:id (DbId/create {:idx -1000004, :part :db.part/tx}),
+                                :txInstant epoch})))))
+                 db
+                 datomic.db/bootstrap-txes)
+            db (datomic.db/run-hooks db (:memidx db))
+            db (datomic.db/finish-init db)
+            midx (:memidx db)
+            avet (reduce
+                   (fn fn__13034
+                     ([ret d]
+                       (let [a (.getA ^datomic.impl.db.IDatum d)
+                             attr (.elementAt
+                                    ^datomic.db.IDbImpl db
+                                    (java.lang.Integer/valueOf (int a)))]
+                         (if (.-needsAVET ^datomic.db.Attribute attr) (conj ret d) ret))))
+                   (:avet midx)
+                   (seq (:aevt midx)))
+            raet (reduce
+                   (fn fn__13036
+                     ([ret d]
+                       (let [a (.getA ^datomic.impl.db.IDatum d)
+                             attr (.elementAt
+                                    ^datomic.db.IDbImpl db
+                                    (java.lang.Integer/valueOf (int a)))]
+                         (if (= (.-vtypeid ^datomic.db.Attribute attr) 20) (conj ret d) ret))))
+                   (:raet midx)
+                   (seq (:aevt midx)))]
+        (assoc db :memidx (assoc midx :avet avet :raet raet) :nextT 1000)))
+    ([] (datomic.db/bootstrap-db* "bootstrap")))
   (reset-meta!
     #'bootstrap-db*
     (assoc
@@ -8473,40 +8325,38 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.db" "base-bootstrap-db")
     (delay (datomic.db/bootstrap-db*)))
-  (def bootstrap-db
-   (fn bootstrap_db
-     ([id] (assoc (deref datomic.db/base-bootstrap-db) :id id))
-     ([] (datomic.db/bootstrap-db (str (common/squuid))))))
+  (defn bootstrap-db
+    ([id] (assoc (deref datomic.db/base-bootstrap-db) :id id))
+    ([] (datomic.db/bootstrap-db (str (common/squuid)))))
   (reset-meta!
     #'bootstrap-db
     (assoc {:arglists (clojure.core/list [] ['id]), :column (int 1)} :name 'bootstrap-db :ns *ns*))
-  (def pretty-datum
-   (fn pretty_datum
-     ([db d]
-       (let [attr (.elementAt
-                    ^datomic.db.Db db
-                    (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))]
-         {:p
-          (.keywordOf
-            ^datomic.db.Db db
-            (long (datomic.db/eid->part (.getE ^datomic.impl.db.IDatum d)))),
-          :e
-          (or
-            (.keywordOf ^datomic.db.Db db (long (.getE ^datomic.impl.db.IDatum d)))
-            (long (datomic.db/eid->eidx (.getE ^datomic.impl.db.IDatum d)))),
-          :a
-          (.keywordOf
-            ^datomic.db.Db db
-            (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))),
-          :v
-          (if (= (.-vtypeid ^datomic.db.Attribute attr) (.idOf ^datomic.db.Db db :db.type/ref))
-            (or
-              (.keywordOf ^datomic.db.Db db (.getV ^datomic.impl.db.IDatum d))
-              (.getV ^datomic.impl.db.IDatum d))
-            (.getV ^datomic.impl.db.IDatum d)),
-          :t (long (.getT ^datomic.impl.db.IDatum d)),
-          :tx (long (.getTx ^datomic.impl.db.IDatum d)),
-          :op (.isAssertion ^datomic.impl.db.IDatum d)}))))
+  (defn pretty-datum
+    ([db d]
+      (let [attr (.elementAt
+                   ^datomic.db.Db db
+                   (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))]
+        {:p
+         (.keywordOf
+           ^datomic.db.Db db
+           (long (datomic.db/eid->part (.getE ^datomic.impl.db.IDatum d)))),
+         :e
+         (or
+           (.keywordOf ^datomic.db.Db db (long (.getE ^datomic.impl.db.IDatum d)))
+           (long (datomic.db/eid->eidx (.getE ^datomic.impl.db.IDatum d)))),
+         :a
+         (.keywordOf
+           ^datomic.db.Db db
+           (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))),
+         :v
+         (if (= (.-vtypeid ^datomic.db.Attribute attr) (.idOf ^datomic.db.Db db :db.type/ref))
+           (or
+             (.keywordOf ^datomic.db.Db db (.getV ^datomic.impl.db.IDatum d))
+             (.getV ^datomic.impl.db.IDatum d))
+           (.getV ^datomic.impl.db.IDatum d)),
+         :t (long (.getT ^datomic.impl.db.IDatum d)),
+         :tx (long (.getTx ^datomic.impl.db.IDatum d)),
+         :op (.isAssertion ^datomic.impl.db.IDatum d)})))
   (reset-meta!
     #'pretty-datum
     (assoc
@@ -8516,7 +8366,7 @@
       'pretty-datum
       :ns
       *ns*))
-  (def t->tx (fn t__GT_tx (^long [^long t] (datomic.db/make-eid 3 t))))
+  (defn t->tx (^long [^long t] (datomic.db/make-eid 3 t)))
   (reset-meta!
     #'t->tx
     (assoc
@@ -8526,8 +8376,7 @@
       't->tx
       :ns
       *ns*))
-  (def accept-data-no-check
-   (fn accept_data_no_check ([db tx] (.acceptDataCheck ^datomic.db.IDbImpl db tx false))))
+  (defn accept-data-no-check ([db tx] (.acceptDataCheck ^datomic.db.IDbImpl db tx false)))
   (reset-meta!
     #'accept-data-no-check
     (assoc

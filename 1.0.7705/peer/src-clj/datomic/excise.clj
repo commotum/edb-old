@@ -43,49 +43,48 @@
       'component-attr?
       :ns
       *ns*))
-  (def component-es-set
-   (fn component_es_set
-     ([db e via_attrs]
-       (let [es #{e}
-             G__13588 [e]
-             vec__13589 G__13588
-             seq__13590 (seq vec__13589)
-             first__13591 (first seq__13590)
-             seq__13590 (next seq__13590)
-             check first__13591
-             more seq__13590
-             via via_attrs]
-         (loop [es es G__13588 G__13588 via via]
-           (let [es es
-                 vec__13592 G__13588
-                 seq__13593 (seq vec__13592)
-                 first__13594 (first seq__13593)
-                 seq__13593 (next seq__13593)
-                 check first__13594
-                 more seq__13593
-                 via via]
-             (if check
-               (let [comps (reduce
-                             (fn fn__13595
-                               ([s d]
-                                 (if (and
-                                       (or
-                                         (empty? via)
-                                         (contains?
-                                           via
-                                           (java.lang.Integer/valueOf
-                                             (int (.getA ^datomic.impl.db.IDatum d)))))
-                                       (datomic.excise/component-attr?
-                                         db
-                                         (java.lang.Integer/valueOf
-                                           (int (.getA ^datomic.impl.db.IDatum d)))))
-                                   (conj s (.getV ^datomic.impl.db.IDatum d))
-                                   s)))
-                             #{}
-                             (db/datoms db :eavt [check]))]
-                 (recur (into es comps) (into more (set/difference comps es)) nil))
-               es)))))
-     ([db e] (datomic.excise/component-es-set db e nil))))
+  (defn component-es-set
+    ([db e via_attrs]
+      (let [es #{e}
+            G__13588 [e]
+            vec__13589 G__13588
+            seq__13590 (seq vec__13589)
+            first__13591 (first seq__13590)
+            seq__13590 (next seq__13590)
+            check first__13591
+            more seq__13590
+            via via_attrs]
+        (loop [es es G__13588 G__13588 via via]
+          (let [es es
+                vec__13592 G__13588
+                seq__13593 (seq vec__13592)
+                first__13594 (first seq__13593)
+                seq__13593 (next seq__13593)
+                check first__13594
+                more seq__13593
+                via via]
+            (if check
+              (let [comps (reduce
+                            (fn fn__13595
+                              ([s d]
+                                (if (and
+                                      (or
+                                        (empty? via)
+                                        (contains?
+                                          via
+                                          (java.lang.Integer/valueOf
+                                            (int (.getA ^datomic.impl.db.IDatum d)))))
+                                      (datomic.excise/component-attr?
+                                        db
+                                        (java.lang.Integer/valueOf
+                                          (int (.getA ^datomic.impl.db.IDatum d)))))
+                                  (conj s (.getV ^datomic.impl.db.IDatum d))
+                                  s)))
+                            #{}
+                            (db/datoms db :eavt [check]))]
+                (recur (into es comps) (into more (set/difference comps es)) nil))
+              es)))))
+    ([db e] (datomic.excise/component-es-set db e nil)))
   (reset-meta!
     #'component-es-set
     (assoc
@@ -94,12 +93,12 @@
       'component-es-set
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol ExcisePred (ep-datoms [epred]) (ep-remove? [epred datom]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.excise" "ExcisePred")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'ExcisePred :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'ExcisePred :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -109,13 +108,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.excise" "ExcisePred"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.excise" "ep-datoms")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -125,22 +124,21 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.excise" "ExcisePred"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.excise" "ep-remove?")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*))))
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*))))
   (.setMeta (clojure.lang.RT/var "datomic.excise" "bootids") {:private true, :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.excise" "bootids") (into #{} (vals db/BOOT-IDS)))
-  (def keeper?
-   (fn keeper_QMARK_
-     ([d]
-       (or
-         (zero? (.getP ^datomic.impl.db.IDatum d))
-         (contains?
-           datomic.excise/bootids
-           (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))))))
+  (defn keeper?
+    ([d]
+      (or
+        (zero? (.getP ^datomic.impl.db.IDatum d))
+        (contains?
+          datomic.excise/bootids
+          (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))))))
   (reset-meta!
     #'keeper?
     (assoc
@@ -149,13 +147,12 @@
       'keeper?
       :ns
       *ns*))
-  (def get-before-t
-   (fn get_before_t
-     ([db spec]
-       (let [before_t (:db.excise/beforeT spec) before (:db.excise/before spec)]
-         (if before
-           (min (or before_t (long java.lang.Long/MAX_VALUE)) (db/as-of-t db before))
-           before_t)))))
+  (defn get-before-t
+    ([db spec]
+      (let [before_t (:db.excise/beforeT spec) before (:db.excise/before spec)]
+        (if before
+          (min (or before_t (long java.lang.Long/MAX_VALUE)) (db/as-of-t db before))
+          before_t))))
   (reset-meta!
     #'get-before-t
     (assoc
@@ -164,100 +161,99 @@
       'get-before-t
       :ns
       *ns*))
-  (def pred-and-extent
-   (fn pred_and_extent
-     ([db spec]
-       (let [id (fn id ([p1__13635#] (or (:db/id p1__13635#) (db/resolve-id db p1__13635#))))
-             target (^clojure.lang.IFn id (:db/excise spec))
-             attrs (into #{} (map id (:db.excise/attrs spec)))
-             before_t (datomic.excise/get-before-t db spec)
-             type (cond
-                    (seq attrs) :e
-                    (and
-                      (zero? (db/eid->part (long ^java.lang.Number target)))
-                      (db/attribute db target)) :a
-                    :else (do :e))
-             t (db/eid->eidx (long (:db/id spec)))
-             extent (when (= type :e)
-                      (datomic.excise/component-es-set
-                        (.asOf (.history ^datomic.Database db) (long t))
-                        target
-                        attrs))
-             component? (disj extent target)
-             ref? (fn ref_QMARK_ ([p1__13636#] (= (.-vtypeid (db/attribute db p1__13636#)) 20)))
-             remove? (fn remove_QMARK_
-                       ([d]
-                         (when (and
-                                 (not (datomic.excise/keeper? d))
-                                 (< (.getT ^datomic.impl.db.IDatum d) t)
-                                 (or
-                                   (nil? before_t)
-                                   (<
-                                     (.getT ^datomic.impl.db.IDatum d)
-                                     (db/eid->eidx (long ^java.lang.Number before_t)))))
-                           (let [G__13645 type]
-                             (case
-                               G__13645
-                               :a
-                               (= target (long (.getA ^datomic.impl.db.IDatum d)))
-                               :e
-                               (or
-                                 (and
-                                   (or
-                                     (= target (long (.getE ^datomic.impl.db.IDatum d)))
-                                     (and
-                                       (^clojure.lang.IFn ref?
-                                         (java.lang.Integer/valueOf
-                                           (int (.getA ^datomic.impl.db.IDatum d))))
-                                       (= target (.getV ^datomic.impl.db.IDatum d))))
-                                   (or
-                                     (empty? attrs)
-                                     (contains?
-                                       attrs
-                                       (java.lang.Integer/valueOf
-                                         (int (.getA ^datomic.impl.db.IDatum d))))))
-                                 (^clojure.lang.IFn component?
-                                   (long (.getE ^datomic.impl.db.IDatum d)))
-                                 (and
-                                   (^clojure.lang.IFn ref?
-                                     (java.lang.Integer/valueOf
-                                       (int (.getA ^datomic.impl.db.IDatum d))))
-                                   (^clojure.lang.IFn component?
-                                     (.getV ^datomic.impl.db.IDatum d)))))))))
-             datoms (fn datoms
-                      ([]
-                        (let [G__13658 type]
-                          (case
-                            G__13658
-                            :a
-                            (filter
-                              remove?
-                              (db/datoms (.history ^datomic.Database db) :aevt [target]))
-                            :e
-                            (filter
-                              remove?
-                              (concat
-                                (mapcat
-                                  (fn fn__13659
-                                    ([p1__13637#]
-                                      (db/datoms
-                                        (.history ^datomic.Database db)
-                                        :eavt
-                                        [p1__13637#])))
-                                  extent)
-                                (mapcat
-                                  (fn fn__13661
-                                    ([p1__13638#]
-                                      (db/datoms
-                                        (.history ^datomic.Database db)
-                                        :vaet
-                                        [p1__13638#])))
-                                  extent)))))))]
-         [(reify
-            datomic.excise.ExcisePred
-            (ep-remove? [this d] (^clojure.lang.IFn remove? d))
-            (ep-datoms [this] (^clojure.lang.IFn datoms)))
-          extent]))))
+  (defn pred-and-extent
+    ([db spec]
+      (let [id (fn id ([p1__13635#] (or (:db/id p1__13635#) (db/resolve-id db p1__13635#))))
+            target (^clojure.lang.IFn id (:db/excise spec))
+            attrs (into #{} (map id (:db.excise/attrs spec)))
+            before_t (datomic.excise/get-before-t db spec)
+            type (cond
+                   (seq attrs) :e
+                   (and
+                     (zero? (db/eid->part (long ^java.lang.Number target)))
+                     (db/attribute db target)) :a
+                   :else (do :e))
+            t (db/eid->eidx (long (:db/id spec)))
+            extent (when (= type :e)
+                     (datomic.excise/component-es-set
+                       (.asOf (.history ^datomic.Database db) (long t))
+                       target
+                       attrs))
+            component? (disj extent target)
+            ref? (fn ref_QMARK_ ([p1__13636#] (= (.-vtypeid (db/attribute db p1__13636#)) 20)))
+            remove? (fn remove_QMARK_
+                      ([d]
+                        (when (and
+                                (not (datomic.excise/keeper? d))
+                                (< (.getT ^datomic.impl.db.IDatum d) t)
+                                (or
+                                  (nil? before_t)
+                                  (<
+                                    (.getT ^datomic.impl.db.IDatum d)
+                                    (db/eid->eidx (long ^java.lang.Number before_t)))))
+                          (let [G__13645 type]
+                            (case
+                              G__13645
+                              :a
+                              (= target (long (.getA ^datomic.impl.db.IDatum d)))
+                              :e
+                              (or
+                                (and
+                                  (or
+                                    (= target (long (.getE ^datomic.impl.db.IDatum d)))
+                                    (and
+                                      (^clojure.lang.IFn ref?
+                                        (java.lang.Integer/valueOf
+                                          (int (.getA ^datomic.impl.db.IDatum d))))
+                                      (= target (.getV ^datomic.impl.db.IDatum d))))
+                                  (or
+                                    (empty? attrs)
+                                    (contains?
+                                      attrs
+                                      (java.lang.Integer/valueOf
+                                        (int (.getA ^datomic.impl.db.IDatum d))))))
+                                (^clojure.lang.IFn component?
+                                  (long (.getE ^datomic.impl.db.IDatum d)))
+                                (and
+                                  (^clojure.lang.IFn ref?
+                                    (java.lang.Integer/valueOf
+                                      (int (.getA ^datomic.impl.db.IDatum d))))
+                                  (^clojure.lang.IFn component?
+                                    (.getV ^datomic.impl.db.IDatum d)))))))))
+            datoms (fn datoms
+                     ([]
+                       (let [G__13658 type]
+                         (case
+                           G__13658
+                           :a
+                           (filter
+                             remove?
+                             (db/datoms (.history ^datomic.Database db) :aevt [target]))
+                           :e
+                           (filter
+                             remove?
+                             (concat
+                               (mapcat
+                                 (fn fn__13659
+                                   ([p1__13637#]
+                                     (db/datoms
+                                       (.history ^datomic.Database db)
+                                       :eavt
+                                       [p1__13637#])))
+                                 extent)
+                               (mapcat
+                                 (fn fn__13661
+                                   ([p1__13638#]
+                                     (db/datoms
+                                       (.history ^datomic.Database db)
+                                       :vaet
+                                       [p1__13638#])))
+                                 extent)))))))]
+        [(reify
+           datomic.excise.ExcisePred
+           (ep-remove? [this d] (^clojure.lang.IFn remove? d))
+           (ep-datoms [this] (^clojure.lang.IFn datoms)))
+         extent])))
   (reset-meta!
     #'pred-and-extent
     (assoc
@@ -295,15 +291,14 @@
       'a-target?
       :ns
       *ns*))
-  (def ref-datom?
-   (fn ref_datom_QMARK_
-     ([db d]
-       (=
-         20
-         (.-vtypeid
-           (db/require-attr
-             db
-             (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d)))))))))
+  (defn ref-datom?
+    ([db d]
+      (=
+        20
+        (.-vtypeid
+          (db/require-attr
+            db
+            (java.lang.Integer/valueOf (int (.getA ^datomic.impl.db.IDatum d))))))))
   (reset-meta!
     #'ref-datom?
     (assoc

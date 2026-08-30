@@ -22,45 +22,44 @@
         (clojure.core/import 'java.util.zip.ZipEntry)
         (clojure.core/import 'java.util.zip.ZipOutputStream)
         (clojure.core/import 'java.io.File))))
-  (def add-entries
-   (fn add_entries
-     ([jos sources transform]
-       (loop [seq_26572 (seq
-                          (filter
-                            (fn fn__26576 ([p1__26571#] (.isFile ^java.io.File p1__26571#)))
-                            sources))
-              chunk_26573 nil
-              count_26574 0
-              i_26575 0]
-         (if (< i_26575 count_26574)
-           (let [source (.nth ^clojure.lang.Indexed chunk_26573 (int i_26575))]
-             (let [entry (java.util.jar.JarEntry.
-                           (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
-               (.setTime ^java.util.zip.ZipEntry entry (long (.lastModified ^java.io.File source)))
-               (.putNextEntry ^java.util.jar.JarOutputStream jos ^java.util.zip.ZipEntry entry))
-             (io/copy source jos)
-             (recur seq_26572 chunk_26573 count_26574 (inc i_26575)))
-           (let [temp__5825__auto__ (seq seq_26572)]
-             (when temp__5825__auto__
-               (let [seq_26572 temp__5825__auto__]
-                 (if (chunked-seq? seq_26572)
-                   (let [c__6090__auto__ (chunk-first seq_26572)]
-                     (recur
-                       (chunk-rest seq_26572)
-                       c__6090__auto__
-                       (int (count c__6090__auto__))
-                       (int 0)))
-                   (let [source (first seq_26572)]
-                     (let [entry (java.util.jar.JarEntry.
-                                   (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
-                       (.setTime
-                         ^java.util.zip.ZipEntry entry
-                         (long (.lastModified ^java.io.File source)))
-                       (.putNextEntry
-                         ^java.util.jar.JarOutputStream jos
-                         ^java.util.zip.ZipEntry entry))
-                     (io/copy source jos)
-                     (recur (next seq_26572) nil 0 0)))))))))))
+  (defn add-entries
+    ([jos sources transform]
+      (loop [seq_26572 (seq
+                         (filter
+                           (fn fn__26576 ([p1__26571#] (.isFile ^java.io.File p1__26571#)))
+                           sources))
+             chunk_26573 nil
+             count_26574 0
+             i_26575 0]
+        (if (< i_26575 count_26574)
+          (let [source (.nth ^clojure.lang.Indexed chunk_26573 (int i_26575))]
+            (let [entry (java.util.jar.JarEntry.
+                          (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
+              (.setTime ^java.util.zip.ZipEntry entry (long (.lastModified ^java.io.File source)))
+              (.putNextEntry ^java.util.jar.JarOutputStream jos ^java.util.zip.ZipEntry entry))
+            (io/copy source jos)
+            (recur seq_26572 chunk_26573 count_26574 (inc i_26575)))
+          (let [temp__5825__auto__ (seq seq_26572)]
+            (when temp__5825__auto__
+              (let [seq_26572 temp__5825__auto__]
+                (if (chunked-seq? seq_26572)
+                  (let [c__6090__auto__ (chunk-first seq_26572)]
+                    (recur
+                      (chunk-rest seq_26572)
+                      c__6090__auto__
+                      (int (count c__6090__auto__))
+                      (int 0)))
+                  (let [source (first seq_26572)]
+                    (let [entry (java.util.jar.JarEntry.
+                                  (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
+                      (.setTime
+                        ^java.util.zip.ZipEntry entry
+                        (long (.lastModified ^java.io.File source)))
+                      (.putNextEntry
+                        ^java.util.jar.JarOutputStream jos
+                        ^java.util.zip.ZipEntry entry))
+                    (io/copy source jos)
+                    (recur (next seq_26572) nil 0 0))))))))))
   (reset-meta!
     #'add-entries
     (assoc
@@ -86,45 +85,44 @@
       'create-jar
       :ns
       *ns*))
-  (def add-zip-entries
-   (fn add_zip_entries
-     ([jos sources transform]
-       (loop [seq_26583 (seq
-                          (filter
-                            (fn fn__26587 ([p1__26582#] (.isFile ^java.io.File p1__26582#)))
-                            sources))
-              chunk_26584 nil
-              count_26585 0
-              i_26586 0]
-         (if (< i_26586 count_26585)
-           (let [source (.nth ^clojure.lang.Indexed chunk_26584 (int i_26586))]
-             (let [entry (java.util.zip.ZipEntry.
-                           (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
-               (.setTime ^java.util.zip.ZipEntry entry (long (.lastModified ^java.io.File source)))
-               (.putNextEntry ^java.util.zip.ZipOutputStream jos ^java.util.zip.ZipEntry entry))
-             (io/copy source jos)
-             (recur seq_26583 chunk_26584 count_26585 (inc i_26586)))
-           (let [temp__5825__auto__ (seq seq_26583)]
-             (when temp__5825__auto__
-               (let [seq_26583 temp__5825__auto__]
-                 (if (chunked-seq? seq_26583)
-                   (let [c__6090__auto__ (chunk-first seq_26583)]
-                     (recur
-                       (chunk-rest seq_26583)
-                       c__6090__auto__
-                       (int (count c__6090__auto__))
-                       (int 0)))
-                   (let [source (first seq_26583)]
-                     (let [entry (java.util.zip.ZipEntry.
-                                   (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
-                       (.setTime
-                         ^java.util.zip.ZipEntry entry
-                         (long (.lastModified ^java.io.File source)))
-                       (.putNextEntry
-                         ^java.util.zip.ZipOutputStream jos
-                         ^java.util.zip.ZipEntry entry))
-                     (io/copy source jos)
-                     (recur (next seq_26583) nil 0 0)))))))))))
+  (defn add-zip-entries
+    ([jos sources transform]
+      (loop [seq_26583 (seq
+                         (filter
+                           (fn fn__26587 ([p1__26582#] (.isFile ^java.io.File p1__26582#)))
+                           sources))
+             chunk_26584 nil
+             count_26585 0
+             i_26586 0]
+        (if (< i_26586 count_26585)
+          (let [source (.nth ^clojure.lang.Indexed chunk_26584 (int i_26586))]
+            (let [entry (java.util.zip.ZipEntry.
+                          (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
+              (.setTime ^java.util.zip.ZipEntry entry (long (.lastModified ^java.io.File source)))
+              (.putNextEntry ^java.util.zip.ZipOutputStream jos ^java.util.zip.ZipEntry entry))
+            (io/copy source jos)
+            (recur seq_26583 chunk_26584 count_26585 (inc i_26586)))
+          (let [temp__5825__auto__ (seq seq_26583)]
+            (when temp__5825__auto__
+              (let [seq_26583 temp__5825__auto__]
+                (if (chunked-seq? seq_26583)
+                  (let [c__6090__auto__ (chunk-first seq_26583)]
+                    (recur
+                      (chunk-rest seq_26583)
+                      c__6090__auto__
+                      (int (count c__6090__auto__))
+                      (int 0)))
+                  (let [source (first seq_26583)]
+                    (let [entry (java.util.zip.ZipEntry.
+                                  (^clojure.lang.IFn transform (.getPath ^java.io.File source)))]
+                      (.setTime
+                        ^java.util.zip.ZipEntry entry
+                        (long (.lastModified ^java.io.File source)))
+                      (.putNextEntry
+                        ^java.util.zip.ZipOutputStream jos
+                        ^java.util.zip.ZipEntry entry))
+                    (io/copy source jos)
+                    (recur (next seq_26583) nil 0 0))))))))))
   (reset-meta!
     #'add-zip-entries
     (assoc

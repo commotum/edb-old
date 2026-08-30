@@ -49,158 +49,157 @@
       #'chunk-pool))
   (def cql-keys [:id2 :rev :map :val :chunks])
   (reset-meta! #'cql-keys (assoc {:column (int 1)} :name 'cql-keys :ns *ns*))
-  (def put-value
-   (fn put_value
-     ([session table p__27211]
-       (let [map__27212 p__27211
-             map__27212 (if (seq? map__27212)
-                          (if (next map__27212)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27212))
-                            (if (seq map__27212) (first map__27212) {}))
-                          map__27212)
-             v_map map__27212
-             id (get map__27212 :id)
-             rev (get map__27212 :rev)
-             v (get map__27212 :v)
-             m (dissoc v_map :id :rev :v)
-             chunks (mapv
-                      (fn fn__27213 ([bbuf] (.asReadOnlyBuffer ^java.nio.ByteBuffer bbuf)))
-                      (io/chunk v 358400))
-             n (count chunks)
-             val_map {:chunks (java.lang.Integer/valueOf (int n)),
-                      :id2 id,
-                      :map (when (java.lang.Integer/valueOf (int (count m))) (pr-str m)),
-                      :rev rev,
-                      :val (nth chunks (int 0))}
-             rets [(atom
-                     (let [m_27215 {:event :cassandra-values/put-value,
-                                    :id id,
-                                    :bufsize
-                                    (java.lang.Integer/valueOf
-                                      (int (.remaining (nth chunks (int 0)))))}
-                           ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                          "datomic.cassandra-values-v4")]
-                                             (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                               (.debug
-                                                 ^org.slf4j.Logger logger
-                                                 (logger/process (assoc m_27215 :phase :begin))))
-                                             nil)
-                           start__8599__auto__ (java.lang.System/nanoTime)
-                           result__8600__auto__ (try
-                                                  {:returned
-                                                   (cass/cql-insert
-                                                     session
-                                                     table
-                                                     cql-keys
-                                                     val_map
-                                                     false)}
-                                                  (catch
-                                                    java.lang.Throwable
-                                                    t__8601__auto__
-                                                    {:threw t__8601__auto__}))
-                           elapsed_27216 (- (java.lang.System/nanoTime) start__8599__auto__)
-                           msec_27217 (logger/format-as-msec (long elapsed_27216))]
-                       (let [endmsg__8602__auto__ (merge
-                                                    (assoc m_27215 :msec msec_27217 :phase :end)
-                                                    (when (:threw result__8600__auto__)
-                                                      {:threw
-                                                       (class (:threw result__8600__auto__))}))
-                             logger (org.slf4j.LoggerFactory/getLogger
-                                      "datomic.cassandra-values-v4")]
-                         (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                           (.debug ^org.slf4j.Logger logger (logger/process endmsg__8602__auto__)))
-                         nil)
-                       (if (contains? result__8600__auto__ :returned)
-                         (:returned result__8600__auto__)
-                         (do (throw (:threw result__8600__auto__)) atom))))]
-             rets (mapv
-                    deref
-                    (reduce
-                      (fn fn__27220
-                        ([rets n]
-                          (let [val_map {:id2 (chunk-key id n),
-                                         :val (nth chunks (int ^java.lang.Number n))}]
-                            (conj
-                              rets
-                              (df/-future-with-channel-impl
-                                (deref chunk-pool)
-                                (fn fn__27221
-                                  ([]
-                                    (let [m_27222 {:event :cassandra-values/put-value-chunk,
-                                                   :id id,
-                                                   :n n,
-                                                   :bufsize
-                                                   (java.lang.Integer/valueOf
-                                                     (int
-                                                       (.remaining
-                                                         (nth chunks (int ^java.lang.Number n)))))}
-                                          ___8598__auto__ (let [logger
-                                                                (org.slf4j.LoggerFactory/getLogger
-                                                                  "datomic.cassandra-values-v4")]
-                                                            (when
-                                                              (.isDebugEnabled
-                                                                ^org.slf4j.Logger logger)
-                                                              (.debug
-                                                                ^org.slf4j.Logger logger
-                                                                (logger/process
-                                                                  (assoc m_27222 :phase :begin))))
-                                                            nil)
-                                          start__8599__auto__ (java.lang.System/nanoTime)
-                                          result__8600__auto__ (try
-                                                                 {:returned
-                                                                  (*retry*
-                                                                    (fn 
-                                                                      fn__27226
-                                                                      ([]
-                                                                        (cass/cql-insert
-                                                                          session
-                                                                          table
-                                                                          cql-keys
-                                                                          val_map
-                                                                          false))))}
-                                                                 (catch
-                                                                   java.lang.Throwable
-                                                                   t__8601__auto__
-                                                                   {:threw t__8601__auto__}))
-                                          elapsed_27223 (-
-                                                          (java.lang.System/nanoTime)
-                                                          start__8599__auto__)
-                                          msec_27224 (logger/format-as-msec (long elapsed_27223))]
-                                      (let [endmsg__8602__auto__ (merge
-                                                                   (assoc
-                                                                     m_27222
-                                                                     :msec
-                                                                     msec_27224
-                                                                     :phase
-                                                                     :end)
-                                                                   (when
-                                                                     (:threw result__8600__auto__)
-                                                                     {:threw
-                                                                      (class
-                                                                        (:threw
-                                                                          result__8600__auto__))}))
-                                            logger (org.slf4j.LoggerFactory/getLogger
-                                                     "datomic.cassandra-values-v4")]
-                                        (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                          (.debug
-                                            ^org.slf4j.Logger logger
-                                            (logger/process endmsg__8602__auto__)))
-                                        nil)
-                                      (if (contains? result__8600__auto__ :returned)
-                                        (:returned result__8600__auto__)
-                                        (do (throw (:threw result__8600__auto__)) nil))))))))))
-                      rets
-                      (range 1 (java.lang.Integer/valueOf (int n)))))]
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-values-v4")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process
-                 {:cassandra-values/put rets,
-                  :size (java.lang.Integer/valueOf (int (.remaining ^java.nio.Buffer v)))})))
-           nil)
-         :created))))
+  (defn put-value
+    ([session table p__27211]
+      (let [map__27212 p__27211
+            map__27212 (if (seq? map__27212)
+                         (if (next map__27212)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27212))
+                           (if (seq map__27212) (first map__27212) {}))
+                         map__27212)
+            v_map map__27212
+            id (get map__27212 :id)
+            rev (get map__27212 :rev)
+            v (get map__27212 :v)
+            m (dissoc v_map :id :rev :v)
+            chunks (mapv
+                     (fn fn__27213 ([bbuf] (.asReadOnlyBuffer ^java.nio.ByteBuffer bbuf)))
+                     (io/chunk v 358400))
+            n (count chunks)
+            val_map {:chunks (java.lang.Integer/valueOf (int n)),
+                     :id2 id,
+                     :map (when (java.lang.Integer/valueOf (int (count m))) (pr-str m)),
+                     :rev rev,
+                     :val (nth chunks (int 0))}
+            rets [(atom
+                    (let [m_27215 {:event :cassandra-values/put-value,
+                                   :id id,
+                                   :bufsize
+                                   (java.lang.Integer/valueOf
+                                     (int (.remaining (nth chunks (int 0)))))}
+                          ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                         "datomic.cassandra-values-v4")]
+                                            (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                              (.debug
+                                                ^org.slf4j.Logger logger
+                                                (logger/process (assoc m_27215 :phase :begin))))
+                                            nil)
+                          start__8599__auto__ (java.lang.System/nanoTime)
+                          result__8600__auto__ (try
+                                                 {:returned
+                                                  (cass/cql-insert
+                                                    session
+                                                    table
+                                                    cql-keys
+                                                    val_map
+                                                    false)}
+                                                 (catch
+                                                   java.lang.Throwable
+                                                   t__8601__auto__
+                                                   {:threw t__8601__auto__}))
+                          elapsed_27216 (- (java.lang.System/nanoTime) start__8599__auto__)
+                          msec_27217 (logger/format-as-msec (long elapsed_27216))]
+                      (let [endmsg__8602__auto__ (merge
+                                                   (assoc m_27215 :msec msec_27217 :phase :end)
+                                                   (when (:threw result__8600__auto__)
+                                                     {:threw
+                                                      (class (:threw result__8600__auto__))}))
+                            logger (org.slf4j.LoggerFactory/getLogger
+                                     "datomic.cassandra-values-v4")]
+                        (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                          (.debug ^org.slf4j.Logger logger (logger/process endmsg__8602__auto__)))
+                        nil)
+                      (if (contains? result__8600__auto__ :returned)
+                        (:returned result__8600__auto__)
+                        (do (throw (:threw result__8600__auto__)) atom))))]
+            rets (mapv
+                   deref
+                   (reduce
+                     (fn fn__27220
+                       ([rets n]
+                         (let [val_map {:id2 (chunk-key id n),
+                                        :val (nth chunks (int ^java.lang.Number n))}]
+                           (conj
+                             rets
+                             (df/-future-with-channel-impl
+                               (deref chunk-pool)
+                               (fn fn__27221
+                                 ([]
+                                   (let [m_27222 {:event :cassandra-values/put-value-chunk,
+                                                  :id id,
+                                                  :n n,
+                                                  :bufsize
+                                                  (java.lang.Integer/valueOf
+                                                    (int
+                                                      (.remaining
+                                                        (nth chunks (int ^java.lang.Number n)))))}
+                                         ___8598__auto__ (let [logger
+                                                               (org.slf4j.LoggerFactory/getLogger
+                                                                 "datomic.cassandra-values-v4")]
+                                                           (when
+                                                             (.isDebugEnabled
+                                                               ^org.slf4j.Logger logger)
+                                                             (.debug
+                                                               ^org.slf4j.Logger logger
+                                                               (logger/process
+                                                                 (assoc m_27222 :phase :begin))))
+                                                           nil)
+                                         start__8599__auto__ (java.lang.System/nanoTime)
+                                         result__8600__auto__ (try
+                                                                {:returned
+                                                                 (*retry*
+                                                                   (fn 
+                                                                     fn__27226
+                                                                     ([]
+                                                                       (cass/cql-insert
+                                                                         session
+                                                                         table
+                                                                         cql-keys
+                                                                         val_map
+                                                                         false))))}
+                                                                (catch
+                                                                  java.lang.Throwable
+                                                                  t__8601__auto__
+                                                                  {:threw t__8601__auto__}))
+                                         elapsed_27223 (-
+                                                         (java.lang.System/nanoTime)
+                                                         start__8599__auto__)
+                                         msec_27224 (logger/format-as-msec (long elapsed_27223))]
+                                     (let [endmsg__8602__auto__ (merge
+                                                                  (assoc
+                                                                    m_27222
+                                                                    :msec
+                                                                    msec_27224
+                                                                    :phase
+                                                                    :end)
+                                                                  (when
+                                                                    (:threw result__8600__auto__)
+                                                                    {:threw
+                                                                     (class
+                                                                       (:threw
+                                                                         result__8600__auto__))}))
+                                           logger (org.slf4j.LoggerFactory/getLogger
+                                                    "datomic.cassandra-values-v4")]
+                                       (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                         (.debug
+                                           ^org.slf4j.Logger logger
+                                           (logger/process endmsg__8602__auto__)))
+                                       nil)
+                                     (if (contains? result__8600__auto__ :returned)
+                                       (:returned result__8600__auto__)
+                                       (do (throw (:threw result__8600__auto__)) nil))))))))))
+                     rets
+                     (range 1 (java.lang.Integer/valueOf (int n)))))]
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-values-v4")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process
+                {:cassandra-values/put rets,
+                 :size (java.lang.Integer/valueOf (int (.remaining ^java.nio.Buffer v)))})))
+          nil)
+        :created)))
   (reset-meta!
     #'put-value
     (assoc

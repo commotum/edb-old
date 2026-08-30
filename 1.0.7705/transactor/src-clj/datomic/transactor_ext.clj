@@ -43,48 +43,47 @@
           ['datomic.monitor :as 'monitor]
           ['datomic.logrotate :as 'logrotate]))))
   (set! *warn-on-reflection* true)
-  (def start-logrotate
-   (fn start_logrotate
-     ([p__31815]
-       (let [map__31816 p__31815
-             map__31816 (if (seq? map__31816)
-                          (if (next map__31816)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31816))
-                            (if (seq map__31816) (first map__31816) {}))
-                          map__31816)
-             log_dir (get map__31816 :log-dir)
-             creds (get map__31816 :creds)
-             aws_s3_log_bucket_id (get map__31816 :aws-s3-log-bucket-id)
-             log_path_fn (get map__31816 :log-path-fn)
-             process (get map__31816 :process)]
-         (when aws_s3_log_bucket_id
-           (try
-             (logrotate/probe creds aws_s3_log_bucket_id)
-             (catch
-               java.lang.Throwable
-               t
-               (error/raise
-                 :transactor/config
-                 "Unable to write to S3 bucket"
-                 {:bucket aws_s3_log_bucket_id}
-                 t)))
-           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.transactor-ext")]
-             (when (.isInfoEnabled ^org.slf4j.Logger logger)
-               (.info ^org.slf4j.Logger logger (logger/process "Logrotation started.")))
-             nil)
-           (let [interval (* (* 5 60) 1000)]
-             (logrotate/watch-dir log_dir (long interval) aws_s3_log_bucket_id log_path_fn creds)
-             (process/add-fail-handler
-               process
-               (fn fn__31819
-                 ([]
-                   (logrotate/zip-and-put-in-s3
-                     log_dir
-                     aws_s3_log_bucket_id
-                     log_path_fn
-                     creds
-                     0))))))))))
+  (defn start-logrotate
+    ([p__31815]
+      (let [map__31816 p__31815
+            map__31816 (if (seq? map__31816)
+                         (if (next map__31816)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31816))
+                           (if (seq map__31816) (first map__31816) {}))
+                         map__31816)
+            log_dir (get map__31816 :log-dir)
+            creds (get map__31816 :creds)
+            aws_s3_log_bucket_id (get map__31816 :aws-s3-log-bucket-id)
+            log_path_fn (get map__31816 :log-path-fn)
+            process (get map__31816 :process)]
+        (when aws_s3_log_bucket_id
+          (try
+            (logrotate/probe creds aws_s3_log_bucket_id)
+            (catch
+              java.lang.Throwable
+              t
+              (error/raise
+                :transactor/config
+                "Unable to write to S3 bucket"
+                {:bucket aws_s3_log_bucket_id}
+                t)))
+          (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.transactor-ext")]
+            (when (.isInfoEnabled ^org.slf4j.Logger logger)
+              (.info ^org.slf4j.Logger logger (logger/process "Logrotation started.")))
+            nil)
+          (let [interval (* (* 5 60) 1000)]
+            (logrotate/watch-dir log_dir (long interval) aws_s3_log_bucket_id log_path_fn creds)
+            (process/add-fail-handler
+              process
+              (fn fn__31819
+                ([]
+                  (logrotate/zip-and-put-in-s3
+                    log_dir
+                    aws_s3_log_bucket_id
+                    log_path_fn
+                    creds
+                    0)))))))))
   (reset-meta!
     #'start-logrotate
     (assoc
@@ -2500,724 +2499,723 @@
   (reset-meta!
     #'humanize-key
     (assoc {:arglists (clojure.core/list ['k]), :column (int 1)} :name 'humanize-key :ns *ns*))
-  (def describe-license-key
-   (fn describe_license_key
-     ([p__31848]
-       (let [map__31849 p__31848
-             map__31849 (if (seq? map__31849)
-                          (if (next map__31849)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__31849))
-                            (if (seq map__31849) (first map__31849) {}))
-                          map__31849)
-             properties_file (get map__31849 :properties-file)]
-         (prn
-           (let [G__31850 properties_file
-                 G__31850 (some-> G__31850 (common/load-properties))
-                 G__31850 (some-> G__31850 (common/props->map))
-                 G__31850 (some-> G__31850 (common/force-map-keywords))
-                 G__31850 (some-> G__31850 (:license-key))]
-             (some->
-               (when-not (nil? G__31850)
-                 (clojure.edn/read-string
-                   (let [vec__31851 [(str
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 41)))
-                                       \S
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110))))
-                                     (str
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 16)))
-                                       \I
-                                       \I
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 78)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 77)))
-                                       \A
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 65)))
-                                       \B
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       \k
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 28)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 44)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 48)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 57)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 37)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 63)))
-                                       \0
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 78)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 108)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 30)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 94)))
-                                       \A
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 71)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       \Q
-                                       \8
-                                       \A
-                                       \M
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       \I
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 78)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 71)))
-                                       \g
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 49)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 71)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 108)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 30)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       \i
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 89)))
-                                       \Z
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 82)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 19)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 30)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 19)))
-                                       \z
-                                       \K
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 76)))
-                                       \1
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 96)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 65)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 65)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 53)))
-                                       \f
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 12)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 89)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 40)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 48)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 89)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 41)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 84)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 16)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 108)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 28)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 94)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 58)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 82)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 71)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       \6
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 82)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 15)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 117)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 118)))
-                                       \3
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 28)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 28)))
-                                       \C
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 63)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 57)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 127)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 121)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 107)))
-                                       \c
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 17)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       \f
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 114)))
-                                       \y
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 66)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 119)))
-                                       \m
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       \g
-                                       \Y
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 1)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 98)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 53)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 17)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 121)))
-                                       \2
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 48)))
-                                       \Y
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 49)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 77)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 12)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 53)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 3)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 56)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 94)))
-                                       \c
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 107)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 84)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 87)))
-                                       \f
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       \A
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 4)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 119)))
-                                       \R
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 113)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 39)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       \h
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 87)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 114)))
-                                       \Z
-                                       \D
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       \H
-                                       \5
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 118)))
-                                       \3
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 99)))
-                                       \S
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 40)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 71)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 59)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       \z
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 1)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 94)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 127)))
-                                       \Z
-                                       \F
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 94)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 108)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 1)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       \v
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 76)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 119)))
-                                       \F
-                                       \D
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 58)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 108)))
-                                       \i
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 66)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 66)))
-                                       \W
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 8)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 98)))
-                                       \f
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 117)))
-                                       \B
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       \f
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 59)))
-                                       \B
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 76)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 119)))
-                                       \n
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 4)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 113)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 44)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 41)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 66)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 89)))
-                                       \o
-                                       \U
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 89)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 63)))
-                                       \q
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 108)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 62)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 8)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 127)))
-                                       \Y
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 12)))
-                                       \3
-                                       \y
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 56)))
-                                       \u
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 119)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 29)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 91)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 15)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 117)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 39)))
-                                       \l
-                                       \h
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       \7
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 98)))
-                                       \6
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 66)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 12)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       \X
-                                       \S
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 29)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 83)))
-                                       \W
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 17)))
-                                       \h
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 62)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 114)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 91)))
-                                       \c
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 119)))
-                                       \M
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 118)))
-                                       \O
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 126)))
-                                       \n
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 62)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 65)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 121)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 117)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 29)))
-                                       \M
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 40)))
-                                       \+
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 44)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 44)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 12)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       \n
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 84)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 127)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 49)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 65)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 126)))
-                                       \n
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 40)))
-                                       \V
-                                       \Z
-                                       \R
-                                       \9
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 117)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 65)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 61)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 113)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 84)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 122)))
-                                       \K
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 53)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 87)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 57)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 58)))
-                                       \D
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 83)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 61)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 71)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 4)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 83)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 87)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 77)))
-                                       \F
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 84)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 98)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 120)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 119)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 95)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 41)))
-                                       \i
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 118)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 30)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 44)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 113)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 117)))
-                                       \T
-                                       \P
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 39)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 59)))
-                                       \m
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 118)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 98)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 33)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 117)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 62)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 82)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 95)))
-                                       \y
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 39)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 118)))
-                                       \n
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 115)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 126)))
-                                       \7
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 39)))
-                                       \G
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 37)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 30)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       \V
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 39)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       \Z
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 61)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 65)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 37)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 48)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 95)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 12)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 37)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 49)))
-                                       \0
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 113)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 8)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 76)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 9)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 30)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 41)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 30)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 78)))
-                                       \0
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 91)))
-                                       \H
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 98)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 114)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 15)))
-                                       \g
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 29)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 113)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 93)))
-                                       \Z
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 15)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 118)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 64)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 62)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 63)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 68)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 122)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 108)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 110)))
-                                       (java.lang.Character/valueOf
-                                         (char (get datomic.data/table 78))))]
-                         alg__20238__auto__ (nth vec__31851 (int 0) nil)
-                         b64b__20239__auto__ (nth vec__31851 (int 1) nil)]
-                     (datomic.crypto/decrypt-pk
-                       (datomic.codec/decode-64 (datomic.codec/string->bytes G__31850))
-                       (datomic.crypto/spec->public-key alg__20238__auto__ b64b__20239__auto__)))))
-               (humanize-key))))))))
+  (defn describe-license-key
+    ([p__31848]
+      (let [map__31849 p__31848
+            map__31849 (if (seq? map__31849)
+                         (if (next map__31849)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__31849))
+                           (if (seq map__31849) (first map__31849) {}))
+                         map__31849)
+            properties_file (get map__31849 :properties-file)]
+        (prn
+          (let [G__31850 properties_file
+                G__31850 (some-> G__31850 (common/load-properties))
+                G__31850 (some-> G__31850 (common/props->map))
+                G__31850 (some-> G__31850 (common/force-map-keywords))
+                G__31850 (some-> G__31850 (:license-key))]
+            (some->
+              (when-not (nil? G__31850)
+                (clojure.edn/read-string
+                  (let [vec__31851 [(str
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 41)))
+                                      \S
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110))))
+                                    (str
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 16)))
+                                      \I
+                                      \I
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 78)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 77)))
+                                      \A
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 65)))
+                                      \B
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      \k
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 28)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 44)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 48)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 57)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 37)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 63)))
+                                      \0
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 78)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 108)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 30)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 94)))
+                                      \A
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 71)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      \Q
+                                      \8
+                                      \A
+                                      \M
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      \I
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 78)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 71)))
+                                      \g
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 49)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 71)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 108)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 30)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      \i
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 89)))
+                                      \Z
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 82)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 19)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 30)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 19)))
+                                      \z
+                                      \K
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 76)))
+                                      \1
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 96)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 65)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 65)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 53)))
+                                      \f
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 12)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 89)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 40)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 48)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 89)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 41)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 84)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 16)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 108)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 28)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 94)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 58)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 82)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 71)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      \6
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 82)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 15)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 117)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 118)))
+                                      \3
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 28)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 28)))
+                                      \C
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 63)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 57)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 127)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 121)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 107)))
+                                      \c
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 17)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      \f
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 114)))
+                                      \y
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 66)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 119)))
+                                      \m
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      \g
+                                      \Y
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 1)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 98)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 53)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 17)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 121)))
+                                      \2
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 48)))
+                                      \Y
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 49)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 77)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 12)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 53)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 3)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 56)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 94)))
+                                      \c
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 107)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 84)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 87)))
+                                      \f
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      \A
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 4)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 119)))
+                                      \R
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 113)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 39)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      \h
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 87)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 114)))
+                                      \Z
+                                      \D
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      \H
+                                      \5
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 118)))
+                                      \3
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 99)))
+                                      \S
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 40)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 71)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 59)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      \z
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 1)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 94)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 127)))
+                                      \Z
+                                      \F
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 94)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 108)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 1)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      \v
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 76)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 119)))
+                                      \F
+                                      \D
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 58)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 108)))
+                                      \i
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 66)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 66)))
+                                      \W
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 8)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 98)))
+                                      \f
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 117)))
+                                      \B
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      \f
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 59)))
+                                      \B
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 76)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 119)))
+                                      \n
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 4)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 113)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 44)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 41)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 66)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 89)))
+                                      \o
+                                      \U
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 89)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 63)))
+                                      \q
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 108)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 62)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 8)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 127)))
+                                      \Y
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 12)))
+                                      \3
+                                      \y
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 56)))
+                                      \u
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 119)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 29)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 91)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 15)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 117)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 39)))
+                                      \l
+                                      \h
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      \7
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 98)))
+                                      \6
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 66)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 12)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      \X
+                                      \S
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 29)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 83)))
+                                      \W
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 17)))
+                                      \h
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 62)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 114)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 91)))
+                                      \c
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 119)))
+                                      \M
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 118)))
+                                      \O
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 126)))
+                                      \n
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 62)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 65)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 121)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 117)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 29)))
+                                      \M
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 40)))
+                                      \+
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 44)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 44)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 12)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      \n
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 84)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 127)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 49)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 65)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 126)))
+                                      \n
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 40)))
+                                      \V
+                                      \Z
+                                      \R
+                                      \9
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 117)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 65)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 61)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 113)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 84)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 122)))
+                                      \K
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 53)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 87)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 57)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 58)))
+                                      \D
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 83)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 61)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 71)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 4)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 83)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 87)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 77)))
+                                      \F
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 84)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 98)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 120)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 119)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 95)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 41)))
+                                      \i
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 118)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 30)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 44)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 113)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 117)))
+                                      \T
+                                      \P
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 39)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 59)))
+                                      \m
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 118)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 98)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 33)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 117)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 62)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 82)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 95)))
+                                      \y
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 39)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 118)))
+                                      \n
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 115)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 126)))
+                                      \7
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 39)))
+                                      \G
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 37)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 30)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      \V
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 39)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      \Z
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 61)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 65)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 37)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 48)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 95)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 12)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 37)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 49)))
+                                      \0
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 113)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 8)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 76)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 9)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 30)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 41)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 30)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 78)))
+                                      \0
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 91)))
+                                      \H
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 98)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 114)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 15)))
+                                      \g
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 29)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 113)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 93)))
+                                      \Z
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 15)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 118)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 64)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 62)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 63)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 68)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 122)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 108)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 110)))
+                                      (java.lang.Character/valueOf
+                                        (char (get datomic.data/table 78))))]
+                        alg__20238__auto__ (nth vec__31851 (int 0) nil)
+                        b64b__20239__auto__ (nth vec__31851 (int 1) nil)]
+                    (datomic.crypto/decrypt-pk
+                      (datomic.codec/decode-64 (datomic.codec/string->bytes G__31850))
+                      (datomic.crypto/spec->public-key alg__20238__auto__ b64b__20239__auto__)))))
+              (humanize-key)))))))
   (reset-meta!
     #'describe-license-key
     (assoc

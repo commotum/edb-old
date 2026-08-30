@@ -97,7 +97,7 @@
       (.setMeta (clojure.lang.RT/var "datomic.rest" "whitelist") {:column (int 1)})
       (.bindRoot (clojure.lang.RT/var "datomic.rest" "whitelist") (atom nil))
       #'whitelist))
-  (def set-storage-map (fn set_storage_map ([alias_uri_map] (reset! storages alias_uri_map))))
+  (defn set-storage-map ([alias_uri_map] (reset! storages alias_uri_map)))
   (reset-meta!
     #'set-storage-map
     (assoc
@@ -106,14 +106,13 @@
       'set-storage-map
       :ns
       *ns*))
-  (def read-edn
-   (fn read_edn
-     ([stm encoding]
-       (edn/read
-         {:readers *data-readers*}
-         (java.io.PushbackReader.
-           (java.io.InputStreamReader. ^java.io.InputStream stm ^java.lang.String encoding))))
-     ([str] (when-not (empty? str) (edn/read-string {:readers *data-readers*} str)))))
+  (defn read-edn
+    ([stm encoding]
+      (edn/read
+        {:readers *data-readers*}
+        (java.io.PushbackReader.
+          (java.io.InputStreamReader. ^java.io.InputStream stm ^java.lang.String encoding))))
+    ([str] (when-not (empty? str) (edn/read-string {:readers *data-readers*} str))))
   (reset-meta!
     #'read-edn
     (assoc
@@ -166,24 +165,23 @@
   (reset-meta!
     #'tst
     (assoc {:arglists (clojure.core/list ['req]), :column (int 1)} :name 'tst :ns *ns*))
-  (def windowed
-   (fn windowed
-     ([db p__29838]
-       (let [map__29839 p__29838
-             map__29839 (if (seq? map__29839)
-                          (if (next map__29839)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__29839))
-                            (if (seq map__29839) (first map__29839) {}))
-                          map__29839)
-             basis_t (get map__29839 :basis-t)
-             as_of (get map__29839 :as-of)
-             since (get map__29839 :since)
-             history (get map__29839 :history)
-             db (if (or as_of basis_t) (d/as-of db (or as_of basis_t)) db)
-             db (if since (d/since db since) db)
-             db (if history (d/history db) db)]
-         db))))
+  (defn windowed
+    ([db p__29838]
+      (let [map__29839 p__29838
+            map__29839 (if (seq? map__29839)
+                         (if (next map__29839)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__29839))
+                           (if (seq map__29839) (first map__29839) {}))
+                         map__29839)
+            basis_t (get map__29839 :basis-t)
+            as_of (get map__29839 :as-of)
+            since (get map__29839 :since)
+            history (get map__29839 :history)
+            db (if (or as_of basis_t) (d/as-of db (or as_of basis_t)) db)
+            db (if since (d/since db since) db)
+            db (if history (d/history db) db)]
+        db)))
   (reset-meta!
     #'windowed
     (assoc
@@ -193,20 +191,19 @@
       'windowed
       :ns
       *ns*))
-  (def limited
-   (fn limited
-     ([data p__29843]
-       (let [map__29844 p__29843
-             map__29844 (if (seq? map__29844)
-                          (if (next map__29844)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__29844))
-                            (if (seq map__29844) (first map__29844) {}))
-                          map__29844)
-             offset (get map__29844 :offset)
-             limit (get map__29844 :limit)
-             data (if offset (drop offset data) data)]
-         (if limit (take limit data) data)))))
+  (defn limited
+    ([data p__29843]
+      (let [map__29844 p__29843
+            map__29844 (if (seq? map__29844)
+                         (if (next map__29844)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__29844))
+                           (if (seq map__29844) (first map__29844) {}))
+                         map__29844)
+            offset (get map__29844 :offset)
+            limit (get map__29844 :limit)
+            data (if offset (drop offset data) data)]
+        (if limit (take limit data) data))))
   (reset-meta!
     #'limited
     (assoc
@@ -219,14 +216,13 @@
   (reset-meta!
     #'datom->map
     (assoc {:arglists (clojure.core/list ['d]), :column (int 1)} :name 'datom->map :ns *ns*))
-  (def prep-tx-ret
-   (fn prep_tx_ret
-     ([tx_ret storage dbname]
-       (let [db_base #:db{:alias (str storage "/" dbname)}]
-         {:db-before (assoc db_base :basis-t (d/basis-t (:db-before tx_ret))),
-          :db-after (assoc db_base :basis-t (d/basis-t (:db-after tx_ret))),
-          :tx-data (mapv datom->map (:tx-data tx_ret)),
-          :tempids (:tempids tx_ret)}))))
+  (defn prep-tx-ret
+    ([tx_ret storage dbname]
+      (let [db_base #:db{:alias (str storage "/" dbname)}]
+        {:db-before (assoc db_base :basis-t (d/basis-t (:db-before tx_ret))),
+         :db-after (assoc db_base :basis-t (d/basis-t (:db-after tx_ret))),
+         :tx-data (mapv datom->map (:tx-data tx_ret)),
+         :tempids (:tempids tx_ret)})))
   (reset-meta!
     #'prep-tx-ret
     (assoc
@@ -413,11 +409,10 @@
                [:hr]
                [:ul [:li [:a {:rel "item", :href "query"} "Query"]]])))))))
   (reset-meta! #'api (assoc {:column (int 1)} :name 'api :ns *ns*))
-  (def request-method-in
-   (fn request_method_in
-     ([method_set]
-       (fn fn__29878
-         ([p1__29877#] (contains? method_set (:request-method (:request p1__29877#))))))))
+  (defn request-method-in
+    ([method_set]
+      (fn fn__29878
+        ([p1__29877#] (contains? method_set (:request-method (:request p1__29877#)))))))
   (reset-meta!
     #'request-method-in
     (assoc
@@ -3204,78 +3199,75 @@
   (reset-meta!
     #'servlet
     (assoc {:arglists (clojure.core/list ['handler]), :column (int 1)} :name 'servlet :ns *ns*))
-  (def service-queue
-   (fn service_queue
-     ([desc clients]
-       (let [vec__30495 (.split ^java.lang.String desc "/")
-             storage (nth vec__30495 (int 0) nil)
-             dbname (nth vec__30495 (int 1) nil)
-             c (conn storage dbname)]
-         (when c
-           (let [q (d/tx-report-queue c)]
-             (future-call
-               (fn fn__30498
-                 ([]
-                   (try
-                     (do
-                       (loop []
-                         (do
-                           (let [tx_ret (.take ^java.util.concurrent.BlockingQueue q)
-                                 tx_report (pr-str
-                                             (dissoc
-                                               (prep-tx-ret tx_ret storage dbname)
-                                               :tempids))]
-                             (loop [seq_30499 (seq (get (deref clients) desc))
-                                    chunk_30500 nil
-                                    count_30501 0
-                                    i_30502 0]
-                               (if (< i_30502 count_30501)
-                                 (let [e (.nth ^clojure.lang.Indexed chunk_30500 (int i_30502))]
-                                   (try
-                                     (do
-                                       (.data
-                                         ^org.eclipse.jetty.servlets.EventSource$Emitter e
-                                         ^java.lang.String tx_report)
-                                       nil)
-                                     (catch java.lang.Exception ex nil))
-                                   (recur seq_30499 chunk_30500 count_30501 (inc i_30502)))
-                                 (let [temp__5825__auto__ (seq seq_30499)]
-                                   (when temp__5825__auto__
-                                     (let [seq_30499 temp__5825__auto__]
-                                       (if (chunked-seq? seq_30499)
-                                         (let [c__6090__auto__ (chunk-first seq_30499)]
-                                           (recur
-                                             (chunk-rest seq_30499)
-                                             c__6090__auto__
-                                             (int (count c__6090__auto__))
-                                             (int 0)))
-                                         (let [e (first seq_30499)]
-                                           (try
-                                             (do
-                                               (.data
-                                                 ^org.eclipse.jetty.servlets.EventSource$Emitter e
-                                                 ^java.lang.String tx_report)
-                                               nil)
-                                             (catch java.lang.Exception ex nil))
-                                           (recur (next seq_30499) nil 0 0)))))))))
-                           (recur)))
-                       nil)
-                     (catch
-                       java.lang.Throwable
-                       t__8765__auto__
-                       (do
-                         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.rest")
-                               ex t__8765__auto__]
-                           (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                             (.warn
-                               ^org.slf4j.Logger logger
-                               (datomic.slf4j/process "error executing future")
-                               ^java.lang.Throwable ex)
-                             (datomic.slf4j/caused-by logger ex))
-                           nil)
-                         (datomic.monitor/alarm :UnhandledException)
-                         (throw ^java.lang.Throwable t__8765__auto__)
-                         nil))))))))))))
+  (defn service-queue
+    ([desc clients]
+      (let [vec__30495 (.split ^java.lang.String desc "/")
+            storage (nth vec__30495 (int 0) nil)
+            dbname (nth vec__30495 (int 1) nil)
+            c (conn storage dbname)]
+        (when c
+          (let [q (d/tx-report-queue c)]
+            (future-call
+              (fn fn__30498
+                ([]
+                  (try
+                    (do
+                      (loop []
+                        (do
+                          (let [tx_ret (.take ^java.util.concurrent.BlockingQueue q)
+                                tx_report (pr-str
+                                            (dissoc (prep-tx-ret tx_ret storage dbname) :tempids))]
+                            (loop [seq_30499 (seq (get (deref clients) desc))
+                                   chunk_30500 nil
+                                   count_30501 0
+                                   i_30502 0]
+                              (if (< i_30502 count_30501)
+                                (let [e (.nth ^clojure.lang.Indexed chunk_30500 (int i_30502))]
+                                  (try
+                                    (do
+                                      (.data
+                                        ^org.eclipse.jetty.servlets.EventSource$Emitter e
+                                        ^java.lang.String tx_report)
+                                      nil)
+                                    (catch java.lang.Exception ex nil))
+                                  (recur seq_30499 chunk_30500 count_30501 (inc i_30502)))
+                                (let [temp__5825__auto__ (seq seq_30499)]
+                                  (when temp__5825__auto__
+                                    (let [seq_30499 temp__5825__auto__]
+                                      (if (chunked-seq? seq_30499)
+                                        (let [c__6090__auto__ (chunk-first seq_30499)]
+                                          (recur
+                                            (chunk-rest seq_30499)
+                                            c__6090__auto__
+                                            (int (count c__6090__auto__))
+                                            (int 0)))
+                                        (let [e (first seq_30499)]
+                                          (try
+                                            (do
+                                              (.data
+                                                ^org.eclipse.jetty.servlets.EventSource$Emitter e
+                                                ^java.lang.String tx_report)
+                                              nil)
+                                            (catch java.lang.Exception ex nil))
+                                          (recur (next seq_30499) nil 0 0)))))))))
+                          (recur)))
+                      nil)
+                    (catch
+                      java.lang.Throwable
+                      t__8765__auto__
+                      (do
+                        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.rest")
+                              ex t__8765__auto__]
+                          (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                            (.warn
+                              ^org.slf4j.Logger logger
+                              (datomic.slf4j/process "error executing future")
+                              ^java.lang.Throwable ex)
+                            (datomic.slf4j/caused-by logger ex))
+                          nil)
+                        (datomic.monitor/alarm :UnhandledException)
+                        (throw ^java.lang.Throwable t__8765__auto__)
+                        nil)))))))))))
   (reset-meta!
     #'service-queue
     (assoc

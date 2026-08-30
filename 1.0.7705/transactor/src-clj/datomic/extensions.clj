@@ -88,12 +88,11 @@
       'fulltext
       :ns
       *ns*))
-  (def tx-ids
-   (fn tx_ids
-     ([log start end]
-       (mapv
-         (fn fn__15269 ([p1__15268#] (long (datomic.db/make-eid 3 (long (:t p1__15268#))))))
-         (.txRange ^datomic.Log log start end)))))
+  (defn tx-ids
+    ([log start end]
+      (mapv
+        (fn fn__15269 ([p1__15268#] (long (datomic.db/make-eid 3 (long (:t p1__15268#))))))
+        (.txRange ^datomic.Log log start end))))
   (reset-meta!
     #'tx-ids
     (assoc
@@ -102,8 +101,7 @@
       'tx-ids
       :ns
       *ns*))
-  (def tx-data
-   (fn tx_data ([log t] (or (:data (first (.txRange ^datomic.Log log t (inc t)))) []))))
+  (defn tx-data ([log t] (or (:data (first (.txRange ^datomic.Log log t (inc t)))) [])))
   (reset-meta!
     #'tx-data
     (assoc
@@ -112,8 +110,7 @@
       'tx-data
       :ns
       *ns*))
-  (def missing?
-   (fn missing_QMARK_ ([db e attr] (nil? (seq (datomic.db/datoms db :aevt [attr e]))))))
+  (defn missing? ([db e attr] (nil? (seq (datomic.db/datoms db :aevt [attr e])))))
   (reset-meta!
     #'missing?
     (assoc
@@ -122,15 +119,14 @@
       'missing?
       :ns
       *ns*))
-  (def ensure-sv-attrid
-   (fn ensure_sv_attrid
-     ([db a]
-       (let [attrid (datomic.db/require-attrid db a) attr (datomic.db/attribute db attrid)]
-         (when (= 36 (.-cardinality ^datomic.db.Attribute attr))
-           (throw
-             (java.lang.IllegalArgumentException.
-               (str "cardinality-many attrs not supported: " a))))
-         attrid))))
+  (defn ensure-sv-attrid
+    ([db a]
+      (let [attrid (datomic.db/require-attrid db a) attr (datomic.db/attribute db attrid)]
+        (when (= 36 (.-cardinality ^datomic.db.Attribute attr))
+          (throw
+            (java.lang.IllegalArgumentException.
+              (str "cardinality-many attrs not supported: " a))))
+        attrid)))
   (reset-meta!
     #'ensure-sv-attrid
     (assoc

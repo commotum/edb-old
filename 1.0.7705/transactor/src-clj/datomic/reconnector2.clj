@@ -10,7 +10,7 @@
       (do
         (clojure.core/refer 'clojure.core)
         (clojure.core/require ['datomic.common :as 'common] ['datomic.promise :as 'promise]))))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       Reconnectable
       (reconnect
@@ -18,8 +18,8 @@
         "Try to reconnect. Idempotent. Async. Calls cleanon on previous state Returns ok."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.reconnector2" "Reconnectable")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Reconnectable :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Reconnectable :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'reconnect {:arglists (clojure.core/list ['_])}),
@@ -28,12 +28,12 @@
                                       "Try to reconnect. Idempotent. Async. Calls cleanon on previous state Returns ok."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.reconnector2" "Reconnectable"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.reconnector2" "reconnect")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (.setMeta
     (clojure.lang.RT/var "datomic.reconnector2" "shutdown?")
     {:declared true, :column (int 1)})
@@ -145,15 +145,14 @@
                                nil))))))
                    (reset! current_promise_ref (promise/delivered shutdown_state)))))))))))
   (clojure.core/import 'datomic.reconnector2.Reconnector)
-  (def ->Reconnector
-   (fn __GT_Reconnector
-     ([current_promise_ref worker_ref shutdown_state reconnect_fn cleanup_fn]
-       (datomic.reconnector2.Reconnector.
-         current_promise_ref
-         worker_ref
-         shutdown_state
-         reconnect_fn
-         cleanup_fn))))
+  (defn ->Reconnector
+    ([current_promise_ref worker_ref shutdown_state reconnect_fn cleanup_fn]
+      (datomic.reconnector2.Reconnector.
+        current_promise_ref
+        worker_ref
+        shutdown_state
+        reconnect_fn
+        cleanup_fn)))
   (reset-meta!
     #'->Reconnector
     (assoc
@@ -170,32 +169,31 @@
     datomic.reconnector2.Reconnector
     fn__18610
     ([o w] (.write ^java.io.Writer w (.toString o)) nil))
-  (def reconnector-ref
-   (fn reconnector_ref
-     ([& p__18612]
-       (let [map__18613 p__18612
-             map__18613 (if (seq? map__18613)
-                          (if (next map__18613)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__18613))
-                            (if (seq map__18613) (first map__18613) {}))
-                          map__18613)
-             state (get map__18613 :state)
-             reconnect (get map__18613 :reconnect)
-             cleanup (get map__18613 :cleanup)
-             shutdown_state (get map__18613 :shutdown-state)]
-         (when-not (and state reconnect cleanup shutdown_state)
-           (throw
-             (java.lang.AssertionError.
-               (str
-                 "Assert failed: "
-                 (pr-str (clojure.core/list 'and 'state 'reconnect 'cleanup 'shutdown-state))))))
-         (datomic.reconnector2.Reconnector.
-           (atom (promise/delivered state))
-           (atom nil)
-           shutdown_state
-           reconnect
-           cleanup)))))
+  (defn reconnector-ref
+    ([& p__18612]
+      (let [map__18613 p__18612
+            map__18613 (if (seq? map__18613)
+                         (if (next map__18613)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__18613))
+                           (if (seq map__18613) (first map__18613) {}))
+                         map__18613)
+            state (get map__18613 :state)
+            reconnect (get map__18613 :reconnect)
+            cleanup (get map__18613 :cleanup)
+            shutdown_state (get map__18613 :shutdown-state)]
+        (when-not (and state reconnect cleanup shutdown_state)
+          (throw
+            (java.lang.AssertionError.
+              (str
+                "Assert failed: "
+                (pr-str (clojure.core/list 'and 'state 'reconnect 'cleanup 'shutdown-state))))))
+        (datomic.reconnector2.Reconnector.
+          (atom (promise/delivered state))
+          (atom nil)
+          shutdown_state
+          reconnect
+          cleanup))))
   (reset-meta!
     #'reconnector-ref
     (assoc

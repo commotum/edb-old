@@ -61,25 +61,24 @@
   (reset-meta!
     #'de-item-map
     (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'de-item-map :ns *ns*))
-  (def conditional-put-request
-   (fn conditional_put_request
-     ([p__21264]
-       (let [map__21265 p__21264
-             map__21265 (if (seq? map__21265)
-                          (if (next map__21265)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21265))
-                            (if (seq map__21265) (first map__21265) {}))
-                          map__21265)
-             table (get map__21265 :table)
-             p (get map__21265 :p)
-             r (get map__21265 :r)
-             item (get map__21265 :item)]
-         {:op :PutItem,
-          :request
-          {:TableName table,
-           :Item (item-map item),
-           :Expected {(name p) {:Exists false}, (name r) {:Exists false}}}}))))
+  (defn conditional-put-request
+    ([p__21264]
+      (let [map__21265 p__21264
+            map__21265 (if (seq? map__21265)
+                         (if (next map__21265)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21265))
+                           (if (seq map__21265) (first map__21265) {}))
+                         map__21265)
+            table (get map__21265 :table)
+            p (get map__21265 :p)
+            r (get map__21265 :r)
+            item (get map__21265 :item)]
+        {:op :PutItem,
+         :request
+         {:TableName table,
+          :Item (item-map item),
+          :Expected {(name p) {:Exists false}, (name r) {:Exists false}}}})))
   (reset-meta!
     #'conditional-put-request
     (assoc
@@ -88,35 +87,34 @@
       'conditional-put-request
       :ns
       *ns*))
-  (def query-range-request
-   (fn query_range_request
-     ([p__21267]
-       (let [map__21268 p__21267
-             map__21268 (if (seq? map__21268)
-                          (if (next map__21268)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21268))
-                            (if (seq map__21268) (first map__21268) {}))
-                          map__21268)
-             table (get map__21268 :table)
-             p (get map__21268 :p)
-             r (get map__21268 :r)
-             attrs (get map__21268 :attrs)
-             forward (get map__21268 :forward)
-             limit (get map__21268 :limit)]
-         {:op :Query,
-          :request
-          {:TableName table,
-           :ConsistentRead true,
-           :ScanIndexForward forward,
-           :KeyConditions
-           {p
-            {:ComparisonOperator "EQ",
-             :AttributeValueList [(attribute-value (^clojure.lang.IFn p attrs))]},
-            r
-            {:ComparisonOperator (if forward "GE" "LE"),
-             :AttributeValueList [(attribute-value (^clojure.lang.IFn r attrs))]}},
-           :Limit limit}}))))
+  (defn query-range-request
+    ([p__21267]
+      (let [map__21268 p__21267
+            map__21268 (if (seq? map__21268)
+                         (if (next map__21268)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21268))
+                           (if (seq map__21268) (first map__21268) {}))
+                         map__21268)
+            table (get map__21268 :table)
+            p (get map__21268 :p)
+            r (get map__21268 :r)
+            attrs (get map__21268 :attrs)
+            forward (get map__21268 :forward)
+            limit (get map__21268 :limit)]
+        {:op :Query,
+         :request
+         {:TableName table,
+          :ConsistentRead true,
+          :ScanIndexForward forward,
+          :KeyConditions
+          {p
+           {:ComparisonOperator "EQ",
+            :AttributeValueList [(attribute-value (^clojure.lang.IFn p attrs))]},
+           r
+           {:ComparisonOperator (if forward "GE" "LE"),
+            :AttributeValueList [(attribute-value (^clojure.lang.IFn r attrs))]}},
+          :Limit limit}})))
   (reset-meta!
     #'query-range-request
     (assoc

@@ -120,13 +120,12 @@
       'map->Function
       :ns
       *ns*))
-  (def print-function
-   (fn print_function
-     ([dbfn w]
-       (.write
-         ^java.io.Writer w
-         (str "#db/fn" (select-keys dbfn [:lang :imports :requires :params :code])))
-       nil)))
+  (defn print-function
+    ([dbfn w]
+      (.write
+        ^java.io.Writer w
+        (str "#db/fn" (select-keys dbfn [:lang :imports :requires :params :code])))
+      nil))
   (reset-meta!
     #'print-function
     (assoc

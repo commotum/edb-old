@@ -18,10 +18,9 @@
         (clojure.core/import 'datomic.iter.Iter))))
   (set! *warn-on-reflection* true)
   (set! *unchecked-math* true)
-  (def comp
-   (fn comp
-     (^long [cmp x y]
-       (if cmp (.compare ^java.util.Comparator cmp x y) (.compareTo ^java.lang.Comparable x y)))))
+  (defn comp
+    (^long [cmp x y]
+      (if cmp (.compare ^java.util.Comparator cmp x y) (.compareTo ^java.lang.Comparable x y))))
   (reset-meta!
     #'comp
     (assoc

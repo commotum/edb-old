@@ -45,24 +45,23 @@
       'vmap
       :ns
       *ns*))
-  (def service-ex-as-data
-   (fn service_ex_as_data
-     ([t]
-       (vmap
-         :errorCode
-         (.getErrorCode ^com.amazonaws.AmazonServiceException t)
-         :statusCode
-         (java.lang.Integer/valueOf (int (.getStatusCode ^com.amazonaws.AmazonServiceException t)))
-         :httpHeaders
-         (.getHttpHeaders ^com.amazonaws.AmazonServiceException t)
-         :proxyHost
-         (.getProxyHost ^com.amazonaws.AmazonServiceException t)
-         :requestId
-         (.getRequestId ^com.amazonaws.AmazonServiceException t)
-         :serviceName
-         (.getServiceName ^com.amazonaws.AmazonServiceException t)
-         :errorType
-         (some-> (.getErrorType ^com.amazonaws.AmazonServiceException t) (str))))))
+  (defn service-ex-as-data
+    ([t]
+      (vmap
+        :errorCode
+        (.getErrorCode ^com.amazonaws.AmazonServiceException t)
+        :statusCode
+        (java.lang.Integer/valueOf (int (.getStatusCode ^com.amazonaws.AmazonServiceException t)))
+        :httpHeaders
+        (.getHttpHeaders ^com.amazonaws.AmazonServiceException t)
+        :proxyHost
+        (.getProxyHost ^com.amazonaws.AmazonServiceException t)
+        :requestId
+        (.getRequestId ^com.amazonaws.AmazonServiceException t)
+        :serviceName
+        (.getServiceName ^com.amazonaws.AmazonServiceException t)
+        :errorType
+        (some-> (.getErrorType ^com.amazonaws.AmazonServiceException t) (str)))))
   (reset-meta!
     #'service-ex-as-data
     (assoc
@@ -81,14 +80,13 @@
   (reset-meta!
     #'status-code->category
     (assoc {:column (int 1)} :name 'status-code->category :ns *ns*))
-  (def service-exception-category
-   (fn service_exception_category
-     ([t]
-       (or
-         (status-code->category
-           (java.lang.Integer/valueOf
-             (int (.getStatusCode ^com.amazonaws.AmazonServiceException t))))
-         (izer/throwable-class-category (.getClass t))))))
+  (defn service-exception-category
+    ([t]
+      (or
+        (status-code->category
+          (java.lang.Integer/valueOf
+            (int (.getStatusCode ^com.amazonaws.AmazonServiceException t))))
+        (izer/throwable-class-category (.getClass t)))))
   (reset-meta!
     #'service-exception-category
     (assoc

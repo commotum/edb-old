@@ -35,29 +35,28 @@
         (clojure.core/import 'com.datastax.oss.driver.api.core.ConsistencyLevel)
         (clojure.core/import 'com.datastax.oss.driver.api.core.DefaultConsistencyLevel))))
   (set! *warn-on-reflection* true)
-  (def update-stmt*
-   (fn update_stmt_STAR_
-     ([session table id_key col_names]
-       (let [update_cql (str
-                          "update "
-                          table
-                          " set "
-                          (str/join
-                            ", "
-                            (map (fn fn__27167 ([p1__27166#] (str p1__27166# " = ?"))) col_names))
-                          " where "
-                          (name id_key)
-                          " = ? if rev = ?")
-             ss (.build
-                  (.setIdempotence
-                    (.setConsistencyLevel
-                      (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
-                        ^java.lang.String update_cql)
-                      DefaultConsistencyLevel/LOCAL_QUORUM)
-                    false))]
-         (.prepare
-           ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-           ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss)))))
+  (defn update-stmt*
+    ([session table id_key col_names]
+      (let [update_cql (str
+                         "update "
+                         table
+                         " set "
+                         (str/join
+                           ", "
+                           (map (fn fn__27167 ([p1__27166#] (str p1__27166# " = ?"))) col_names))
+                         " where "
+                         (name id_key)
+                         " = ? if rev = ?")
+            ss (.build
+                 (.setIdempotence
+                   (.setConsistencyLevel
+                     (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
+                       ^java.lang.String update_cql)
+                     DefaultConsistencyLevel/LOCAL_QUORUM)
+                   false))]
+        (.prepare
+          ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+          ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss))))
   (reset-meta!
     #'update-stmt*
     (assoc
@@ -70,13 +69,12 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.cassandra-v4" "update-stmt") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.cassandra-v4" "update-stmt") (memoize update-stmt*))
-  (def updated?
-   (fn updated_QMARK_
-     ([res]
-       (let [temp__5825__auto__ (.one ^com.datastax.oss.driver.api.core.PagingIterable res)]
-         (when temp__5825__auto__
-           (let [row temp__5825__auto__]
-             (.getBoolean ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 0))))))))
+  (defn updated?
+    ([res]
+      (let [temp__5825__auto__ (.one ^com.datastax.oss.driver.api.core.PagingIterable res)]
+        (when temp__5825__auto__
+          (let [row temp__5825__auto__]
+            (.getBoolean ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 0)))))))
   (reset-meta!
     #'updated?
     (assoc
@@ -85,28 +83,27 @@
       'updated?
       :ns
       *ns*))
-  (def cql-update
-   (fn cql_update
-     ([session table ensure_rev p__27172 v_map]
-       (let [vec__27173 p__27172
-             seq__27174 (seq vec__27173)
-             first__27175 (first seq__27174)
-             seq__27174 (next seq__27174)
-             id_key first__27175
-             ks seq__27174
-             id (get v_map id_key)
-             col_vals (filter second (select-keys v_map ks))
-             col_names (map (comp name first) col_vals)
-             stmt (update-stmt session table id_key col_names)
-             bound (.bind
-                     ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
-                     (into-array java.lang.Object (concat (map second col_vals) [id ensure_rev])))
-             res (.execute
-                   ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-                   (.setSerialConsistencyLevel
-                     ^com.datastax.oss.driver.api.core.cql.Statement bound
-                     ConsistencyLevel/SERIAL))]
-         (updated? res)))))
+  (defn cql-update
+    ([session table ensure_rev p__27172 v_map]
+      (let [vec__27173 p__27172
+            seq__27174 (seq vec__27173)
+            first__27175 (first seq__27174)
+            seq__27174 (next seq__27174)
+            id_key first__27175
+            ks seq__27174
+            id (get v_map id_key)
+            col_vals (filter second (select-keys v_map ks))
+            col_names (map (comp name first) col_vals)
+            stmt (update-stmt session table id_key col_names)
+            bound (.bind
+                    ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
+                    (into-array java.lang.Object (concat (map second col_vals) [id ensure_rev])))
+            res (.execute
+                  ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+                  (.setSerialConsistencyLevel
+                    ^com.datastax.oss.driver.api.core.cql.Statement bound
+                    ConsistencyLevel/SERIAL))]
+        (updated? res))))
   (reset-meta!
     #'cql-update
     (assoc
@@ -118,32 +115,29 @@
       'cql-update
       :ns
       *ns*))
-  (def insert-stmt*
-   (fn insert_stmt_STAR_
-     ([session table col_names consistent?]
-       (let [insert_cql (str
-                          "insert into "
-                          table
-                          " ("
-                          (str/join ", " col_names)
-                          ") values ("
-                          (str/join
-                            ", "
-                            (take
-                              (java.lang.Integer/valueOf (int (count col_names)))
-                              (repeat "?")))
-                          ")"
-                          (when consistent? " if not exists"))
-             ss (.build
-                  (.setIdempotence
-                    (.setConsistencyLevel
-                      (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
-                        ^java.lang.String insert_cql)
-                      DefaultConsistencyLevel/LOCAL_QUORUM)
-                    false))]
-         (.prepare
-           ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-           ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss)))))
+  (defn insert-stmt*
+    ([session table col_names consistent?]
+      (let [insert_cql (str
+                         "insert into "
+                         table
+                         " ("
+                         (str/join ", " col_names)
+                         ") values ("
+                         (str/join
+                           ", "
+                           (take (java.lang.Integer/valueOf (int (count col_names))) (repeat "?")))
+                         ")"
+                         (when consistent? " if not exists"))
+            ss (.build
+                 (.setIdempotence
+                   (.setConsistencyLevel
+                     (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
+                       ^java.lang.String insert_cql)
+                     DefaultConsistencyLevel/LOCAL_QUORUM)
+                   false))]
+        (.prepare
+          ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+          ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss))))
   (reset-meta!
     #'insert-stmt*
     (assoc
@@ -157,24 +151,23 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.cassandra-v4" "insert-stmt") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.cassandra-v4" "insert-stmt") (memoize insert-stmt*))
-  (def cql-insert
-   (fn cql_insert
-     ([session table ks v_map consistent?]
-       (let [col_vals (filter second (select-keys v_map ks))
-             col_names (map (comp name first) col_vals)
-             stmt (insert-stmt session table col_names consistent?)
-             bound (cond->
-                     (.bind
-                       ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
-                       (into-array java.lang.Object (map second col_vals)))
-                     consistent?
-                     (.setSerialConsistencyLevel ConsistencyLevel/SERIAL))
-             res (.execute
-                   ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-                   ^com.datastax.oss.driver.api.core.cql.Statement bound)]
-         (if consistent?
-           (updated? res)
-           (nil? (.one ^com.datastax.oss.driver.api.core.PagingIterable res)))))))
+  (defn cql-insert
+    ([session table ks v_map consistent?]
+      (let [col_vals (filter second (select-keys v_map ks))
+            col_names (map (comp name first) col_vals)
+            stmt (insert-stmt session table col_names consistent?)
+            bound (cond->
+                    (.bind
+                      ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
+                      (into-array java.lang.Object (map second col_vals)))
+                    consistent?
+                    (.setSerialConsistencyLevel ConsistencyLevel/SERIAL))
+            res (.execute
+                  ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+                  ^com.datastax.oss.driver.api.core.cql.Statement bound)]
+        (if consistent?
+          (updated? res)
+          (nil? (.one ^com.datastax.oss.driver.api.core.PagingIterable res))))))
   (reset-meta!
     #'cql-insert
     (assoc
@@ -186,18 +179,17 @@
       'cql-insert
       :ns
       *ns*))
-  (def select-string
-   (fn select_string
-     ([table p__27180]
-       (let [vec__27181 p__27180 id_key (nth vec__27181 (int 0) nil) ks vec__27181]
-         (str
-           "select "
-           (str/join ", " (map name ks))
-           " from "
-           table
-           " where "
-           (name id_key)
-           " = ?")))))
+  (defn select-string
+    ([table p__27180]
+      (let [vec__27181 p__27180 id_key (nth vec__27181 (int 0) nil) ks vec__27181]
+        (str
+          "select "
+          (str/join ", " (map name ks))
+          " from "
+          table
+          " where "
+          (name id_key)
+          " = ?"))))
   (reset-meta!
     #'select-string
     (assoc
@@ -208,17 +200,16 @@
       'select-string
       :ns
       *ns*))
-  (def select-stmt*
-   (fn select_stmt_STAR_
-     ([session table ks]
-       (let [ss (.build
-                  (.setIdempotence
-                    (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
-                      (select-string table ks))
-                    false))]
-         (.prepare
-           ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-           ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss)))))
+  (defn select-stmt*
+    ([session table ks]
+      (let [ss (.build
+                 (.setIdempotence
+                   (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
+                     (select-string table ks))
+                   false))]
+        (.prepare
+          ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+          ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss))))
   (reset-meta!
     #'select-stmt*
     (assoc
@@ -230,24 +221,23 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.cassandra-v4" "select-stmt") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.cassandra-v4" "select-stmt") (memoize select-stmt*))
-  (def select-with-consistency
-   (fn select_with_consistency
-     ([session stmt consistency serial id]
-       (let [bound (.bind
-                     ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
-                     (into-array java.lang.Object [id]))
-             bound (.setConsistencyLevel
-                     ^com.datastax.oss.driver.api.core.cql.Statement bound
-                     ^com.datastax.oss.driver.api.core.ConsistencyLevel consistency)
-             bound (if serial
-                     (.setSerialConsistencyLevel
-                       ^com.datastax.oss.driver.api.core.cql.Statement bound
-                       ConsistencyLevel/SERIAL)
-                     bound)]
-         (.one
-           (.execute
-             ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-             ^com.datastax.oss.driver.api.core.cql.Statement bound))))))
+  (defn select-with-consistency
+    ([session stmt consistency serial id]
+      (let [bound (.bind
+                    ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
+                    (into-array java.lang.Object [id]))
+            bound (.setConsistencyLevel
+                    ^com.datastax.oss.driver.api.core.cql.Statement bound
+                    ^com.datastax.oss.driver.api.core.ConsistencyLevel consistency)
+            bound (if serial
+                    (.setSerialConsistencyLevel
+                      ^com.datastax.oss.driver.api.core.cql.Statement bound
+                      ConsistencyLevel/SERIAL)
+                    bound)]
+        (.one
+          (.execute
+            ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+            ^com.datastax.oss.driver.api.core.cql.Statement bound)))))
   (reset-meta!
     #'select-with-consistency
     (assoc
@@ -263,26 +253,24 @@
       'select-with-consistency
       :ns
       *ns*))
-  (def row->map
-   (fn row__GT_map
-     ([row ks]
-       (if (= ks [:id :rev :map :val])
-         {:id (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 0)),
-          :rev
-          (long (.getLong ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 1))),
-          :map (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 2)),
-          :val (.getByteBuffer ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 3))}
-         (if (= ks [:id2 :rev :map :val :chunks])
-           {:id (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 0)),
-            :rev
-            (long (.getLong ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 1))),
-            :map (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 2)),
-            :val
-            (.getByteBuffer ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 3)),
-            :chunks
-            (java.lang.Integer/valueOf
-              (int (.getInt ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 4))))}
-           (do (when :else (throw (java.lang.RuntimeException. "Invalid select."))) nil))))))
+  (defn row->map
+    ([row ks]
+      (if (= ks [:id :rev :map :val])
+        {:id (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 0)),
+         :rev (long (.getLong ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 1))),
+         :map (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 2)),
+         :val (.getByteBuffer ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 3))}
+        (if (= ks [:id2 :rev :map :val :chunks])
+          {:id (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 0)),
+           :rev
+           (long (.getLong ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 1))),
+           :map (.getString ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 2)),
+           :val
+           (.getByteBuffer ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 3)),
+           :chunks
+           (java.lang.Integer/valueOf
+             (int (.getInt ^com.datastax.oss.driver.api.core.data.GettableByIndex row (int 4))))}
+          (do (when :else (throw (java.lang.RuntimeException. "Invalid select."))) nil)))))
   (reset-meta!
     #'row->map
     (assoc
@@ -291,26 +279,25 @@
       'row->map
       :ns
       *ns*))
-  (def cql-select
-   (fn cql_select
-     ([session table id ks consistent?]
-       (let [stmt (select-stmt session table ks)
-             temp__5825__auto__ (or
-                                  (and
-                                    (not consistent?)
-                                    (select-with-consistency
-                                      session
-                                      stmt
-                                      ConsistencyLevel/ONE
-                                      false
-                                      id))
-                                  (select-with-consistency
-                                    session
-                                    stmt
-                                    DefaultConsistencyLevel/LOCAL_QUORUM
-                                    true
-                                    id))]
-         (when temp__5825__auto__ (let [row temp__5825__auto__] (row->map row ks)))))))
+  (defn cql-select
+    ([session table id ks consistent?]
+      (let [stmt (select-stmt session table ks)
+            temp__5825__auto__ (or
+                                 (and
+                                   (not consistent?)
+                                   (select-with-consistency
+                                     session
+                                     stmt
+                                     ConsistencyLevel/ONE
+                                     false
+                                     id))
+                                 (select-with-consistency
+                                   session
+                                   stmt
+                                   DefaultConsistencyLevel/LOCAL_QUORUM
+                                   true
+                                   id))]
+        (when temp__5825__auto__ (let [row temp__5825__auto__] (row->map row ks))))))
   (reset-meta!
     #'cql-select
     (assoc
@@ -322,19 +309,18 @@
       'cql-select
       :ns
       *ns*))
-  (def delete-stmt*
-   (fn delete_stmt_STAR_
-     ([session table id_key]
-       (let [ss (.build
-                  (.setConsistencyLevel
-                    (.setIdempotence
-                      (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
-                        (str "delete from " table " where " (name id_key) " = ?"))
-                      false)
-                    DefaultConsistencyLevel/LOCAL_QUORUM))]
-         (.prepare
-           ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-           ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss)))))
+  (defn delete-stmt*
+    ([session table id_key]
+      (let [ss (.build
+                 (.setConsistencyLevel
+                   (.setIdempotence
+                     (com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder.
+                       (str "delete from " table " where " (name id_key) " = ?"))
+                     false)
+                   DefaultConsistencyLevel/LOCAL_QUORUM))]
+        (.prepare
+          ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+          ^com.datastax.oss.driver.api.core.cql.SimpleStatement ss))))
   (reset-meta!
     #'delete-stmt*
     (assoc
@@ -346,23 +332,22 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.cassandra-v4" "delete-stmt") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.cassandra-v4" "delete-stmt") (memoize delete-stmt*))
-  (def cql-delete
-   (fn cql_delete
-     ([session table id p__27193]
-       (let [vec__27194 p__27193
-             seq__27195 (seq vec__27194)
-             first__27196 (first seq__27195)
-             seq__27195 (next seq__27195)
-             id_key first__27196
-             _ seq__27195
-             stmt (delete-stmt session table id_key)
-             bs (.bind
-                  ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
-                  (into-array java.lang.Object [id]))
-             res (.execute
-                   ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
-                   ^com.datastax.oss.driver.api.core.cql.Statement bs)]
-         res))))
+  (defn cql-delete
+    ([session table id p__27193]
+      (let [vec__27194 p__27193
+            seq__27195 (seq vec__27194)
+            first__27196 (first seq__27195)
+            seq__27195 (next seq__27195)
+            id_key first__27196
+            _ seq__27195
+            stmt (delete-stmt session table id_key)
+            bs (.bind
+                 ^com.datastax.oss.driver.api.core.cql.PreparedStatement stmt
+                 (into-array java.lang.Object [id]))
+            res (.execute
+                  ^com.datastax.oss.driver.api.core.cql.SyncCqlSession session
+                  ^com.datastax.oss.driver.api.core.cql.Statement bs)]
+        res)))
   (reset-meta!
     #'cql-delete
     (assoc
@@ -374,45 +359,44 @@
       'cql-delete
       :ns
       *ns*))
-  (def session-from-callback
-   (fn session_from_callback
-     ([p__27198]
-       (let [map__27199 p__27198
-             map__27199 (if (seq? map__27199)
-                          (if (next map__27199)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27199))
-                            (if (seq map__27199) (first map__27199) {}))
-                          map__27199)
-             endpoint map__27199
-             session_callback (get map__27199 :session-callback)]
-         (when session_callback
-           (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-v4")]
-             (when (.isInfoEnabled ^org.slf4j.Logger logger)
-               (.info
-                 ^org.slf4j.Logger logger
-                 (logger/process (str "Using cassandra-session-callback " session_callback))))
-             nil)
-           (let [temp__5823__auto__ (cb/create-callback (symbol session_callback))]
-             (if temp__5823__auto__
-               (let [callback temp__5823__auto__
-                     temp__5823__auto__ (^clojure.lang.IFn callback endpoint)]
-                 (if temp__5823__auto__
-                   (let [session temp__5823__auto__] session)
-                   (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-v4")]
-                     (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                       (.warn
-                         ^org.slf4j.Logger logger
-                         (logger/process
-                           (str "The cassandra-session-callback " session_callback " nil"))))
-                     nil)))
-               (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-v4")]
-                 (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                   (.warn
-                     ^org.slf4j.Logger logger
-                     (logger/process
-                       (str "Could not resolve cassandra-session-callback " session_callback))))
-                 nil))))))))
+  (defn session-from-callback
+    ([p__27198]
+      (let [map__27199 p__27198
+            map__27199 (if (seq? map__27199)
+                         (if (next map__27199)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27199))
+                           (if (seq map__27199) (first map__27199) {}))
+                         map__27199)
+            endpoint map__27199
+            session_callback (get map__27199 :session-callback)]
+        (when session_callback
+          (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-v4")]
+            (when (.isInfoEnabled ^org.slf4j.Logger logger)
+              (.info
+                ^org.slf4j.Logger logger
+                (logger/process (str "Using cassandra-session-callback " session_callback))))
+            nil)
+          (let [temp__5823__auto__ (cb/create-callback (symbol session_callback))]
+            (if temp__5823__auto__
+              (let [callback temp__5823__auto__
+                    temp__5823__auto__ (^clojure.lang.IFn callback endpoint)]
+                (if temp__5823__auto__
+                  (let [session temp__5823__auto__] session)
+                  (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-v4")]
+                    (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                      (.warn
+                        ^org.slf4j.Logger logger
+                        (logger/process
+                          (str "The cassandra-session-callback " session_callback " nil"))))
+                    nil)))
+              (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.cassandra-v4")]
+                (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                  (.warn
+                    ^org.slf4j.Logger logger
+                    (logger/process
+                      (str "Could not resolve cassandra-session-callback " session_callback))))
+                nil)))))))
   (reset-meta!
     #'session-from-callback
     (assoc

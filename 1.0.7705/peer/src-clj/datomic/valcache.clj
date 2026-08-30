@@ -117,30 +117,28 @@
   (reset-meta!
     #'NOT_SUPPORTED
     (assoc {:const true, :column (int 1)} :name 'NOT_SUPPORTED :ns *ns*))
-  (def read-header
-   (fn read_header
-     ([sc bb]
-       (io/read-into-buffer bb 24 sc)
-       (let [magic (.get ^java.nio.ByteBuffer bb)]
-         (when-not (= -128 (long (java.lang.Byte/valueOf (byte magic))))
-           (throw
-             (java.io.IOException.
-               (str "Framing error: " (java.lang.Byte/valueOf (byte magic)))))))
-       (let [opcode (.get ^java.nio.ByteBuffer bb)
-             key_length (.getShort ^java.nio.ByteBuffer bb)
-             extras_length (.get ^java.nio.ByteBuffer bb)
-             data_type (.get ^java.nio.ByteBuffer bb)
-             vbucket_id (.getShort ^java.nio.ByteBuffer bb)
-             total_body_length (.getInt ^java.nio.ByteBuffer bb)
-             opaque (.getInt ^java.nio.ByteBuffer bb)
-             cas (.getLong ^java.nio.ByteBuffer bb)]
-         {:opcode (java.lang.Byte/valueOf (byte opcode)),
-          :key-length (java.lang.Short/valueOf (short key_length)),
-          :extras-length (java.lang.Byte/valueOf (byte extras_length)),
-          :data-type (java.lang.Byte/valueOf (byte data_type)),
-          :vbucket-id (java.lang.Short/valueOf (short vbucket_id)),
-          :total-body-length (java.lang.Integer/valueOf (int total_body_length)),
-          :cas (long cas)}))))
+  (defn read-header
+    ([sc bb]
+      (io/read-into-buffer bb 24 sc)
+      (let [magic (.get ^java.nio.ByteBuffer bb)]
+        (when-not (= -128 (long (java.lang.Byte/valueOf (byte magic))))
+          (throw
+            (java.io.IOException. (str "Framing error: " (java.lang.Byte/valueOf (byte magic)))))))
+      (let [opcode (.get ^java.nio.ByteBuffer bb)
+            key_length (.getShort ^java.nio.ByteBuffer bb)
+            extras_length (.get ^java.nio.ByteBuffer bb)
+            data_type (.get ^java.nio.ByteBuffer bb)
+            vbucket_id (.getShort ^java.nio.ByteBuffer bb)
+            total_body_length (.getInt ^java.nio.ByteBuffer bb)
+            opaque (.getInt ^java.nio.ByteBuffer bb)
+            cas (.getLong ^java.nio.ByteBuffer bb)]
+        {:opcode (java.lang.Byte/valueOf (byte opcode)),
+         :key-length (java.lang.Short/valueOf (short key_length)),
+         :extras-length (java.lang.Byte/valueOf (byte extras_length)),
+         :data-type (java.lang.Byte/valueOf (byte data_type)),
+         :vbucket-id (java.lang.Short/valueOf (short vbucket_id)),
+         :total-body-length (java.lang.Integer/valueOf (int total_body_length)),
+         :cas (long cas)})))
   (reset-meta!
     #'read-header
     (assoc
@@ -203,32 +201,31 @@
           :default
           #'clojure.core/global-hierarchy))
       #'sasl))
-  (def reply-with-error
-   (fn reply_with_error
-     ([opcode status msg sc]
-       (let [msg_bytes (.getBytes ^java.lang.String msg "UTF-8")
-             mlen (alength ^bytes msg_bytes)
-             bb (ByteBuffer/allocate (int (+ 24 mlen)))]
-         (io/write-buffer
-           (.flip
-             (.put
-               (.putLong
-                 (.putInt
-                   (.putInt
-                     (.putShort
-                       (.put
-                         (.put
-                           (.putShort
-                             (.put (.put ^java.nio.ByteBuffer bb (byte -127)) (byte opcode))
-                             (short 0))
-                           (byte 0))
-                         (byte 0))
-                       (short ^java.lang.Number status))
-                     (int mlen))
-                   (int 0))
-                 0)
-               ^bytes msg_bytes))
-           sc)))))
+  (defn reply-with-error
+    ([opcode status msg sc]
+      (let [msg_bytes (.getBytes ^java.lang.String msg "UTF-8")
+            mlen (alength ^bytes msg_bytes)
+            bb (ByteBuffer/allocate (int (+ 24 mlen)))]
+        (io/write-buffer
+          (.flip
+            (.put
+              (.putLong
+                (.putInt
+                  (.putInt
+                    (.putShort
+                      (.put
+                        (.put
+                          (.putShort
+                            (.put (.put ^java.nio.ByteBuffer bb (byte -127)) (byte opcode))
+                            (short 0))
+                          (byte 0))
+                        (byte 0))
+                      (short ^java.lang.Number status))
+                    (int mlen))
+                  (int 0))
+                0)
+              ^bytes msg_bytes))
+          sc))))
   (reset-meta!
     #'reply-with-error
     (assoc
@@ -239,31 +236,30 @@
       'reply-with-error
       :ns
       *ns*))
-  (def supported-or-drain
-   (fn supported_or_drain
-     ([p__15476 sc mmeth]
-       (let [map__15477 p__15476
-             map__15477 (if (seq? map__15477)
-                          (if (next map__15477)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__15477))
-                            (if (seq map__15477) (first map__15477) {}))
-                          map__15477)
-             header map__15477
-             opcode (get map__15477 :opcode)
-             data_type (get map__15477 :data-type)
-             vbucket_id (get map__15477 :vbucket-id)
-             cas (get map__15477 :cas)
-             total_body_length (get map__15477 :total-body-length)]
-         (if (not
-               (and
-                 (zero? data_type)
-                 (zero? vbucket_id)
-                 (zero? cas)
-                 (contains? (methods mmeth) opcode)))
-           (let [bb (io/read-n-bytes total_body_length sc)]
-             (reply-with-error opcode 131 "Not supported" sc))
-           header)))))
+  (defn supported-or-drain
+    ([p__15476 sc mmeth]
+      (let [map__15477 p__15476
+            map__15477 (if (seq? map__15477)
+                         (if (next map__15477)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__15477))
+                           (if (seq map__15477) (first map__15477) {}))
+                         map__15477)
+            header map__15477
+            opcode (get map__15477 :opcode)
+            data_type (get map__15477 :data-type)
+            vbucket_id (get map__15477 :vbucket-id)
+            cas (get map__15477 :cas)
+            total_body_length (get map__15477 :total-body-length)]
+        (if (not
+              (and
+                (zero? data_type)
+                (zero? vbucket_id)
+                (zero? cas)
+                (contains? (methods mmeth) opcode)))
+          (let [bb (io/read-n-bytes total_body_length sc)]
+            (reply-with-error opcode 131 "Not supported" sc))
+          header))))
   (reset-meta!
     #'supported-or-drain
     (assoc
@@ -307,23 +303,22 @@
       'reply-empty-ok
       :ns
       *ns*))
-  (def noop-quit
-   (fn noop_quit
-     ([p__15483 sc]
-       (let [map__15484 p__15483
-             map__15484 (if (seq? map__15484)
-                          (if (next map__15484)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__15484))
-                            (if (seq map__15484) (first map__15484) {}))
-                          map__15484)
-             opcode (get map__15484 :opcode)
-             key_length (get map__15484 :key-length)
-             extras_length (get map__15484 :extras-length)
-             total_body_length (get map__15484 :total-body-length)]
-         (if (not (and (zero? key_length) (zero? extras_length) (zero? total_body_length)))
-           (reply-with-error opcode 4 "Invalid args" sc)
-           (reply-empty-ok opcode sc))))))
+  (defn noop-quit
+    ([p__15483 sc]
+      (let [map__15484 p__15483
+            map__15484 (if (seq? map__15484)
+                         (if (next map__15484)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__15484))
+                           (if (seq map__15484) (first map__15484) {}))
+                         map__15484)
+            opcode (get map__15484 :opcode)
+            key_length (get map__15484 :key-length)
+            extras_length (get map__15484 :extras-length)
+            total_body_length (get map__15484 :total-body-length)]
+        (if (not (and (zero? key_length) (zero? extras_length) (zero? total_body_length)))
+          (reply-with-error opcode 4 "Invalid args" sc)
+          (reply-empty-ok opcode sc)))))
   (reset-meta!
     #'noop-quit
     (assoc
@@ -360,18 +355,17 @@
       'uuid-prefix
       :ns
       *ns*))
-  (def full-path
-   (fn full_path
-     ([root k]
-       (let [temp__5804__auto__ (uuid-prefix k)]
-         (when temp__5804__auto__
-           (let [uuid_prefix temp__5804__auto__]
-             (.getPath
-               (FileSystems/getDefault)
-               ^java.lang.String root
-               (into-array
-                 java.lang.String
-                 [(subs uuid_prefix (long (- (count uuid_prefix) 3))) k]))))))))
+  (defn full-path
+    ([root k]
+      (let [temp__5804__auto__ (uuid-prefix k)]
+        (when temp__5804__auto__
+          (let [uuid_prefix temp__5804__auto__]
+            (.getPath
+              (FileSystems/getDefault)
+              ^java.lang.String root
+              (into-array
+                java.lang.String
+                [(subs uuid_prefix (long (- (count uuid_prefix) 3))) k])))))))
   (reset-meta!
     #'full-path
     (assoc
@@ -445,14 +439,13 @@
                   ^java.nio.file.Path path
                   (into-array java.nio.file.CopyOption [StandardCopyOption/REPLACE_EXISTING]))
                 (reply-empty-ok opcode sc))))))))
-  (def read-key
-   (fn read_key
-     ([key_length sc]
-       (let [kb (ByteBuffer/allocate (int ^java.lang.Number key_length))
-             _ (io/read-into-buffer kb key_length sc)
-             kbytes (byte-array key_length)
-             _ (.get ^java.nio.ByteBuffer kb ^bytes kbytes)]
-         (java.lang.String. ^bytes kbytes "UTF-8")))))
+  (defn read-key
+    ([key_length sc]
+      (let [kb (ByteBuffer/allocate (int ^java.lang.Number key_length))
+            _ (io/read-into-buffer kb key_length sc)
+            kbytes (byte-array key_length)
+            _ (.get ^java.nio.ByteBuffer kb ^bytes kbytes)]
+        (java.lang.String. ^bytes kbytes "UTF-8"))))
   (reset-meta!
     #'read-key
     (assoc
@@ -542,18 +535,17 @@
           (let [k (read-key key_length sc) path (full-path root k) file (some-> path (.toFile))]
             (when (and file (.exists ^java.io.File file)) (.delete ^java.io.File file))
             (reply-empty-ok opcode sc))))))
-  (def scan-strings
-   (fn scan_strings
-     ([bb]
-       (loop [strs [] buf (java.lang.StringBuffer.)]
-         (if (.hasRemaining ^java.nio.Buffer bb)
-           (let [ch (.get ^java.nio.ByteBuffer bb)]
-             (if (= (long (java.lang.Byte/valueOf (byte ch))) 0)
-               (if (= (count buf) 0)
-                 (recur strs buf)
-                 (recur (conj strs (str buf)) (java.lang.StringBuffer.)))
-               (recur strs (.append ^java.lang.StringBuffer buf (char ch)))))
-           (conj strs (str buf)))))))
+  (defn scan-strings
+    ([bb]
+      (loop [strs [] buf (java.lang.StringBuffer.)]
+        (if (.hasRemaining ^java.nio.Buffer bb)
+          (let [ch (.get ^java.nio.ByteBuffer bb)]
+            (if (= (long (java.lang.Byte/valueOf (byte ch))) 0)
+              (if (= (count buf) 0)
+                (recur strs buf)
+                (recur (conj strs (str buf)) (java.lang.StringBuffer.)))
+              (recur strs (.append ^java.lang.StringBuffer buf (char ch)))))
+          (conj strs (str buf))))))
   (reset-meta!
     #'scan-strings
     (assoc
@@ -623,7 +615,7 @@
       'mkdirs
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       IServer
       (connection-count [s] "Number of connected sockets")
@@ -632,8 +624,8 @@
       (handled-count [s] "Number of handled requests"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.valcache" "IServer")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'IServer :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'IServer :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -643,13 +635,13 @@
                                       :doc "Number of connected sockets"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.valcache" "IServer"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.valcache" "connection-count")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -659,13 +651,13 @@
                                       :doc "Number of running handler threads"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.valcache" "IServer"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.valcache" "running-count")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*)))
-    (let [protocol_signature__7436 (assoc
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*)))
+    (let [protocol_signature__7468 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -675,13 +667,13 @@
                                       :doc "Number of pending handler threads"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.valcache" "IServer"))
-          protocol_method_name__7437 (with-meta
-                                       (:name protocol_signature__7436)
-                                       protocol_signature__7436)]
+          protocol_method_name__7469 (with-meta
+                                       (:name protocol_signature__7468)
+                                       protocol_signature__7468)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.valcache" "pending-count")
-        (assoc protocol_signature__7436 :name protocol_method_name__7437 :ns *ns*)))
-    (let [protocol_signature__7438 (assoc
+        (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*)))
+    (let [protocol_signature__7470 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -691,12 +683,12 @@
                                       :doc "Number of handled requests"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.valcache" "IServer"))
-          protocol_method_name__7439 (with-meta
-                                       (:name protocol_signature__7438)
-                                       protocol_signature__7438)]
+          protocol_method_name__7471 (with-meta
+                                       (:name protocol_signature__7470)
+                                       protocol_signature__7470)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.valcache" "handled-count")
-        (assoc protocol_signature__7438 :name protocol_method_name__7439 :ns *ns*))))
+        (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
   (deftype
     Server
     [sem ^long concurrency socket_registry handled host port path shutdown_fn]
@@ -712,18 +704,17 @@
     (connection-count [this] (java.lang.Integer/valueOf (int (count socket_registry))))
     (^void close [this] (do (^clojure.lang.IFn shutdown_fn) nil)))
   (clojure.core/import 'datomic.valcache.Server)
-  (def ->Server
-   (fn __GT_Server
-     ([sem concurrency socket_registry handled host port path shutdown_fn]
-       (datomic.valcache.Server.
-         sem
-         (long ^java.lang.Number concurrency)
-         socket_registry
-         handled
-         host
-         port
-         path
-         shutdown_fn))))
+  (defn ->Server
+    ([sem concurrency socket_registry handled host port path shutdown_fn]
+      (datomic.valcache.Server.
+        sem
+        (long ^java.lang.Number concurrency)
+        socket_registry
+        handled
+        host
+        port
+        path
+        shutdown_fn)))
   (reset-meta!
     #'->Server
     (assoc
@@ -735,173 +726,168 @@
       '->Server
       :ns
       *ns*))
-  (def eviction-loop
-   (fn eviction_loop
-     ([path threshold interval_secs file_window shutdown_requested]
-       (let [opts (into-array java.nio.file.LinkOption [])
-             dirs (into [] (shuffle (range 4096)))
-             evict1 (fn evict1
-                      ([dir]
-                        (let [threshold (/ threshold 4096)
-                              path (.getPath
-                                     (FileSystems/getDefault)
-                                     ^java.lang.String path
-                                     (into-array java.lang.String [(dirname dir)]))
-                              pq (java.util.PriorityQueue.
-                                   (int ^java.lang.Number file_window)
-                                   (comparator
-                                     (fn fn__15595
-                                       ([p1__15592# p2__15593#]
-                                         (> (:atime p1__15592#) (:atime p2__15593#))))))
-                              size (atom 0)
-                              visited (atom 0)]
-                          (Files/walkFileTree
-                            ^java.nio.file.Path path
-                            (reify
-                              java.nio.file.FileVisitor
-                              (^java.nio.file.FileVisitResult visitFileFailed
-                                [this file ^java.io.IOException exc]
-                                FileVisitResult/CONTINUE)
-                              (^java.nio.file.FileVisitResult visitFile
-                                [this file ^java.nio.file.attribute.BasicFileAttributes attrs]
-                                (let [length (+
-                                               (Files/getAttribute
-                                                 ^java.nio.file.Path file
-                                                 "size"
-                                                 ^"[Ljava.nio.file.LinkOption;" opts)
-                                               2048)
-                                      atime (Files/getAttribute
-                                              ^java.nio.file.Path file
-                                              "lastAccessTime"
-                                              ^"[Ljava.nio.file.LinkOption;" opts)]
-                                  (swap! size + length)
-                                  (swap! visited inc)
-                                  (.add
-                                    ^java.util.PriorityQueue pq
-                                    {:atime
-                                     (long (.toMillis ^java.nio.file.attribute.FileTime atime)),
-                                     :length length,
-                                     :file file})
-                                  (when (<= file_window (count pq))
-                                    (.poll ^java.util.PriorityQueue pq))
-                                  FileVisitResult/CONTINUE))
-                              (^java.nio.file.FileVisitResult preVisitDirectory
-                                [this dir ^java.nio.file.attribute.BasicFileAttributes attrs]
-                                FileVisitResult/CONTINUE)
-                              (^java.nio.file.FileVisitResult postVisitDirectory
-                                [this dir ^java.io.IOException exc]
-                                (do (swap! size + (long (* 2 2048))) FileVisitResult/CONTINUE))))
-                          (when (and
-                                  (> (deref size) threshold)
-                                  (clojure.lang.Numbers/isPos (long (count pq))))
-                            (let [fa (.toArray ^java.util.PriorityQueue pq)
-                                  target (- (deref size) (* 0.9 threshold))]
-                              (loop [i (dec (count fa)) deleted 0 files 0]
-                                (if (or (neg? i) (>= deleted target))
-                                  (let [result {:deleted-files (long files),
-                                                :deleted-bytes (long deleted),
-                                                :visited-files (deref visited),
-                                                :visited-bytes (deref size)}]
-                                    result)
-                                  (let [map__15599 (aget ^"[Ljava.lang.Object;" fa (int i))
-                                        map__15599 (if (seq? map__15599)
-                                                     (if (next map__15599)
-                                                       (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                         (to-array map__15599))
-                                                       (if (seq map__15599) (first map__15599) {}))
-                                                     map__15599)
-                                        atime (get map__15599 :atime)
-                                        length (get map__15599 :length)
-                                        file (get map__15599 :file)]
-                                    (Files/deleteIfExists ^java.nio.file.Path file)
+  (defn eviction-loop
+    ([path threshold interval_secs file_window shutdown_requested]
+      (let [opts (into-array java.nio.file.LinkOption [])
+            dirs (into [] (shuffle (range 4096)))
+            evict1 (fn evict1
+                     ([dir]
+                       (let [threshold (/ threshold 4096)
+                             path (.getPath
+                                    (FileSystems/getDefault)
+                                    ^java.lang.String path
+                                    (into-array java.lang.String [(dirname dir)]))
+                             pq (java.util.PriorityQueue.
+                                  (int ^java.lang.Number file_window)
+                                  (comparator
+                                    (fn fn__15595
+                                      ([p1__15592# p2__15593#]
+                                        (> (:atime p1__15592#) (:atime p2__15593#))))))
+                             size (atom 0)
+                             visited (atom 0)]
+                         (Files/walkFileTree
+                           ^java.nio.file.Path path
+                           (reify
+                             java.nio.file.FileVisitor
+                             (^java.nio.file.FileVisitResult visitFileFailed
+                               [this file ^java.io.IOException exc]
+                               FileVisitResult/CONTINUE)
+                             (^java.nio.file.FileVisitResult visitFile
+                               [this file ^java.nio.file.attribute.BasicFileAttributes attrs]
+                               (let [length (+
+                                              (Files/getAttribute
+                                                ^java.nio.file.Path file
+                                                "size"
+                                                ^"[Ljava.nio.file.LinkOption;" opts)
+                                              2048)
+                                     atime (Files/getAttribute
+                                             ^java.nio.file.Path file
+                                             "lastAccessTime"
+                                             ^"[Ljava.nio.file.LinkOption;" opts)]
+                                 (swap! size + length)
+                                 (swap! visited inc)
+                                 (.add
+                                   ^java.util.PriorityQueue pq
+                                   {:atime
+                                    (long (.toMillis ^java.nio.file.attribute.FileTime atime)),
+                                    :length length,
+                                    :file file})
+                                 (when (<= file_window (count pq))
+                                   (.poll ^java.util.PriorityQueue pq))
+                                 FileVisitResult/CONTINUE))
+                             (^java.nio.file.FileVisitResult preVisitDirectory
+                               [this dir ^java.nio.file.attribute.BasicFileAttributes attrs]
+                               FileVisitResult/CONTINUE)
+                             (^java.nio.file.FileVisitResult postVisitDirectory
+                               [this dir ^java.io.IOException exc]
+                               (do (swap! size + (long (* 2 2048))) FileVisitResult/CONTINUE))))
+                         (when (and
+                                 (> (deref size) threshold)
+                                 (clojure.lang.Numbers/isPos (long (count pq))))
+                           (let [fa (.toArray ^java.util.PriorityQueue pq)
+                                 target (- (deref size) (* 0.9 threshold))]
+                             (loop [i (dec (count fa)) deleted 0 files 0]
+                               (if (or (neg? i) (>= deleted target))
+                                 (let [result {:deleted-files (long files),
+                                               :deleted-bytes (long deleted),
+                                               :visited-files (deref visited),
+                                               :visited-bytes (deref size)}]
+                                   result)
+                                 (let [map__15599 (aget ^"[Ljava.lang.Object;" fa (int i))
+                                       map__15599 (if (seq? map__15599)
+                                                    (if (next map__15599)
+                                                      (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                        (to-array map__15599))
+                                                      (if (seq map__15599) (first map__15599) {}))
+                                                    map__15599)
+                                       atime (get map__15599 :atime)
+                                       length (get map__15599 :length)
+                                       file (get map__15599 :file)]
+                                   (Files/deleteIfExists ^java.nio.file.Path file)
+                                   (recur
+                                     (dec i)
+                                     (+ deleted (long ^java.lang.Number length))
+                                     (inc files))))))))))]
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process
+                {:event "ValcacheEvictPlan",
+                 :path (str path),
+                 :threshold-mb (quot threshold 1048576),
+                 :interval-secs interval_secs,
+                 :file-window file_window})))
+          nil)
+        (loop [counter_base 0]
+          (when-not (deref shutdown_requested)
+            (let [start (java.lang.System/currentTimeMillis)
+                  next_base (loop [counter counter_base iter 0 summary {}]
+                              (let [temp__5802__auto__ (try
+                                                         (^clojure.lang.IFn evict1
+                                                           (nth dirs (int counter)))
+                                                         (catch
+                                                           java.lang.Throwable
+                                                           ex
+                                                           (do
+                                                             (let 
+                                                               [logger
+                                                                (org.slf4j.LoggerFactory/getLogger
+                                                                  "datomic.valcache")
+                                                                ex ex]
+                                                               (when
+                                                                 (.isWarnEnabled
+                                                                   ^org.slf4j.Logger logger)
+                                                                 (.warn
+                                                                   ^org.slf4j.Logger logger
+                                                                   (logger/process
+                                                                     "ValcacheEvictLoopFailed")
+                                                                   ^java.lang.Throwable ex)
+                                                                 (logger/caused-by logger ex))
+                                                               nil)
+                                                             nil)))]
+                                (if temp__5802__auto__
+                                  (let [step temp__5802__auto__]
+                                    (when (zero? (mod (long counter) 128))
+                                      (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                     "datomic.valcache")]
+                                        (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                          (.info
+                                            ^org.slf4j.Logger logger
+                                            (logger/process
+                                              (merge
+                                                {:event "ValcacheEvictProgress",
+                                                 :counter (long counter),
+                                                 :iter (long iter),
+                                                 :msec
+                                                 (long
+                                                   (- (java.lang.System/currentTimeMillis) start))}
+                                                summary))))
+                                        nil))
                                     (recur
-                                      (dec i)
-                                      (+ deleted (long ^java.lang.Number length))
-                                      (inc files))))))))))]
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process
-                 {:event "ValcacheEvictPlan",
-                  :path (str path),
-                  :threshold-mb (quot threshold 1048576),
-                  :interval-secs interval_secs,
-                  :file-window file_window})))
-           nil)
-         (loop [counter_base 0]
-           (when-not (deref shutdown_requested)
-             (let [start (java.lang.System/currentTimeMillis)
-                   next_base (loop [counter counter_base iter 0 summary {}]
-                               (let [temp__5802__auto__ (try
-                                                          (^clojure.lang.IFn evict1
-                                                            (nth dirs (int counter)))
-                                                          (catch
-                                                            java.lang.Throwable
-                                                            ex
-                                                            (do
-                                                              (let 
-                                                                [logger
-                                                                 (org.slf4j.LoggerFactory/getLogger
-                                                                   "datomic.valcache")
-                                                                 ex ex]
-                                                                (when
-                                                                  (.isWarnEnabled
-                                                                    ^org.slf4j.Logger logger)
-                                                                  (.warn
-                                                                    ^org.slf4j.Logger logger
-                                                                    (logger/process
-                                                                      "ValcacheEvictLoopFailed")
-                                                                    ^java.lang.Throwable ex)
-                                                                  (logger/caused-by logger ex))
-                                                                nil)
-                                                              nil)))]
-                                 (if temp__5802__auto__
-                                   (let [step temp__5802__auto__]
-                                     (when (zero? (mod (long counter) 128))
-                                       (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                      "datomic.valcache")]
-                                         (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                           (.info
-                                             ^org.slf4j.Logger logger
-                                             (logger/process
-                                               (merge
-                                                 {:event "ValcacheEvictProgress",
-                                                  :counter (long counter),
-                                                  :iter (long iter),
-                                                  :msec
-                                                  (long
-                                                    (-
-                                                      (java.lang.System/currentTimeMillis)
-                                                      start))}
-                                                 summary))))
-                                         nil))
-                                     (recur
-                                       (long (mod (long (inc counter)) 4096))
-                                       (inc iter)
-                                       (merge-with + summary step)))
-                                   (do
-                                     (when-not (= iter 0)
-                                       (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                      "datomic.valcache")]
-                                         (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                           (.info
-                                             ^org.slf4j.Logger logger
-                                             (logger/process
-                                               (merge
-                                                 {:event "ValcacheEvictCompleted",
-                                                  :counter (long counter),
-                                                  :iter (long iter),
-                                                  :msec
-                                                  (long
-                                                    (-
-                                                      (java.lang.System/currentTimeMillis)
-                                                      start))}
-                                                 summary))))
-                                         nil))
-                                     (mod (long (inc counter)) 4096)))))]
-               (java.lang.Thread/sleep (long (* 1000 interval_secs)))
-               (recur (long next_base)))))))))
+                                      (long (mod (long (inc counter)) 4096))
+                                      (inc iter)
+                                      (merge-with + summary step)))
+                                  (do
+                                    (when-not (= iter 0)
+                                      (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                     "datomic.valcache")]
+                                        (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                          (.info
+                                            ^org.slf4j.Logger logger
+                                            (logger/process
+                                              (merge
+                                                {:event "ValcacheEvictCompleted",
+                                                 :counter (long counter),
+                                                 :iter (long iter),
+                                                 :msec
+                                                 (long
+                                                   (- (java.lang.System/currentTimeMillis) start))}
+                                                summary))))
+                                        nil))
+                                    (mod (long (inc counter)) 4096)))))]
+              (java.lang.Thread/sleep (long (* 1000 interval_secs)))
+              (recur (long next_base))))))))
   (reset-meta!
     #'eviction-loop
     (assoc
@@ -925,26 +911,23 @@
   (reset-meta!
     #'shutdown
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'shutdown :ns *ns*))
-  (def sasl-loop
-   (fn sasl_loop
-     ([creds sc sem]
-       (loop [hb (ByteBuffer/wrap (byte-array 24))]
-         (let [map__15611 (read-header sc hb)
-               map__15611 (if (seq? map__15611)
-                            (if (next map__15611)
-                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                (to-array map__15611))
-                              (if (seq map__15611) (first map__15611) {}))
-                            map__15611)
-               header map__15611
-               opcode (get map__15611 :opcode)]
-           (.acquire ^java.util.concurrent.Semaphore sem)
-           (let [authed (try
-                          (some->
-                            (supported-or-drain (assoc header :sasl creds) sc sasl)
-                            (sasl sc))
-                          (finally (.release ^java.util.concurrent.Semaphore sem)))]
-             (if authed true (if (= opcode 7) false (recur hb)))))))))
+  (defn sasl-loop
+    ([creds sc sem]
+      (loop [hb (ByteBuffer/wrap (byte-array 24))]
+        (let [map__15611 (read-header sc hb)
+              map__15611 (if (seq? map__15611)
+                           (if (next map__15611)
+                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                               (to-array map__15611))
+                             (if (seq map__15611) (first map__15611) {}))
+                           map__15611)
+              header map__15611
+              opcode (get map__15611 :opcode)]
+          (.acquire ^java.util.concurrent.Semaphore sem)
+          (let [authed (try
+                         (some-> (supported-or-drain (assoc header :sasl creds) sc sasl) (sasl sc))
+                         (finally (.release ^java.util.concurrent.Semaphore sem)))]
+            (if authed true (if (= opcode 7) false (recur hb))))))))
   (reset-meta!
     #'sasl-loop
     (assoc
@@ -956,11 +939,10 @@
       'sasl-loop
       :ns
       *ns*))
-  (def remote-ip
-   (fn remote_ip
-     ([sc]
-       (let [inet (.getRemoteAddress ^java.nio.channels.SocketChannel sc)]
-         (.getHostString ^java.net.InetSocketAddress inet)))))
+  (defn remote-ip
+    ([sc]
+      (let [inet (.getRemoteAddress ^java.nio.channels.SocketChannel sc)]
+        (.getHostString ^java.net.InetSocketAddress inet))))
   (reset-meta!
     #'remote-ip
     (assoc
@@ -971,204 +953,201 @@
       'remote-ip
       :ns
       *ns*))
-  (def start-server
-   (fn start_server
-     ([p__15617]
-       (let [map__15618 p__15617
-             map__15618 (if (seq? map__15618)
-                          (if (next map__15618)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__15618))
-                            (if (seq map__15618) (first map__15618) {}))
-                          map__15618)
-             path (get map__15618 :path)
-             eviction_threshold_mb (get map__15618 :eviction-threshold-mb)
-             eviction_file_window (get map__15618 :eviction-file-window 10000)
-             concurrency (get map__15618 :concurrency 8)
-             port (get map__15618 :port 11211)
-             host (get map__15618 :host)
-             eviction_interval_secs (get map__15618 :eviction-interval-secs 60)
-             ip_validator (get map__15618 :ip-validator (constantly true))
-             sasl (get map__15618 :sasl)]
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process
-                 {:event :valcache/start,
-                  :datomic.valcache/host host,
-                  :datomic.valcache/port port,
-                  :datomic.valcache/path path,
-                  :datomic.valcache/eviction-threshold-mb eviction_threshold_mb})))
-           nil)
-         (let [ssc (ServerSocketChannel/open)
-               sem (java.util.concurrent.Semaphore.
-                     (int ^java.lang.Number concurrency)
-                     (boolean (.booleanValue true)))
-               socket_registry (java.util.concurrent.ConcurrentHashMap.)
-               handled (atom 0)
-               shutdown_requested (atom nil)
-               internal_shutdown (fn internal_shutdown
-                                   ([]
-                                     (reset! shutdown_requested true)
-                                     (.close
-                                       ^java.nio.channels.spi.AbstractInterruptibleChannel ssc)
-                                     (loop [seq_15620 (seq
-                                                        (.keySet
-                                                          ^java.util.concurrent.ConcurrentHashMap socket_registry))
-                                            chunk_15621 nil
-                                            count_15622 0
-                                            i_15623 0]
-                                       (if (< i_15623 count_15622)
-                                         (let [sc (.nth
-                                                    ^clojure.lang.Indexed chunk_15621
-                                                    (int i_15623))]
-                                           (.close
-                                             ^java.nio.channels.spi.AbstractInterruptibleChannel sc)
-                                           (recur seq_15620 chunk_15621 count_15622 (inc i_15623)))
-                                         (let [temp__5804__auto__ (seq seq_15620)]
-                                           (when temp__5804__auto__
-                                             (let [seq_15620 temp__5804__auto__]
-                                               (if (chunked-seq? seq_15620)
-                                                 (let [c__6065__auto__ (chunk-first seq_15620)]
-                                                   (recur
-                                                     (chunk-rest seq_15620)
-                                                     c__6065__auto__
-                                                     (int (count c__6065__auto__))
-                                                     (int 0)))
-                                                 (let [sc (first seq_15620)]
-                                                   (.close
-                                                     ^java.nio.channels.spi.AbstractInterruptibleChannel sc)
-                                                   (recur (next seq_15620) nil 0 0))))))))))
-               socket_loop (fn socket_loop
-                             ([sc]
-                               (try
-                                 (try
-                                   (do
-                                     (.setTcpNoDelay
-                                       (.socket ^java.nio.channels.SocketChannel sc)
-                                       (boolean (.booleanValue true)))
-                                     (when (if sasl (sasl-loop sasl sc sem) true)
-                                       (loop [hb (ByteBuffer/wrap (byte-array 24))]
-                                         (let [map__15628 (read-header sc hb)
-                                               map__15628 (if (seq? map__15628)
-                                                            (if
-                                                              (next map__15628)
-                                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                                (to-array map__15628))
-                                                              (if
-                                                                (seq map__15628)
-                                                                (first map__15628)
-                                                                {}))
-                                                            map__15628)
-                                               header map__15628
-                                               opcode (get map__15628 :opcode)]
-                                           (.acquire ^java.util.concurrent.Semaphore sem)
-                                           (try
-                                             (do
-                                               (some->
-                                                 (supported-or-drain
-                                                   (assoc header :root path)
-                                                   sc
-                                                   handle)
-                                                 (handle sc))
-                                               (swap! handled inc))
-                                             (finally
-                                               (.release ^java.util.concurrent.Semaphore sem)))
-                                           (when-not (= opcode 7) (recur hb))))
-                                       nil))
-                                   (catch
-                                     java.lang.Throwable
-                                     ex
-                                     (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                    "datomic.valcache")
-                                           ex ex]
-                                       (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                         (.info
-                                           ^org.slf4j.Logger logger
-                                           (logger/process {:event :valcache/socket-exception})
-                                           ^java.lang.Throwable ex)
-                                         (logger/caused-by logger ex))
-                                       nil))
-                                   (catch
-                                     java.io.IOException
-                                     ex
-                                     (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                    "datomic.valcache")]
-                                       (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                         (.info
-                                           ^org.slf4j.Logger logger
-                                           (logger/process
-                                             {:event :valcache/io-exception,
-                                              :msg (.getMessage ^java.lang.Throwable ex)})))
-                                       nil)))
-                                 (finally
-                                   (do
-                                     (.close
-                                       ^java.nio.channels.spi.AbstractInterruptibleChannel sc)
-                                     (.remove
-                                       ^java.util.concurrent.ConcurrentHashMap socket_registry
-                                       sc))))))
-               accept_loop (fn accept_loop
-                             ([]
-                               (try
-                                 (try
-                                   (do
-                                     (loop []
-                                       (let [sc (.accept
-                                                  ^java.nio.channels.ServerSocketChannel ssc)
-                                             ip (remote-ip sc)]
-                                         (if (^clojure.lang.IFn ip_validator ip)
-                                           (do
-                                             (.put
-                                               ^java.util.concurrent.ConcurrentHashMap socket_registry
-                                               sc
-                                               sc)
-                                             (datomic.async/daemon
-                                               (fn fn__15634
-                                                 ([] (^clojure.lang.IFn socket_loop sc)))
-                                               "valcache-socket-loop"))
-                                           (do
-                                             (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                            "datomic.valcache")]
-                                               (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                                 (.info
-                                                   ^org.slf4j.Logger logger
-                                                   (logger/process
-                                                     {:event :valcache/reject-ip, :ip ip})))
-                                               nil)
-                                             (.close
-                                               ^java.nio.channels.spi.AbstractInterruptibleChannel sc)))
-                                         (recur)))
-                                     nil)
-                                   (catch java.nio.channels.AsynchronousCloseException _ nil))
-                                 (finally (^clojure.lang.IFn internal_shutdown)))))]
-           (mkdirs path)
-           (.bind
-             (.socket ^java.nio.channels.ServerSocketChannel ssc)
-             (java.net.InetSocketAddress. ^java.lang.String host (int ^java.lang.Number port)))
-           (datomic.async/daemon
-             (fn fn__15637
-               ([]
-                 (eviction-loop
-                   path
-                   (* (* eviction_threshold_mb 1024) 1024)
-                   eviction_interval_secs
-                   eviction_file_window
-                   shutdown_requested)))
-             "valcache-eviction-loop")
-           (datomic.async/daemon accept_loop "valcache-accept-loop")
-           (reset!
-             valcache-ref
-             (datomic.valcache.Server.
-               sem
-               (long ^java.lang.Number concurrency)
-               socket_registry
-               handled
-               host
-               port
-               path
-               internal_shutdown)))))))
+  (defn start-server
+    ([p__15617]
+      (let [map__15618 p__15617
+            map__15618 (if (seq? map__15618)
+                         (if (next map__15618)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__15618))
+                           (if (seq map__15618) (first map__15618) {}))
+                         map__15618)
+            path (get map__15618 :path)
+            eviction_threshold_mb (get map__15618 :eviction-threshold-mb)
+            eviction_file_window (get map__15618 :eviction-file-window 10000)
+            concurrency (get map__15618 :concurrency 8)
+            port (get map__15618 :port 11211)
+            host (get map__15618 :host)
+            eviction_interval_secs (get map__15618 :eviction-interval-secs 60)
+            ip_validator (get map__15618 :ip-validator (constantly true))
+            sasl (get map__15618 :sasl)]
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process
+                {:event :valcache/start,
+                 :datomic.valcache/host host,
+                 :datomic.valcache/port port,
+                 :datomic.valcache/path path,
+                 :datomic.valcache/eviction-threshold-mb eviction_threshold_mb})))
+          nil)
+        (let [ssc (ServerSocketChannel/open)
+              sem (java.util.concurrent.Semaphore.
+                    (int ^java.lang.Number concurrency)
+                    (boolean (.booleanValue true)))
+              socket_registry (java.util.concurrent.ConcurrentHashMap.)
+              handled (atom 0)
+              shutdown_requested (atom nil)
+              internal_shutdown (fn internal_shutdown
+                                  ([]
+                                    (reset! shutdown_requested true)
+                                    (.close
+                                      ^java.nio.channels.spi.AbstractInterruptibleChannel ssc)
+                                    (loop [seq_15620 (seq
+                                                       (.keySet
+                                                         ^java.util.concurrent.ConcurrentHashMap socket_registry))
+                                           chunk_15621 nil
+                                           count_15622 0
+                                           i_15623 0]
+                                      (if (< i_15623 count_15622)
+                                        (let [sc (.nth
+                                                   ^clojure.lang.Indexed chunk_15621
+                                                   (int i_15623))]
+                                          (.close
+                                            ^java.nio.channels.spi.AbstractInterruptibleChannel sc)
+                                          (recur seq_15620 chunk_15621 count_15622 (inc i_15623)))
+                                        (let [temp__5804__auto__ (seq seq_15620)]
+                                          (when temp__5804__auto__
+                                            (let [seq_15620 temp__5804__auto__]
+                                              (if (chunked-seq? seq_15620)
+                                                (let [c__6065__auto__ (chunk-first seq_15620)]
+                                                  (recur
+                                                    (chunk-rest seq_15620)
+                                                    c__6065__auto__
+                                                    (int (count c__6065__auto__))
+                                                    (int 0)))
+                                                (let [sc (first seq_15620)]
+                                                  (.close
+                                                    ^java.nio.channels.spi.AbstractInterruptibleChannel sc)
+                                                  (recur (next seq_15620) nil 0 0))))))))))
+              socket_loop (fn socket_loop
+                            ([sc]
+                              (try
+                                (try
+                                  (do
+                                    (.setTcpNoDelay
+                                      (.socket ^java.nio.channels.SocketChannel sc)
+                                      (boolean (.booleanValue true)))
+                                    (when (if sasl (sasl-loop sasl sc sem) true)
+                                      (loop [hb (ByteBuffer/wrap (byte-array 24))]
+                                        (let [map__15628 (read-header sc hb)
+                                              map__15628 (if (seq? map__15628)
+                                                           (if
+                                                             (next map__15628)
+                                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                               (to-array map__15628))
+                                                             (if
+                                                               (seq map__15628)
+                                                               (first map__15628)
+                                                               {}))
+                                                           map__15628)
+                                              header map__15628
+                                              opcode (get map__15628 :opcode)]
+                                          (.acquire ^java.util.concurrent.Semaphore sem)
+                                          (try
+                                            (do
+                                              (some->
+                                                (supported-or-drain
+                                                  (assoc header :root path)
+                                                  sc
+                                                  handle)
+                                                (handle sc))
+                                              (swap! handled inc))
+                                            (finally
+                                              (.release ^java.util.concurrent.Semaphore sem)))
+                                          (when-not (= opcode 7) (recur hb))))
+                                      nil))
+                                  (catch
+                                    java.lang.Throwable
+                                    ex
+                                    (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                   "datomic.valcache")
+                                          ex ex]
+                                      (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                        (.info
+                                          ^org.slf4j.Logger logger
+                                          (logger/process {:event :valcache/socket-exception})
+                                          ^java.lang.Throwable ex)
+                                        (logger/caused-by logger ex))
+                                      nil))
+                                  (catch
+                                    java.io.IOException
+                                    ex
+                                    (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                   "datomic.valcache")]
+                                      (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                        (.info
+                                          ^org.slf4j.Logger logger
+                                          (logger/process
+                                            {:event :valcache/io-exception,
+                                             :msg (.getMessage ^java.lang.Throwable ex)})))
+                                      nil)))
+                                (finally
+                                  (do
+                                    (.close ^java.nio.channels.spi.AbstractInterruptibleChannel sc)
+                                    (.remove
+                                      ^java.util.concurrent.ConcurrentHashMap socket_registry
+                                      sc))))))
+              accept_loop (fn accept_loop
+                            ([]
+                              (try
+                                (try
+                                  (do
+                                    (loop []
+                                      (let [sc (.accept ^java.nio.channels.ServerSocketChannel ssc)
+                                            ip (remote-ip sc)]
+                                        (if (^clojure.lang.IFn ip_validator ip)
+                                          (do
+                                            (.put
+                                              ^java.util.concurrent.ConcurrentHashMap socket_registry
+                                              sc
+                                              sc)
+                                            (datomic.async/daemon
+                                              (fn fn__15634
+                                                ([] (^clojure.lang.IFn socket_loop sc)))
+                                              "valcache-socket-loop"))
+                                          (do
+                                            (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                           "datomic.valcache")]
+                                              (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                                (.info
+                                                  ^org.slf4j.Logger logger
+                                                  (logger/process
+                                                    {:event :valcache/reject-ip, :ip ip})))
+                                              nil)
+                                            (.close
+                                              ^java.nio.channels.spi.AbstractInterruptibleChannel sc)))
+                                        (recur)))
+                                    nil)
+                                  (catch java.nio.channels.AsynchronousCloseException _ nil))
+                                (finally (^clojure.lang.IFn internal_shutdown)))))]
+          (mkdirs path)
+          (.bind
+            (.socket ^java.nio.channels.ServerSocketChannel ssc)
+            (java.net.InetSocketAddress. ^java.lang.String host (int ^java.lang.Number port)))
+          (datomic.async/daemon
+            (fn fn__15637
+              ([]
+                (eviction-loop
+                  path
+                  (* (* eviction_threshold_mb 1024) 1024)
+                  eviction_interval_secs
+                  eviction_file_window
+                  shutdown_requested)))
+            "valcache-eviction-loop")
+          (datomic.async/daemon accept_loop "valcache-accept-loop")
+          (reset!
+            valcache-ref
+            (datomic.valcache.Server.
+              sem
+              (long ^java.lang.Number concurrency)
+              socket_registry
+              handled
+              host
+              port
+              path
+              internal_shutdown))))))
   (reset-meta!
     #'start-server
     (assoc
@@ -1195,47 +1174,46 @@
       'start-server
       :ns
       *ns*))
-  (def direct-init
-   (fn direct_init
-     ([p__15640]
-       (let [map__15641 p__15640
-             map__15641 (if (seq? map__15641)
-                          (if (next map__15641)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__15641))
-                            (if (seq map__15641) (first map__15641) {}))
-                          map__15641)
-             path (get map__15641 :path)
-             eviction_threshold_mb (get map__15641 :eviction-threshold-mb)
-             concurrency (get map__15641 :concurrency 8)
-             eviction_interval_secs (get map__15641 :eviction-interval-secs 60)
-             eviction_file_window (get map__15641 :eviction-file-window 10000)]
-         (when-not path (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'path)))))
-         (when-not eviction_threshold_mb
-           (throw
-             (java.lang.AssertionError. (str "Assert failed: " (pr-str 'eviction-threshold-mb)))))
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process
-                 {:event :valcache/direct-init,
-                  :datomic.valcache/path path,
-                  :datomic.valcache/eviction-threshold-mb eviction_threshold_mb})))
-           nil)
-         (let [shutdown_requested (atom nil)]
-           (mkdirs path)
-           (datomic.async/daemon
-             (fn fn__15642
-               ([]
-                 (eviction-loop
-                   path
-                   (* (* eviction_threshold_mb 1024) 1024)
-                   eviction_interval_secs
-                   eviction_file_window
-                   shutdown_requested)))
-             "valcache-eviction-loop")
-           (fn fn__15644 ([] (reset! shutdown_requested true))))))))
+  (defn direct-init
+    ([p__15640]
+      (let [map__15641 p__15640
+            map__15641 (if (seq? map__15641)
+                         (if (next map__15641)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__15641))
+                           (if (seq map__15641) (first map__15641) {}))
+                         map__15641)
+            path (get map__15641 :path)
+            eviction_threshold_mb (get map__15641 :eviction-threshold-mb)
+            concurrency (get map__15641 :concurrency 8)
+            eviction_interval_secs (get map__15641 :eviction-interval-secs 60)
+            eviction_file_window (get map__15641 :eviction-file-window 10000)]
+        (when-not path (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'path)))))
+        (when-not eviction_threshold_mb
+          (throw
+            (java.lang.AssertionError. (str "Assert failed: " (pr-str 'eviction-threshold-mb)))))
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process
+                {:event :valcache/direct-init,
+                 :datomic.valcache/path path,
+                 :datomic.valcache/eviction-threshold-mb eviction_threshold_mb})))
+          nil)
+        (let [shutdown_requested (atom nil)]
+          (mkdirs path)
+          (datomic.async/daemon
+            (fn fn__15642
+              ([]
+                (eviction-loop
+                  path
+                  (* (* eviction_threshold_mb 1024) 1024)
+                  eviction_interval_secs
+                  eviction_file_window
+                  shutdown_requested)))
+            "valcache-eviction-loop")
+          (fn fn__15644 ([] (reset! shutdown_requested true)))))))
   (reset-meta!
     #'direct-init
     (assoc
@@ -1255,20 +1233,19 @@
       'direct-init
       :ns
       *ns*))
-  (def direct-get
-   (fn direct_get
-     ([root k]
-       (when-not root (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root)))))
-       (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'k)))))
-       (let [path (full-path root k)]
-         (when (some-> path (.toFile) (.exists))
-           (with-open [fc (FileChannel/open
-                            ^java.nio.file.Path path
-                            (into-array java.nio.file.OpenOption [StandardOpenOption/READ]))]
-             (let [size (- (.size ^java.nio.channels.FileChannel fc) 4)]
-               (when (> size 0)
-                 (.position ^java.nio.channels.FileChannel fc 4)
-                 (io/read-into-buffer (ByteBuffer/allocate (int size)) (long size) fc)))))))))
+  (defn direct-get
+    ([root k]
+      (when-not root (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root)))))
+      (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'k)))))
+      (let [path (full-path root k)]
+        (when (some-> path (.toFile) (.exists))
+          (with-open [fc (FileChannel/open
+                           ^java.nio.file.Path path
+                           (into-array java.nio.file.OpenOption [StandardOpenOption/READ]))]
+            (let [size (- (.size ^java.nio.channels.FileChannel fc) 4)]
+              (when (> size 0)
+                (.position ^java.nio.channels.FileChannel fc 4)
+                (io/read-into-buffer (ByteBuffer/allocate (int size)) (long size) fc))))))))
   (reset-meta!
     #'direct-get
     (assoc
@@ -1277,49 +1254,48 @@
       'direct-get
       :ns
       *ns*))
-  (def direct-put
-   (fn direct_put
-     ([root k v]
-       (when-not root (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root)))))
-       (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'k)))))
-       (when-not v (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'v)))))
-       (let [temp__5804__auto__ (full-path root k)]
-         (when temp__5804__auto__
-           (let [path temp__5804__auto__ tmp_path (full-path root (str (UUID/randomUUID)))]
-             (try
-               (do
-                 (with-open [fc (FileChannel/open
-                                  ^java.nio.file.Path tmp_path
-                                  (into-array
-                                    java.nio.file.OpenOption
-                                    [StandardOpenOption/CREATE
-                                     StandardOpenOption/WRITE
-                                     StandardOpenOption/TRUNCATE_EXISTING]))]
-                   (do
-                     (let [bb (ByteBuffer/allocate (int 4))]
-                       (io/write-buffer (.flip (.putInt ^java.nio.ByteBuffer bb (int 2048))) fc))
-                     (io/write-buffer (.duplicate ^java.nio.ByteBuffer v) fc)
-                     (.force ^java.nio.channels.FileChannel fc (boolean (.booleanValue true)))
-                     nil))
-                 (Files/move
-                   ^java.nio.file.Path tmp_path
-                   ^java.nio.file.Path path
-                   (into-array java.nio.file.CopyOption [StandardCopyOption/REPLACE_EXISTING]))
-                 true)
-               (catch
-                 java.lang.Throwable
-                 t
-                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache") ex t]
-                   (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                     (.info
-                       ^org.slf4j.Logger logger
-                       (logger/process
-                         {:event :valcache/put-exception,
-                          :tmp-path (str tmp_path),
-                          :path (str path)})
-                       ^java.lang.Throwable ex)
-                     (logger/caused-by logger ex))
-                   nil)))))))))
+  (defn direct-put
+    ([root k v]
+      (when-not root (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root)))))
+      (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'k)))))
+      (when-not v (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'v)))))
+      (let [temp__5804__auto__ (full-path root k)]
+        (when temp__5804__auto__
+          (let [path temp__5804__auto__ tmp_path (full-path root (str (UUID/randomUUID)))]
+            (try
+              (do
+                (with-open [fc (FileChannel/open
+                                 ^java.nio.file.Path tmp_path
+                                 (into-array
+                                   java.nio.file.OpenOption
+                                   [StandardOpenOption/CREATE
+                                    StandardOpenOption/WRITE
+                                    StandardOpenOption/TRUNCATE_EXISTING]))]
+                  (do
+                    (let [bb (ByteBuffer/allocate (int 4))]
+                      (io/write-buffer (.flip (.putInt ^java.nio.ByteBuffer bb (int 2048))) fc))
+                    (io/write-buffer (.duplicate ^java.nio.ByteBuffer v) fc)
+                    (.force ^java.nio.channels.FileChannel fc (boolean (.booleanValue true)))
+                    nil))
+                (Files/move
+                  ^java.nio.file.Path tmp_path
+                  ^java.nio.file.Path path
+                  (into-array java.nio.file.CopyOption [StandardCopyOption/REPLACE_EXISTING]))
+                true)
+              (catch
+                java.lang.Throwable
+                t
+                (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache") ex t]
+                  (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                    (.info
+                      ^org.slf4j.Logger logger
+                      (logger/process
+                        {:event :valcache/put-exception,
+                         :tmp-path (str tmp_path),
+                         :path (str path)})
+                      ^java.lang.Throwable ex)
+                    (logger/caused-by logger ex))
+                  nil))))))))
   (reset-meta!
     #'direct-put
     (assoc

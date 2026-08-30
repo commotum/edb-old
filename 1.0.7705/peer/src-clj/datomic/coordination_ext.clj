@@ -138,11 +138,10 @@
         (kvc/kv-cluster kvs cluster_conf))))
   (.setMeta (clojure.lang.RT/var "datomic.coordination-ext" "devspec") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.coordination-ext" "devspec") (atom nil))
-  (def init-dev
-   (fn init_dev
-     ([cluster_map data_dir]
-       (let [spec (assoc cluster_map :data-dir (str data_dir "/db"))]
-         (compare-and-set! devspec nil (req/require-and-run 'datomic.h2/init-tcp spec))))))
+  (defn init-dev
+    ([cluster_map data_dir]
+      (let [spec (assoc cluster_map :data-dir (str data_dir "/db"))]
+        (compare-and-set! devspec nil (req/require-and-run 'datomic.h2/init-tcp spec)))))
   (reset-meta!
     #'init-dev
     (assoc
@@ -161,16 +160,15 @@
     :limited-edition
     fn__17281
     ([cluster_map data_dir] (init-dev cluster_map data_dir)))
-  (def create-dev-cluster
-   (fn create_dev_cluster
-     ([cluster_conf]
-       (kvc/kv-cluster
-         (let [temp__5802__auto__ (deref devspec)]
-           (if temp__5802__auto__
-             (let [spec temp__5802__auto__]
-               (kvsql/from-spec (req/require-and-run 'datomic.h2/local-jdbc-spec spec)))
-             (kvsql/from-spec (req/require-and-run 'datomic.h2/remote-jdbc-spec cluster_conf))))
-         cluster_conf))))
+  (defn create-dev-cluster
+    ([cluster_conf]
+      (kvc/kv-cluster
+        (let [temp__5802__auto__ (deref devspec)]
+          (if temp__5802__auto__
+            (let [spec temp__5802__auto__]
+              (kvsql/from-spec (req/require-and-run 'datomic.h2/local-jdbc-spec spec)))
+            (kvsql/from-spec (req/require-and-run 'datomic.h2/remote-jdbc-spec cluster_conf))))
+        cluster_conf)))
   (reset-meta!
     #'create-dev-cluster
     (assoc

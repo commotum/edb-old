@@ -17,8 +17,7 @@
           ['datomic.aws.client.api :as 'aws])
         (clojure.core/import 'software.amazon.awssdk.services.ec2.Ec2Client))))
   (set! *warn-on-reflection* true)
-  (def client
-   (fn client ([opts] (aws-helpers/sync-client (Ec2Client/builder) opts)) ([] (client nil))))
+  (defn client ([opts] (aws-helpers/sync-client (Ec2Client/builder) opts)) ([] (client nil)))
   (reset-meta!
     #'client
     (assoc {:arglists (clojure.core/list [] ['opts]), :column (int 1)} :name 'client :ns *ns*))
@@ -55,32 +54,31 @@
        (fn fn__27644
          ([]
            (software.amazon.awssdk.services.ec2.model.AuthorizeSecurityGroupIngressRequest/builder)))}))
-  (def authorize-security-group-ingress-command
-   (fn authorize_security_group_ingress_command
-     ([p__27647]
-       (let [map__27648 p__27647
-             map__27648 (if (seq? map__27648)
-                          (if (next map__27648)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27648))
-                            (if (seq map__27648) (first map__27648) {}))
-                          map__27648)
-             group_name (get map__27648 :group-name)
-             address (get map__27648 :address)
-             protocol (get map__27648 :protocol)
-             port (get map__27648 :port)
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (println
-               (aws-helpers/invoke
-                 (client)
-                 {:op :AuthorizeSecurityGroupIngress,
-                  :req
-                  {:GroupName group_name,
-                   :IpPermissions
-                   [{:IpProtocol protocol, :ToPort port, :FromPort port, :IpRanges [address]}]}}))
-             (str s__6444__auto__)))))))
+  (defn authorize-security-group-ingress-command
+    ([p__27647]
+      (let [map__27648 p__27647
+            map__27648 (if (seq? map__27648)
+                         (if (next map__27648)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27648))
+                           (if (seq map__27648) (first map__27648) {}))
+                         map__27648)
+            group_name (get map__27648 :group-name)
+            address (get map__27648 :address)
+            protocol (get map__27648 :protocol)
+            port (get map__27648 :port)
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (println
+              (aws-helpers/invoke
+                (client)
+                {:op :AuthorizeSecurityGroupIngress,
+                 :req
+                 {:GroupName group_name,
+                  :IpPermissions
+                  [{:IpProtocol protocol, :ToPort port, :FromPort port, :IpRanges [address]}]}}))
+            (str s__6444__auto__))))))
   (reset-meta!
     #'authorize-security-group-ingress-command
     (assoc
@@ -90,27 +88,26 @@
       'authorize-security-group-ingress-command
       :ns
       *ns*))
-  (def create-security-group-command
-   (fn create_security_group_command
-     ([p__27651]
-       (let [map__27652 p__27651
-             map__27652 (if (seq? map__27652)
-                          (if (next map__27652)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27652))
-                            (if (seq map__27652) (first map__27652) {}))
-                          map__27652)
-             group_name (get map__27652 :group-name)
-             description (get map__27652 :description)
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (println
-               (aws-helpers/invoke
-                 (client)
-                 {:op :CreateSecurityGroup,
-                  :req {:GroupName group_name, :Description description}}))
-             (str s__6444__auto__)))))))
+  (defn create-security-group-command
+    ([p__27651]
+      (let [map__27652 p__27651
+            map__27652 (if (seq? map__27652)
+                         (if (next map__27652)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27652))
+                           (if (seq map__27652) (first map__27652) {}))
+                         map__27652)
+            group_name (get map__27652 :group-name)
+            description (get map__27652 :description)
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (println
+              (aws-helpers/invoke
+                (client)
+                {:op :CreateSecurityGroup,
+                 :req {:GroupName group_name, :Description description}}))
+            (str s__6444__auto__))))))
   (reset-meta!
     #'create-security-group-command
     (assoc

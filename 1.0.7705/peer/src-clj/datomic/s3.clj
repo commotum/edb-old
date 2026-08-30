@@ -45,7 +45,7 @@
   (reset-meta!
     #'s3-service
     (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name 's3-service :ns *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       Name
       (s3-name
@@ -53,8 +53,8 @@
         "Get the string name from an object that can be used as\n    a name in an S3 context."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.s3" "Name")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Name :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Name :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 's3-name {:arglists (clojure.core/list ['x])}),
@@ -63,40 +63,39 @@
                                       "Get the string name from an object that can be used as\n    a name in an S3 context."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.s3" "Name"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.s3" "s3-name")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend java.lang.String Name {:s3-name (fn fn__21717 ([item] item))})
   (extend clojure.lang.APersistentMap Name {:s3-name (fn fn__21719 ([item] (:Name item)))})
-  (def signed-get-url
-   (fn signed_get_url
-     ([s3 bucket path duration_days]
-       (let [conf (.serviceClientConfiguration ^software.amazon.awssdk.services.s3.S3Client s3)
-             presigner (.build
-                         (.credentialsProvider
-                           (.region
-                             (S3Presigner/builder)
-                             (.region
-                               ^software.amazon.awssdk.awscore.AwsServiceClientConfiguration conf))
-                           (.credentialsProvider
-                             ^software.amazon.awssdk.awscore.AwsServiceClientConfiguration conf)))
-             presign_request (.build
-                               (.signatureDuration
-                                 (.getObjectRequest
-                                   (GetObjectPresignRequest/builder)
-                                   (datafy/clj->sdk
-                                     (GetObjectRequest/builder)
-                                     {:Bucket bucket, :Key path}))
-                                 (Duration/ofDays (long ^java.lang.Number duration_days))))
-             presigned_url (.presignGetObject
-                             ^software.amazon.awssdk.services.s3.presigner.S3Presigner presigner
-                             ^software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest presign_request)]
-         (.close ^software.amazon.awssdk.awscore.presigner.SdkPresigner presigner)
-         (let [_ nil]
-           (.url ^software.amazon.awssdk.awscore.presigner.PresignedRequest presigned_url))))))
+  (defn signed-get-url
+    ([s3 bucket path duration_days]
+      (let [conf (.serviceClientConfiguration ^software.amazon.awssdk.services.s3.S3Client s3)
+            presigner (.build
+                        (.credentialsProvider
+                          (.region
+                            (S3Presigner/builder)
+                            (.region
+                              ^software.amazon.awssdk.awscore.AwsServiceClientConfiguration conf))
+                          (.credentialsProvider
+                            ^software.amazon.awssdk.awscore.AwsServiceClientConfiguration conf)))
+            presign_request (.build
+                              (.signatureDuration
+                                (.getObjectRequest
+                                  (GetObjectPresignRequest/builder)
+                                  (datafy/clj->sdk
+                                    (GetObjectRequest/builder)
+                                    {:Bucket bucket, :Key path}))
+                                (Duration/ofDays (long ^java.lang.Number duration_days))))
+            presigned_url (.presignGetObject
+                            ^software.amazon.awssdk.services.s3.presigner.S3Presigner presigner
+                            ^software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest presign_request)]
+        (.close ^software.amazon.awssdk.awscore.presigner.SdkPresigner presigner)
+        (let [_ nil]
+          (.url ^software.amazon.awssdk.awscore.presigner.PresignedRequest presigned_url)))))
   (reset-meta!
     #'signed-get-url
     (assoc
@@ -107,13 +106,12 @@
       'signed-get-url
       :ns
       *ns*))
-  (def get-bucket
-   (fn get_bucket
-     ([s3 bucket_name]
-       (first
-         (filter
-           (fn fn__21722 ([b] (= (:Name b) bucket_name)))
-           (:Buckets (aws/invoke s3 {:op :ListBuckets, :req {:Prefix bucket_name}})))))))
+  (defn get-bucket
+    ([s3 bucket_name]
+      (first
+        (filter
+          (fn fn__21722 ([b] (= (:Name b) bucket_name)))
+          (:Buckets (aws/invoke s3 {:op :ListBuckets, :req {:Prefix bucket_name}}))))))
   (reset-meta!
     #'get-bucket
     (assoc
@@ -134,32 +132,31 @@
       'ensure-bucket
       :ns
       *ns*))
-  (def list-objects
-   (fn list_objects
-     ([s3 bucket prefix delimiter]
-       (let [s3_bucket (s3-name bucket)]
-         (sequence
-           cat
-           (iteration
-             (fn fn__21726
-               ([token]
-                 (aws/invoke
-                   s3
-                   {:op :ListObjectsV2,
-                    :req
-                    (cond->
-                      {:Bucket s3_bucket}
-                      prefix
-                      (assoc :Prefix prefix)
-                      delimiter
-                      (assoc :Delimiter delimiter)
-                      token
-                      (assoc :ContinuationToken token))})))
-             :kf
-             :NextContinuationToken
-             :vf
-             :Contents))))
-     ([s3 bucket] (list-objects s3 bucket nil nil))))
+  (defn list-objects
+    ([s3 bucket prefix delimiter]
+      (let [s3_bucket (s3-name bucket)]
+        (sequence
+          cat
+          (iteration
+            (fn fn__21726
+              ([token]
+                (aws/invoke
+                  s3
+                  {:op :ListObjectsV2,
+                   :req
+                   (cond->
+                     {:Bucket s3_bucket}
+                     prefix
+                     (assoc :Prefix prefix)
+                     delimiter
+                     (assoc :Delimiter delimiter)
+                     token
+                     (assoc :ContinuationToken token))})))
+            :kf
+            :NextContinuationToken
+            :vf
+            :Contents))))
+    ([s3 bucket] (list-objects s3 bucket nil nil)))
   (reset-meta!
     #'list-objects
     (assoc
@@ -206,15 +203,14 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.s3" "BUCKET_OWNER_FULL_ACCESS_CANNED_ACL")
     (str software.amazon.awssdk.services.s3.model.ObjectCannedACL/BUCKET_OWNER_FULL_CONTROL))
-  (def put-file-as
-   (fn put_file_as
-     ([s3 bucket f path opts]
-       (aws/invoke
-         s3
-         {:op :PutObject,
-          :req (merge opts {:Bucket (s3-name bucket), :Key path}),
-          :body (jio/file f)}))
-     ([s3 bucket f path] (put-file-as s3 bucket f path nil))))
+  (defn put-file-as
+    ([s3 bucket f path opts]
+      (aws/invoke
+        s3
+        {:op :PutObject,
+         :req (merge opts {:Bucket (s3-name bucket), :Key path}),
+         :body (jio/file f)}))
+    ([s3 bucket f path] (put-file-as s3 bucket f path nil)))
   (reset-meta!
     #'put-file-as
     (assoc
@@ -237,20 +233,19 @@
       'put-object
       :ns
       *ns*))
-  (def get-object
-   (fn get_object
-     ([s3 bucket path response_as]
-       (try
-         (aws/invoke
-           s3
-           {:op :GetObject,
-            :req {:Bucket (s3-name bucket), :Key (s3-name path)},
-            :response-as response_as})
-         (catch
-           java.lang.Exception
-           ex
-           (when-not (canom/not-found? (ex-data ex)) (throw ^java.lang.Throwable ex) nil))))
-     ([s3 bucket path] (get-object s3 bucket path :bytes))))
+  (defn get-object
+    ([s3 bucket path response_as]
+      (try
+        (aws/invoke
+          s3
+          {:op :GetObject,
+           :req {:Bucket (s3-name bucket), :Key (s3-name path)},
+           :response-as response_as})
+        (catch
+          java.lang.Exception
+          ex
+          (when-not (canom/not-found? (ex-data ex)) (throw ^java.lang.Throwable ex) nil))))
+    ([s3 bucket path] (get-object s3 bucket path :bytes)))
   (reset-meta!
     #'get-object
     (assoc

@@ -19,10 +19,9 @@
   (reset-meta! #'forbidden (assoc {:column (int 1)} :name 'forbidden :ns *ns*))
   (def not-found #:cognitect.anomalies{:category :cognitect.anomalies/not-found})
   (reset-meta! #'not-found (assoc {:column (int 1)} :name 'not-found :ns *ns*))
-  (def anom
-   (fn anom
-     ([x context] (when (:cognitect.anomalies/category x) (merge x context)))
-     ([x] (when (:cognitect.anomalies/category x) x))))
+  (defn anom
+    ([x context] (when (:cognitect.anomalies/category x) (merge x context)))
+    ([x] (when (:cognitect.anomalies/category x) x)))
   (reset-meta!
     #'anom
     (assoc

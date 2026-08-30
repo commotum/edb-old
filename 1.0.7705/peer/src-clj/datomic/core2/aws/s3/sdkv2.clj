@@ -15,13 +15,11 @@
           ['datomic.core2.anomalies :as 'canom]
           ['datomic.core2.aws.helpers :as 'helpers]))))
   (set! *warn-on-reflection* true)
-  (def wrap-ex-handler
-   (fn wrap_ex_handler
-     ([f context]
-       (fn fn__21391
-         ([& args]
-           (try (apply f args) (catch java.lang.Throwable t (merge context (ex-data t)))))))
-     ([f] (wrap-ex-handler f nil))))
+  (defn wrap-ex-handler
+    ([f context]
+      (fn fn__21391
+        ([& args] (try (apply f args) (catch java.lang.Throwable t (merge context (ex-data t)))))))
+    ([f] (wrap-ex-handler f nil)))
   (reset-meta!
     #'wrap-ex-handler
     (assoc
@@ -43,18 +41,17 @@
       'put-object
       :ns
       *ns*))
-  (def get-object
-   (fn get_object
-     ([s3 bucket path response_as]
-       (try
-         (helpers/invoke
-           s3
-           {:op :GetObject, :req {:Bucket bucket, :Key path}, :response-as response_as})
-         (catch
-           java.lang.Exception
-           ex
-           (when-not (canom/not-found? (ex-data ex)) (throw ^java.lang.Throwable ex) nil))))
-     ([s3 bucket path] (get-object s3 bucket path :bytes))))
+  (defn get-object
+    ([s3 bucket path response_as]
+      (try
+        (helpers/invoke
+          s3
+          {:op :GetObject, :req {:Bucket bucket, :Key path}, :response-as response_as})
+        (catch
+          java.lang.Exception
+          ex
+          (when-not (canom/not-found? (ex-data ex)) (throw ^java.lang.Throwable ex) nil))))
+    ([s3 bucket path] (get-object s3 bucket path :bytes)))
   (reset-meta!
     #'get-object
     (assoc
@@ -64,7 +61,7 @@
       'get-object
       :ns
       *ns*))
-  (def get-bytes (fn get_bytes ([s3 bucket path] (get-object s3 bucket path :bytes))))
+  (defn get-bytes ([s3 bucket path] (get-object s3 bucket path :bytes)))
   (reset-meta!
     #'get-bytes
     (assoc

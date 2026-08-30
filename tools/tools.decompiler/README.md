@@ -1,5 +1,24 @@
 I gave a talk on tools.decompiler at Clojure/Conj in October 2017. Video [here](https://www.youtube.com/watch?v=2SGFeegEt9E)
 
+## Local recovery fork
+
+This retained copy includes the generic decompiler repairs used by Atomic. In
+addition to the upstream Clojure 1.9-era behavior, it handles Clojure 1.11/1.12
+function and protocol metadata shapes, parses JVM `invokedynamic` constant-pool
+entries, and leaves unsupported control flow fail-closed.
+
+Run the regression script from this directory with dependencies from
+`deps.edn`:
+
+```bash
+lein javac
+clojure -M test/validate_decompiler.clj
+```
+
+The repository deliberately retains source rather than a built standalone JAR.
+Build or resolve a fresh runtime from this tree so recovery work cannot silently
+use an older packaged copy.
+
 # Dependencies:
 
 Leiningen:

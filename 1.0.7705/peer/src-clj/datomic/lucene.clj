@@ -216,8 +216,7 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.lucene" "string-value")
     (fn string_value ([f] (.stringValue ^com.datomic.lucene.document.Field f))))
-  (def long-value
-   (fn long_value ([f] (.getNumericValue ^com.datomic.lucene.document.NumericField f))))
+  (defn long-value ([f] (.getNumericValue ^com.datomic.lucene.document.NumericField f)))
   (reset-meta!
     #'long-value
     (assoc
@@ -302,9 +301,8 @@
           (.getBinaryValue ^com.datomic.lucene.document.AbstractField field)
           (int (.getBinaryOffset ^com.datomic.lucene.document.AbstractField field))
           (int (.getBinaryLength ^com.datomic.lucene.document.AbstractField field))))))
-  (def read-only-clone
-   (fn read_only_clone
-     ([rdr] (.clone ^com.datomic.lucene.index.IndexReader rdr (boolean (.booleanValue true))))))
+  (defn read-only-clone
+    ([rdr] (.clone ^com.datomic.lucene.index.IndexReader rdr (boolean (.booleanValue true)))))
   (reset-meta!
     #'read-only-clone
     (assoc
@@ -313,9 +311,8 @@
       'read-only-clone
       :ns
       *ns*))
-  (def get-field
-   (fn get_field
-     ([doc s] (.getFieldable ^com.datomic.lucene.document.Document doc ^java.lang.String s))))
+  (defn get-field
+    ([doc s] (.getFieldable ^com.datomic.lucene.document.Document doc ^java.lang.String s)))
   (reset-meta!
     #'get-field
     (assoc
@@ -324,12 +321,12 @@
       'get-field
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Readerable (index-reader [_] "Returns a reader which must be closed."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.lucene" "Readerable")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Readerable :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Readerable :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -339,12 +336,12 @@
                                       :doc "Returns a reader which must be closed."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.lucene" "Readerable"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.lucene" "index-reader")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend
     com.datomic.lucene.store.Directory
     Readerable
@@ -354,20 +351,19 @@
     Readerable
     {:index-reader
      (fn fn__11154 ([this] (IndexReader/open this (boolean (.booleanValue false)))))})
-  (def multi-reader
-   (fn multi_reader
-     ([rdrs & p__11156]
-       (let [map__11157 p__11156
-             map__11157 (if (seq? map__11157)
-                          (if (next map__11157)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11157))
-                            (if (seq map__11157) (first map__11157) {}))
-                          map__11157)
-             close_subreaders (get map__11157 :close-subreaders)]
-         (com.datomic.lucene.index.MultiReader.
-           (into-array com.datomic.lucene.index.IndexReader rdrs)
-           (boolean (.booleanValue ^java.lang.Boolean close_subreaders)))))))
+  (defn multi-reader
+    ([rdrs & p__11156]
+      (let [map__11157 p__11156
+            map__11157 (if (seq? map__11157)
+                         (if (next map__11157)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11157))
+                           (if (seq map__11157) (first map__11157) {}))
+                         map__11157)
+            close_subreaders (get map__11157 :close-subreaders)]
+        (com.datomic.lucene.index.MultiReader.
+          (into-array com.datomic.lucene.index.IndexReader rdrs)
+          (boolean (.booleanValue ^java.lang.Boolean close_subreaders))))))
   (reset-meta!
     #'multi-reader
     (assoc
@@ -401,27 +397,26 @@
       'persistent-directory
       :ns
       *ns*))
-  (def search-seq
-   (fn search_seq
-     ([searcher query & p__11162]
-       (let [map__11163 p__11162
-             map__11163 (if (seq? map__11163)
-                          (if (next map__11163)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11163))
-                            (if (seq map__11163) (first map__11163) {}))
-                          map__11163)
-             max (get map__11163 :max 10000)]
-         (map
-           (fn fn__11164
-             ([p1__11161#]
-               (java.lang.Integer/valueOf
-                 (int (.-doc ^com.datomic.lucene.search.ScoreDoc p1__11161#)))))
-           (.-scoreDocs
-             (.search
-               ^com.datomic.lucene.search.IndexSearcher searcher
-               ^com.datomic.lucene.search.Query query
-               (int max))))))))
+  (defn search-seq
+    ([searcher query & p__11162]
+      (let [map__11163 p__11162
+            map__11163 (if (seq? map__11163)
+                         (if (next map__11163)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11163))
+                           (if (seq map__11163) (first map__11163) {}))
+                         map__11163)
+            max (get map__11163 :max 10000)]
+        (map
+          (fn fn__11164
+            ([p1__11161#]
+              (java.lang.Integer/valueOf
+                (int (.-doc ^com.datomic.lucene.search.ScoreDoc p1__11161#)))))
+          (.-scoreDocs
+            (.search
+              ^com.datomic.lucene.search.IndexSearcher searcher
+              ^com.datomic.lucene.search.Query query
+              (int max)))))))
   (reset-meta!
     #'search-seq
     (assoc
@@ -469,14 +464,13 @@
                           ^com.datomic.lucene.document.Fieldable f)
                         (recur (next seq_11167) nil 0 0))))))))
           d))))
-  (def add-document
-   (fn add_document
-     ([writer doc]
-       (let [G__11174 writer]
-         (.addDocument
-           ^com.datomic.lucene.index.IndexWriter G__11174
-           ^com.datomic.lucene.document.Document doc)
-         G__11174))))
+  (defn add-document
+    ([writer doc]
+      (let [G__11174 writer]
+        (.addDocument
+          ^com.datomic.lucene.index.IndexWriter G__11174
+          ^com.datomic.lucene.document.Document doc)
+        G__11174)))
   (reset-meta!
     #'add-document
     (assoc
@@ -488,12 +482,11 @@
       'add-document
       :ns
       *ns*))
-  (def add-documents
-   (fn add_documents
-     ([writer docs]
-       (let [G__11176 writer]
-         (.addDocuments ^com.datomic.lucene.index.IndexWriter G__11176 ^java.util.Collection docs)
-         G__11176))))
+  (defn add-documents
+    ([writer docs]
+      (let [G__11176 writer]
+        (.addDocuments ^com.datomic.lucene.index.IndexWriter G__11176 ^java.util.Collection docs)
+        G__11176)))
   (reset-meta!
     #'add-documents
     (assoc
@@ -514,11 +507,10 @@
       ([field term]
         (com.datomic.lucene.search.TermQuery.
           (com.datomic.lucene.index.Term. ^java.lang.String field ^java.lang.String term)))))
-  (def term-enum-seq
-   (fn term_enum_seq
-     ([te]
-       (when (.next ^com.datomic.lucene.index.TermEnum te)
-         (lazy-seq (cons (.term ^com.datomic.lucene.index.TermEnum te) (term-enum-seq te)))))))
+  (defn term-enum-seq
+    ([te]
+      (when (.next ^com.datomic.lucene.index.TermEnum te)
+        (lazy-seq (cons (.term ^com.datomic.lucene.index.TermEnum te) (term-enum-seq te))))))
   (reset-meta!
     #'term-enum-seq
     (assoc
@@ -527,13 +519,12 @@
       'term-enum-seq
       :ns
       *ns*))
-  (def term-from-tokenizer
-   (fn term_from_tokenizer
-     ([t]
-       (.term
-         (.getAttribute
-           ^com.datomic.lucene.util.AttributeSource t
-           com.datomic.lucene.analysis.tokenattributes.TermAttribute)))))
+  (defn term-from-tokenizer
+    ([t]
+      (.term
+        (.getAttribute
+          ^com.datomic.lucene.util.AttributeSource t
+          com.datomic.lucene.analysis.tokenattributes.TermAttribute))))
   (reset-meta!
     #'term-from-tokenizer
     (assoc

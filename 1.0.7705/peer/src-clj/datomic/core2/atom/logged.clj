@@ -20,15 +20,15 @@
           ['datomic.core2.anomalies :as 'canom :refer (clojure.core/list 'anom 'athrow 'slet)]
           ['datomic.core2.atom.spi :as 'spi]
           ['datomic.core2.log :as 'log]))))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       LoggedAtomImpl
       (-validated-v [_ v] "Returns v or an anomaly.")
       (-read-latest [_] "Returns channel with latest value or anomaly."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.core2.atom.logged" "LoggedAtomImpl")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'LoggedAtomImpl :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'LoggedAtomImpl :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -40,13 +40,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.core2.atom.logged"
                                        "LoggedAtomImpl"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.atom.logged" "-validated-v")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -58,27 +58,26 @@
                                      (clojure.lang.RT/var
                                        "datomic.core2.atom.logged"
                                        "LoggedAtomImpl"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.atom.logged" "-read-latest")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*))))
-  (def next-header
-   (fn next_header
-     ([p__20537]
-       (let [map__20538 p__20537
-             map__20538 (if (seq? map__20538)
-                          (if (next map__20538)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__20538))
-                            (if (seq map__20538) (first map__20538) {}))
-                          map__20538)
-             header map__20538
-             tombstone (get map__20538 :tombstone)]
-         (if tombstone
-           #:cognitect.anomalies{:category :cognitect.anomalies/unavailable, :message tombstone}
-           (update (update header :t inc) :next-t inc))))))
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*))))
+  (defn next-header
+    ([p__20537]
+      (let [map__20538 p__20537
+            map__20538 (if (seq? map__20538)
+                         (if (next map__20538)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__20538))
+                           (if (seq map__20538) (first map__20538) {}))
+                         map__20538)
+            header map__20538
+            tombstone (get map__20538 :tombstone)]
+        (if tombstone
+          #:cognitect.anomalies{:category :cognitect.anomalies/unavailable, :message tombstone}
+          (update (update header :t inc) :next-t inc)))))
   (reset-meta!
     #'next-header
     (assoc
@@ -4361,17 +4360,16 @@
         (if anom (canom/athrow anom) value)))
     (^void close [this] (do (a/close! close_ch) nil)))
   (clojure.core/import 'datomic.core2.atom.logged.LoggedAtom)
-  (def ->LoggedAtom
-   (fn __GT_LoggedAtom
-     ([log close_ch state_ref serialize deserialize validator_ref watches_ref]
-       (datomic.core2.atom.logged.LoggedAtom.
-         log
-         close_ch
-         state_ref
-         serialize
-         deserialize
-         validator_ref
-         watches_ref))))
+  (defn ->LoggedAtom
+    ([log close_ch state_ref serialize deserialize validator_ref watches_ref]
+      (datomic.core2.atom.logged.LoggedAtom.
+        log
+        close_ch
+        state_ref
+        serialize
+        deserialize
+        validator_ref
+        watches_ref)))
   (reset-meta!
     #'->LoggedAtom
     (assoc
@@ -4383,628 +4381,624 @@
       '->LoggedAtom
       :ns
       *ns*))
-  (def create*
-   (fn create_STAR_
-     ([p__21006 state]
-       (let [map__21007 p__21006
-             map__21007 (if (seq? map__21007)
-                          (if (next map__21007)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21007))
-                            (if (seq map__21007) (first map__21007) {}))
-                          map__21007)
-             log (get map__21007 :log)
-             serialize (get map__21007 :serialize)
-             deserialize (get map__21007 :deserialize)
-             refresh_msec (get map__21007 :refresh-msec)
-             validator (get map__21007 :validator)
-             validator_ref (atom validator)
-             state_ref (atom state)
-             watches_ref (atom nil)
-             close_ch (a/promise-chan)
-             logged_atom (datomic.core2.atom.logged.LoggedAtom.
-                           log
-                           close_ch
-                           state_ref
-                           serialize
-                           deserialize
-                           validator_ref
-                           watches_ref)]
-         (add-watch
-           state_ref
-           :datomic.core2.atom.logged/state
-           (fn fn__21008
-             ([_ _ old new]
-               (when-not (:anom new)
-                 (loop [seq_21009 (seq (deref watches_ref))
-                        chunk_21010 nil
-                        count_21011 0
-                        i_21012 0]
-                   (if (< i_21012 count_21011)
-                     (let [vec__21013 (.nth ^clojure.lang.Indexed chunk_21010 (int i_21012))
-                           k (nth vec__21013 (int 0) nil)
-                           v (nth vec__21013 (int 1) nil)]
-                       (^clojure.lang.IFn v logged_atom k (:value old) (:value new))
-                       (recur seq_21009 chunk_21010 count_21011 (inc i_21012)))
-                     (let [temp__5825__auto__ (seq seq_21009)]
-                       (when temp__5825__auto__
-                         (let [seq_21009 temp__5825__auto__]
-                           (if (chunked-seq? seq_21009)
-                             (let [c__6090__auto__ (chunk-first seq_21009)]
-                               (recur
-                                 (chunk-rest seq_21009)
-                                 c__6090__auto__
-                                 (int (count c__6090__auto__))
-                                 (int 0)))
-                             (let [vec__21016 (first seq_21009)
-                                   k (nth vec__21016 (int 0) nil)
-                                   v (nth vec__21016 (int 1) nil)]
-                               (^clojure.lang.IFn v logged_atom k (:value old) (:value new))
-                               (recur (next seq_21009) nil 0 0))))))))))))
-         (let [c__10363__auto__ (a/chan 1)
-               captured_bindings__10364__auto__ (clojure.lang.Var/getThreadBindingFrame)]
-           (clojure.core.async.impl.dispatch/run
-             (fn fn__21089
-               ([]
-                 (let [G__21022 (fn G__21022 ([] log))
-                       G__21023 (fn G__21023 ([] map__21007))
-                       G__21024 (fn G__21024 ([] refresh_msec))
-                       G__21025 (fn G__21025 ([] serialize))
-                       G__21026 (fn G__21026 ([] validator))
-                       G__21027 (fn G__21027 ([] close_ch))
-                       G__21028 (fn G__21028 ([] state_ref))
-                       G__21029 (fn G__21029 ([] logged_atom))
-                       G__21030 (fn G__21030 ([] state))
-                       G__21031 (fn G__21031 ([] validator_ref))
-                       G__21032 (fn G__21032 ([] p__21006))
-                       G__21033 (fn G__21033 ([] deserialize))
-                       G__21034 (fn G__21034 ([] watches_ref))
-                       f__10365__auto__ (fn state_machine__10108__auto__
-                                          ([]
-                                            (let [statearr_21117 (java.util.concurrent.atomic.AtomicReferenceArray.
-                                                                   (int 23))]
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21117
-                                                0
-                                                state_machine__10108__auto__)
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21117
-                                                1
-                                                1)
-                                              statearr_21117))
-                                          ([state_21088]
-                                            (let [old_frame__10109__auto__ (clojure.lang.Var/getThreadBindingFrame)
-                                                  ret_value__10110__auto__ (try
-                                                                             (try
-                                                                               (do
-                                                                                 (clojure.lang.Var/resetThreadBindingFrame
-                                                                                   (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                     state_21088
-                                                                                     3))
-                                                                                 (loop 
-                                                                                   []
-                                                                                   (let 
-                                                                                     [result__10111__auto__
-                                                                                      (let 
-                                                                                        [G__21119
-                                                                                         (int
-                                                                                           (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                             state_21088
-                                                                                             1))]
-                                                                                        (case
-                                                                                          G__21119
-                                                                                          1
-                                                                                          (let 
-                                                                                            [inst_21040
-                                                                                             (^clojure.lang.IFn G__21022)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             inst_21041
-                                                                                             (^clojure.lang.IFn G__21023)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             inst_21042
-                                                                                             (^clojure.lang.IFn G__21024)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             inst_21043
-                                                                                             (^clojure.lang.IFn G__21025)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             inst_21044
-                                                                                             (^clojure.lang.IFn G__21026)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             inst_21045
-                                                                                             (^clojure.lang.IFn G__21027)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             close_ch
-                                                                                             inst_21045
-                                                                                             inst_21046
-                                                                                             (^clojure.lang.IFn G__21028)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             close_ch
-                                                                                             inst_21045
-                                                                                             state_ref
-                                                                                             inst_21046
-                                                                                             inst_21047
-                                                                                             (^clojure.lang.IFn G__21029)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             close_ch
-                                                                                             inst_21045
-                                                                                             state_ref
-                                                                                             inst_21046
-                                                                                             logged_atom
-                                                                                             inst_21047
-                                                                                             inst_21048
-                                                                                             (^clojure.lang.IFn G__21030)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             close_ch
-                                                                                             inst_21045
-                                                                                             state_ref
-                                                                                             inst_21046
-                                                                                             logged_atom
-                                                                                             inst_21047
-                                                                                             state
-                                                                                             inst_21048
-                                                                                             inst_21049
-                                                                                             (^clojure.lang.IFn G__21031)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             close_ch
-                                                                                             inst_21045
-                                                                                             state_ref
-                                                                                             inst_21046
-                                                                                             logged_atom
-                                                                                             inst_21047
-                                                                                             state
-                                                                                             inst_21048
-                                                                                             validator_ref
-                                                                                             inst_21049
-                                                                                             inst_21050
-                                                                                             (^clojure.lang.IFn G__21032)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             close_ch
-                                                                                             inst_21045
-                                                                                             state_ref
-                                                                                             inst_21046
-                                                                                             logged_atom
-                                                                                             inst_21047
-                                                                                             state
-                                                                                             inst_21048
-                                                                                             validator_ref
-                                                                                             inst_21049
-                                                                                             p__21006
-                                                                                             inst_21050
-                                                                                             inst_21051
-                                                                                             (^clojure.lang.IFn G__21033)
-                                                                                             log
-                                                                                             inst_21040
-                                                                                             map__21007
-                                                                                             inst_21041
-                                                                                             refresh_msec
-                                                                                             inst_21042
-                                                                                             serialize
-                                                                                             inst_21043
-                                                                                             validator
-                                                                                             inst_21044
-                                                                                             close_ch
-                                                                                             inst_21045
-                                                                                             state_ref
-                                                                                             inst_21046
-                                                                                             logged_atom
-                                                                                             inst_21047
-                                                                                             state
-                                                                                             inst_21048
-                                                                                             validator_ref
-                                                                                             inst_21049
-                                                                                             p__21006
-                                                                                             inst_21050
-                                                                                             deserialize
-                                                                                             inst_21051
-                                                                                             inst_21052
-                                                                                             (^clojure.lang.IFn G__21034)
-                                                                                             inst_21053
-                                                                                             inst_21040
-                                                                                             inst_21054
-                                                                                             inst_21041
-                                                                                             inst_21055
-                                                                                             inst_21042
-                                                                                             inst_21056
-                                                                                             inst_21043
-                                                                                             inst_21057
-                                                                                             inst_21044
-                                                                                             inst_21058
-                                                                                             inst_21045
-                                                                                             inst_21059
-                                                                                             inst_21046
-                                                                                             inst_21060
-                                                                                             inst_21047
-                                                                                             inst_21061
-                                                                                             inst_21048
-                                                                                             inst_21062
-                                                                                             inst_21049
-                                                                                             inst_21063
-                                                                                             inst_21050
-                                                                                             inst_21064
-                                                                                             inst_21051
-                                                                                             inst_21065
-                                                                                             inst_21052
-                                                                                             state_21088
-                                                                                             (let 
-                                                                                               [statearr_21120
-                                                                                                state_21088]
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 6
-                                                                                                 inst_21053)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 7
-                                                                                                 inst_21054)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 8
-                                                                                                 inst_21055)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 9
-                                                                                                 inst_21056)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 10
-                                                                                                 inst_21057)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 11
-                                                                                                 inst_21058)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 12
-                                                                                                 inst_21059)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 13
-                                                                                                 inst_21060)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 14
-                                                                                                 inst_21061)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 15
-                                                                                                 inst_21062)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 16
-                                                                                                 inst_21063)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 17
-                                                                                                 inst_21064)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21120
-                                                                                                 18
-                                                                                                 inst_21065)
-                                                                                               statearr_21120)]
-                                                                                            (let 
-                                                                                              [statearr_21121
-                                                                                               state_21088]
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21121
-                                                                                                2
-                                                                                                nil)
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21121
-                                                                                                1
-                                                                                                2))
-                                                                                            :recur)
-                                                                                          2
-                                                                                          (let 
-                                                                                            [inst_21055
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               8)
-                                                                                             inst_21067
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               19)
-                                                                                             inst_21058
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               11)
-                                                                                             inst_21067
-                                                                                             (a/timeout
-                                                                                               (long
-                                                                                                 ^java.lang.Number inst_21055))
-                                                                                             inst_21068
-                                                                                             (vector
-                                                                                               inst_21067
-                                                                                               inst_21058)
-                                                                                             state_21088
-                                                                                             (let 
-                                                                                               [statearr_21122
-                                                                                                state_21088]
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21122
-                                                                                                 19
-                                                                                                 inst_21067)
-                                                                                               statearr_21122)]
-                                                                                            (a/ioc-alts!
-                                                                                              state_21088
-                                                                                              4
-                                                                                              inst_21068))
-                                                                                          3
-                                                                                          (let 
-                                                                                            [inst_21086
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               2)]
-                                                                                            (clojure.core.async.impl.ioc-macros/return-chan
-                                                                                              state_21088
-                                                                                              inst_21086))
-                                                                                          4
-                                                                                          (let 
-                                                                                            [inst_21067
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               19)
-                                                                                             inst_21070
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               2)
-                                                                                             inst_21071
-                                                                                             (nth
-                                                                                               inst_21070
-                                                                                               (int
-                                                                                                 0)
-                                                                                               nil)
-                                                                                             inst_21072
-                                                                                             (nth
-                                                                                               inst_21070
-                                                                                               (int
-                                                                                                 1)
-                                                                                               nil)
-                                                                                             inst_21073
-                                                                                             inst_21067
-                                                                                             inst_21074
-                                                                                             inst_21070
-                                                                                             inst_21075
-                                                                                             inst_21071
-                                                                                             inst_21076
-                                                                                             inst_21072
-                                                                                             inst_21077
-                                                                                             (=
-                                                                                               inst_21076
-                                                                                               inst_21073)
-                                                                                             state_21088
-                                                                                             (let 
-                                                                                               [statearr_21123
-                                                                                                state_21088]
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21123
-                                                                                                 20
-                                                                                                 inst_21074)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21123
-                                                                                                 21
-                                                                                                 inst_21075)
-                                                                                               statearr_21123)]
-                                                                                            (if
-                                                                                              inst_21077
-                                                                                              (let 
-                                                                                                [statearr_21124
-                                                                                                 state_21088]
-                                                                                                (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                  statearr_21124
-                                                                                                  1
-                                                                                                  5))
-                                                                                              (let 
-                                                                                                [statearr_21125
-                                                                                                 state_21088]
-                                                                                                (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                  statearr_21125
-                                                                                                  1
-                                                                                                  6)))
-                                                                                            :recur)
-                                                                                          5
-                                                                                          (let 
-                                                                                            [inst_21060
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               13)
-                                                                                             inst_21079
-                                                                                             (a/chan
-                                                                                               1)
-                                                                                             inst_21080
-                                                                                             (spi/-sync
-                                                                                               inst_21060
-                                                                                               inst_21079)
-                                                                                             state_21088
-                                                                                             (let 
-                                                                                               [statearr_21126
-                                                                                                state_21088]
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21126
-                                                                                                 22
-                                                                                                 inst_21080)
-                                                                                               statearr_21126)]
-                                                                                            (let 
-                                                                                              [statearr_21127
-                                                                                               state_21088]
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21127
-                                                                                                2
-                                                                                                nil)
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21127
-                                                                                                1
-                                                                                                2))
-                                                                                            :recur)
-                                                                                          6
-                                                                                          (do
-                                                                                            (let 
-                                                                                              [statearr_21128
-                                                                                               state_21088]
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21128
-                                                                                                2
-                                                                                                nil)
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21128
-                                                                                                1
-                                                                                                7))
-                                                                                            :recur)
-                                                                                          7
-                                                                                          (let 
-                                                                                            [inst_21084
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21088
-                                                                                               2)]
-                                                                                            (let 
-                                                                                              [statearr_21129
-                                                                                               state_21088]
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21129
-                                                                                                2
-                                                                                                inst_21084)
-                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                statearr_21129
-                                                                                                1
-                                                                                                3))
-                                                                                            :recur)))]
-                                                                                     (if
-                                                                                       (identical?
-                                                                                         result__10111__auto__
-                                                                                         :recur)
-                                                                                       (recur)
-                                                                                       result__10111__auto__))))
-                                                                               (catch
-                                                                                 java.lang.Throwable
-                                                                                 ex__10112__auto__
-                                                                                 (do
-                                                                                   (let 
-                                                                                     [statearr_21130
-                                                                                      state_21088]
-                                                                                     (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                       statearr_21130
-                                                                                       2
-                                                                                       ex__10112__auto__))
-                                                                                   (if
-                                                                                     (seq
-                                                                                       (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                         state_21088
-                                                                                         4))
+  (defn create*
+    ([p__21006 state]
+      (let [map__21007 p__21006
+            map__21007 (if (seq? map__21007)
+                         (if (next map__21007)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21007))
+                           (if (seq map__21007) (first map__21007) {}))
+                         map__21007)
+            log (get map__21007 :log)
+            serialize (get map__21007 :serialize)
+            deserialize (get map__21007 :deserialize)
+            refresh_msec (get map__21007 :refresh-msec)
+            validator (get map__21007 :validator)
+            validator_ref (atom validator)
+            state_ref (atom state)
+            watches_ref (atom nil)
+            close_ch (a/promise-chan)
+            logged_atom (datomic.core2.atom.logged.LoggedAtom.
+                          log
+                          close_ch
+                          state_ref
+                          serialize
+                          deserialize
+                          validator_ref
+                          watches_ref)]
+        (add-watch
+          state_ref
+          :datomic.core2.atom.logged/state
+          (fn fn__21008
+            ([_ _ old new]
+              (when-not (:anom new)
+                (loop [seq_21009 (seq (deref watches_ref)) chunk_21010 nil count_21011 0 i_21012 0]
+                  (if (< i_21012 count_21011)
+                    (let [vec__21013 (.nth ^clojure.lang.Indexed chunk_21010 (int i_21012))
+                          k (nth vec__21013 (int 0) nil)
+                          v (nth vec__21013 (int 1) nil)]
+                      (^clojure.lang.IFn v logged_atom k (:value old) (:value new))
+                      (recur seq_21009 chunk_21010 count_21011 (inc i_21012)))
+                    (let [temp__5825__auto__ (seq seq_21009)]
+                      (when temp__5825__auto__
+                        (let [seq_21009 temp__5825__auto__]
+                          (if (chunked-seq? seq_21009)
+                            (let [c__6090__auto__ (chunk-first seq_21009)]
+                              (recur
+                                (chunk-rest seq_21009)
+                                c__6090__auto__
+                                (int (count c__6090__auto__))
+                                (int 0)))
+                            (let [vec__21016 (first seq_21009)
+                                  k (nth vec__21016 (int 0) nil)
+                                  v (nth vec__21016 (int 1) nil)]
+                              (^clojure.lang.IFn v logged_atom k (:value old) (:value new))
+                              (recur (next seq_21009) nil 0 0))))))))))))
+        (let [c__10363__auto__ (a/chan 1)
+              captured_bindings__10364__auto__ (clojure.lang.Var/getThreadBindingFrame)]
+          (clojure.core.async.impl.dispatch/run
+            (fn fn__21089
+              ([]
+                (let [G__21022 (fn G__21022 ([] log))
+                      G__21023 (fn G__21023 ([] map__21007))
+                      G__21024 (fn G__21024 ([] refresh_msec))
+                      G__21025 (fn G__21025 ([] serialize))
+                      G__21026 (fn G__21026 ([] validator))
+                      G__21027 (fn G__21027 ([] close_ch))
+                      G__21028 (fn G__21028 ([] state_ref))
+                      G__21029 (fn G__21029 ([] logged_atom))
+                      G__21030 (fn G__21030 ([] state))
+                      G__21031 (fn G__21031 ([] validator_ref))
+                      G__21032 (fn G__21032 ([] p__21006))
+                      G__21033 (fn G__21033 ([] deserialize))
+                      G__21034 (fn G__21034 ([] watches_ref))
+                      f__10365__auto__ (fn state_machine__10108__auto__
+                                         ([]
+                                           (let [statearr_21117 (java.util.concurrent.atomic.AtomicReferenceArray.
+                                                                  (int 23))]
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21117
+                                               0
+                                               state_machine__10108__auto__)
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21117
+                                               1
+                                               1)
+                                             statearr_21117))
+                                         ([state_21088]
+                                           (let [old_frame__10109__auto__ (clojure.lang.Var/getThreadBindingFrame)
+                                                 ret_value__10110__auto__ (try
+                                                                            (try
+                                                                              (do
+                                                                                (clojure.lang.Var/resetThreadBindingFrame
+                                                                                  (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                    state_21088
+                                                                                    3))
+                                                                                (loop 
+                                                                                  []
+                                                                                  (let 
+                                                                                    [result__10111__auto__
                                                                                      (let 
-                                                                                       [statearr_21131
-                                                                                        state_21088]
-                                                                                       (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                         statearr_21131
+                                                                                       [G__21119
+                                                                                        (int
+                                                                                          (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                            state_21088
+                                                                                            1))]
+                                                                                       (case
+                                                                                         G__21119
                                                                                          1
-                                                                                         (first
-                                                                                           (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                         (let 
+                                                                                           [inst_21040
+                                                                                            (^clojure.lang.IFn G__21022)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            inst_21041
+                                                                                            (^clojure.lang.IFn G__21023)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            inst_21042
+                                                                                            (^clojure.lang.IFn G__21024)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            inst_21043
+                                                                                            (^clojure.lang.IFn G__21025)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            inst_21044
+                                                                                            (^clojure.lang.IFn G__21026)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            inst_21045
+                                                                                            (^clojure.lang.IFn G__21027)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            close_ch
+                                                                                            inst_21045
+                                                                                            inst_21046
+                                                                                            (^clojure.lang.IFn G__21028)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            close_ch
+                                                                                            inst_21045
+                                                                                            state_ref
+                                                                                            inst_21046
+                                                                                            inst_21047
+                                                                                            (^clojure.lang.IFn G__21029)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            close_ch
+                                                                                            inst_21045
+                                                                                            state_ref
+                                                                                            inst_21046
+                                                                                            logged_atom
+                                                                                            inst_21047
+                                                                                            inst_21048
+                                                                                            (^clojure.lang.IFn G__21030)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            close_ch
+                                                                                            inst_21045
+                                                                                            state_ref
+                                                                                            inst_21046
+                                                                                            logged_atom
+                                                                                            inst_21047
+                                                                                            state
+                                                                                            inst_21048
+                                                                                            inst_21049
+                                                                                            (^clojure.lang.IFn G__21031)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            close_ch
+                                                                                            inst_21045
+                                                                                            state_ref
+                                                                                            inst_21046
+                                                                                            logged_atom
+                                                                                            inst_21047
+                                                                                            state
+                                                                                            inst_21048
+                                                                                            validator_ref
+                                                                                            inst_21049
+                                                                                            inst_21050
+                                                                                            (^clojure.lang.IFn G__21032)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            close_ch
+                                                                                            inst_21045
+                                                                                            state_ref
+                                                                                            inst_21046
+                                                                                            logged_atom
+                                                                                            inst_21047
+                                                                                            state
+                                                                                            inst_21048
+                                                                                            validator_ref
+                                                                                            inst_21049
+                                                                                            p__21006
+                                                                                            inst_21050
+                                                                                            inst_21051
+                                                                                            (^clojure.lang.IFn G__21033)
+                                                                                            log
+                                                                                            inst_21040
+                                                                                            map__21007
+                                                                                            inst_21041
+                                                                                            refresh_msec
+                                                                                            inst_21042
+                                                                                            serialize
+                                                                                            inst_21043
+                                                                                            validator
+                                                                                            inst_21044
+                                                                                            close_ch
+                                                                                            inst_21045
+                                                                                            state_ref
+                                                                                            inst_21046
+                                                                                            logged_atom
+                                                                                            inst_21047
+                                                                                            state
+                                                                                            inst_21048
+                                                                                            validator_ref
+                                                                                            inst_21049
+                                                                                            p__21006
+                                                                                            inst_21050
+                                                                                            deserialize
+                                                                                            inst_21051
+                                                                                            inst_21052
+                                                                                            (^clojure.lang.IFn G__21034)
+                                                                                            inst_21053
+                                                                                            inst_21040
+                                                                                            inst_21054
+                                                                                            inst_21041
+                                                                                            inst_21055
+                                                                                            inst_21042
+                                                                                            inst_21056
+                                                                                            inst_21043
+                                                                                            inst_21057
+                                                                                            inst_21044
+                                                                                            inst_21058
+                                                                                            inst_21045
+                                                                                            inst_21059
+                                                                                            inst_21046
+                                                                                            inst_21060
+                                                                                            inst_21047
+                                                                                            inst_21061
+                                                                                            inst_21048
+                                                                                            inst_21062
+                                                                                            inst_21049
+                                                                                            inst_21063
+                                                                                            inst_21050
+                                                                                            inst_21064
+                                                                                            inst_21051
+                                                                                            inst_21065
+                                                                                            inst_21052
+                                                                                            state_21088
+                                                                                            (let 
+                                                                                              [statearr_21120
+                                                                                               state_21088]
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                6
+                                                                                                inst_21053)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                7
+                                                                                                inst_21054)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                8
+                                                                                                inst_21055)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                9
+                                                                                                inst_21056)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                10
+                                                                                                inst_21057)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                11
+                                                                                                inst_21058)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                12
+                                                                                                inst_21059)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                13
+                                                                                                inst_21060)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                14
+                                                                                                inst_21061)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                15
+                                                                                                inst_21062)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                16
+                                                                                                inst_21063)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                17
+                                                                                                inst_21064)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21120
+                                                                                                18
+                                                                                                inst_21065)
+                                                                                              statearr_21120)]
+                                                                                           (let 
+                                                                                             [statearr_21121
+                                                                                              state_21088]
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21121
+                                                                                               2
+                                                                                               nil)
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21121
+                                                                                               1
+                                                                                               2))
+                                                                                           :recur)
+                                                                                         2
+                                                                                         (let 
+                                                                                           [inst_21055
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              8)
+                                                                                            inst_21067
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              19)
+                                                                                            inst_21058
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              11)
+                                                                                            inst_21067
+                                                                                            (a/timeout
+                                                                                              (long
+                                                                                                ^java.lang.Number inst_21055))
+                                                                                            inst_21068
+                                                                                            (vector
+                                                                                              inst_21067
+                                                                                              inst_21058)
+                                                                                            state_21088
+                                                                                            (let 
+                                                                                              [statearr_21122
+                                                                                               state_21088]
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21122
+                                                                                                19
+                                                                                                inst_21067)
+                                                                                              statearr_21122)]
+                                                                                           (a/ioc-alts!
                                                                                              state_21088
-                                                                                             4))))
-                                                                                     (throw
-                                                                                       ^java.lang.Throwable ex__10112__auto__))
-                                                                                   :recur)))
-                                                                             (finally
-                                                                               (do
-                                                                                 (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                   state_21088
-                                                                                   3
-                                                                                   (clojure.lang.Var/getThreadBindingFrame))
-                                                                                 (clojure.lang.Var/resetThreadBindingFrame
-                                                                                   old_frame__10109__auto__))))]
-                                              (if (identical? ret_value__10110__auto__ :recur)
-                                                (recur state_21088)
-                                                ret_value__10110__auto__))))
-                       state__10366__auto__ (let [statearr_21137 (^clojure.lang.IFn f__10365__auto__)]
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21137
-                                                5
-                                                c__10363__auto__)
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21137
-                                                3
-                                                captured_bindings__10364__auto__)
-                                              statearr_21137)]
-                   (clojure.core.async.impl.ioc-macros/run-state-machine-wrapped
-                     state__10366__auto__))))))
-         logged_atom))))
+                                                                                             4
+                                                                                             inst_21068))
+                                                                                         3
+                                                                                         (let 
+                                                                                           [inst_21086
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              2)]
+                                                                                           (clojure.core.async.impl.ioc-macros/return-chan
+                                                                                             state_21088
+                                                                                             inst_21086))
+                                                                                         4
+                                                                                         (let 
+                                                                                           [inst_21067
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              19)
+                                                                                            inst_21070
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              2)
+                                                                                            inst_21071
+                                                                                            (nth
+                                                                                              inst_21070
+                                                                                              (int
+                                                                                                0)
+                                                                                              nil)
+                                                                                            inst_21072
+                                                                                            (nth
+                                                                                              inst_21070
+                                                                                              (int
+                                                                                                1)
+                                                                                              nil)
+                                                                                            inst_21073
+                                                                                            inst_21067
+                                                                                            inst_21074
+                                                                                            inst_21070
+                                                                                            inst_21075
+                                                                                            inst_21071
+                                                                                            inst_21076
+                                                                                            inst_21072
+                                                                                            inst_21077
+                                                                                            (=
+                                                                                              inst_21076
+                                                                                              inst_21073)
+                                                                                            state_21088
+                                                                                            (let 
+                                                                                              [statearr_21123
+                                                                                               state_21088]
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21123
+                                                                                                20
+                                                                                                inst_21074)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21123
+                                                                                                21
+                                                                                                inst_21075)
+                                                                                              statearr_21123)]
+                                                                                           (if
+                                                                                             inst_21077
+                                                                                             (let 
+                                                                                               [statearr_21124
+                                                                                                state_21088]
+                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                 statearr_21124
+                                                                                                 1
+                                                                                                 5))
+                                                                                             (let 
+                                                                                               [statearr_21125
+                                                                                                state_21088]
+                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                 statearr_21125
+                                                                                                 1
+                                                                                                 6)))
+                                                                                           :recur)
+                                                                                         5
+                                                                                         (let 
+                                                                                           [inst_21060
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              13)
+                                                                                            inst_21079
+                                                                                            (a/chan
+                                                                                              1)
+                                                                                            inst_21080
+                                                                                            (spi/-sync
+                                                                                              inst_21060
+                                                                                              inst_21079)
+                                                                                            state_21088
+                                                                                            (let 
+                                                                                              [statearr_21126
+                                                                                               state_21088]
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21126
+                                                                                                22
+                                                                                                inst_21080)
+                                                                                              statearr_21126)]
+                                                                                           (let 
+                                                                                             [statearr_21127
+                                                                                              state_21088]
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21127
+                                                                                               2
+                                                                                               nil)
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21127
+                                                                                               1
+                                                                                               2))
+                                                                                           :recur)
+                                                                                         6
+                                                                                         (do
+                                                                                           (let 
+                                                                                             [statearr_21128
+                                                                                              state_21088]
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21128
+                                                                                               2
+                                                                                               nil)
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21128
+                                                                                               1
+                                                                                               7))
+                                                                                           :recur)
+                                                                                         7
+                                                                                         (let 
+                                                                                           [inst_21084
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21088
+                                                                                              2)]
+                                                                                           (let 
+                                                                                             [statearr_21129
+                                                                                              state_21088]
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21129
+                                                                                               2
+                                                                                               inst_21084)
+                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                               statearr_21129
+                                                                                               1
+                                                                                               3))
+                                                                                           :recur)))]
+                                                                                    (if
+                                                                                      (identical?
+                                                                                        result__10111__auto__
+                                                                                        :recur)
+                                                                                      (recur)
+                                                                                      result__10111__auto__))))
+                                                                              (catch
+                                                                                java.lang.Throwable
+                                                                                ex__10112__auto__
+                                                                                (do
+                                                                                  (let 
+                                                                                    [statearr_21130
+                                                                                     state_21088]
+                                                                                    (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                      statearr_21130
+                                                                                      2
+                                                                                      ex__10112__auto__))
+                                                                                  (if
+                                                                                    (seq
+                                                                                      (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                        state_21088
+                                                                                        4))
+                                                                                    (let 
+                                                                                      [statearr_21131
+                                                                                       state_21088]
+                                                                                      (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                        statearr_21131
+                                                                                        1
+                                                                                        (first
+                                                                                          (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                            state_21088
+                                                                                            4))))
+                                                                                    (throw
+                                                                                      ^java.lang.Throwable ex__10112__auto__))
+                                                                                  :recur)))
+                                                                            (finally
+                                                                              (do
+                                                                                (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                  state_21088
+                                                                                  3
+                                                                                  (clojure.lang.Var/getThreadBindingFrame))
+                                                                                (clojure.lang.Var/resetThreadBindingFrame
+                                                                                  old_frame__10109__auto__))))]
+                                             (if (identical? ret_value__10110__auto__ :recur)
+                                               (recur state_21088)
+                                               ret_value__10110__auto__))))
+                      state__10366__auto__ (let [statearr_21137 (^clojure.lang.IFn f__10365__auto__)]
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21137
+                                               5
+                                               c__10363__auto__)
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21137
+                                               3
+                                               captured_bindings__10364__auto__)
+                                             statearr_21137)]
+                  (clojure.core.async.impl.ioc-macros/run-state-machine-wrapped
+                    state__10366__auto__))))))
+        logged_atom)))
   (reset-meta!
     #'create*
     (assoc
@@ -5017,352 +5011,351 @@
       'create*
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__21144]
-       (let [map__21145 p__21144
-             map__21145 (if (seq? map__21145)
-                          (if (next map__21145)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21145))
-                            (if (seq map__21145) (first map__21145) {}))
-                          map__21145)
-             args map__21145
-             log (get map__21145 :log)
-             header (get map__21145 :header)
-             value (get map__21145 :value)
-             serialize (get map__21145 :serialize)]
-         (when-not header
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'header)))))
-         (when-not value
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'value)))))
-         (let [c__10363__auto__ (a/chan 1)
-               captured_bindings__10364__auto__ (clojure.lang.Var/getThreadBindingFrame)]
-           (clojure.core.async.impl.dispatch/run
-             (fn fn__21175
-               ([]
-                 (let [G__21146 (fn G__21146 ([] p__21144))
-                       G__21147 (fn G__21147 ([] map__21145))
-                       G__21148 (fn G__21148 ([] args))
-                       G__21149 (fn G__21149 ([] log))
-                       G__21150 (fn G__21150 ([] header))
-                       G__21151 (fn G__21151 ([] value))
-                       G__21152 (fn G__21152 ([] serialize))
-                       f__10365__auto__ (fn state_machine__10108__auto__
-                                          ([]
-                                            (let [statearr_21191 (java.util.concurrent.atomic.AtomicReferenceArray.
-                                                                   (int 13))]
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21191
-                                                0
-                                                state_machine__10108__auto__)
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21191
-                                                1
-                                                1)
-                                              statearr_21191))
-                                          ([state_21174]
-                                            (let [old_frame__10109__auto__ (clojure.lang.Var/getThreadBindingFrame)
-                                                  ret_value__10110__auto__ (try
-                                                                             (try
-                                                                               (do
-                                                                                 (clojure.lang.Var/resetThreadBindingFrame
-                                                                                   (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                     state_21174
-                                                                                     3))
-                                                                                 (loop 
-                                                                                   []
-                                                                                   (let 
-                                                                                     [result__10111__auto__
-                                                                                      (let 
-                                                                                        [G__21193
-                                                                                         (int
-                                                                                           (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                             state_21174
-                                                                                             1))]
-                                                                                        (case
-                                                                                          G__21193
-                                                                                          1
-                                                                                          (let 
-                                                                                            [inst_21164
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               6)
-                                                                                             inst_21163
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               7)
-                                                                                             inst_21167
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               8)
-                                                                                             inst_21166
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               9)
-                                                                                             inst_21161
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               10)
-                                                                                             inst_21165
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               11)
-                                                                                             inst_21162
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               12)
-                                                                                             inst_21154
-                                                                                             (^clojure.lang.IFn G__21146)
-                                                                                             p__21144
-                                                                                             inst_21154
-                                                                                             inst_21155
-                                                                                             (^clojure.lang.IFn G__21147)
-                                                                                             p__21144
-                                                                                             inst_21154
-                                                                                             map__21145
-                                                                                             inst_21155
-                                                                                             inst_21156
-                                                                                             (^clojure.lang.IFn G__21148)
-                                                                                             args
-                                                                                             inst_21156
-                                                                                             p__21144
-                                                                                             inst_21154
-                                                                                             map__21145
-                                                                                             inst_21155
-                                                                                             inst_21157
-                                                                                             (^clojure.lang.IFn G__21149)
-                                                                                             log
-                                                                                             inst_21157
-                                                                                             args
-                                                                                             inst_21156
-                                                                                             p__21144
-                                                                                             inst_21154
-                                                                                             map__21145
-                                                                                             inst_21155
-                                                                                             inst_21158
-                                                                                             (^clojure.lang.IFn G__21150)
-                                                                                             log
-                                                                                             inst_21157
-                                                                                             args
-                                                                                             inst_21156
-                                                                                             p__21144
-                                                                                             inst_21154
-                                                                                             header
-                                                                                             inst_21158
-                                                                                             map__21145
-                                                                                             inst_21155
-                                                                                             inst_21159
-                                                                                             (^clojure.lang.IFn G__21151)
-                                                                                             log
-                                                                                             inst_21157
-                                                                                             args
-                                                                                             inst_21156
-                                                                                             value
-                                                                                             inst_21159
-                                                                                             p__21144
-                                                                                             inst_21154
-                                                                                             header
-                                                                                             inst_21158
-                                                                                             map__21145
-                                                                                             inst_21155
-                                                                                             inst_21160
-                                                                                             (^clojure.lang.IFn G__21152)
-                                                                                             inst_21161
-                                                                                             inst_21154
-                                                                                             inst_21162
-                                                                                             inst_21155
-                                                                                             inst_21163
-                                                                                             inst_21156
-                                                                                             inst_21164
-                                                                                             inst_21157
-                                                                                             inst_21165
-                                                                                             inst_21158
-                                                                                             inst_21166
-                                                                                             inst_21159
-                                                                                             inst_21167
-                                                                                             inst_21160
-                                                                                             log
-                                                                                             inst_21164
-                                                                                             args
-                                                                                             inst_21163
-                                                                                             serialize
-                                                                                             inst_21167
-                                                                                             value
-                                                                                             inst_21166
-                                                                                             p__21144
-                                                                                             inst_21161
-                                                                                             header
-                                                                                             inst_21165
-                                                                                             map__21145
-                                                                                             inst_21162
-                                                                                             inst_21168
-                                                                                             (append-value
-                                                                                               log
-                                                                                               serialize
-                                                                                               header
-                                                                                               value)
-                                                                                             state_21174
-                                                                                             (let 
-                                                                                               [statearr_21194
-                                                                                                state_21174]
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21194
-                                                                                                 10
-                                                                                                 inst_21161)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21194
-                                                                                                 12
-                                                                                                 inst_21162)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21194
-                                                                                                 7
-                                                                                                 inst_21163)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21194
-                                                                                                 6
-                                                                                                 inst_21164)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21194
-                                                                                                 11
-                                                                                                 inst_21165)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21194
-                                                                                                 9
-                                                                                                 inst_21166)
-                                                                                               (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                                 statearr_21194
-                                                                                                 8
-                                                                                                 inst_21167)
-                                                                                               statearr_21194)]
-                                                                                            (clojure.core.async.impl.ioc-macros/take!
-                                                                                              state_21174
-                                                                                              2
-                                                                                              inst_21168))
-                                                                                          2
-                                                                                          (let 
-                                                                                            [inst_21164
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               6)
-                                                                                             inst_21163
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               7)
-                                                                                             inst_21167
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               8)
-                                                                                             inst_21166
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               9)
-                                                                                             inst_21161
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               10)
-                                                                                             inst_21165
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               11)
-                                                                                             inst_21162
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               12)
-                                                                                             inst_21170
-                                                                                             (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                               state_21174
-                                                                                               2)
-                                                                                             inst_21171
-                                                                                             inst_21170
-                                                                                             log
-                                                                                             inst_21164
-                                                                                             args
-                                                                                             inst_21163
-                                                                                             serialize
-                                                                                             inst_21167
-                                                                                             value
-                                                                                             inst_21166
-                                                                                             loaded
-                                                                                             inst_21171
-                                                                                             p__21144
-                                                                                             inst_21161
-                                                                                             header
-                                                                                             inst_21165
-                                                                                             map__21145
-                                                                                             inst_21162
-                                                                                             inst_21172
-                                                                                             (or
-                                                                                               (canom/anom
-                                                                                                 loaded)
-                                                                                               (create*
-                                                                                                 args
-                                                                                                 {:header
-                                                                                                  header,
-                                                                                                  :value
-                                                                                                  value}))]
-                                                                                            (clojure.core.async.impl.ioc-macros/return-chan
-                                                                                              state_21174
-                                                                                              inst_21172))))]
-                                                                                     (if
-                                                                                       (identical?
-                                                                                         result__10111__auto__
-                                                                                         :recur)
-                                                                                       (recur)
-                                                                                       result__10111__auto__))))
-                                                                               (catch
-                                                                                 java.lang.Throwable
-                                                                                 ex__10112__auto__
-                                                                                 (do
-                                                                                   (let 
-                                                                                     [statearr_21195
-                                                                                      state_21174]
-                                                                                     (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                       statearr_21195
-                                                                                       2
-                                                                                       ex__10112__auto__))
-                                                                                   (if
-                                                                                     (seq
-                                                                                       (clojure.core.async.impl.ioc-macros/aget-object
-                                                                                         state_21174
-                                                                                         4))
+  (defn create
+    ([p__21144]
+      (let [map__21145 p__21144
+            map__21145 (if (seq? map__21145)
+                         (if (next map__21145)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21145))
+                           (if (seq map__21145) (first map__21145) {}))
+                         map__21145)
+            args map__21145
+            log (get map__21145 :log)
+            header (get map__21145 :header)
+            value (get map__21145 :value)
+            serialize (get map__21145 :serialize)]
+        (when-not header
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'header)))))
+        (when-not value
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'value)))))
+        (let [c__10363__auto__ (a/chan 1)
+              captured_bindings__10364__auto__ (clojure.lang.Var/getThreadBindingFrame)]
+          (clojure.core.async.impl.dispatch/run
+            (fn fn__21175
+              ([]
+                (let [G__21146 (fn G__21146 ([] p__21144))
+                      G__21147 (fn G__21147 ([] map__21145))
+                      G__21148 (fn G__21148 ([] args))
+                      G__21149 (fn G__21149 ([] log))
+                      G__21150 (fn G__21150 ([] header))
+                      G__21151 (fn G__21151 ([] value))
+                      G__21152 (fn G__21152 ([] serialize))
+                      f__10365__auto__ (fn state_machine__10108__auto__
+                                         ([]
+                                           (let [statearr_21191 (java.util.concurrent.atomic.AtomicReferenceArray.
+                                                                  (int 13))]
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21191
+                                               0
+                                               state_machine__10108__auto__)
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21191
+                                               1
+                                               1)
+                                             statearr_21191))
+                                         ([state_21174]
+                                           (let [old_frame__10109__auto__ (clojure.lang.Var/getThreadBindingFrame)
+                                                 ret_value__10110__auto__ (try
+                                                                            (try
+                                                                              (do
+                                                                                (clojure.lang.Var/resetThreadBindingFrame
+                                                                                  (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                    state_21174
+                                                                                    3))
+                                                                                (loop 
+                                                                                  []
+                                                                                  (let 
+                                                                                    [result__10111__auto__
                                                                                      (let 
-                                                                                       [statearr_21196
-                                                                                        state_21174]
-                                                                                       (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                         statearr_21196
+                                                                                       [G__21193
+                                                                                        (int
+                                                                                          (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                            state_21174
+                                                                                            1))]
+                                                                                       (case
+                                                                                         G__21193
                                                                                          1
-                                                                                         (first
-                                                                                           (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                         (let 
+                                                                                           [inst_21164
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              6)
+                                                                                            inst_21163
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              7)
+                                                                                            inst_21167
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              8)
+                                                                                            inst_21166
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              9)
+                                                                                            inst_21161
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              10)
+                                                                                            inst_21165
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              11)
+                                                                                            inst_21162
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              12)
+                                                                                            inst_21154
+                                                                                            (^clojure.lang.IFn G__21146)
+                                                                                            p__21144
+                                                                                            inst_21154
+                                                                                            inst_21155
+                                                                                            (^clojure.lang.IFn G__21147)
+                                                                                            p__21144
+                                                                                            inst_21154
+                                                                                            map__21145
+                                                                                            inst_21155
+                                                                                            inst_21156
+                                                                                            (^clojure.lang.IFn G__21148)
+                                                                                            args
+                                                                                            inst_21156
+                                                                                            p__21144
+                                                                                            inst_21154
+                                                                                            map__21145
+                                                                                            inst_21155
+                                                                                            inst_21157
+                                                                                            (^clojure.lang.IFn G__21149)
+                                                                                            log
+                                                                                            inst_21157
+                                                                                            args
+                                                                                            inst_21156
+                                                                                            p__21144
+                                                                                            inst_21154
+                                                                                            map__21145
+                                                                                            inst_21155
+                                                                                            inst_21158
+                                                                                            (^clojure.lang.IFn G__21150)
+                                                                                            log
+                                                                                            inst_21157
+                                                                                            args
+                                                                                            inst_21156
+                                                                                            p__21144
+                                                                                            inst_21154
+                                                                                            header
+                                                                                            inst_21158
+                                                                                            map__21145
+                                                                                            inst_21155
+                                                                                            inst_21159
+                                                                                            (^clojure.lang.IFn G__21151)
+                                                                                            log
+                                                                                            inst_21157
+                                                                                            args
+                                                                                            inst_21156
+                                                                                            value
+                                                                                            inst_21159
+                                                                                            p__21144
+                                                                                            inst_21154
+                                                                                            header
+                                                                                            inst_21158
+                                                                                            map__21145
+                                                                                            inst_21155
+                                                                                            inst_21160
+                                                                                            (^clojure.lang.IFn G__21152)
+                                                                                            inst_21161
+                                                                                            inst_21154
+                                                                                            inst_21162
+                                                                                            inst_21155
+                                                                                            inst_21163
+                                                                                            inst_21156
+                                                                                            inst_21164
+                                                                                            inst_21157
+                                                                                            inst_21165
+                                                                                            inst_21158
+                                                                                            inst_21166
+                                                                                            inst_21159
+                                                                                            inst_21167
+                                                                                            inst_21160
+                                                                                            log
+                                                                                            inst_21164
+                                                                                            args
+                                                                                            inst_21163
+                                                                                            serialize
+                                                                                            inst_21167
+                                                                                            value
+                                                                                            inst_21166
+                                                                                            p__21144
+                                                                                            inst_21161
+                                                                                            header
+                                                                                            inst_21165
+                                                                                            map__21145
+                                                                                            inst_21162
+                                                                                            inst_21168
+                                                                                            (append-value
+                                                                                              log
+                                                                                              serialize
+                                                                                              header
+                                                                                              value)
+                                                                                            state_21174
+                                                                                            (let 
+                                                                                              [statearr_21194
+                                                                                               state_21174]
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21194
+                                                                                                10
+                                                                                                inst_21161)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21194
+                                                                                                12
+                                                                                                inst_21162)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21194
+                                                                                                7
+                                                                                                inst_21163)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21194
+                                                                                                6
+                                                                                                inst_21164)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21194
+                                                                                                11
+                                                                                                inst_21165)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21194
+                                                                                                9
+                                                                                                inst_21166)
+                                                                                              (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                                statearr_21194
+                                                                                                8
+                                                                                                inst_21167)
+                                                                                              statearr_21194)]
+                                                                                           (clojure.core.async.impl.ioc-macros/take!
                                                                                              state_21174
-                                                                                             4))))
-                                                                                     (throw
-                                                                                       ^java.lang.Throwable ex__10112__auto__))
-                                                                                   :recur)))
-                                                                             (finally
-                                                                               (do
-                                                                                 (clojure.core.async.impl.ioc-macros/aset-object
-                                                                                   state_21174
-                                                                                   3
-                                                                                   (clojure.lang.Var/getThreadBindingFrame))
-                                                                                 (clojure.lang.Var/resetThreadBindingFrame
-                                                                                   old_frame__10109__auto__))))]
-                                              (if (identical? ret_value__10110__auto__ :recur)
-                                                (recur state_21174)
-                                                ret_value__10110__auto__))))
-                       state__10366__auto__ (let [statearr_21203 (^clojure.lang.IFn f__10365__auto__)]
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21203
-                                                5
-                                                c__10363__auto__)
-                                              (clojure.core.async.impl.ioc-macros/aset-object
-                                                statearr_21203
-                                                3
-                                                captured_bindings__10364__auto__)
-                                              statearr_21203)]
-                   (clojure.core.async.impl.ioc-macros/run-state-machine-wrapped
-                     state__10366__auto__)))))
-           c__10363__auto__)))))
+                                                                                             2
+                                                                                             inst_21168))
+                                                                                         2
+                                                                                         (let 
+                                                                                           [inst_21164
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              6)
+                                                                                            inst_21163
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              7)
+                                                                                            inst_21167
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              8)
+                                                                                            inst_21166
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              9)
+                                                                                            inst_21161
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              10)
+                                                                                            inst_21165
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              11)
+                                                                                            inst_21162
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              12)
+                                                                                            inst_21170
+                                                                                            (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                              state_21174
+                                                                                              2)
+                                                                                            inst_21171
+                                                                                            inst_21170
+                                                                                            log
+                                                                                            inst_21164
+                                                                                            args
+                                                                                            inst_21163
+                                                                                            serialize
+                                                                                            inst_21167
+                                                                                            value
+                                                                                            inst_21166
+                                                                                            loaded
+                                                                                            inst_21171
+                                                                                            p__21144
+                                                                                            inst_21161
+                                                                                            header
+                                                                                            inst_21165
+                                                                                            map__21145
+                                                                                            inst_21162
+                                                                                            inst_21172
+                                                                                            (or
+                                                                                              (canom/anom
+                                                                                                loaded)
+                                                                                              (create*
+                                                                                                args
+                                                                                                {:header
+                                                                                                 header,
+                                                                                                 :value
+                                                                                                 value}))]
+                                                                                           (clojure.core.async.impl.ioc-macros/return-chan
+                                                                                             state_21174
+                                                                                             inst_21172))))]
+                                                                                    (if
+                                                                                      (identical?
+                                                                                        result__10111__auto__
+                                                                                        :recur)
+                                                                                      (recur)
+                                                                                      result__10111__auto__))))
+                                                                              (catch
+                                                                                java.lang.Throwable
+                                                                                ex__10112__auto__
+                                                                                (do
+                                                                                  (let 
+                                                                                    [statearr_21195
+                                                                                     state_21174]
+                                                                                    (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                      statearr_21195
+                                                                                      2
+                                                                                      ex__10112__auto__))
+                                                                                  (if
+                                                                                    (seq
+                                                                                      (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                        state_21174
+                                                                                        4))
+                                                                                    (let 
+                                                                                      [statearr_21196
+                                                                                       state_21174]
+                                                                                      (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                        statearr_21196
+                                                                                        1
+                                                                                        (first
+                                                                                          (clojure.core.async.impl.ioc-macros/aget-object
+                                                                                            state_21174
+                                                                                            4))))
+                                                                                    (throw
+                                                                                      ^java.lang.Throwable ex__10112__auto__))
+                                                                                  :recur)))
+                                                                            (finally
+                                                                              (do
+                                                                                (clojure.core.async.impl.ioc-macros/aset-object
+                                                                                  state_21174
+                                                                                  3
+                                                                                  (clojure.lang.Var/getThreadBindingFrame))
+                                                                                (clojure.lang.Var/resetThreadBindingFrame
+                                                                                  old_frame__10109__auto__))))]
+                                             (if (identical? ret_value__10110__auto__ :recur)
+                                               (recur state_21174)
+                                               ret_value__10110__auto__))))
+                      state__10366__auto__ (let [statearr_21203 (^clojure.lang.IFn f__10365__auto__)]
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21203
+                                               5
+                                               c__10363__auto__)
+                                             (clojure.core.async.impl.ioc-macros/aset-object
+                                               statearr_21203
+                                               3
+                                               captured_bindings__10364__auto__)
+                                             statearr_21203)]
+                  (clojure.core.async.impl.ioc-macros/run-state-machine-wrapped
+                    state__10366__auto__)))))
+          c__10363__auto__))))
   (reset-meta!
     #'create
     (assoc

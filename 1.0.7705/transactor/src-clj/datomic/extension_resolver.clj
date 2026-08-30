@@ -32,10 +32,9 @@
       'anom-map
       :ns
       *ns*))
-  (def anomaly!
-   (fn anomaly_BANG_
-     ([name msg cause] (throw (ex-info msg (anom-map name msg) cause)))
-     ([name msg] (throw (ex-info msg (anom-map name msg))))))
+  (defn anomaly!
+    ([name msg cause] (throw (ex-info msg (anom-map name msg) cause)))
+    ([name msg] (throw (ex-info msg (anom-map name msg)))))
   (reset-meta!
     #'anomaly!
     (assoc
@@ -70,16 +69,15 @@
       'wildcard-pred
       :ns
       *ns*))
-  (def ensure-allow-list!
-   (fn ensure_allow_list_BANG_
-     ([allow_list]
-       (when allow_list
-         (when-not (coll? allow_list)
-           (throw
-             (ex-info
-               "xforms expects a vector"
-               {:cognitect.anomalies/category :cognitect.anomalies/incorrect, :value allow_list}))
-           nil)))))
+  (defn ensure-allow-list!
+    ([allow_list]
+      (when allow_list
+        (when-not (coll? allow_list)
+          (throw
+            (ex-info
+              "xforms expects a vector"
+              {:cognitect.anomalies/category :cognitect.anomalies/incorrect, :value allow_list}))
+          nil))))
   (reset-meta!
     #'ensure-allow-list!
     (assoc
@@ -88,18 +86,17 @@
       'ensure-allow-list!
       :ns
       *ns*))
-  (def ensure-extensions-config!
-   (fn ensure_extensions_config_BANG_
-     ([p__16183]
-       (let [map__16184 p__16183
-             map__16184 (if (seq? map__16184)
-                          (if (next map__16184)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16184))
-                            (if (seq map__16184) (first map__16184) {}))
-                          map__16184)
-             xforms (get map__16184 :xforms)]
-         (when xforms (ensure-allow-list! xforms))))))
+  (defn ensure-extensions-config!
+    ([p__16183]
+      (let [map__16184 p__16183
+            map__16184 (if (seq? map__16184)
+                         (if (next map__16184)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16184))
+                           (if (seq map__16184) (first map__16184) {}))
+                         map__16184)
+            xforms (get map__16184 :xforms)]
+        (when xforms (ensure-allow-list! xforms)))))
   (reset-meta!
     #'ensure-extensions-config!
     (assoc

@@ -7,12 +7,12 @@
     (clojure.core/with-loading-context
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'print-method))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Summary (summary [x]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.summary" "Summary")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Summary :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Summary :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'summary {:arglists (clojure.core/list ['x])}),
@@ -20,12 +20,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.summary" "Summary"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.summary" "summary")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend nil Summary {:summary (fn fn__17813 ([_] nil))})
   (extend java.util.Map Summary {:summary (fn fn__17815 ([m] m))})
   (defn write ([w o] (.write ^java.io.Writer w ^java.lang.String o) nil))

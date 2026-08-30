@@ -117,8 +117,7 @@
       'status->anomaly-cat
       :ns
       *ns*))
-  (def error-code->anomaly-cat
-   (fn error_code__GT_anomaly_cat ([error_code] (get (deref error-code-categories) error_code))))
+  (defn error-code->anomaly-cat ([error_code] (get (deref error-code-categories) error_code)))
   (reset-meta!
     #'error-code->anomaly-cat
     (assoc
@@ -182,22 +181,21 @@
            (.retryable ^software.amazon.awssdk.core.exception.SdkException ex)
            :datomic.aws.client.api/attempts
            (.numAttempts ^software.amazon.awssdk.core.exception.SdkException ex))))})
-  (def anomalize
-   (fn anomalize
-     ([t op_map]
-       (with-meta
-         (update
-           (izer/throwable->anom t)
-           :data
-           merge
-           (util/vmap
-             :datomic.aws.client.api/op
-             (:op op_map)
-             :datomic.aws.client.api/service
-             (:service op_map)
-             :datomic.aws.client.api/meta
-             (:meta op_map)))
-         #:datomic.aws.client.api{:op-map op_map}))))
+  (defn anomalize
+    ([t op_map]
+      (with-meta
+        (update
+          (izer/throwable->anom t)
+          :data
+          merge
+          (util/vmap
+            :datomic.aws.client.api/op
+            (:op op_map)
+            :datomic.aws.client.api/service
+            (:service op_map)
+            :datomic.aws.client.api/meta
+            (:meta op_map)))
+        #:datomic.aws.client.api{:op-map op_map})))
   (reset-meta!
     #'anomalize
     (assoc

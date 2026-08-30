@@ -109,7 +109,7 @@
         (clojure.lang.RT/var "datomic.backup" "backup-branch-pool")
         (delay (common/thread-pool {:nthreads backup-branch-size, :name "backup-branch"})))
       #'backup-branch-pool))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       Storage
       (store
@@ -120,8 +120,8 @@
       (retrieve [_ k] "Returns {:v buf} if path exists."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.backup" "Storage")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Storage :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Storage :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -132,13 +132,13 @@
                                       "Place a byte buffer into storage under pathkey.\n    Returns {:k k} on success."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "Storage"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "store")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -148,13 +148,13 @@
                                       :doc "Returns {:ks keys} on success."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "Storage"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "list-keys")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*)))
-    (let [protocol_signature__7436 (assoc
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*)))
+    (let [protocol_signature__7468 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'exists? {:arglists (clojure.core/list ['_ 'k])}),
@@ -162,13 +162,13 @@
                                       :doc "Returns a boolean"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "Storage"))
-          protocol_method_name__7437 (with-meta
-                                       (:name protocol_signature__7436)
-                                       protocol_signature__7436)]
+          protocol_method_name__7469 (with-meta
+                                       (:name protocol_signature__7468)
+                                       protocol_signature__7468)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "exists?")
-        (assoc protocol_signature__7436 :name protocol_method_name__7437 :ns *ns*)))
-    (let [protocol_signature__7438 (assoc
+        (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*)))
+    (let [protocol_signature__7470 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -178,12 +178,12 @@
                                       :doc "Returns {:v buf} if path exists."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "Storage"))
-          protocol_method_name__7439 (with-meta
-                                       (:name protocol_signature__7438)
-                                       protocol_signature__7438)]
+          protocol_method_name__7471 (with-meta
+                                       (:name protocol_signature__7470)
+                                       protocol_signature__7470)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "retrieve")
-        (assoc protocol_signature__7438 :name protocol_method_name__7439 :ns *ns*))))
+        (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
   (defn subkey ([prefix k] (str prefix "/" k)))
   (reset-meta!
     #'subkey
@@ -211,10 +211,9 @@
       'add-key-prefix
       :ns
       *ns*))
-  (def backup-k-factory
-   (fn backup_k_factory
-     ([^long backup_version]
-       (let [G__21315 backup_version] (case G__21315 (1 2) identity 3 add-key-prefix)))))
+  (defn backup-k-factory
+    ([^long backup_version]
+      (let [G__21315 backup_version] (case G__21315 (1 2) identity 3 add-key-prefix))))
   (reset-meta!
     #'backup-k-factory
     (assoc
@@ -297,9 +296,7 @@
       'ensure-claim
       :ns
       *ns*))
-  (def ->connect-uri
-   (fn __GT_connect_uri
-     ([backup_uri t] (str "datomic:backup:" backup_uri (when t (str "?t=" t))))))
+  (defn ->connect-uri ([backup_uri t] (str "datomic:backup:" backup_uri (when t (str "?t=" t)))))
   (reset-meta!
     #'->connect-uri
     (assoc
@@ -345,10 +342,9 @@
       (error/arg
         :storage/invalid-uri
         (str "Unsupported protocol: " (.getScheme ^java.net.URI uri)))))
-  (def create-storage
-   (fn create_storage
-     ([storage_uri sse?] (create-storage* (io/as-uri storage_uri) sse?))
-     ([storage_uri] (create-storage storage_uri false))))
+  (defn create-storage
+    ([storage_uri sse?] (create-storage* (io/as-uri storage_uri) sse?))
+    ([storage_uri] (create-storage storage_uri false)))
   (reset-meta!
     #'create-storage
     (assoc
@@ -394,18 +390,15 @@
       'uncached-storage-lookup
       :ns
       *ns*))
-  (def storage-olookup
-   (fn storage_olookup
-     ([storage backup_version]
-       (cache/lookup-transformer
-         (domain/peer-object-lookup
-           (uncached-storage-lookup storage)
-           domain/common-read-handlers
-           (domain/system-cache))
-         :key-fn
-         (comp
-           (backup-k-factory (long ^java.lang.Number backup_version))
-           cluster/uuid->val-key)))))
+  (defn storage-olookup
+    ([storage backup_version]
+      (cache/lookup-transformer
+        (domain/peer-object-lookup
+          (uncached-storage-lookup storage)
+          domain/common-read-handlers
+          (domain/system-cache))
+        :key-fn
+        (comp (backup-k-factory (long ^java.lang.Number backup_version)) cluster/uuid->val-key))))
   (reset-meta!
     #'storage-olookup
     (assoc
@@ -414,55 +407,54 @@
       'storage-olookup
       :ns
       *ns*))
-  (def val-store-on-backup
-   (fn val_store_on_backup
-     ([storage backup_version]
-       (let [kf (backup-k-factory (long ^java.lang.Number backup_version))]
-         (reify
-           datomic.core2.val_store.spi.Get
-           datomic.core2.val_store.spi.Delete
-           datomic.core2.val_store.spi.Put
-           (-delete
-             [this k opts]
-             (let [G__21367 (async/chan 1)]
-               (async/>!!
-                 G__21367
-                 #:cognitect.anomalies{:category :cognitect.anomalies/unsupported,
-                                       :message "Backup storage does not support delete"})
-               G__21367))
-           (-put
-             [this k v opts]
-             (let [G__21366 (async/chan 1)]
-               (async/>!!
-                 G__21366
-                 #:cognitect.anomalies{:category :cognitect.anomalies/unsupported,
-                                       :message "Backup storage does not support put"})
-               G__21366))
-           (-get
-             [this k opts]
-             (async/thread-call
-               (fn fn__21360
-                 ([]
-                   (try
-                     (let [temp__5802__auto__ (retry
-                                                (fn fn__21361
-                                                  ([]
-                                                    (retrieve storage (^clojure.lang.IFn kf k)))))]
-                       (if temp__5802__auto__
-                         (let [map__21363 temp__5802__auto__
-                               map__21363 (if (seq? map__21363)
-                                            (if (next map__21363)
-                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                (to-array map__21363))
-                                              (if (seq map__21363) (first map__21363) {}))
-                                            map__21363)
-                               v (get map__21363 :v)]
-                           {:val v})
-                         {:cognitect.anomalies/category :cognitect.anomalies/not-found,
-                          :cognitect.anomalies/message "Backup cannot find key",
-                          :key k}))
-                     (catch java.lang.Throwable t (izer/throwable->anom t)))))
-               :io)))))))
+  (defn val-store-on-backup
+    ([storage backup_version]
+      (let [kf (backup-k-factory (long ^java.lang.Number backup_version))]
+        (reify
+          datomic.core2.val_store.spi.Get
+          datomic.core2.val_store.spi.Delete
+          datomic.core2.val_store.spi.Put
+          (-delete
+            [this k opts]
+            (let [G__21367 (async/chan 1)]
+              (async/>!!
+                G__21367
+                #:cognitect.anomalies{:category :cognitect.anomalies/unsupported,
+                                      :message "Backup storage does not support delete"})
+              G__21367))
+          (-put
+            [this k v opts]
+            (let [G__21366 (async/chan 1)]
+              (async/>!!
+                G__21366
+                #:cognitect.anomalies{:category :cognitect.anomalies/unsupported,
+                                      :message "Backup storage does not support put"})
+              G__21366))
+          (-get
+            [this k opts]
+            (async/thread-call
+              (fn fn__21360
+                ([]
+                  (try
+                    (let [temp__5802__auto__ (retry
+                                               (fn fn__21361
+                                                 ([]
+                                                   (retrieve storage (^clojure.lang.IFn kf k)))))]
+                      (if temp__5802__auto__
+                        (let [map__21363 temp__5802__auto__
+                              map__21363 (if (seq? map__21363)
+                                           (if (next map__21363)
+                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                               (to-array map__21363))
+                                             (if (seq map__21363) (first map__21363) {}))
+                                           map__21363)
+                              v (get map__21363 :v)]
+                          {:val v})
+                        {:cognitect.anomalies/category :cognitect.anomalies/not-found,
+                         :cognitect.anomalies/message "Backup cannot find key",
+                         :key k}))
+                    (catch java.lang.Throwable t (izer/throwable->anom t)))))
+              :io))))))
   (reset-meta!
     #'val-store-on-backup
     (assoc
@@ -471,24 +463,23 @@
       'val-store-on-backup
       :ns
       *ns*))
-  (def lookup-over-vs
-   (fn lookup_over_vs
-     ([val_store]
-       (reify
-         clojure.lang.ILookup
-         (valAt
-           [this k not_found]
-           (let [map__21371 (async/<!! (vs/get val_store k))
-                 map__21371 (if (seq? map__21371)
-                              (if (next map__21371)
-                                (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                  (to-array map__21371))
-                                (if (seq map__21371) (first map__21371) {}))
-                              map__21371)
-                 ret map__21371
-                 val (get map__21371 :val)]
-             (or val (common/throw-anom ret))))
-         (valAt [this k] (.valAt this k nil))))))
+  (defn lookup-over-vs
+    ([val_store]
+      (reify
+        clojure.lang.ILookup
+        (valAt
+          [this k not_found]
+          (let [map__21371 (async/<!! (vs/get val_store k))
+                map__21371 (if (seq? map__21371)
+                             (if (next map__21371)
+                               (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                 (to-array map__21371))
+                               (if (seq map__21371) (first map__21371) {}))
+                             map__21371)
+                ret map__21371
+                val (get map__21371 :val)]
+            (or val (common/throw-anom ret))))
+        (valAt [this k] (.valAt this k nil)))))
   (reset-meta!
     #'lookup-over-vs
     (assoc
@@ -497,19 +488,18 @@
       'lookup-over-vs
       :ns
       *ns*))
-  (def caching-olookup
-   (fn caching_olookup
-     ([storage backup_version]
-       (let [vs (val-store-on-backup storage backup_version)
-             vs (let [temp__5802__auto__ (deref cluster-stack/kv-cache-ref)]
-                  (if temp__5802__auto__
-                    (let [kvc temp__5802__auto__]
-                      (double-store/create {:near-store kvc, :far-store vs}))
-                    vs))]
-         (domain/peer-object-lookup
-           (lookup-over-vs vs)
-           domain/common-read-handlers
-           (domain/system-cache))))))
+  (defn caching-olookup
+    ([storage backup_version]
+      (let [vs (val-store-on-backup storage backup_version)
+            vs (let [temp__5802__auto__ (deref cluster-stack/kv-cache-ref)]
+                 (if temp__5802__auto__
+                   (let [kvc temp__5802__auto__]
+                     (double-store/create {:near-store kvc, :far-store vs}))
+                   vs))]
+        (domain/peer-object-lookup
+          (lookup-over-vs vs)
+          domain/common-read-handlers
+          (domain/system-cache)))))
   (reset-meta!
     #'caching-olookup
     (assoc
@@ -518,15 +508,15 @@
       'caching-olookup
       :ns
       *ns*))
-  (let [protocol_metadata__7440 {:column (int 1)}]
+  (let [protocol_metadata__7472 {:column (int 1)}]
     (defprotocol
       IValueBackup
       (backup-val [_ k backup-k] "Backup a segment from storage k to backup backup-k.")
       (backup-node [_ node] "Backup a node's children, then the node."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.backup" "IValueBackup")
-      (assoc (assoc protocol_metadata__7440 :doc nil) :name 'IValueBackup :ns *ns*))
-    (let [protocol_signature__7441 (assoc
+      (assoc (assoc protocol_metadata__7472 :doc nil) :name 'IValueBackup :ns *ns*))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -536,13 +526,13 @@
                                       :doc "Backup a segment from storage k to backup backup-k."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "IValueBackup"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "backup-val")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -552,12 +542,12 @@
                                       :doc "Backup a node's children, then the node."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "IValueBackup"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "backup-node")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*))))
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*))))
   (deftype
     ValueBackup
     [from_cluster value_storage progress incremental? ids_>nodes throttle sem]
@@ -700,17 +690,16 @@
               (do (throw (:threw result__8554__auto__)) nil)))
           (finally (.release ^java.util.concurrent.Semaphore sem))))))
   (clojure.core/import 'datomic.backup.ValueBackup)
-  (def ->ValueBackup
-   (fn __GT_ValueBackup
-     ([from_cluster value_storage progress incremental? ids_>nodes throttle sem]
-       (datomic.backup.ValueBackup.
-         from_cluster
-         value_storage
-         progress
-         incremental?
-         ids_>nodes
-         throttle
-         sem))))
+  (defn ->ValueBackup
+    ([from_cluster value_storage progress incremental? ids_>nodes throttle sem]
+      (datomic.backup.ValueBackup.
+        from_cluster
+        value_storage
+        progress
+        incremental?
+        ids_>nodes
+        throttle
+        sem)))
   (reset-meta!
     #'->ValueBackup
     (assoc
@@ -722,43 +711,42 @@
       '->ValueBackup
       :ns
       *ns*))
-  (def create-value-backup
-   (fn create_value_backup
-     ([& p__21456]
-       (let [map__21457 p__21456
-             map__21457 (if (seq? map__21457)
-                          (if (next map__21457)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21457))
-                            (if (seq map__21457) (first map__21457) {}))
-                          map__21457)
-             from_cluster (get map__21457 :from-cluster)
-             to_storage (get map__21457 :to-storage)
-             progress (get map__21457 :progress)
-             incremental? (get map__21457 :incremental?)
-             ids_>nodes (get map__21457 :ids->nodes)
-             concurrency (get map__21457 :concurrency)]
-         (when-not from_cluster
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'from-cluster)))))
-         (when-not to_storage
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'to-storage)))))
-         (when-not progress
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'progress)))))
-         (when-not ids_>nodes
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'ids->nodes)))))
-         (when-not concurrency
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'concurrency)))))
-         (->ValueBackup
-           from_cluster
-           (substorage to_storage "values")
-           progress
-           incremental?
-           ids_>nodes
-           (let [temp__5804__auto__ (config/property "datomic.backupPaceMsec")]
-             (when temp__5804__auto__
-               (let [pace temp__5804__auto__]
-                 (fn fn__21458 ([] (java.lang.Thread/sleep (long ^java.lang.Number pace)) nil)))))
-           (java.util.concurrent.Semaphore. (int ^java.lang.Number concurrency)))))))
+  (defn create-value-backup
+    ([& p__21456]
+      (let [map__21457 p__21456
+            map__21457 (if (seq? map__21457)
+                         (if (next map__21457)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21457))
+                           (if (seq map__21457) (first map__21457) {}))
+                         map__21457)
+            from_cluster (get map__21457 :from-cluster)
+            to_storage (get map__21457 :to-storage)
+            progress (get map__21457 :progress)
+            incremental? (get map__21457 :incremental?)
+            ids_>nodes (get map__21457 :ids->nodes)
+            concurrency (get map__21457 :concurrency)]
+        (when-not from_cluster
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'from-cluster)))))
+        (when-not to_storage
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'to-storage)))))
+        (when-not progress
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'progress)))))
+        (when-not ids_>nodes
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'ids->nodes)))))
+        (when-not concurrency
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'concurrency)))))
+        (->ValueBackup
+          from_cluster
+          (substorage to_storage "values")
+          progress
+          incremental?
+          ids_>nodes
+          (let [temp__5804__auto__ (config/property "datomic.backupPaceMsec")]
+            (when temp__5804__auto__
+              (let [pace temp__5804__auto__]
+                (fn fn__21458 ([] (java.lang.Thread/sleep (long ^java.lang.Number pace)) nil)))))
+          (java.util.concurrent.Semaphore. (int ^java.lang.Number concurrency))))))
   (reset-meta!
     #'create-value-backup
     (assoc
@@ -773,15 +761,15 @@
       'create-value-backup
       :ns
       *ns*))
-  (let [protocol_metadata__7445 {:column (int 1)}]
+  (let [protocol_metadata__7477 {:column (int 1)}]
     (defprotocol
       IValueRestore
       (restore-val [_ k] "Restore segment with key k from backup to storage.")
       (restore-node [_ node] "Restores a node's children, then the node"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.backup" "IValueRestore")
-      (assoc (assoc protocol_metadata__7445 :doc nil) :name 'IValueRestore :ns *ns*))
-    (let [protocol_signature__7446 (assoc
+      (assoc (assoc protocol_metadata__7477 :doc nil) :name 'IValueRestore :ns *ns*))
+    (let [protocol_signature__7478 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -791,13 +779,13 @@
                                       :doc "Restore segment with key k from backup to storage."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "IValueRestore"))
-          protocol_method_name__7447 (with-meta
-                                       (:name protocol_signature__7446)
-                                       protocol_signature__7446)]
+          protocol_method_name__7479 (with-meta
+                                       (:name protocol_signature__7478)
+                                       protocol_signature__7478)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "restore-val")
-        (assoc protocol_signature__7446 :name protocol_method_name__7447 :ns *ns*)))
-    (let [protocol_signature__7448 (assoc
+        (assoc protocol_signature__7478 :name protocol_method_name__7479 :ns *ns*)))
+    (let [protocol_signature__7480 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -807,12 +795,12 @@
                                       :doc "Restores a node's children, then the node"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.backup" "IValueRestore"))
-          protocol_method_name__7449 (with-meta
-                                       (:name protocol_signature__7448)
-                                       protocol_signature__7448)]
+          protocol_method_name__7481 (with-meta
+                                       (:name protocol_signature__7480)
+                                       protocol_signature__7480)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "restore-node")
-        (assoc protocol_signature__7448 :name protocol_method_name__7449 :ns *ns*))))
+        (assoc protocol_signature__7480 :name protocol_method_name__7481 :ns *ns*))))
   (deftype
     ValueRestore
     [value_storage to_cluster progress incremental? k_>backup_k ids_>nodes sem]
@@ -951,17 +939,16 @@
               (do (throw (:threw result__8554__auto__)) nil)))
           (finally (.release ^java.util.concurrent.Semaphore sem))))))
   (clojure.core/import 'datomic.backup.ValueRestore)
-  (def ->ValueRestore
-   (fn __GT_ValueRestore
-     ([value_storage to_cluster progress incremental? k_>backup_k ids_>nodes sem]
-       (datomic.backup.ValueRestore.
-         value_storage
-         to_cluster
-         progress
-         incremental?
-         k_>backup_k
-         ids_>nodes
-         sem))))
+  (defn ->ValueRestore
+    ([value_storage to_cluster progress incremental? k_>backup_k ids_>nodes sem]
+      (datomic.backup.ValueRestore.
+        value_storage
+        to_cluster
+        progress
+        incremental?
+        k_>backup_k
+        ids_>nodes
+        sem)))
   (reset-meta!
     #'->ValueRestore
     (assoc
@@ -973,41 +960,40 @@
       '->ValueRestore
       :ns
       *ns*))
-  (def create-value-restore
-   (fn create_value_restore
-     ([& p__21535]
-       (let [map__21536 p__21535
-             map__21536 (if (seq? map__21536)
-                          (if (next map__21536)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21536))
-                            (if (seq map__21536) (first map__21536) {}))
-                          map__21536)
-             from_storage (get map__21536 :from-storage)
-             to_cluster (get map__21536 :to-cluster)
-             backup_version (get map__21536 :backup-version)
-             progress (get map__21536 :progress)
-             incremental? (get map__21536 :incremental?)
-             concurrency (get map__21536 :concurrency)
-             ids_>nodes (get map__21536 :ids->nodes)]
-         (when-not from_storage
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'from-storage)))))
-         (when-not to_cluster
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'to-cluster)))))
-         (when-not progress
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'progress)))))
-         (when-not concurrency
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'concurrency)))))
-         (when-not ids_>nodes
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'ids->nodes)))))
-         (->ValueRestore
-           (substorage from_storage "values")
-           to_cluster
-           progress
-           incremental?
-           (backup-k-factory (long ^java.lang.Number backup_version))
-           ids_>nodes
-           (java.util.concurrent.Semaphore. (int ^java.lang.Number concurrency)))))))
+  (defn create-value-restore
+    ([& p__21535]
+      (let [map__21536 p__21535
+            map__21536 (if (seq? map__21536)
+                         (if (next map__21536)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21536))
+                           (if (seq map__21536) (first map__21536) {}))
+                         map__21536)
+            from_storage (get map__21536 :from-storage)
+            to_cluster (get map__21536 :to-cluster)
+            backup_version (get map__21536 :backup-version)
+            progress (get map__21536 :progress)
+            incremental? (get map__21536 :incremental?)
+            concurrency (get map__21536 :concurrency)
+            ids_>nodes (get map__21536 :ids->nodes)]
+        (when-not from_storage
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'from-storage)))))
+        (when-not to_cluster
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'to-cluster)))))
+        (when-not progress
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'progress)))))
+        (when-not concurrency
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'concurrency)))))
+        (when-not ids_>nodes
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'ids->nodes)))))
+        (->ValueRestore
+          (substorage from_storage "values")
+          to_cluster
+          progress
+          incremental?
+          (backup-k-factory (long ^java.lang.Number backup_version))
+          ids_>nodes
+          (java.util.concurrent.Semaphore. (int ^java.lang.Number concurrency))))))
   (reset-meta!
     #'create-value-restore
     (assoc
@@ -1076,13 +1062,12 @@
       'backup->mem
       :ns
       *ns*))
-  (def backup-roots
-   (fn backup_roots
-     ([job t to_storage]
-       (store
-         to_storage
-         (roots-path t)
-         (fressian/byte-buf (mem->backup job) :handlers fressian/user-write-handlers)))))
+  (defn backup-roots
+    ([job t to_storage]
+      (store
+        to_storage
+        (roots-path t)
+        (fressian/byte-buf (mem->backup job) :handlers fressian/user-write-handlers))))
   (reset-meta!
     #'backup-roots
     (assoc
@@ -1091,13 +1076,12 @@
       'backup-roots
       :ns
       *ns*))
-  (def read-roots
-   (fn read_roots
-     ([t from_storage]
-       (let [temp__5804__auto__ (:v (retrieve from_storage (roots-path t)))]
-         (when temp__5804__auto__
-           (let [buf temp__5804__auto__]
-             (backup->mem (fressian/defressian buf :handlers fressian/user-read-handlers))))))))
+  (defn read-roots
+    ([t from_storage]
+      (let [temp__5804__auto__ (:v (retrieve from_storage (roots-path t)))]
+        (when temp__5804__auto__
+          (let [buf temp__5804__auto__]
+            (backup->mem (fressian/defressian buf :handlers fressian/user-read-handlers)))))))
   (reset-meta!
     #'read-roots
     (assoc
@@ -1131,12 +1115,11 @@
       'describe-backups
       :ns
       *ns*))
-  (def list-backups
-   (fn list_backups
-     ([backup_uri]
-       (let [storage (create-storage backup_uri) ts (list-roots storage)]
-         {:backups
-          (mapv (fn fn__21553 ([t] {:t t, :connect-uri (->connect-uri backup_uri t)})) ts)}))))
+  (defn list-backups
+    ([backup_uri]
+      (let [storage (create-storage backup_uri) ts (list-roots storage)]
+        {:backups
+         (mapv (fn fn__21553 ([t] {:t t, :connect-uri (->connect-uri backup_uri t)})) ts)})))
   (reset-meta!
     #'list-backups
     (assoc
@@ -1259,18 +1242,17 @@
       'create-restore-job
       :ns
       *ns*))
-  (def create-cluster
-   (fn create_cluster
-     ([cluster_conf concurrency]
-       (coord/create-db-cluster
-         (assoc
-           cluster_conf
-           :read-concurrency
-           (max concurrency (config/property "datomic.readConcurrency"))
-           :write-concurrency
-           (max concurrency (config/property "datomic.writeConcurrency"))
-           :shared-pool?
-           false)))))
+  (defn create-cluster
+    ([cluster_conf concurrency]
+      (coord/create-db-cluster
+        (assoc
+          cluster_conf
+          :read-concurrency
+          (max concurrency (config/property "datomic.readConcurrency"))
+          :write-concurrency
+          (max concurrency (config/property "datomic.writeConcurrency"))
+          :shared-pool?
+          false))))
   (reset-meta!
     #'create-cluster
     (assoc
@@ -1354,112 +1336,111 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.backup" "create-ids->nodes") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.backup" "create-ids->nodes") treewalk/create-ids->nodes)
-  (def restore-db
-   (fn restore_db
-     ([p__21579 p__21580 progress concurrency incremental?]
-       (let [map__21581 p__21579
-             map__21581 (if (seq? map__21581)
-                          (if (next map__21581)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21581))
-                            (if (seq map__21581) (first map__21581) {}))
-                          map__21581)
-             from_storage (get map__21581 :from-storage)
-             t (get map__21581 :t)
-             map__21582 p__21580
-             map__21582 (if (seq? map__21582)
-                          (if (next map__21582)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21582))
-                            (if (seq map__21582) (first map__21582) {}))
-                          map__21582)
-             to_uri (get map__21582 :to-uri)
-             job (create-restore-job from_storage t)
-             backup_version (:backup/version job)
-             map__21583 job
-             map__21583 (if (seq? map__21583)
-                          (if (next map__21583)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21583))
-                            (if (seq map__21583) (first map__21583) {}))
-                          map__21583)
-             index_top_node (get map__21583 :index-top-node)
-             log_root_node (get map__21583 :log-root-node)
-             db_id (get map__21583 :db-id)
-             lookup (get map__21583 :lookup)
-             to_cluster (create-restore-target to_uri {:db-id db_id} concurrency)
-             restore (create-value-restore
-                       :from-storage
-                       from_storage
-                       :to-cluster
-                       to_cluster
-                       :backup-version
-                       backup_version
-                       :progress
-                       progress
-                       :ids->nodes
-                       (create-ids->nodes lookup)
-                       :incremental?
-                       incremental?
-                       :concurrency
-                       concurrency)]
-         (future-call
-           (fn fn__21584
-             ([]
-               (try
-                 (let [m_21585 {:event :restore/db, :t t, :db-id db_id}
-                       ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                      "datomic.backup")]
-                                         (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                           (.info
-                                             ^org.slf4j.Logger logger
-                                             (logger/process (assoc m_21585 :phase :begin))))
-                                         nil)
-                       start__8553__auto__ (java.lang.System/nanoTime)
-                       result__8554__auto__ (try
-                                              (do
-                                                (when-not (garbage/ensure-root-ref
-                                                            to_cluster
-                                                            :forget-garbage)
-                                                  (throw
-                                                    (java.lang.Error.
-                                                      "Unable to clear garbage root")))
-                                                (restore-node restore log_root_node)
-                                                (restore-node restore index_top_node)
-                                                {:returned (restore-roots job to_cluster)})
-                                              (catch
-                                                java.lang.Throwable
-                                                t__8555__auto__
-                                                {:threw t__8555__auto__}))
-                       elapsed_21586 (- (java.lang.System/nanoTime) start__8553__auto__)
-                       msec_21587 (logger/format-as-msec (long elapsed_21586))]
-                   (let [endmsg__8556__auto__ (merge
-                                                (assoc m_21585 :msec msec_21587 :phase :end)
-                                                (when (:threw result__8554__auto__)
-                                                  {:threw (class (:threw result__8554__auto__))}))
-                         logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")]
-                     (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                       (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-                     nil)
-                   (if (contains? result__8554__auto__ :returned)
-                     (:returned result__8554__auto__)
-                     (do (throw (:threw result__8554__auto__)) nil)))
-                 (catch
-                   java.lang.Throwable
-                   t__8798__auto__
-                   (do
-                     (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")
-                           ex t__8798__auto__]
-                       (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                         (.warn
-                           ^org.slf4j.Logger logger
-                           (logger/process "error executing future")
-                           ^java.lang.Throwable ex)
-                         (logger/caused-by logger ex))
-                       nil)
-                     (monitor/alarm :UnhandledException)
-                     (throw ^java.lang.Throwable t__8798__auto__)
-                     nil))))))))))
+  (defn restore-db
+    ([p__21579 p__21580 progress concurrency incremental?]
+      (let [map__21581 p__21579
+            map__21581 (if (seq? map__21581)
+                         (if (next map__21581)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21581))
+                           (if (seq map__21581) (first map__21581) {}))
+                         map__21581)
+            from_storage (get map__21581 :from-storage)
+            t (get map__21581 :t)
+            map__21582 p__21580
+            map__21582 (if (seq? map__21582)
+                         (if (next map__21582)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21582))
+                           (if (seq map__21582) (first map__21582) {}))
+                         map__21582)
+            to_uri (get map__21582 :to-uri)
+            job (create-restore-job from_storage t)
+            backup_version (:backup/version job)
+            map__21583 job
+            map__21583 (if (seq? map__21583)
+                         (if (next map__21583)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21583))
+                           (if (seq map__21583) (first map__21583) {}))
+                         map__21583)
+            index_top_node (get map__21583 :index-top-node)
+            log_root_node (get map__21583 :log-root-node)
+            db_id (get map__21583 :db-id)
+            lookup (get map__21583 :lookup)
+            to_cluster (create-restore-target to_uri {:db-id db_id} concurrency)
+            restore (create-value-restore
+                      :from-storage
+                      from_storage
+                      :to-cluster
+                      to_cluster
+                      :backup-version
+                      backup_version
+                      :progress
+                      progress
+                      :ids->nodes
+                      (create-ids->nodes lookup)
+                      :incremental?
+                      incremental?
+                      :concurrency
+                      concurrency)]
+        (future-call
+          (fn fn__21584
+            ([]
+              (try
+                (let [m_21585 {:event :restore/db, :t t, :db-id db_id}
+                      ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                     "datomic.backup")]
+                                        (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                          (.info
+                                            ^org.slf4j.Logger logger
+                                            (logger/process (assoc m_21585 :phase :begin))))
+                                        nil)
+                      start__8553__auto__ (java.lang.System/nanoTime)
+                      result__8554__auto__ (try
+                                             (do
+                                               (when-not (garbage/ensure-root-ref
+                                                           to_cluster
+                                                           :forget-garbage)
+                                                 (throw
+                                                   (java.lang.Error.
+                                                     "Unable to clear garbage root")))
+                                               (restore-node restore log_root_node)
+                                               (restore-node restore index_top_node)
+                                               {:returned (restore-roots job to_cluster)})
+                                             (catch
+                                               java.lang.Throwable
+                                               t__8555__auto__
+                                               {:threw t__8555__auto__}))
+                      elapsed_21586 (- (java.lang.System/nanoTime) start__8553__auto__)
+                      msec_21587 (logger/format-as-msec (long elapsed_21586))]
+                  (let [endmsg__8556__auto__ (merge
+                                               (assoc m_21585 :msec msec_21587 :phase :end)
+                                               (when (:threw result__8554__auto__)
+                                                 {:threw (class (:threw result__8554__auto__))}))
+                        logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")]
+                    (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                      (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+                    nil)
+                  (if (contains? result__8554__auto__ :returned)
+                    (:returned result__8554__auto__)
+                    (do (throw (:threw result__8554__auto__)) nil)))
+                (catch
+                  java.lang.Throwable
+                  t__8798__auto__
+                  (do
+                    (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")
+                          ex t__8798__auto__]
+                      (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                        (.warn
+                          ^org.slf4j.Logger logger
+                          (logger/process "error executing future")
+                          ^java.lang.Throwable ex)
+                        (logger/caused-by logger ex))
+                      nil)
+                    (monitor/alarm :UnhandledException)
+                    (throw ^java.lang.Throwable t__8798__auto__)
+                    nil)))))))))
   (reset-meta!
     #'restore-db
     (assoc
@@ -1471,13 +1452,10 @@
       'restore-db
       :ns
       *ns*))
-  (def backup-key->seg-id
-   (fn backup_key__GT_seg_id
-     ([s]
-       (let [idx (.lastIndexOf ^java.lang.String s "/")]
-         (if (<= 0 idx)
-           (subs s (long (inc idx)) (java.lang.Integer/valueOf (int (count s))))
-           s)))))
+  (defn backup-key->seg-id
+    ([s]
+      (let [idx (.lastIndexOf ^java.lang.String s "/")]
+        (if (<= 0 idx) (subs s (long (inc idx)) (java.lang.Integer/valueOf (int (count s)))) s))))
   (reset-meta!
     #'backup-key->seg-id
     (assoc
@@ -1503,9 +1481,7 @@
     (list-keys [this prefix] (list-keys storage prefix))
     (store [this k buf] (store storage k buf)))
   (clojure.core/import 'datomic.backup.SegSetStorage)
-  (def ->SegSetStorage
-   (fn __GT_SegSetStorage
-     ([storage seg_id_set] (datomic.backup.SegSetStorage. storage seg_id_set))))
+  (defn ->SegSetStorage ([storage seg_id_set] (datomic.backup.SegSetStorage. storage seg_id_set)))
   (reset-meta!
     #'->SegSetStorage
     (assoc
@@ -1528,20 +1504,19 @@
       'map->SegSetStorage
       :ns
       *ns*))
-  (def backup-seg-ids
-   (fn backup_seg_ids
-     ([backup_storage t]
-       (let [map__21621 (create-restore-job backup_storage t)
-             map__21621 (if (seq? map__21621)
-                          (if (next map__21621)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21621))
-                            (if (seq map__21621) (first map__21621) {}))
-                          map__21621)
-             lookup (get map__21621 :lookup)
-             index_top_node (get map__21621 :index-top-node)
-             log_root_node (get map__21621 :log-root-node)]
-         (treewalk/db-seq log_root_node index_top_node lookup)))))
+  (defn backup-seg-ids
+    ([backup_storage t]
+      (let [map__21621 (create-restore-job backup_storage t)
+            map__21621 (if (seq? map__21621)
+                         (if (next map__21621)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21621))
+                           (if (seq map__21621) (first map__21621) {}))
+                         map__21621)
+            lookup (get map__21621 :lookup)
+            index_top_node (get map__21621 :index-top-node)
+            log_root_node (get map__21621 :log-root-node)]
+        (treewalk/db-seq log_root_node index_top_node lookup))))
   (reset-meta!
     #'backup-seg-ids
     (assoc
@@ -1550,15 +1525,14 @@
       'backup-seg-ids
       :ns
       *ns*))
-  (def segset-storage
-   (fn segset_storage
-     ([backup_storage seg_id_set]
-       (when seg_id_set
-         (when-not (set? seg_id_set)
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str (clojure.core/list 'set? 'seg-id-set)))))))
-       (->SegSetStorage backup_storage seg_id_set))))
+  (defn segset-storage
+    ([backup_storage seg_id_set]
+      (when seg_id_set
+        (when-not (set? seg_id_set)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list 'set? 'seg-id-set)))))))
+      (->SegSetStorage backup_storage seg_id_set)))
   (reset-meta!
     #'segset-storage
     (assoc
@@ -1567,17 +1541,16 @@
       'segset-storage
       :ns
       *ns*))
-  (def maybe-segset-storage
-   (fn maybe_segset_storage
-     ([backup_storage]
-       (if (config/property "datomic.backupUseSegsetStorage")
-         (segset-storage
-           backup_storage
-           (let [temp__5804__auto__ (latest-t backup_storage)]
-             (when temp__5804__auto__
-               (let [prior_backup_t temp__5804__auto__]
-                 (into #{} (backup-seg-ids backup_storage prior_backup_t))))))
-         backup_storage))))
+  (defn maybe-segset-storage
+    ([backup_storage]
+      (if (config/property "datomic.backupUseSegsetStorage")
+        (segset-storage
+          backup_storage
+          (let [temp__5804__auto__ (latest-t backup_storage)]
+            (when temp__5804__auto__
+              (let [prior_backup_t temp__5804__auto__]
+                (into #{} (backup-seg-ids backup_storage prior_backup_t))))))
+        backup_storage)))
   (reset-meta!
     #'maybe-segset-storage
     (assoc
@@ -1586,99 +1559,98 @@
       'maybe-segset-storage
       :ns
       *ns*))
-  (def backup-db
-   (fn backup_db
-     ([from_uri to_storage progress concurrency incremental?]
-       (let [cluster_conf (uri/parse-db from_uri)
-             resolved_cluster_conf (or
-                                     (coord/resolve-db-name cluster_conf)
-                                     (error/raise
-                                       :catalog/db-does-not-exist
-                                       (str "Database does not exist: " from_uri)))
-             from_cluster (create-cluster resolved_cluster_conf concurrency)
-             to_storage (maybe-segset-storage to_storage)
-             _ (ensure-claim to_storage (cluster/dbId from_cluster))
-             olookup (domain/system-cache-olookup from_cluster)
-             job (create-backup-job from_cluster olookup)
-             map__21626 job
-             map__21626 (if (seq? map__21626)
-                          (if (next map__21626)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21626))
-                            (if (seq map__21626) (first map__21626) {}))
-                          map__21626)
-             index_top_node (get map__21626 :index-top-node)
-             log_root_node (get map__21626 :log-root-node)
-             db_id (get map__21626 :db-id)
-             t (get map__21626 :t)
-             backup (create-value-backup
-                      :from-cluster
-                      from_cluster
-                      :to-storage
-                      to_storage
-                      :progress
-                      progress
-                      :ids->nodes
-                      (create-ids->nodes olookup)
-                      :concurrency
-                      concurrency
-                      :incremental?
-                      incremental?)]
-         (future-call
-           (fn fn__21627
-             ([]
-               (try
-                 (let [m_21628 {:event :backup/db, :t t, :db-id (:db-id job)}
-                       ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                      "datomic.backup")]
-                                         (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                           (.info
-                                             ^org.slf4j.Logger logger
-                                             (logger/process (assoc m_21628 :phase :begin))))
-                                         nil)
-                       start__8553__auto__ (java.lang.System/nanoTime)
-                       result__8554__auto__ (try
-                                              (do
-                                                (backup-node backup index_top_node)
-                                                (backup-node backup log_root_node)
-                                                (when-not (:k (backup-roots job t to_storage))
-                                                  (throw
-                                                    (java.lang.RuntimeException.
-                                                      "Backup roots failed")))
-                                                {:returned :succeeded})
-                                              (catch
-                                                java.lang.Throwable
-                                                t__8555__auto__
-                                                {:threw t__8555__auto__}))
-                       elapsed_21629 (- (java.lang.System/nanoTime) start__8553__auto__)
-                       msec_21630 (logger/format-as-msec (long elapsed_21629))]
-                   (let [endmsg__8556__auto__ (merge
-                                                (assoc m_21628 :msec msec_21630 :phase :end)
-                                                (when (:threw result__8554__auto__)
-                                                  {:threw (class (:threw result__8554__auto__))}))
-                         logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")]
-                     (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                       (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-                     nil)
-                   (if (contains? result__8554__auto__ :returned)
-                     (:returned result__8554__auto__)
-                     (do (throw (:threw result__8554__auto__)) nil)))
-                 (catch
-                   java.lang.Throwable
-                   t__8798__auto__
-                   (do
-                     (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")
-                           ex t__8798__auto__]
-                       (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                         (.warn
-                           ^org.slf4j.Logger logger
-                           (logger/process "error executing future")
-                           ^java.lang.Throwable ex)
-                         (logger/caused-by logger ex))
-                       nil)
-                     (monitor/alarm :UnhandledException)
-                     (throw ^java.lang.Throwable t__8798__auto__)
-                     nil))))))))))
+  (defn backup-db
+    ([from_uri to_storage progress concurrency incremental?]
+      (let [cluster_conf (uri/parse-db from_uri)
+            resolved_cluster_conf (or
+                                    (coord/resolve-db-name cluster_conf)
+                                    (error/raise
+                                      :catalog/db-does-not-exist
+                                      (str "Database does not exist: " from_uri)))
+            from_cluster (create-cluster resolved_cluster_conf concurrency)
+            to_storage (maybe-segset-storage to_storage)
+            _ (ensure-claim to_storage (cluster/dbId from_cluster))
+            olookup (domain/system-cache-olookup from_cluster)
+            job (create-backup-job from_cluster olookup)
+            map__21626 job
+            map__21626 (if (seq? map__21626)
+                         (if (next map__21626)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21626))
+                           (if (seq map__21626) (first map__21626) {}))
+                         map__21626)
+            index_top_node (get map__21626 :index-top-node)
+            log_root_node (get map__21626 :log-root-node)
+            db_id (get map__21626 :db-id)
+            t (get map__21626 :t)
+            backup (create-value-backup
+                     :from-cluster
+                     from_cluster
+                     :to-storage
+                     to_storage
+                     :progress
+                     progress
+                     :ids->nodes
+                     (create-ids->nodes olookup)
+                     :concurrency
+                     concurrency
+                     :incremental?
+                     incremental?)]
+        (future-call
+          (fn fn__21627
+            ([]
+              (try
+                (let [m_21628 {:event :backup/db, :t t, :db-id (:db-id job)}
+                      ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                     "datomic.backup")]
+                                        (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                          (.info
+                                            ^org.slf4j.Logger logger
+                                            (logger/process (assoc m_21628 :phase :begin))))
+                                        nil)
+                      start__8553__auto__ (java.lang.System/nanoTime)
+                      result__8554__auto__ (try
+                                             (do
+                                               (backup-node backup index_top_node)
+                                               (backup-node backup log_root_node)
+                                               (when-not (:k (backup-roots job t to_storage))
+                                                 (throw
+                                                   (java.lang.RuntimeException.
+                                                     "Backup roots failed")))
+                                               {:returned :succeeded})
+                                             (catch
+                                               java.lang.Throwable
+                                               t__8555__auto__
+                                               {:threw t__8555__auto__}))
+                      elapsed_21629 (- (java.lang.System/nanoTime) start__8553__auto__)
+                      msec_21630 (logger/format-as-msec (long elapsed_21629))]
+                  (let [endmsg__8556__auto__ (merge
+                                               (assoc m_21628 :msec msec_21630 :phase :end)
+                                               (when (:threw result__8554__auto__)
+                                                 {:threw (class (:threw result__8554__auto__))}))
+                        logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")]
+                    (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                      (.info ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+                    nil)
+                  (if (contains? result__8554__auto__ :returned)
+                    (:returned result__8554__auto__)
+                    (do (throw (:threw result__8554__auto__)) nil)))
+                (catch
+                  java.lang.Throwable
+                  t__8798__auto__
+                  (do
+                    (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")
+                          ex t__8798__auto__]
+                      (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                        (.warn
+                          ^org.slf4j.Logger logger
+                          (logger/process "error executing future")
+                          ^java.lang.Throwable ex)
+                        (logger/caused-by logger ex))
+                      nil)
+                    (monitor/alarm :UnhandledException)
+                    (throw ^java.lang.Throwable t__8798__auto__)
+                    nil)))))))))
   (reset-meta!
     #'backup-db
     (assoc
@@ -1705,16 +1677,15 @@
       'backup-concurrency
       :ns
       *ns*))
-  (def backup
-   (fn backup
-     ([from_conn_uri to_storage_uri sse? progress incremental?]
-       (let [storage (create-storage to_storage_uri sse?)]
-         (backup-db
-           from_conn_uri
-           storage
-           progress
-           (backup-concurrency to_storage_uri)
-           incremental?)))))
+  (defn backup
+    ([from_conn_uri to_storage_uri sse? progress incremental?]
+      (let [storage (create-storage to_storage_uri sse?)]
+        (backup-db
+          from_conn_uri
+          storage
+          progress
+          (backup-concurrency to_storage_uri)
+          incremental?))))
   (reset-meta!
     #'backup
     (assoc
@@ -1725,15 +1696,14 @@
       'backup
       :ns
       *ns*))
-  (def restore
-   (fn restore
-     ([from_storage_uri to_uri progress t incremental?]
-       (restore-db
-         {:from-storage (create-storage from_storage_uri), :t t}
-         {:to-uri to_uri}
-         progress
-         (backup-concurrency from_storage_uri)
-         incremental?))))
+  (defn restore
+    ([from_storage_uri to_uri progress t incremental?]
+      (restore-db
+        {:from-storage (create-storage from_storage_uri), :t t}
+        {:to-uri to_uri}
+        progress
+        (backup-concurrency from_storage_uri)
+        incremental?)))
   (reset-meta!
     #'restore
     (assoc
@@ -1755,119 +1725,116 @@
           ([p1__21644#]
             (vector (format "%02x" p1__21644#) (str/upper-case (format "%02x" p1__21644#)))))
         (range 256))))
-  (def missing-seg-ids
-   (fn missing_seg_ids
-     ([backup_storage seg_id_set]
-       (when-not (set? seg_id_set)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'set? 'seg-id-set))))))
-       (let [value_substorage (substorage backup_storage "values")
-             map__21648 (queue/queue-seq (long (* (* (count prefixes) 1000) 10)))
-             map__21648 (if (seq? map__21648)
-                          (if (next map__21648)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21648))
-                            (if (seq map__21648) (first map__21648) {}))
-                          map__21648)
-             fill (get map__21648 :fill)
-             done (get map__21648 :done)
-             drain (get map__21648 :drain)
-             ms_fut (future-call
-                      (fn fn__21649
-                        ([]
-                          (reduce
-                            (fn fn__21650 ([acc k] (disj acc k)))
-                            seg_id_set
-                            (^clojure.lang.IFn drain)))))]
-         (let [futs (mapv
-                      (fn fn__21653
-                        ([prefix]
-                          (common/pfuture
-                            (deref thread-pool)
-                            (fn fn__21654
-                              ([]
-                                (let [m_21655 {:event :verify/list-prefix, :prefix prefix}
-                                      ___8552__auto__ (let [logger
-                                                            (org.slf4j.LoggerFactory/getLogger
-                                                              "datomic.backup")]
-                                                        (when (.isInfoEnabled
-                                                                ^org.slf4j.Logger logger)
-                                                          (.info
-                                                            ^org.slf4j.Logger logger
-                                                            (logger/process
-                                                              (assoc m_21655 :phase :begin))))
-                                                        nil)
-                                      start__8553__auto__ (java.lang.System/nanoTime)
-                                      result__8554__auto__ (try
-                                                             {:returned
-                                                              (run!
-                                                                fill
-                                                                (filter
-                                                                  (fn 
-                                                                    fn__21659
-                                                                    ([p1__21647#]
-                                                                      (contains?
-                                                                        seg_id_set
-                                                                        p1__21647#)))
-                                                                  (:ks
-                                                                    (list-keys
-                                                                      (substorage
-                                                                        value_substorage
-                                                                        prefix)
-                                                                      ""))))}
-                                                             (catch
-                                                               java.lang.Throwable
-                                                               t__8555__auto__
-                                                               {:threw t__8555__auto__}))
-                                      elapsed_21656 (-
-                                                      (java.lang.System/nanoTime)
-                                                      start__8553__auto__)
-                                      msec_21657 (logger/format-as-msec (long elapsed_21656))]
-                                  (let [endmsg__8556__auto__ (merge
-                                                               (assoc
-                                                                 m_21655
-                                                                 :msec
-                                                                 msec_21657
-                                                                 :phase
-                                                                 :end)
-                                                               (when
-                                                                 (:threw result__8554__auto__)
-                                                                 {:threw
-                                                                  (class
-                                                                    (:threw
-                                                                      result__8554__auto__))}))
-                                        logger (org.slf4j.LoggerFactory/getLogger
-                                                 "datomic.backup")]
-                                    (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                      (.info
-                                        ^org.slf4j.Logger logger
-                                        (logger/process endmsg__8556__auto__)))
-                                    nil)
-                                  (if (contains? result__8554__auto__ :returned)
-                                    (:returned result__8554__auto__)
-                                    (do (throw (:threw result__8554__auto__)) nil))))))))
-                      prefixes)]
-           (loop [seq_21668 (seq futs) chunk_21669 nil count_21670 0 i_21671 0]
-             (if (< i_21671 count_21670)
-               (let [fut (.nth ^clojure.lang.Indexed chunk_21669 (int i_21671))]
-                 (deref fut)
-                 (recur seq_21668 chunk_21669 count_21670 (inc i_21671)))
-               (let [temp__5804__auto__ (seq seq_21668)]
-                 (when temp__5804__auto__
-                   (let [seq_21668 temp__5804__auto__]
-                     (if (chunked-seq? seq_21668)
-                       (let [c__6065__auto__ (chunk-first seq_21668)]
-                         (recur
-                           (chunk-rest seq_21668)
-                           c__6065__auto__
-                           (int (count c__6065__auto__))
-                           (int 0)))
-                       (let [fut (first seq_21668)]
-                         (deref fut)
-                         (recur (next seq_21668) nil 0 0))))))))
-           (^clojure.lang.IFn done))
-         (deref ms_fut)))))
+  (defn missing-seg-ids
+    ([backup_storage seg_id_set]
+      (when-not (set? seg_id_set)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'set? 'seg-id-set))))))
+      (let [value_substorage (substorage backup_storage "values")
+            map__21648 (queue/queue-seq (long (* (* (count prefixes) 1000) 10)))
+            map__21648 (if (seq? map__21648)
+                         (if (next map__21648)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21648))
+                           (if (seq map__21648) (first map__21648) {}))
+                         map__21648)
+            fill (get map__21648 :fill)
+            done (get map__21648 :done)
+            drain (get map__21648 :drain)
+            ms_fut (future-call
+                     (fn fn__21649
+                       ([]
+                         (reduce
+                           (fn fn__21650 ([acc k] (disj acc k)))
+                           seg_id_set
+                           (^clojure.lang.IFn drain)))))]
+        (let [futs (mapv
+                     (fn fn__21653
+                       ([prefix]
+                         (common/pfuture
+                           (deref thread-pool)
+                           (fn fn__21654
+                             ([]
+                               (let [m_21655 {:event :verify/list-prefix, :prefix prefix}
+                                     ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                                    "datomic.backup")]
+                                                       (when (.isInfoEnabled
+                                                               ^org.slf4j.Logger logger)
+                                                         (.info
+                                                           ^org.slf4j.Logger logger
+                                                           (logger/process
+                                                             (assoc m_21655 :phase :begin))))
+                                                       nil)
+                                     start__8553__auto__ (java.lang.System/nanoTime)
+                                     result__8554__auto__ (try
+                                                            {:returned
+                                                             (run!
+                                                               fill
+                                                               (filter
+                                                                 (fn 
+                                                                   fn__21659
+                                                                   ([p1__21647#]
+                                                                     (contains?
+                                                                       seg_id_set
+                                                                       p1__21647#)))
+                                                                 (:ks
+                                                                   (list-keys
+                                                                     (substorage
+                                                                       value_substorage
+                                                                       prefix)
+                                                                     ""))))}
+                                                            (catch
+                                                              java.lang.Throwable
+                                                              t__8555__auto__
+                                                              {:threw t__8555__auto__}))
+                                     elapsed_21656 (-
+                                                     (java.lang.System/nanoTime)
+                                                     start__8553__auto__)
+                                     msec_21657 (logger/format-as-msec (long elapsed_21656))]
+                                 (let [endmsg__8556__auto__ (merge
+                                                              (assoc
+                                                                m_21655
+                                                                :msec
+                                                                msec_21657
+                                                                :phase
+                                                                :end)
+                                                              (when
+                                                                (:threw result__8554__auto__)
+                                                                {:threw
+                                                                 (class
+                                                                   (:threw
+                                                                     result__8554__auto__))}))
+                                       logger (org.slf4j.LoggerFactory/getLogger "datomic.backup")]
+                                   (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                     (.info
+                                       ^org.slf4j.Logger logger
+                                       (logger/process endmsg__8556__auto__)))
+                                   nil)
+                                 (if (contains? result__8554__auto__ :returned)
+                                   (:returned result__8554__auto__)
+                                   (do (throw (:threw result__8554__auto__)) nil))))))))
+                     prefixes)]
+          (loop [seq_21668 (seq futs) chunk_21669 nil count_21670 0 i_21671 0]
+            (if (< i_21671 count_21670)
+              (let [fut (.nth ^clojure.lang.Indexed chunk_21669 (int i_21671))]
+                (deref fut)
+                (recur seq_21668 chunk_21669 count_21670 (inc i_21671)))
+              (let [temp__5804__auto__ (seq seq_21668)]
+                (when temp__5804__auto__
+                  (let [seq_21668 temp__5804__auto__]
+                    (if (chunked-seq? seq_21668)
+                      (let [c__6065__auto__ (chunk-first seq_21668)]
+                        (recur
+                          (chunk-rest seq_21668)
+                          c__6065__auto__
+                          (int (count c__6065__auto__))
+                          (int 0)))
+                      (let [fut (first seq_21668)]
+                        (deref fut)
+                        (recur (next seq_21668) nil 0 0))))))))
+          (^clojure.lang.IFn done))
+        (deref ms_fut))))
   (reset-meta!
     #'missing-seg-ids
     (assoc
@@ -1876,29 +1843,28 @@
       'missing-seg-ids
       :ns
       *ns*))
-  (def unreadable-seg-ids
-   (fn unreadable_seg_ids
-     ([lookup seg_ids]
-       (let [unreadable? (fn unreadable_QMARK_
-                           ([p1__21675#]
-                             (try
-                               (do (get lookup p1__21675#) false)
-                               (catch java.lang.Throwable _ true))))]
-         (keep
-           deref
-           (seque
-             pool-size
-             (map
-               (fn fn__21678
-                 ([k]
-                   (common/pfuture
-                     (deref thread-pool)
-                     (fn fn__21679
-                       ([]
-                         (when (^clojure.lang.IFn unreadable? k)
-                           (common/log-and-print {:event :verify-backup/unreadable-segment, :k k})
-                           k))))))
-               seg_ids)))))))
+  (defn unreadable-seg-ids
+    ([lookup seg_ids]
+      (let [unreadable? (fn unreadable_QMARK_
+                          ([p1__21675#]
+                            (try
+                              (do (get lookup p1__21675#) false)
+                              (catch java.lang.Throwable _ true))))]
+        (keep
+          deref
+          (seque
+            pool-size
+            (map
+              (fn fn__21678
+                ([k]
+                  (common/pfuture
+                    (deref thread-pool)
+                    (fn fn__21679
+                      ([]
+                        (when (^clojure.lang.IFn unreadable? k)
+                          (common/log-and-print {:event :verify-backup/unreadable-segment, :k k})
+                          k))))))
+              seg_ids))))))
   (reset-meta!
     #'unreadable-seg-ids
     (assoc
@@ -1907,57 +1873,55 @@
       'unreadable-seg-ids
       :ns
       *ns*))
-  (def verify-backup
-   (fn verify_backup
-     ([p__21683]
-       (let [map__21684 p__21683
-             map__21684 (if (seq? map__21684)
-                          (if (next map__21684)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21684))
-                            (if (seq map__21684) (first map__21684) {}))
-                          map__21684)
-             backup_uri (get map__21684 :backup-uri)
-             t (get map__21684 :t)
-             read_all (get map__21684 :read-all)
-             backup_storage (create-storage backup_uri nil)
-             map__21685 (or
-                          (read-roots t backup_storage)
-                          (error/raise :verify/roots-missing (str "No database root for t " t)))
-             map__21685 (if (seq? map__21685)
-                          (if (next map__21685)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21685))
-                            (if (seq map__21685) (first map__21685) {}))
-                          map__21685)
-             version (get map__21685 :backup/version)]
-         (when (< version 3)
-           (throw
-             (java.lang.RuntimeException. "Verify not supported for pre-2015 backup format.")))
-         (let [_ nil
-               seg_id_set (into #{} (backup-seg-ids backup_storage t))
-               missing (missing-seg-ids backup_storage seg_id_set)
-               segcount (count seg_id_set)
-               progress (fn progress
-                          ([x]
-                            (when (= (mod x 1000) 0)
-                              (println
-                                (format
-                                  "%s of %s"
-                                  x
-                                  (java.lang.Integer/valueOf (int segcount)))))))]
-           (merge
-             {:t t,
-              :total-segments (java.lang.Integer/valueOf (int segcount)),
-              :missing-segments missing}
-             (when read_all
-               {:unreadable-segments
-                (doall
-                  (unreadable-seg-ids
-                    (:lookup (create-restore-job backup_storage t))
-                    (map-indexed
-                      (fn fn__21688 ([idx arg] (^clojure.lang.IFn progress idx) arg))
-                      seg_id_set)))})))))))
+  (defn verify-backup
+    ([p__21683]
+      (let [map__21684 p__21683
+            map__21684 (if (seq? map__21684)
+                         (if (next map__21684)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21684))
+                           (if (seq map__21684) (first map__21684) {}))
+                         map__21684)
+            backup_uri (get map__21684 :backup-uri)
+            t (get map__21684 :t)
+            read_all (get map__21684 :read-all)
+            backup_storage (create-storage backup_uri nil)
+            map__21685 (or
+                         (read-roots t backup_storage)
+                         (error/raise :verify/roots-missing (str "No database root for t " t)))
+            map__21685 (if (seq? map__21685)
+                         (if (next map__21685)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21685))
+                           (if (seq map__21685) (first map__21685) {}))
+                         map__21685)
+            version (get map__21685 :backup/version)]
+        (when (< version 3)
+          (throw (java.lang.RuntimeException. "Verify not supported for pre-2015 backup format.")))
+        (let [_ nil
+              seg_id_set (into #{} (backup-seg-ids backup_storage t))
+              missing (missing-seg-ids backup_storage seg_id_set)
+              segcount (count seg_id_set)
+              progress (fn progress
+                         ([x]
+                           (when (= (mod x 1000) 0)
+                             (println
+                               (format
+                                 "%s of %s"
+                                 x
+                                 (java.lang.Integer/valueOf (int segcount)))))))]
+          (merge
+            {:t t,
+             :total-segments (java.lang.Integer/valueOf (int segcount)),
+             :missing-segments missing}
+            (when read_all
+              {:unreadable-segments
+               (doall
+                 (unreadable-seg-ids
+                   (:lookup (create-restore-job backup_storage t))
+                   (map-indexed
+                     (fn fn__21688 ([idx arg] (^clojure.lang.IFn progress idx) arg))
+                     seg_id_set)))}))))))
   (reset-meta!
     #'verify-backup
     (assoc
@@ -1966,34 +1930,33 @@
       'verify-backup
       :ns
       *ns*))
-  (def load-database
-   (fn load_database
-     ([backup_uri t]
-       (let [storage (create-storage backup_uri)
-             map__21692 (or
-                          (read-roots (or t (require-latest-t backup_uri)) storage)
-                          (error/raise
-                            :restore/roots-missing
-                            (str "No database root for t " t " in backup")))
-             map__21692 (if (seq? map__21692)
-                          (if (next map__21692)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21692))
-                            (if (seq map__21692) (first map__21692) {}))
-                          map__21692)
-             roots map__21692
-             db_id (get map__21692 :db-id)
-             index_root_id (get map__21692 :index-root-id)
-             log_root_id (get map__21692 :log-root-id)
-             log_tail (get map__21692 :log-tail)
-             olookup (caching-olookup (substorage storage "values") (:backup/version roots))
-             index (index/load-index olookup index_root_id)
-             tail (log/load-tail (ByteBuffer/wrap ^bytes log_tail))
-             idxdb (db/db db_id index)
-             log (log/->LogValue nil olookup log_root_id tail)
-             db (:db (log/catchup idxdb log true))
-             log (log/->LogValue db olookup log_root_id (:memlog db))]
-         {:db-id db_id, :db db, :log log}))))
+  (defn load-database
+    ([backup_uri t]
+      (let [storage (create-storage backup_uri)
+            map__21692 (or
+                         (read-roots (or t (require-latest-t backup_uri)) storage)
+                         (error/raise
+                           :restore/roots-missing
+                           (str "No database root for t " t " in backup")))
+            map__21692 (if (seq? map__21692)
+                         (if (next map__21692)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21692))
+                           (if (seq map__21692) (first map__21692) {}))
+                         map__21692)
+            roots map__21692
+            db_id (get map__21692 :db-id)
+            index_root_id (get map__21692 :index-root-id)
+            log_root_id (get map__21692 :log-root-id)
+            log_tail (get map__21692 :log-tail)
+            olookup (caching-olookup (substorage storage "values") (:backup/version roots))
+            index (index/load-index olookup index_root_id)
+            tail (log/load-tail (ByteBuffer/wrap ^bytes log_tail))
+            idxdb (db/db db_id index)
+            log (log/->LogValue nil olookup log_root_id tail)
+            db (:db (log/catchup idxdb log true))
+            log (log/->LogValue db olookup log_root_id (:memlog db))]
+        {:db-id db_id, :db db, :log log})))
   (reset-meta!
     #'load-database
     (assoc

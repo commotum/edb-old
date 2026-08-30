@@ -144,38 +144,37 @@
       'report-val-fn-fail
       :ns
       *ns*))
-  (def lookup-transformer
-   (fn lookup_transformer
-     ([m & p__9851]
-       (let [map__9852 p__9851
-             map__9852 (if (seq? map__9852)
-                         (if (next map__9852)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__9852))
-                           (if (seq map__9852) (first map__9852) {}))
-                         map__9852)
-             key_fn (get map__9852 :key-fn identity)
-             val_fn (get map__9852 :val-fn identity)
-             try_val_fn (fn try_val_fn
-                          ([raw k]
-                            (try
-                              (^clojure.lang.IFn val_fn raw)
-                              (catch java.lang.Throwable t (report-val-fn-fail t raw k)))))]
-         (reify
-           clojure.lang.ILookup
-           datomic.cache.ICachedLookup
-           (valAtUncached
-             [this k not_found]
-             (let [ret (get-uncached m (^clojure.lang.IFn key_fn k) not_found)]
-               (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k))))
-           (getFromCache
-             [this k not_found]
-             (let [ret (get-from-cache m (^clojure.lang.IFn key_fn k) not_found)]
-               (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k))))
-           (valAt
-             [this k not_found]
-             (let [ret (get m (^clojure.lang.IFn key_fn k) not_found)]
-               (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k))))
-           (valAt [this k] (.valAt this k nil)))))))
+  (defn lookup-transformer
+    ([m & p__9851]
+      (let [map__9852 p__9851
+            map__9852 (if (seq? map__9852)
+                        (if (next map__9852)
+                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__9852))
+                          (if (seq map__9852) (first map__9852) {}))
+                        map__9852)
+            key_fn (get map__9852 :key-fn identity)
+            val_fn (get map__9852 :val-fn identity)
+            try_val_fn (fn try_val_fn
+                         ([raw k]
+                           (try
+                             (^clojure.lang.IFn val_fn raw)
+                             (catch java.lang.Throwable t (report-val-fn-fail t raw k)))))]
+        (reify
+          clojure.lang.ILookup
+          datomic.cache.ICachedLookup
+          (valAtUncached
+            [this k not_found]
+            (let [ret (get-uncached m (^clojure.lang.IFn key_fn k) not_found)]
+              (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k))))
+          (getFromCache
+            [this k not_found]
+            (let [ret (get-from-cache m (^clojure.lang.IFn key_fn k) not_found)]
+              (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k))))
+          (valAt
+            [this k not_found]
+            (let [ret (get m (^clojure.lang.IFn key_fn k) not_found)]
+              (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k))))
+          (valAt [this k] (.valAt this k nil))))))
   (reset-meta!
     #'lookup-transformer
     (assoc
@@ -187,29 +186,28 @@
       'lookup-transformer
       :ns
       *ns*))
-  (def safe-lookup-transformer
-   (fn safe_lookup_transformer
-     ([m & p__9858]
-       (let [map__9859 p__9858
-             map__9859 (if (seq? map__9859)
-                         (if (next map__9859)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__9859))
-                           (if (seq map__9859) (first map__9859) {}))
-                         map__9859)
-             key_fn (get map__9859 :key-fn identity)
-             val_fn (get map__9859 :val-fn identity)
-             try_val_fn (fn try_val_fn
-                          ([raw k not_found]
-                            (try
-                              (^clojure.lang.IFn val_fn (^clojure.lang.IFn key_fn k) raw not_found)
-                              (catch java.lang.Throwable t (report-val-fn-fail t raw k)))))]
-         (reify
-           clojure.lang.ILookup
-           (valAt
-             [this k not_found]
-             (let [ret (get m (^clojure.lang.IFn key_fn k) not_found)]
-               (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k not_found))))
-           (valAt [this k] (.valAt this k nil)))))))
+  (defn safe-lookup-transformer
+    ([m & p__9858]
+      (let [map__9859 p__9858
+            map__9859 (if (seq? map__9859)
+                        (if (next map__9859)
+                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__9859))
+                          (if (seq map__9859) (first map__9859) {}))
+                        map__9859)
+            key_fn (get map__9859 :key-fn identity)
+            val_fn (get map__9859 :val-fn identity)
+            try_val_fn (fn try_val_fn
+                         ([raw k not_found]
+                           (try
+                             (^clojure.lang.IFn val_fn (^clojure.lang.IFn key_fn k) raw not_found)
+                             (catch java.lang.Throwable t (report-val-fn-fail t raw k)))))]
+        (reify
+          clojure.lang.ILookup
+          (valAt
+            [this k not_found]
+            (let [ret (get m (^clojure.lang.IFn key_fn k) not_found)]
+              (if (= ret not_found) not_found (^clojure.lang.IFn try_val_fn ret k not_found))))
+          (valAt [this k] (.valAt this k nil))))))
   (reset-meta!
     #'safe-lookup-transformer
     (assoc
@@ -221,38 +219,37 @@
       'safe-lookup-transformer
       :ns
       *ns*))
-  (def lookup-cache
-   (fn lookup_cache
-     ([m cache f]
-       (reify
-         datomic.cache.impl.FastCount
-         datomic.cache.impl.CachePut
-         clojure.lang.ILookup
-         datomic.cache.impl.CacheRemove
-         datomic.cache.ICachedLookup
-         (valAtUncached
-           [this k not_found]
-           (let [ret (get cache k)]
-             (when f (^clojure.lang.IFn f k (if ret :hit :miss)))
-             (if ret ret (get m k not_found))))
-         (getFromCache
-           [this k not_found]
-           (let [ret (get cache k)]
-             (when f (^clojure.lang.IFn f k (if ret :hit :miss)))
-             (if ret ret not_found)))
-         (valAt
-           [this k not_found]
-           (let [ret (get cache k)]
-             (when f (^clojure.lang.IFn f k (if ret :hit :miss)))
-             (if ret
-               ret
-               (let [v (get m k not_found)] (when-not (= v not_found) (put cache k v)) v))))
-         (valAt [this k] (.valAt this k nil))
-         (clear [this] (clear cache))
-         (remove [this k] (remove cache k))
-         (put [this k v] (put cache k v))
-         (fast-count [this] (fast-count cache))))
-     ([m cache] (lookup-cache m cache nil))))
+  (defn lookup-cache
+    ([m cache f]
+      (reify
+        datomic.cache.impl.FastCount
+        datomic.cache.impl.CachePut
+        clojure.lang.ILookup
+        datomic.cache.impl.CacheRemove
+        datomic.cache.ICachedLookup
+        (valAtUncached
+          [this k not_found]
+          (let [ret (get cache k)]
+            (when f (^clojure.lang.IFn f k (if ret :hit :miss)))
+            (if ret ret (get m k not_found))))
+        (getFromCache
+          [this k not_found]
+          (let [ret (get cache k)]
+            (when f (^clojure.lang.IFn f k (if ret :hit :miss)))
+            (if ret ret not_found)))
+        (valAt
+          [this k not_found]
+          (let [ret (get cache k)]
+            (when f (^clojure.lang.IFn f k (if ret :hit :miss)))
+            (if ret
+              ret
+              (let [v (get m k not_found)] (when-not (= v not_found) (put cache k v)) v))))
+        (valAt [this k] (.valAt this k nil))
+        (clear [this] (clear cache))
+        (remove [this k] (remove cache k))
+        (put [this k v] (put cache k v))
+        (fast-count [this] (fast-count cache))))
+    ([m cache] (lookup-cache m cache nil)))
   (reset-meta!
     #'lookup-cache
     (assoc
@@ -315,40 +312,39 @@
       'double-lookup
       :ns
       *ns*))
-  (def repairing-cache-stack
-   (fn repairing_cache_stack
-     ([p__9880]
-       (let [map__9881 p__9880
-             map__9881 (if (seq? map__9881)
-                         (if (next map__9881)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__9881))
-                           (if (seq map__9881) (first map__9881) {}))
-                         map__9881)
-             cache_1 (get map__9881 :cache-1)
-             cache_2 (get map__9881 :cache-2)
-             close_cache_1? (get map__9881 :close-cache-1? true)
-             close_cache_2? (get map__9881 :close-cache-2? true)
-             on_repair (get map__9881 :on-repair)]
-         (reify
-           datomic.cache.impl.CachePut
-           clojure.lang.ILookup
-           java.lang.AutoCloseable
-           (valAt
-             [this k not_found]
-             (let [v (get cache_1 k not_found)]
-               (if (= v not_found)
-                 (let [v (get cache_2 k not_found)]
-                   (when-not (= v not_found) (put cache_1 k v) (^clojure.lang.IFn on_repair k))
-                   v)
-                 v)))
-           (valAt [this k] (.valAt this k nil))
-           (put [this k v] (do (put cache_1 k v) (put cache_2 k v)))
-           (^void close
-             [this]
-             (do
-               (when close_cache_1? (.close ^java.lang.AutoCloseable cache_1))
-               (when close_cache_2? (.close ^java.lang.AutoCloseable cache_2) nil)
-               nil)))))))
+  (defn repairing-cache-stack
+    ([p__9880]
+      (let [map__9881 p__9880
+            map__9881 (if (seq? map__9881)
+                        (if (next map__9881)
+                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__9881))
+                          (if (seq map__9881) (first map__9881) {}))
+                        map__9881)
+            cache_1 (get map__9881 :cache-1)
+            cache_2 (get map__9881 :cache-2)
+            close_cache_1? (get map__9881 :close-cache-1? true)
+            close_cache_2? (get map__9881 :close-cache-2? true)
+            on_repair (get map__9881 :on-repair)]
+        (reify
+          datomic.cache.impl.CachePut
+          clojure.lang.ILookup
+          java.lang.AutoCloseable
+          (valAt
+            [this k not_found]
+            (let [v (get cache_1 k not_found)]
+              (if (= v not_found)
+                (let [v (get cache_2 k not_found)]
+                  (when-not (= v not_found) (put cache_1 k v) (^clojure.lang.IFn on_repair k))
+                  v)
+                v)))
+          (valAt [this k] (.valAt this k nil))
+          (put [this k v] (do (put cache_1 k v) (put cache_2 k v)))
+          (^void close
+            [this]
+            (do
+              (when close_cache_1? (.close ^java.lang.AutoCloseable cache_1))
+              (when close_cache_2? (.close ^java.lang.AutoCloseable cache_2) nil)
+              nil))))))
   (reset-meta!
     #'repairing-cache-stack
     (assoc

@@ -77,17 +77,16 @@
         (clojure.core/import 'java.util.concurrent.Semaphore)
         (clojure.core/import 'java.util.concurrent.TimeUnit))))
   (set! *warn-on-reflection* true)
-  (def wrap-metrics
-   (fn wrap_metrics
-     ([f record_kv succ fail]
-       (let [start (java.lang.System/nanoTime)]
-         (fn fn__21577
-           ([result]
-             (let [v (^clojure.lang.IFn f result)]
-               (^clojure.lang.IFn record_kv
-                 (if v succ fail)
-                 (long (- (java.lang.System/nanoTime) start)))
-               v)))))))
+  (defn wrap-metrics
+    ([f record_kv succ fail]
+      (let [start (java.lang.System/nanoTime)]
+        (fn fn__21577
+          ([result]
+            (let [v (^clojure.lang.IFn f result)]
+              (^clojure.lang.IFn record_kv
+                (if v succ fail)
+                (long (- (java.lang.System/nanoTime) start)))
+              v))))))
   (reset-meta!
     #'wrap-metrics
     (assoc
@@ -96,8 +95,7 @@
       'wrap-metrics
       :ns
       *ns*))
-  (def safe-deref
-   (fn safe_deref ([fut] (when-not (.isCancelled ^java.util.concurrent.Future fut) (deref fut)))))
+  (defn safe-deref ([fut] (when-not (.isCancelled ^java.util.concurrent.Future fut) (deref fut))))
   (reset-meta!
     #'safe-deref
     (assoc
@@ -134,14 +132,13 @@
       'put-result-handler
       :ns
       *ns*))
-  (def op-listener
-   (fn op_listener
-     ([f]
-       (reify
-         datomic.spy.memcached.internal.OperationCompletionListener
-         (^void onComplete
-           [this ^java.util.concurrent.Future fut]
-           (do (^clojure.lang.IFn f fut) nil))))))
+  (defn op-listener
+    ([f]
+      (reify
+        datomic.spy.memcached.internal.OperationCompletionListener
+        (^void onComplete
+          [this ^java.util.concurrent.Future fut]
+          (do (^clojure.lang.IFn f fut) nil)))))
   (reset-meta!
     #'op-listener
     (assoc
@@ -166,32 +163,31 @@
       'memcached-client-supports-autodiscovery?
       :ns
       *ns*))
-  (def set-client-mode*
-   (fn set_client_mode_STAR_
-     ([builder auto_discovery config_timeout_msec]
-       (let [client_mode (java.lang.Enum/valueOf
-                           (java.lang.Class/forName "datomic.spy.memcached.ClientMode")
-                           (if auto_discovery "Dynamic" "Static"))
-             set_client_mode_method (.getDeclaredMethod
-                                      (java.lang.Class/forName
-                                        "datomic.spy.memcached.ConnectionFactoryBuilder")
-                                      "setClientMode"
-                                      (into-array
-                                        [(java.lang.Class/forName
-                                           "datomic.spy.memcached.ClientMode")]))
-             set_config_op_timeout_method (.getDeclaredMethod
-                                            (java.lang.Class/forName
-                                              "datomic.spy.memcached.ConnectionFactoryBuilder")
-                                            "setConfigOpTimeout"
-                                            (into-array [java.lang.Long/TYPE]))]
-         (.invoke
-           ^java.lang.reflect.Method set_client_mode_method
-           builder
-           (into-array [client_mode]))
-         (.invoke
-           ^java.lang.reflect.Method set_config_op_timeout_method
-           builder
-           (into-array [config_timeout_msec]))))))
+  (defn set-client-mode*
+    ([builder auto_discovery config_timeout_msec]
+      (let [client_mode (java.lang.Enum/valueOf
+                          (java.lang.Class/forName "datomic.spy.memcached.ClientMode")
+                          (if auto_discovery "Dynamic" "Static"))
+            set_client_mode_method (.getDeclaredMethod
+                                     (java.lang.Class/forName
+                                       "datomic.spy.memcached.ConnectionFactoryBuilder")
+                                     "setClientMode"
+                                     (into-array
+                                       [(java.lang.Class/forName
+                                          "datomic.spy.memcached.ClientMode")]))
+            set_config_op_timeout_method (.getDeclaredMethod
+                                           (java.lang.Class/forName
+                                             "datomic.spy.memcached.ConnectionFactoryBuilder")
+                                           "setConfigOpTimeout"
+                                           (into-array [java.lang.Long/TYPE]))]
+        (.invoke
+          ^java.lang.reflect.Method set_client_mode_method
+          builder
+          (into-array [client_mode]))
+        (.invoke
+          ^java.lang.reflect.Method set_config_op_timeout_method
+          builder
+          (into-array [config_timeout_msec])))))
   (reset-meta!
     #'set-client-mode*
     (assoc
@@ -244,50 +240,49 @@
         [this bs]
         (datomic.spy.memcached.CachedData. (int SPY_BYTEARRAY_FLAGS) ^bytes bs (int SPY_MAX_SIZE)))
       (^boolean asyncDecode [this ^datomic.spy.memcached.CachedData _] (.booleanValue false))))
-  (def factory*
-   (fn factory_STAR_
-     ([p__21590]
-       (let [map__21591 p__21590
-             map__21591 (if (seq? map__21591)
-                          (if (next map__21591)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21591))
-                            (if (seq map__21591) (first map__21591) {}))
-                          map__21591)
-             timeout_msec (get map__21591 :timeout-msec 10)
-             config_timeout_msec (get map__21591 :config-timeout-msec 100)
-             username (get map__21591 :username)
-             password (get map__21591 :password)
-             auto_discovery (get map__21591 :auto-discovery)
-             fact (configure-auto-discovery
-                    (.setTranscoder
-                      (.setAuthWaitTime
-                        (.setOpQueueMaxBlockTime
-                          (.setOpTimeout
-                            (.setHashAlg
-                              (.setFailureMode
-                                (.setLocatorType
-                                  (.setProtocol
-                                    (datomic.spy.memcached.ConnectionFactoryBuilder.)
-                                    ConnectionFactoryBuilder$Protocol/BINARY)
-                                  ConnectionFactoryBuilder$Locator/CONSISTENT)
-                                FailureMode/Redistribute)
-                              DefaultHashAlgorithm/KETAMA_HASH)
-                            (long ^java.lang.Number timeout_msec))
-                          (long ^java.lang.Number timeout_msec))
-                        (long ^java.lang.Number timeout_msec))
-                      legacy-transcoder)
-                    auto_discovery
-                    config_timeout_msec)]
-         (when (and username password)
-           (.setAuthDescriptor
-             ^datomic.spy.memcached.ConnectionFactoryBuilder fact
-             (datomic.spy.memcached.auth.AuthDescriptor.
-               (into-array java.lang.String ["PLAIN"])
-               (datomic.spy.memcached.auth.PlainCallbackHandler.
-                 ^java.lang.String username
-                 ^java.lang.String password))))
-         (.build ^datomic.spy.memcached.ConnectionFactoryBuilder fact)))))
+  (defn factory*
+    ([p__21590]
+      (let [map__21591 p__21590
+            map__21591 (if (seq? map__21591)
+                         (if (next map__21591)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21591))
+                           (if (seq map__21591) (first map__21591) {}))
+                         map__21591)
+            timeout_msec (get map__21591 :timeout-msec 10)
+            config_timeout_msec (get map__21591 :config-timeout-msec 100)
+            username (get map__21591 :username)
+            password (get map__21591 :password)
+            auto_discovery (get map__21591 :auto-discovery)
+            fact (configure-auto-discovery
+                   (.setTranscoder
+                     (.setAuthWaitTime
+                       (.setOpQueueMaxBlockTime
+                         (.setOpTimeout
+                           (.setHashAlg
+                             (.setFailureMode
+                               (.setLocatorType
+                                 (.setProtocol
+                                   (datomic.spy.memcached.ConnectionFactoryBuilder.)
+                                   ConnectionFactoryBuilder$Protocol/BINARY)
+                                 ConnectionFactoryBuilder$Locator/CONSISTENT)
+                               FailureMode/Redistribute)
+                             DefaultHashAlgorithm/KETAMA_HASH)
+                           (long ^java.lang.Number timeout_msec))
+                         (long ^java.lang.Number timeout_msec))
+                       (long ^java.lang.Number timeout_msec))
+                     legacy-transcoder)
+                   auto_discovery
+                   config_timeout_msec)]
+        (when (and username password)
+          (.setAuthDescriptor
+            ^datomic.spy.memcached.ConnectionFactoryBuilder fact
+            (datomic.spy.memcached.auth.AuthDescriptor.
+              (into-array java.lang.String ["PLAIN"])
+              (datomic.spy.memcached.auth.PlainCallbackHandler.
+                ^java.lang.String username
+                ^java.lang.String password))))
+        (.build ^datomic.spy.memcached.ConnectionFactoryBuilder fact))))
   (reset-meta!
     #'factory*
     (assoc
@@ -303,27 +298,26 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.memcached" "factory") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.memcached" "factory") factory*)
-  (def create-client
-   (fn create_client
-     ([p__21594]
-       (let [map__21595 p__21594
-             map__21595 (if (seq? map__21595)
-                          (if (next map__21595)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21595))
-                            (if (seq map__21595) (first map__21595) {}))
-                          map__21595)
-             args map__21595
-             servers (get map__21595 :servers)]
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.memcached")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process {:event :memcached/connect, :servers servers})))
-           nil)
-         (datomic.spy.memcached.MemcachedClient.
-           (factory args)
-           (AddrUtil/getAddresses ^java.lang.String servers))))))
+  (defn create-client
+    ([p__21594]
+      (let [map__21595 p__21594
+            map__21595 (if (seq? map__21595)
+                         (if (next map__21595)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21595))
+                           (if (seq map__21595) (first map__21595) {}))
+                         map__21595)
+            args map__21595
+            servers (get map__21595 :servers)]
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.memcached")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process {:event :memcached/connect, :servers servers})))
+          nil)
+        (datomic.spy.memcached.MemcachedClient.
+          (factory args)
+          (AddrUtil/getAddresses ^java.lang.String servers)))))
   (reset-meta!
     #'create-client
     (assoc
@@ -333,8 +327,7 @@
       'create-client
       :ns
       *ns*))
-  (def fits-in-memcached?
-   (fn fits_in_memcached_QMARK_ ([v] (<= (.remaining ^java.nio.Buffer v) 1000000))))
+  (defn fits-in-memcached? ([v] (<= (.remaining ^java.nio.Buffer v) 1000000)))
   (reset-meta!
     #'fits-in-memcached?
     (assoc
@@ -371,7 +364,7 @@
   (reset-meta!
     #'memcached-metric-names
     (assoc {:private true, :column (int 1)} :name 'memcached-metric-names :ns *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       RecoveringClientImpl
       (rc-shutdown [_])
@@ -380,8 +373,8 @@
       (rc-reset-if-crashed [_]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.memcached" "RecoveringClientImpl")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'RecoveringClientImpl :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'RecoveringClientImpl :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -393,13 +386,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.memcached"
                                        "RecoveringClientImpl"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.memcached" "rc-shutdown")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'rc-get {:arglists (clojure.core/list ['_ 'k])}),
@@ -409,13 +402,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.memcached"
                                        "RecoveringClientImpl"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.memcached" "rc-get")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*)))
-    (let [protocol_signature__7436 (assoc
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*)))
+    (let [protocol_signature__7468 (assoc
                                      {:tag 'datomic.spy.memcached.internal.OperationFuture,
                                       :name
                                       (.withMeta
@@ -427,13 +420,13 @@
                                      (clojure.lang.RT/var
                                        "datomic.memcached"
                                        "RecoveringClientImpl"))
-          protocol_method_name__7437 (with-meta
-                                       (:name protocol_signature__7436)
-                                       protocol_signature__7436)]
+          protocol_method_name__7469 (with-meta
+                                       (:name protocol_signature__7468)
+                                       protocol_signature__7468)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.memcached" "rc-set")
-        (assoc protocol_signature__7436 :name protocol_method_name__7437 :ns *ns*)))
-    (let [protocol_signature__7438 (assoc
+        (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*)))
+    (let [protocol_signature__7470 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -445,12 +438,12 @@
                                      (clojure.lang.RT/var
                                        "datomic.memcached"
                                        "RecoveringClientImpl"))
-          protocol_method_name__7439 (with-meta
-                                       (:name protocol_signature__7438)
-                                       protocol_signature__7438)]
+          protocol_method_name__7471 (with-meta
+                                       (:name protocol_signature__7470)
+                                       protocol_signature__7470)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.memcached" "rc-reset-if-crashed")
-        (assoc protocol_signature__7438 :name protocol_method_name__7439 :ns *ns*))))
+        (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
   (deftype
     RecoveringClient
     [client_ref create_client sem]
@@ -500,10 +493,9 @@
         (do (.acquire ^java.util.concurrent.Semaphore sem) (.shutdown (deref client_ref)) nil)
         (finally (.release ^java.util.concurrent.Semaphore sem)))))
   (clojure.core/import 'datomic.memcached.RecoveringClient)
-  (def ->RecoveringClient
-   (fn __GT_RecoveringClient
-     ([client_ref create_client sem]
-       (datomic.memcached.RecoveringClient. client_ref create_client sem))))
+  (defn ->RecoveringClient
+    ([client_ref create_client sem]
+      (datomic.memcached.RecoveringClient. client_ref create_client sem)))
   (reset-meta!
     #'->RecoveringClient
     (assoc
@@ -512,13 +504,12 @@
       '->RecoveringClient
       :ns
       *ns*))
-  (def create-recovering-client
-   (fn create_recovering_client
-     ([create_client]
-       (datomic.memcached.RecoveringClient.
-         (atom (^clojure.lang.IFn create_client))
-         create_client
-         (java.util.concurrent.Semaphore. (int 1))))))
+  (defn create-recovering-client
+    ([create_client]
+      (datomic.memcached.RecoveringClient.
+        (atom (^clojure.lang.IFn create_client))
+        create_client
+        (java.util.concurrent.Semaphore. (int 1)))))
   (reset-meta!
     #'create-recovering-client
     (assoc
@@ -529,116 +520,111 @@
       'create-recovering-client
       :ns
       *ns*))
-  (def create-cache
-   (fn create_cache
-     ([p__21673]
-       (let [map__21674 p__21673
-             map__21674 (if (seq? map__21674)
-                          (if (next map__21674)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21674))
-                            (if (seq map__21674) (first map__21674) {}))
-                          map__21674)
-             args map__21674
-             shutdown_client? (get map__21674 :shutdown-client? true)
-             record_kv (get map__21674 :record-kv monitor/add-stat)
-             client (get map__21674 :client)
-             metric_names (get map__21674 :metric-names memcached-metric-names)
-             vec__21675 metric_names
-             io_counter (nth vec__21675 (int 0) nil)
-             io_latency (nth vec__21675 (int 1) nil)
-             hit_counter (nth vec__21675 (int 2) nil)
-             get_succeeded (nth vec__21675 (int 3) nil)
-             get_failed (nth vec__21675 (int 4) nil)
-             get_missed (nth vec__21675 (int 5) nil)
-             get_timeout (nth vec__21675 (int 6) nil)
-             get_queue_full (nth vec__21675 (int 7) nil)
-             put_succeeded (nth vec__21675 (int 8) nil)
-             put_failed (nth vec__21675 (int 9) nil)
-             ttl (-> (config/property "datomic.memcachedExpirationDays")
-                  (* 24)
-                  (* 60)
-                  (* 60)
-                  (int))
-             bytes_class (java.lang.Class/forName "[B")]
-         (reify
-           datomic.cache.impl.CachePut
-           clojure.lang.ILookup
-           java.lang.AutoCloseable
-           (put
-             [this k v]
-             (if (fits-in-memcached? v)
-               (try
-                 (let [G__21691 (rc-set
-                                  client
-                                  k
-                                  (java.lang.Integer/valueOf (int ttl))
-                                  (if (instance? java.nio.ByteBuffer v) (io/alias-buf-bytes v) v))]
-                   (.addListener
-                     ^datomic.spy.memcached.internal.OperationFuture G__21691
-                     (op-listener
-                       (wrap-metrics put-result-handler record_kv put_succeeded put_failed)))
-                   G__21691)
-                 (catch java.lang.Exception e nil))
-               (do
-                 (^clojure.lang.IFn record_kv :MemcacheItemTooLarge 1)
-                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.memcached")]
-                   (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                     (.info
-                       ^org.slf4j.Logger logger
-                       (logger/process {:event :memcached/item-too-large, :key k})))
-                   nil))))
-           (valAt
-             [this k not_found]
-             (do
-               (io-stats/inc! io_counter)
-               (let [record_latencies (fn record_latencies
-                                        ([nanos p__21682]
-                                          (let [vec__21684 p__21682
-                                                v (nth vec__21684 (int 0) nil)
-                                                ex (nth vec__21684 (int 1) nil)]
-                                            (when-not v
-                                              (^clojure.lang.IFn record_kv get_failed nanos))
-                                            (io-stats/inc!
-                                              io_latency
-                                              (long ^java.lang.Number nanos))
-                                            (let [temp__5825__auto__ (cond
-                                                                       v get_succeeded
-                                                                       (nil? ex) get_missed
-                                                                       (instance?
-                                                                         datomic.spy.memcached.OperationTimeoutException
-                                                                         ex)
-                                                                       get_timeout
-                                                                       (instance?
-                                                                         java.lang.IllegalStateException
-                                                                         ex)
-                                                                       (do get_queue_full))]
-                                              (when temp__5825__auto__
-                                                (let [k temp__5825__auto__]
-                                                  (^clojure.lang.IFn record_kv k nanos)))))))
-                     vec__21679 (let [start__8781__auto__ (java.lang.System/nanoTime)
-                                      result__8782__auto__ (try
-                                                             (try
-                                                               [(rc-get client k)]
-                                                               (catch
-                                                                 java.lang.Throwable
-                                                                 t
-                                                                 [nil t]))
-                                                             (catch java.lang.Throwable e e))]
-                                  (^clojure.lang.IFn record_latencies
-                                    (long (- (java.lang.System/nanoTime) start__8781__auto__))
-                                    result__8782__auto__)
-                                  (common/return-or-throw result__8782__auto__))
-                     result (nth vec__21679 (int 0) nil)
-                     ex (nth vec__21679 (int 1) nil)]
-                 (^clojure.lang.IFn record_kv hit_counter (if result 1 0))
-                 (when ex (throw ^java.lang.Throwable ex))
-                 (cond
-                   (nil? result) not_found
-                   (instance? bytes_class result) (ByteBuffer/wrap ^bytes result)
-                   :else (do result)))))
-           (valAt [this k] (.valAt this k nil))
-           (^void close [this] (do (when shutdown_client? (rc-shutdown client)) nil)))))))
+  (defn create-cache
+    ([p__21673]
+      (let [map__21674 p__21673
+            map__21674 (if (seq? map__21674)
+                         (if (next map__21674)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21674))
+                           (if (seq map__21674) (first map__21674) {}))
+                         map__21674)
+            args map__21674
+            shutdown_client? (get map__21674 :shutdown-client? true)
+            record_kv (get map__21674 :record-kv monitor/add-stat)
+            client (get map__21674 :client)
+            metric_names (get map__21674 :metric-names memcached-metric-names)
+            vec__21675 metric_names
+            io_counter (nth vec__21675 (int 0) nil)
+            io_latency (nth vec__21675 (int 1) nil)
+            hit_counter (nth vec__21675 (int 2) nil)
+            get_succeeded (nth vec__21675 (int 3) nil)
+            get_failed (nth vec__21675 (int 4) nil)
+            get_missed (nth vec__21675 (int 5) nil)
+            get_timeout (nth vec__21675 (int 6) nil)
+            get_queue_full (nth vec__21675 (int 7) nil)
+            put_succeeded (nth vec__21675 (int 8) nil)
+            put_failed (nth vec__21675 (int 9) nil)
+            ttl (-> (config/property "datomic.memcachedExpirationDays") (* 24) (* 60) (* 60) (int))
+            bytes_class (java.lang.Class/forName "[B")]
+        (reify
+          datomic.cache.impl.CachePut
+          clojure.lang.ILookup
+          java.lang.AutoCloseable
+          (put
+            [this k v]
+            (if (fits-in-memcached? v)
+              (try
+                (let [G__21691 (rc-set
+                                 client
+                                 k
+                                 (java.lang.Integer/valueOf (int ttl))
+                                 (if (instance? java.nio.ByteBuffer v) (io/alias-buf-bytes v) v))]
+                  (.addListener
+                    ^datomic.spy.memcached.internal.OperationFuture G__21691
+                    (op-listener
+                      (wrap-metrics put-result-handler record_kv put_succeeded put_failed)))
+                  G__21691)
+                (catch java.lang.Exception e nil))
+              (do
+                (^clojure.lang.IFn record_kv :MemcacheItemTooLarge 1)
+                (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.memcached")]
+                  (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                    (.info
+                      ^org.slf4j.Logger logger
+                      (logger/process {:event :memcached/item-too-large, :key k})))
+                  nil))))
+          (valAt
+            [this k not_found]
+            (do
+              (io-stats/inc! io_counter)
+              (let [record_latencies (fn record_latencies
+                                       ([nanos p__21682]
+                                         (let [vec__21684 p__21682
+                                               v (nth vec__21684 (int 0) nil)
+                                               ex (nth vec__21684 (int 1) nil)]
+                                           (when-not v
+                                             (^clojure.lang.IFn record_kv get_failed nanos))
+                                           (io-stats/inc!
+                                             io_latency
+                                             (long ^java.lang.Number nanos))
+                                           (let [temp__5825__auto__ (cond
+                                                                      v get_succeeded
+                                                                      (nil? ex) get_missed
+                                                                      (instance?
+                                                                        datomic.spy.memcached.OperationTimeoutException
+                                                                        ex)
+                                                                      get_timeout
+                                                                      (instance?
+                                                                        java.lang.IllegalStateException
+                                                                        ex)
+                                                                      (do get_queue_full))]
+                                             (when temp__5825__auto__
+                                               (let [k temp__5825__auto__]
+                                                 (^clojure.lang.IFn record_kv k nanos)))))))
+                    vec__21679 (let [start__8781__auto__ (java.lang.System/nanoTime)
+                                     result__8782__auto__ (try
+                                                            (try
+                                                              [(rc-get client k)]
+                                                              (catch
+                                                                java.lang.Throwable
+                                                                t
+                                                                [nil t]))
+                                                            (catch java.lang.Throwable e e))]
+                                 (^clojure.lang.IFn record_latencies
+                                   (long (- (java.lang.System/nanoTime) start__8781__auto__))
+                                   result__8782__auto__)
+                                 (common/return-or-throw result__8782__auto__))
+                    result (nth vec__21679 (int 0) nil)
+                    ex (nth vec__21679 (int 1) nil)]
+                (^clojure.lang.IFn record_kv hit_counter (if result 1 0))
+                (when ex (throw ^java.lang.Throwable ex))
+                (cond
+                  (nil? result) not_found
+                  (instance? bytes_class result) (ByteBuffer/wrap ^bytes result)
+                  :else (do result)))))
+          (valAt [this k] (.valAt this k nil))
+          (^void close [this] (do (when shutdown_client? (rc-shutdown client)) nil))))))
   (reset-meta!
     #'create-cache
     (assoc

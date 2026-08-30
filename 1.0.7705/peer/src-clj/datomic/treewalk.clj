@@ -18,12 +18,12 @@
           'datomic.index
           ['datomic.clusterfs :as 'clusterfs]
           ['datomic.common :as 'common]))))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol NodeId (node-id [_] "Return storage id of this node."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.treewalk" "NodeId")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'NodeId :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'NodeId :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'node-id {:arglists (clojure.core/list ['_])}),
@@ -31,13 +31,13 @@
                                       :doc "Return storage id of this node."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.treewalk" "NodeId"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.treewalk" "node-id")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       TreeWalker
       (child-node-ids [_] "Ids of nodes owned by this node.")
@@ -46,8 +46,8 @@
         "Subtree objects for child nodes that contain more nodes.\n    Subtrees implement TreeWalker. Nil if children are leaves."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.treewalk" "TreeWalker")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'TreeWalker :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'TreeWalker :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -57,13 +57,13 @@
                                       :doc "Ids of nodes owned by this node."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.treewalk" "TreeWalker"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.treewalk" "child-node-ids")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*)))
-    (let [protocol_signature__7437 (assoc
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*)))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -74,12 +74,12 @@
                                       "Subtree objects for child nodes that contain more nodes.\n    Subtrees implement TreeWalker. Nil if children are leaves."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.treewalk" "TreeWalker"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.treewalk" "subtrees")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*))))
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*))))
   (def index-root-keys
    [:aevt-hist
     :aevt
@@ -135,9 +135,8 @@
   (reset-meta!
     #'->Node
     (assoc {:arglists (clojure.core/list ['id 'walker]), :column (int 1)} :name '->Node :ns *ns*))
-  (def lookup-val
-   (fn lookup_val
-     ([lookup id allow_missing?] (if allow_missing? (get lookup id) (common/getx lookup id)))))
+  (defn lookup-val
+    ([lookup id allow_missing?] (if allow_missing? (get lookup id) (common/getx lookup id))))
   (reset-meta!
     #'lookup-val
     (assoc
@@ -146,14 +145,13 @@
       'lookup-val
       :ns
       *ns*))
-  (def create-node
-   (fn create_node
-     ([id lookup allow_missing?]
-       (when-not id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'id)))))
-       (when-not lookup
-         (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
-       (let [temp__5804__auto__ (lookup-val lookup id allow_missing?)]
-         (when temp__5804__auto__ (let [v temp__5804__auto__] (->Node id v)))))))
+  (defn create-node
+    ([id lookup allow_missing?]
+      (when-not id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'id)))))
+      (when-not lookup
+        (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
+      (let [temp__5804__auto__ (lookup-val lookup id allow_missing?)]
+        (when temp__5804__auto__ (let [v temp__5804__auto__] (->Node id v))))))
   (reset-meta!
     #'create-node
     (assoc
@@ -164,20 +162,19 @@
       'create-node
       :ns
       *ns*))
-  (def create-ids->nodes
-   (fn create_ids__GT_nodes
-     ([lookup allow_missing?]
-       (do
-         (when-not lookup
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
-         (fn fn__14838
-           ([ids]
-             (remove
-               nil?
-               (map
-                 (fn fn__14839 ([p1__14837#] (create-node p1__14837# lookup allow_missing?)))
-                 ids))))))
-     ([lookup] (create-ids->nodes lookup false))))
+  (defn create-ids->nodes
+    ([lookup allow_missing?]
+      (do
+        (when-not lookup
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
+        (fn fn__14838
+          ([ids]
+            (remove
+              nil?
+              (map
+                (fn fn__14839 ([p1__14837#] (create-node p1__14837# lookup allow_missing?)))
+                ids))))))
+    ([lookup] (create-ids->nodes lookup false)))
   (reset-meta!
     #'create-ids->nodes
     (assoc
@@ -188,15 +185,14 @@
       'create-ids->nodes
       :ns
       *ns*))
-  (def create-parent-node
-   (fn create_parent_node
-     ([id walker lookup allow_missing?]
-       (let [ids_>nodes (create-ids->nodes lookup allow_missing?)
-             temp__5804__auto__ (lookup-val lookup id allow_missing?)]
-         (when temp__5804__auto__
-           (let [top temp__5804__auto__]
-             (datomic.treewalk.Node. id (^clojure.lang.IFn walker top))))))
-     ([id walker lookup] (create-parent-node id walker lookup false))))
+  (defn create-parent-node
+    ([id walker lookup allow_missing?]
+      (let [ids_>nodes (create-ids->nodes lookup allow_missing?)
+            temp__5804__auto__ (lookup-val lookup id allow_missing?)]
+        (when temp__5804__auto__
+          (let [top temp__5804__auto__]
+            (datomic.treewalk.Node. id (^clojure.lang.IFn walker top))))))
+    ([id walker lookup] (create-parent-node id walker lookup false)))
   (reset-meta!
     #'create-parent-node
     (assoc
@@ -206,14 +202,13 @@
       'create-parent-node
       :ns
       *ns*))
-  (def tree-node-ids
-   (fn tree_node_ids
-     ([node ids_>nodes]
-       (concat
-         (mapcat
-           (fn fn__14846 ([p1__14845#] (tree-node-ids p1__14845# ids_>nodes)))
-           (subtrees node ids_>nodes))
-         (child-node-ids node)))))
+  (defn tree-node-ids
+    ([node ids_>nodes]
+      (concat
+        (mapcat
+          (fn fn__14846 ([p1__14845#] (tree-node-ids p1__14845# ids_>nodes)))
+          (subtrees node ids_>nodes))
+        (child-node-ids node))))
   (reset-meta!
     #'tree-node-ids
     (assoc
@@ -236,19 +231,18 @@
       'index-top-walker
       :ns
       *ns*))
-  (def index-tree-seq
-   (fn index_tree_seq
-     ([id lookup allow_missing?]
-       (do
-         (when-not id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'id)))))
-         (when-not lookup
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
-         (let [ids_>nodes (create-ids->nodes lookup allow_missing?)
-               temp__5804__auto__ (lookup-val lookup id allow_missing?)]
-           (when temp__5804__auto__
-             (let [top temp__5804__auto__]
-               (concat (tree-node-ids (index-top-walker top) ids_>nodes) [id]))))))
-     ([id lookup] (index-tree-seq id lookup false))))
+  (defn index-tree-seq
+    ([id lookup allow_missing?]
+      (do
+        (when-not id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'id)))))
+        (when-not lookup
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
+        (let [ids_>nodes (create-ids->nodes lookup allow_missing?)
+              temp__5804__auto__ (lookup-val lookup id allow_missing?)]
+          (when temp__5804__auto__
+            (let [top temp__5804__auto__]
+              (concat (tree-node-ids (index-top-walker top) ids_>nodes) [id]))))))
+    ([id lookup] (index-tree-seq id lookup false)))
   (reset-meta!
     #'index-tree-seq
     (assoc
@@ -261,35 +255,34 @@
       'index-tree-seq
       :ns
       *ns*))
-  (def log-root-walker
-   (fn log_root_walker
-     ([root lookup allow_missing?]
-       (reify
-         datomic.treewalk.TreeWalker
-         (subtrees
-           [this ids_>nodes]
-           (map
-             (fn fn__14856
-               ([p__14855]
-                 (let [map__14857 p__14855
-                       map__14857 (if (seq? map__14857)
-                                    (if (next map__14857)
-                                      (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                        (to-array map__14857))
-                                      (if (seq map__14857) (first map__14857) {}))
-                                    map__14857)
-                       uuid (get map__14857 :uuid)
-                       temp__5804__auto__ (lookup-val lookup (str uuid) allow_missing?)]
-                   (when temp__5804__auto__
-                     (let [v temp__5804__auto__]
-                       (datomic.treewalk.Node.
-                         (str uuid)
-                         (reify
-                           datomic.treewalk.TreeWalker
-                           (subtrees [this _] nil)
-                           (child-node-ids [this] (map (comp str :uuid) v)))))))))
-             root))
-         (child-node-ids [this] (map (comp str :uuid) root))))))
+  (defn log-root-walker
+    ([root lookup allow_missing?]
+      (reify
+        datomic.treewalk.TreeWalker
+        (subtrees
+          [this ids_>nodes]
+          (map
+            (fn fn__14856
+              ([p__14855]
+                (let [map__14857 p__14855
+                      map__14857 (if (seq? map__14857)
+                                   (if (next map__14857)
+                                     (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                       (to-array map__14857))
+                                     (if (seq map__14857) (first map__14857) {}))
+                                   map__14857)
+                      uuid (get map__14857 :uuid)
+                      temp__5804__auto__ (lookup-val lookup (str uuid) allow_missing?)]
+                  (when temp__5804__auto__
+                    (let [v temp__5804__auto__]
+                      (datomic.treewalk.Node.
+                        (str uuid)
+                        (reify
+                          datomic.treewalk.TreeWalker
+                          (subtrees [this _] nil)
+                          (child-node-ids [this] (map (comp str :uuid) v)))))))))
+            root))
+        (child-node-ids [this] (map (comp str :uuid) root)))))
   (reset-meta!
     #'log-root-walker
     (assoc
@@ -298,21 +291,20 @@
       'log-root-walker
       :ns
       *ns*))
-  (def log-tree-seq
-   (fn log_tree_seq
-     ([id lookup allow_missing?]
-       (do
-         (when-not id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'id)))))
-         (when-not lookup
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
-         (let [ids_>nodes (create-ids->nodes lookup allow_missing?)
-               temp__5804__auto__ (lookup-val lookup id allow_missing?)]
-           (when temp__5804__auto__
-             (let [root temp__5804__auto__]
-               (concat
-                 (tree-node-ids (log-root-walker root lookup allow_missing?) ids_>nodes)
-                 [id]))))))
-     ([id lookup] (log-tree-seq id lookup false))))
+  (defn log-tree-seq
+    ([id lookup allow_missing?]
+      (do
+        (when-not id (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'id)))))
+        (when-not lookup
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'lookup)))))
+        (let [ids_>nodes (create-ids->nodes lookup allow_missing?)
+              temp__5804__auto__ (lookup-val lookup id allow_missing?)]
+          (when temp__5804__auto__
+            (let [root temp__5804__auto__]
+              (concat
+                (tree-node-ids (log-root-walker root lookup allow_missing?) ids_>nodes)
+                [id]))))))
+    ([id lookup] (log-tree-seq id lookup false)))
   (reset-meta!
     #'log-tree-seq
     (assoc
@@ -325,12 +317,11 @@
       'log-tree-seq
       :ns
       *ns*))
-  (def db-seq
-   (fn db_seq
-     ([log_root_node index_top_node lookup]
-       (concat
-         (index-tree-seq (node-id index_top_node) lookup)
-         (log-tree-seq (node-id log_root_node) lookup)))))
+  (defn db-seq
+    ([log_root_node index_top_node lookup]
+      (concat
+        (index-tree-seq (node-id index_top_node) lookup)
+        (log-tree-seq (node-id log_root_node) lookup))))
   (reset-meta!
     #'db-seq
     (assoc

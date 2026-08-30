@@ -17,12 +17,12 @@
         (clojure.core/import 'java.util.concurrent.TimeUnit)
         (clojure.core/import 'java.lang.ref.ReferenceQueue))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Producer (offer-nb [sink item] "Implementaion detail. See offer."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.queue" "Producer")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Producer :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Producer :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -32,18 +32,18 @@
                                       :doc "Implementaion detail. See offer."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.queue" "Producer"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.queue" "offer-nb")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol Consumer (poll-nb [source or-else] "Implementation detail. See poll."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.queue" "Consumer")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'Consumer :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'Consumer :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -53,21 +53,21 @@
                                       :doc "Implementation detail. See poll."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.queue" "Consumer"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.queue" "poll-nb")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*))))
-  (let [protocol_metadata__7437 {:column (int 1)}]
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*))))
+  (let [protocol_metadata__7469 {:column (int 1)}]
     (defprotocol
       BlockingProducer
       (put [sink item] "Inserts item into sink, blocking until successful. Returns logical true.")
       (offer-b [sink item msec] "Implementation detail, see offer."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.queue" "BlockingProducer")
-      (assoc (assoc protocol_metadata__7437 :doc nil) :name 'BlockingProducer :ns *ns*))
-    (let [protocol_signature__7438 (assoc
+      (assoc (assoc protocol_metadata__7469 :doc nil) :name 'BlockingProducer :ns *ns*))
+    (let [protocol_signature__7470 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -78,13 +78,13 @@
                                       "Inserts item into sink, blocking until successful. Returns logical true."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.queue" "BlockingProducer"))
-          protocol_method_name__7439 (with-meta
-                                       (:name protocol_signature__7438)
-                                       protocol_signature__7438)]
+          protocol_method_name__7471 (with-meta
+                                       (:name protocol_signature__7470)
+                                       protocol_signature__7470)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.queue" "put")
-        (assoc protocol_signature__7438 :name protocol_method_name__7439 :ns *ns*)))
-    (let [protocol_signature__7440 (assoc
+        (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*)))
+    (let [protocol_signature__7472 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -94,21 +94,21 @@
                                       :doc "Implementation detail, see offer."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.queue" "BlockingProducer"))
-          protocol_method_name__7441 (with-meta
-                                       (:name protocol_signature__7440)
-                                       protocol_signature__7440)]
+          protocol_method_name__7473 (with-meta
+                                       (:name protocol_signature__7472)
+                                       protocol_signature__7472)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.queue" "offer-b")
-        (assoc protocol_signature__7440 :name protocol_method_name__7441 :ns *ns*))))
-  (let [protocol_metadata__7442 {:column (int 1)}]
+        (assoc protocol_signature__7472 :name protocol_method_name__7473 :ns *ns*))))
+  (let [protocol_metadata__7474 {:column (int 1)}]
     (defprotocol
       BlockingConsumer
       (take [source] "Retrieves item from source, blocking until available.")
       (poll-b [source or-else msec] "Implementation detail, see poll."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.queue" "BlockingConsumer")
-      (assoc (assoc protocol_metadata__7442 :doc nil) :name 'BlockingConsumer :ns *ns*))
-    (let [protocol_signature__7443 (assoc
+      (assoc (assoc protocol_metadata__7474 :doc nil) :name 'BlockingConsumer :ns *ns*))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'take {:arglists (clojure.core/list ['source])}),
@@ -116,13 +116,13 @@
                                       :doc "Retrieves item from source, blocking until available."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.queue" "BlockingConsumer"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.queue" "take")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*)))
-    (let [protocol_signature__7445 (assoc
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*)))
+    (let [protocol_signature__7477 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -132,18 +132,18 @@
                                       :doc "Implementation detail, see poll."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.queue" "BlockingConsumer"))
-          protocol_method_name__7446 (with-meta
-                                       (:name protocol_signature__7445)
-                                       protocol_signature__7445)]
+          protocol_method_name__7478 (with-meta
+                                       (:name protocol_signature__7477)
+                                       protocol_signature__7477)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.queue" "poll-b")
-        (assoc protocol_signature__7445 :name protocol_method_name__7446 :ns *ns*))))
-  (let [protocol_metadata__7447 {:column (int 1)}]
+        (assoc protocol_signature__7477 :name protocol_method_name__7478 :ns *ns*))))
+  (let [protocol_metadata__7479 {:column (int 1)}]
     (defprotocol Clear (clear [q] "Clear all items from queue, returning queue."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.queue" "Clear")
-      (assoc (assoc protocol_metadata__7447 :doc nil) :name 'Clear :ns *ns*))
-    (let [protocol_signature__7448 (assoc
+      (assoc (assoc protocol_metadata__7479 :doc nil) :name 'Clear :ns *ns*))
+    (let [protocol_signature__7480 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'clear {:arglists (clojure.core/list ['q])}),
@@ -151,14 +151,13 @@
                                       :doc "Clear all items from queue, returning queue."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.queue" "Clear"))
-          protocol_method_name__7449 (with-meta
-                                       (:name protocol_signature__7448)
-                                       protocol_signature__7448)]
+          protocol_method_name__7481 (with-meta
+                                       (:name protocol_signature__7480)
+                                       protocol_signature__7480)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.queue" "clear")
-        (assoc protocol_signature__7448 :name protocol_method_name__7449 :ns *ns*))))
-  (def offer
-   (fn offer ([sink item msec] (offer-b sink item msec)) ([sink item] (offer-nb sink item))))
+        (assoc protocol_signature__7480 :name protocol_method_name__7481 :ns *ns*))))
+  (defn offer ([sink item msec] (offer-b sink item msec)) ([sink item] (offer-nb sink item)))
   (reset-meta!
     #'offer
     (assoc
@@ -167,11 +166,10 @@
       'offer
       :ns
       *ns*))
-  (def poll
-   (fn poll
-     ([source or_else msec] (poll-b source or_else msec))
-     ([source or_else] (poll-nb source or_else))
-     ([source] (poll-nb source nil))))
+  (defn poll
+    ([source or_else msec] (poll-b source or_else msec))
+    ([source or_else] (poll-nb source or_else))
+    ([source] (poll-nb source nil)))
   (reset-meta!
     #'poll
     (assoc
@@ -232,9 +230,8 @@
       [this item]
       (put delay_queue {:item item, :timestamp (+ delay (java.lang.System/currentTimeMillis))})))
   (clojure.core/import 'datomic.queue.DelayingQueue)
-  (def ->DelayingQueue
-   (fn __GT_DelayingQueue
-     ([delay delay_queue thread] (datomic.queue.DelayingQueue. delay delay_queue thread))))
+  (defn ->DelayingQueue
+    ([delay delay_queue thread] (datomic.queue.DelayingQueue. delay delay_queue thread)))
   (reset-meta!
     #'->DelayingQueue
     (assoc
@@ -243,32 +240,31 @@
       '->DelayingQueue
       :ns
       *ns*))
-  (def delaying-queue
-   (fn delaying_queue
-     ([msec dest_queue]
-       (let [delay_queue (java.util.concurrent.LinkedBlockingQueue.)
-             t (java.lang.Thread.
-                 (fn fn__11448
-                   ([]
-                     (loop []
-                       (let [obj (take delay_queue)]
-                         (when-not (= obj delay_queue)
-                           (let [map__11449 obj
-                                 map__11449 (if (seq? map__11449)
-                                              (if (next map__11449)
-                                                (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                  (to-array map__11449))
-                                                (if (seq map__11449) (first map__11449) {}))
-                                              map__11449)
-                                 item (get map__11449 :item)
-                                 timestamp (get map__11449 :timestamp)]
-                             (let [sleep (- timestamp (java.lang.System/currentTimeMillis))]
-                               (when (> sleep 0)
-                                 (java.lang.Thread/sleep (long ^java.lang.Number sleep))))
-                             (put dest_queue item)
-                             (recur))))))))]
-         (.start ^java.lang.Thread t)
-         (datomic.queue.DelayingQueue. msec delay_queue t)))))
+  (defn delaying-queue
+    ([msec dest_queue]
+      (let [delay_queue (java.util.concurrent.LinkedBlockingQueue.)
+            t (java.lang.Thread.
+                (fn fn__11448
+                  ([]
+                    (loop []
+                      (let [obj (take delay_queue)]
+                        (when-not (= obj delay_queue)
+                          (let [map__11449 obj
+                                map__11449 (if (seq? map__11449)
+                                             (if (next map__11449)
+                                               (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                 (to-array map__11449))
+                                               (if (seq map__11449) (first map__11449) {}))
+                                             map__11449)
+                                item (get map__11449 :item)
+                                timestamp (get map__11449 :timestamp)]
+                            (let [sleep (- timestamp (java.lang.System/currentTimeMillis))]
+                              (when (> sleep 0)
+                                (java.lang.Thread/sleep (long ^java.lang.Number sleep))))
+                            (put dest_queue item)
+                            (recur))))))))]
+        (.start ^java.lang.Thread t)
+        (datomic.queue.DelayingQueue. msec delay_queue t))))
   (reset-meta!
     #'delaying-queue
     (assoc

@@ -15,7 +15,7 @@
         (clojure.core/refer 'clojure.core)
         (clojure.core/require ['clojure.spec.alpha :as 's] ['cognitect.anomalies :as 'anom]))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       ThrowableAnomCat
       (-throwable-anom-category
@@ -23,8 +23,8 @@
         "Impl helper for throwable-category. Returns a category by\nwalking the superclasses until a class matches an entry in the\nthrowable-categories map."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.anomalizer" "ThrowableAnomCat")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'ThrowableAnomCat :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'ThrowableAnomCat :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -35,13 +35,13 @@
                                       "Impl helper for throwable-category. Returns a category by\nwalking the superclasses until a class matches an entry in the\nthrowable-categories map."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.anomalizer" "ThrowableAnomCat"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.anomalizer" "-throwable-anom-category")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       ThrowableAnomData
       (-throwable->anom-data
@@ -49,8 +49,8 @@
         "Impl helper for throwable->anom. Returns data to be added\nunder the :data key in the anomaly. Default impl returns nil."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.anomalizer" "ThrowableAnomData")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'ThrowableAnomData :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'ThrowableAnomData :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -63,12 +63,12 @@
                                      (clojure.lang.RT/var
                                        "datomic.anomalizer"
                                        "ThrowableAnomData"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.anomalizer" "-throwable->anom-data")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*))))
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*))))
   (def anom-categories
    #{:cognitect.anomalies/unavailable :cognitect.anomalies/unsupported
      :cognitect.anomalies/interrupted :cognitect.anomalies/conflict :cognitect.anomalies/incorrect
@@ -155,19 +155,17 @@
        'java.lang.InterruptedException :cognitect.anomalies/interrupted}
       :validator
       (spec-validator :datomic.anomalizer/throwable-categories)))
-  (def throwable-class-category
-   (fn throwable_class_category
-     ([tc]
-       (let [cmap (deref throwable-categories)]
-         (loop [c tc]
-           (let [temp__5802__auto__ (^clojure.lang.IFn cmap
-                                      (symbol (.getName ^java.lang.Class c)))]
-             (if temp__5802__auto__
-               (let [cat temp__5802__auto__] cat)
-               (let [temp__5802__auto__ (.getSuperclass ^java.lang.Class c)]
-                 (if temp__5802__auto__
-                   (let [super temp__5802__auto__] (recur super))
-                   :cognitect.anomalies/fault)))))))))
+  (defn throwable-class-category
+    ([tc]
+      (let [cmap (deref throwable-categories)]
+        (loop [c tc]
+          (let [temp__5802__auto__ (^clojure.lang.IFn cmap (symbol (.getName ^java.lang.Class c)))]
+            (if temp__5802__auto__
+              (let [cat temp__5802__auto__] cat)
+              (let [temp__5802__auto__ (.getSuperclass ^java.lang.Class c)]
+                (if temp__5802__auto__
+                  (let [super temp__5802__auto__] (recur super))
+                  :cognitect.anomalies/fault))))))))
   (reset-meta!
     #'throwable-class-category
     (assoc
@@ -183,15 +181,14 @@
       #{'java.util.concurrent.ExecutionException}
       :validator
       (spec-validator :datomic.anomalizer/delegating-throwables)))
-  (def category-delegate
-   (fn category_delegate
-     ([t]
-       (let [dset (deref delegating-throwables)]
-         (loop [c (.getClass t)]
-           (if (^clojure.lang.IFn dset (symbol (.getName ^java.lang.Class c)))
-             (category-delegate (.getCause ^java.lang.Throwable t))
-             (let [temp__5802__auto__ (.getSuperclass ^java.lang.Class c)]
-               (if temp__5802__auto__ (let [super temp__5802__auto__] (recur super)) t))))))))
+  (defn category-delegate
+    ([t]
+      (let [dset (deref delegating-throwables)]
+        (loop [c (.getClass t)]
+          (if (^clojure.lang.IFn dset (symbol (.getName ^java.lang.Class c)))
+            (category-delegate (.getCause ^java.lang.Throwable t))
+            (let [temp__5802__auto__ (.getSuperclass ^java.lang.Class c)]
+              (if temp__5802__auto__ (let [super temp__5802__auto__] (recur super)) t)))))))
   (reset-meta!
     #'category-delegate
     (assoc
@@ -214,22 +211,21 @@
       :ns
       *ns*))
   (extend java.lang.Throwable ThrowableAnomData {:-throwable->anom-data (fn fn__3563 ([t] nil))})
-  (def throwable->anom
-   (fn throwable__GT_anom
-     ([t return_throwable?]
-       (let [data (-throwable->anom-data t)
-             ret (cond->
-                   #:cognitect.anomalies{:message (.getMessage ^java.lang.Throwable t),
-                                         :category (throwable-category t)}
-                   data
-                   (assoc :data data)
-                   return_throwable?
-                   (assoc :throwable (Throwable->map t)))
-             temp__5802__auto__ (.getCause ^java.lang.Throwable t)]
-         (if temp__5802__auto__
-           (let [cause temp__5802__auto__] (assoc ret :cause (throwable->anom cause false)))
-           ret)))
-     ([t] (throwable->anom t true))))
+  (defn throwable->anom
+    ([t return_throwable?]
+      (let [data (-throwable->anom-data t)
+            ret (cond->
+                  #:cognitect.anomalies{:message (.getMessage ^java.lang.Throwable t),
+                                        :category (throwable-category t)}
+                  data
+                  (assoc :data data)
+                  return_throwable?
+                  (assoc :throwable (Throwable->map t)))
+            temp__5802__auto__ (.getCause ^java.lang.Throwable t)]
+        (if temp__5802__auto__
+          (let [cause temp__5802__auto__] (assoc ret :cause (throwable->anom cause false)))
+          ret)))
+    ([t] (throwable->anom t true)))
   (reset-meta!
     #'throwable->anom
     (assoc

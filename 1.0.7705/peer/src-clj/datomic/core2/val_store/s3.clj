@@ -428,66 +428,65 @@
       'wrap-metric-handler
       :ns
       *ns*))
-  (def retry-handler
-   (fn retry_handler
-     ([f op p__22268]
-       (let [map__22269 p__22268
-             map__22269 (if (seq? map__22269)
-                          (if (next map__22269)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22269))
-                            (if (seq map__22269) (first map__22269) {}))
-                          map__22269)
-             backoff (get map__22269 :backoff 200)
-             base (get map__22269 :base 2)
-             retriable? (get map__22269 :retriable? (partial retry/limiting-retry 5))
-             metric_cb (fn metric_cb
-                         ([p__22270]
-                           (let [map__22272 p__22270
-                                 map__22272 (if (seq? map__22272)
-                                              (if (next map__22272)
-                                                (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                  (to-array map__22272))
-                                                (if (seq map__22272) (first map__22272) {}))
-                                              map__22272)
-                                 m map__22272
-                                 ok? (get map__22272 :ok?)
-                                 i (get map__22272 :i)
-                                 result (get map__22272 :result)
-                                 metric_name (get
-                                               (if ok? retry-success-metrics retry-failure-metrics)
-                                               op)]
-                             (if ok?
-                               (when (> (long ^java.lang.Number i) 1)
-                                 (cast/metric*
-                                   cast/instance
-                                   {:name metric_name, :value i, :units :count}))
-                               (do
-                                 (cast/metric*
-                                   cast/instance
-                                   {:name metric_name, :value i, :units :count})
-                                 (cast/event*
-                                   cast/instance
-                                   (merge
-                                     result
-                                     {:msg "S3 op failed",
-                                      :datomic.core2.val-store.s3/op op,
-                                      :datomic.core2.val-store.s3/retry i})))))))]
-         (fn fn__22274
-           ([]
-             (retry/retry
-               f
-               canom/ok?
-               retriable?
-               (fn fn__22275
-                 ([round_map]
-                   (retry/full-jitter
-                     (long
-                       (retry/calc-exp-backoff
-                         (long ^java.lang.Number backoff)
-                         (long ^java.lang.Number base)
-                         round_map)))))
-               {:on-success metric_cb, :on-failure metric_cb})))))))
+  (defn retry-handler
+    ([f op p__22268]
+      (let [map__22269 p__22268
+            map__22269 (if (seq? map__22269)
+                         (if (next map__22269)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22269))
+                           (if (seq map__22269) (first map__22269) {}))
+                         map__22269)
+            backoff (get map__22269 :backoff 200)
+            base (get map__22269 :base 2)
+            retriable? (get map__22269 :retriable? (partial retry/limiting-retry 5))
+            metric_cb (fn metric_cb
+                        ([p__22270]
+                          (let [map__22272 p__22270
+                                map__22272 (if (seq? map__22272)
+                                             (if (next map__22272)
+                                               (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                 (to-array map__22272))
+                                               (if (seq map__22272) (first map__22272) {}))
+                                             map__22272)
+                                m map__22272
+                                ok? (get map__22272 :ok?)
+                                i (get map__22272 :i)
+                                result (get map__22272 :result)
+                                metric_name (get
+                                              (if ok? retry-success-metrics retry-failure-metrics)
+                                              op)]
+                            (if ok?
+                              (when (> (long ^java.lang.Number i) 1)
+                                (cast/metric*
+                                  cast/instance
+                                  {:name metric_name, :value i, :units :count}))
+                              (do
+                                (cast/metric*
+                                  cast/instance
+                                  {:name metric_name, :value i, :units :count})
+                                (cast/event*
+                                  cast/instance
+                                  (merge
+                                    result
+                                    {:msg "S3 op failed",
+                                     :datomic.core2.val-store.s3/op op,
+                                     :datomic.core2.val-store.s3/retry i})))))))]
+        (fn fn__22274
+          ([]
+            (retry/retry
+              f
+              canom/ok?
+              retriable?
+              (fn fn__22275
+                ([round_map]
+                  (retry/full-jitter
+                    (long
+                      (retry/calc-exp-backoff
+                        (long ^java.lang.Number backoff)
+                        (long ^java.lang.Number base)
+                        round_map)))))
+              {:on-success metric_cb, :on-failure metric_cb}))))))
   (reset-meta!
     #'retry-handler
     (assoc

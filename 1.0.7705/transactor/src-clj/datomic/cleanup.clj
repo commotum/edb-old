@@ -55,14 +55,13 @@
       '->Manager
       :ns
       *ns*))
-  (def register-cleanup
-   (fn register_cleanup
-     ([manager object cleanup]
-       (.put
-         (.-phantoms ^datomic.cleanup.Manager manager)
-         (java.lang.ref.PhantomReference. object (.-queue ^datomic.cleanup.Manager manager))
-         cleanup)
-       object)))
+  (defn register-cleanup
+    ([manager object cleanup]
+      (.put
+        (.-phantoms ^datomic.cleanup.Manager manager)
+        (java.lang.ref.PhantomReference. object (.-queue ^datomic.cleanup.Manager manager))
+        cleanup)
+      object))
   (reset-meta!
     #'register-cleanup
     (assoc
@@ -80,16 +79,15 @@
   (reset-meta!
     #'create-manager
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'create-manager :ns *ns*))
-  (def run-queue-loop
-   (fn run_queue_loop
-     ([q error_handler]
-       (loop []
-         (let [f (queue/take q)]
-           (try
-             (^clojure.lang.IFn f)
-             (catch java.lang.Throwable t (^clojure.lang.IFn error_handler t)))
-           (recur)))
-       nil)))
+  (defn run-queue-loop
+    ([q error_handler]
+      (loop []
+        (let [f (queue/take q)]
+          (try
+            (^clojure.lang.IFn f)
+            (catch java.lang.Throwable t (^clojure.lang.IFn error_handler t)))
+          (recur)))
+      nil))
   (reset-meta!
     #'run-queue-loop
     (assoc

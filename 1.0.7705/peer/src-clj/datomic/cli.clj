@@ -24,20 +24,19 @@
           ['clojure.java.shell :as 'sh]
           ['clojure.string :as 'str]
           ['datomic.require :as 'req]))))
-  (def unique-index
-   (fn unique_index
-     ([xrel k v]
-       (reduce
-         (fn fn__15373
-           ([m x]
-             (let [temp__5802__auto__ (get x k)]
-               (if temp__5802__auto__
-                 (let [xk temp__5802__auto__ temp__5802__auto__ (if v (get x v) x)]
-                   (if temp__5802__auto__ (let [xv temp__5802__auto__] (assoc m xk xv)) m))
-                 m))))
-         {}
-         xrel))
-     ([xrel k] (unique-index xrel k nil))))
+  (defn unique-index
+    ([xrel k v]
+      (reduce
+        (fn fn__15373
+          ([m x]
+            (let [temp__5802__auto__ (get x k)]
+              (if temp__5802__auto__
+                (let [xk temp__5802__auto__ temp__5802__auto__ (if v (get x v) x)]
+                  (if temp__5802__auto__ (let [xv temp__5802__auto__] (assoc m xk xv)) m))
+                m))))
+        {}
+        xrel))
+    ([xrel k] (unique-index xrel k nil)))
   (reset-meta!
     #'unique-index
     (assoc
@@ -255,23 +254,22 @@
       'missing-values
       :ns
       *ns*))
-  (def parse-or-exit!
-   (fn parse_or_exit_BANG_
-     ([cmd args spec positions vararg]
-       (if (some #{"--help"} args)
-         (do (print-help cmd spec positions) (java.lang.System/exit (int -1)) nil)
-         (let [m (apply-defaults
-                   (coerce-vals (expand-short-names (cli->map args positions vararg) spec) spec)
-                   spec)
-               missing (missing-values m spec)]
-           (if (seq missing)
-             (do
-               (print-help cmd spec positions)
-               (println "\n**** missing required arguments" missing "****")
-               (java.lang.System/exit (int -1))
-               nil)
-             m))))
-     ([cmd arg spec positions] (parse-or-exit! cmd arg spec positions nil))))
+  (defn parse-or-exit!
+    ([cmd args spec positions vararg]
+      (if (some #{"--help"} args)
+        (do (print-help cmd spec positions) (java.lang.System/exit (int -1)) nil)
+        (let [m (apply-defaults
+                  (coerce-vals (expand-short-names (cli->map args positions vararg) spec) spec)
+                  spec)
+              missing (missing-values m spec)]
+          (if (seq missing)
+            (do
+              (print-help cmd spec positions)
+              (println "\n**** missing required arguments" missing "****")
+              (java.lang.System/exit (int -1))
+              nil)
+            m))))
+    ([cmd arg spec positions] (parse-or-exit! cmd arg spec positions nil)))
   (reset-meta!
     #'parse-or-exit!
     (assoc

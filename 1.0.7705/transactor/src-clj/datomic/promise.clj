@@ -34,23 +34,22 @@
       'throw-executionexception-if-throwable
       :ns
       *ns*))
-  (def call-user-code
-   (fn call_user_code
-     ([exec listener]
-       (try
-         (do (.execute ^java.util.concurrent.Executor exec ^java.lang.Runnable listener) nil)
-         (catch
-           java.lang.Throwable
-           t
-           (let [temp__5823__auto__ (java.lang.Thread/getDefaultUncaughtExceptionHandler)]
-             (if temp__5823__auto__
-               (let [h temp__5823__auto__]
-                 (.uncaughtException
-                   ^java.lang.Thread$UncaughtExceptionHandler h
-                   (java.lang.Thread/currentThread)
-                   ^java.lang.Throwable t)
-                 nil)
-               (do (.printStackTrace ^java.lang.Throwable t) nil))))))))
+  (defn call-user-code
+    ([exec listener]
+      (try
+        (do (.execute ^java.util.concurrent.Executor exec ^java.lang.Runnable listener) nil)
+        (catch
+          java.lang.Throwable
+          t
+          (let [temp__5823__auto__ (java.lang.Thread/getDefaultUncaughtExceptionHandler)]
+            (if temp__5823__auto__
+              (let [h temp__5823__auto__]
+                (.uncaughtException
+                  ^java.lang.Thread$UncaughtExceptionHandler h
+                  (java.lang.Thread/currentThread)
+                  ^java.lang.Throwable t)
+                nil)
+              (do (.printStackTrace ^java.lang.Throwable t) nil)))))))
   (reset-meta!
     #'call-user-code
     (assoc

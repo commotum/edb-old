@@ -55,7 +55,7 @@
   (reset-meta!
     #'max-bytes
     (assoc {:private true, :const true, :column (int 1)} :name 'max-bytes :ns *ns*))
-  (def fits-in-cache? (fn fits_in_cache_QMARK_ ([v] (<= (.remaining ^java.nio.Buffer v) 1000000))))
+  (defn fits-in-cache? ([v] (<= (.remaining ^java.nio.Buffer v) 1000000)))
   (reset-meta!
     #'fits-in-cache?
     (assoc
@@ -154,10 +154,9 @@
     (valAt [this k] (.valAt this k nil))
     (^void close [this] (do (^clojure.lang.IFn shutdown_fn) nil)))
   (clojure.core/import 'datomic.valcache_direct.ValcacheDirect)
-  (def ->ValcacheDirect
-   (fn __GT_ValcacheDirect
-     ([root shutdown_fn puts_pool]
-       (datomic.valcache_direct.ValcacheDirect. root shutdown_fn puts_pool))))
+  (defn ->ValcacheDirect
+    ([root shutdown_fn puts_pool]
+      (datomic.valcache_direct.ValcacheDirect. root shutdown_fn puts_pool)))
   (reset-meta!
     #'->ValcacheDirect
     (assoc
@@ -166,30 +165,29 @@
       '->ValcacheDirect
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__27894]
-       (let [map__27895 p__27894
-             map__27895 (if (seq? map__27895)
-                          (if (next map__27895)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27895))
-                            (if (seq map__27895) (first map__27895) {}))
-                          map__27895)
-             args map__27895
-             path (get map__27895 :path)
-             puts_pool (get map__27895 :puts-pool)]
-         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache-direct")]
-           (when (.isInfoEnabled ^org.slf4j.Logger logger)
-             (.info
-               ^org.slf4j.Logger logger
-               (logger/process {:event :valcache-direct/start, :root path})))
-           nil)
-         (let [shutdown_fn (vc/direct-init args)]
-           (datomic.valcache_direct.ValcacheDirect.
-             path
-             shutdown_fn
-             (or puts_pool (deref puts-pool-impl/valcache-puts-pool))))))))
+  (defn create
+    ([p__27894]
+      (let [map__27895 p__27894
+            map__27895 (if (seq? map__27895)
+                         (if (next map__27895)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27895))
+                           (if (seq map__27895) (first map__27895) {}))
+                         map__27895)
+            args map__27895
+            path (get map__27895 :path)
+            puts_pool (get map__27895 :puts-pool)]
+        (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.valcache-direct")]
+          (when (.isInfoEnabled ^org.slf4j.Logger logger)
+            (.info
+              ^org.slf4j.Logger logger
+              (logger/process {:event :valcache-direct/start, :root path})))
+          nil)
+        (let [shutdown_fn (vc/direct-init args)]
+          (datomic.valcache_direct.ValcacheDirect.
+            path
+            shutdown_fn
+            (or puts_pool (deref puts-pool-impl/valcache-puts-pool)))))))
   (reset-meta!
     #'create
     (assoc

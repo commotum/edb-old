@@ -13,12 +13,12 @@
         (clojure.core/require ['clojure.string :as 'str] ['cognitect.anomalies :as 'anom])
         (clojure.core/import 'java.nio.ByteBuffer))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Put (-put [_ k v opts] "SPI for datomic.core2.val-store/put."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.core2.val-store.spi" "Put")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Put :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Put :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -28,18 +28,18 @@
                                       :doc "SPI for datomic.core2.val-store/put."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.core2.val-store.spi" "Put"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.spi" "-put")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
-  (let [protocol_metadata__7434 {:column (int 1)}]
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol Get (-get [_ k opts] "SPI for datomic.core2.val-store/get."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.core2.val-store.spi" "Get")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'Get :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'Get :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -49,18 +49,18 @@
                                       :doc "SPI for datomic.core2.val-store/get."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.core2.val-store.spi" "Get"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.spi" "-get")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*))))
-  (let [protocol_metadata__7437 {:column (int 1)}]
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*))))
+  (let [protocol_metadata__7469 {:column (int 1)}]
     (defprotocol Delete (-delete [_ k opts] "SPI for datomic.core2.val-store/delete."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.core2.val-store.spi" "Delete")
-      (assoc (assoc protocol_metadata__7437 :doc nil) :name 'Delete :ns *ns*))
-    (let [protocol_signature__7438 (assoc
+      (assoc (assoc protocol_metadata__7469 :doc nil) :name 'Delete :ns *ns*))
+    (let [protocol_signature__7470 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -70,12 +70,12 @@
                                       :doc "SPI for datomic.core2.val-store/delete."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.core2.val-store.spi" "Delete"))
-          protocol_method_name__7439 (with-meta
-                                       (:name protocol_signature__7438)
-                                       protocol_signature__7438)]
+          protocol_method_name__7471 (with-meta
+                                       (:name protocol_signature__7470)
+                                       protocol_signature__7470)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.core2.val-store.spi" "-delete")
-        (assoc protocol_signature__7438 :name protocol_method_name__7439 :ns *ns*))))
+        (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
   (defn no-val-error
     ([k v]
       (when-not (and (:val v) (.hasRemaining (:val v)))
@@ -85,10 +85,9 @@
   (reset-meta!
     #'no-val-error
     (assoc {:arglists (clojure.core/list ['k 'v]), :column (int 1)} :name 'no-val-error :ns *ns*))
-  (def partition-key
-   (fn partition_key
-     ([s]
-       (.toLowerCase (.substring ^java.lang.String s (int (- (.length ^java.lang.String s) 3)))))))
+  (defn partition-key
+    ([s]
+      (.toLowerCase (.substring ^java.lang.String s (int (- (.length ^java.lang.String s) 3))))))
   (reset-meta!
     #'partition-key
     (assoc
@@ -110,9 +109,8 @@
       'splice-partition-key
       :ns
       *ns*))
-  (def val-op-succeeded?
-   (fn val_op_succeeded_QMARK_
-     ([store_api_result] (or (:result store_api_result) (:val store_api_result)))))
+  (defn val-op-succeeded?
+    ([store_api_result] (or (:result store_api_result) (:val store_api_result))))
   (reset-meta!
     #'val-op-succeeded?
     (assoc

@@ -53,12 +53,12 @@
   (reset-meta!
     #'CAFFEINE_ENTRY_OVERHEAD
     (assoc {:private true, :const true, :column (int 1)} :name 'CAFFEINE_ENTRY_OVERHEAD :ns *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol CacheGet (cache-get [_ k]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cache.caffeine" "CacheGet")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'CacheGet :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'CacheGet :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -68,12 +68,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cache.caffeine" "CacheGet"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.cache.caffeine" "cache-get")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend
     com.github.benmanes.caffeine.cache.Cache
     CacheGet
@@ -116,7 +116,7 @@
       '->WrappedCCache
       :ns
       *ns*))
-  (def adapt-caffeine-cache (fn adapt_caffeine_cache ([cache] (->WrappedCCache cache))))
+  (defn adapt-caffeine-cache ([cache] (->WrappedCCache cache)))
   (reset-meta!
     #'adapt-caffeine-cache
     (assoc
@@ -127,16 +127,15 @@
       'adapt-caffeine-cache
       :ns
       *ns*))
-  (def create-write-limited
-   (fn create_write_limited
-     ([^long num_entries ^long timeout_minutes]
-       (adapt-caffeine-cache
-         (.build
-           (.maximumSize
-             (.expireAfterWrite (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES)
-             (long num_entries)))))
-     ([^long num_entries]
-       (adapt-caffeine-cache (.build (.maximumSize (Caffeine/newBuilder) (long num_entries)))))))
+  (defn create-write-limited
+    ([^long num_entries ^long timeout_minutes]
+      (adapt-caffeine-cache
+        (.build
+          (.maximumSize
+            (.expireAfterWrite (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES)
+            (long num_entries)))))
+    ([^long num_entries]
+      (adapt-caffeine-cache (.build (.maximumSize (Caffeine/newBuilder) (long num_entries))))))
   (reset-meta!
     #'create-write-limited
     (assoc
@@ -149,16 +148,15 @@
       'create-write-limited
       :ns
       *ns*))
-  (def create-limited
-   (fn create_limited
-     ([^long num_entries ^long timeout_minutes]
-       (adapt-caffeine-cache
-         (.build
-           (.maximumSize
-             (.expireAfterAccess (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES)
-             (long num_entries)))))
-     ([^long num_entries]
-       (adapt-caffeine-cache (.build (.maximumSize (Caffeine/newBuilder) (long num_entries)))))))
+  (defn create-limited
+    ([^long num_entries ^long timeout_minutes]
+      (adapt-caffeine-cache
+        (.build
+          (.maximumSize
+            (.expireAfterAccess (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES)
+            (long num_entries)))))
+    ([^long num_entries]
+      (adapt-caffeine-cache (.build (.maximumSize (Caffeine/newBuilder) (long num_entries))))))
   (reset-meta!
     #'create-limited
     (assoc
@@ -171,19 +169,18 @@
       'create-limited
       :ns
       *ns*))
-  (def create-soft-limited
-   (fn create_soft_limited
-     ([^long num_entries ^long timeout_minutes]
-       (adapt-caffeine-cache
-         (.build
-           (.softValues
-             (.maximumSize
-               (.expireAfterAccess (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES)
-               (long num_entries))))))
-     ([^long num_entries]
-       (adapt-caffeine-cache
-         (.build (.softValues (.maximumSize (Caffeine/newBuilder) (long num_entries))))))
-     ([] (adapt-caffeine-cache (.build (.softValues (Caffeine/newBuilder)))))))
+  (defn create-soft-limited
+    ([^long num_entries ^long timeout_minutes]
+      (adapt-caffeine-cache
+        (.build
+          (.softValues
+            (.maximumSize
+              (.expireAfterAccess (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES)
+              (long num_entries))))))
+    ([^long num_entries]
+      (adapt-caffeine-cache
+        (.build (.softValues (.maximumSize (Caffeine/newBuilder) (long num_entries))))))
+    ([] (adapt-caffeine-cache (.build (.softValues (Caffeine/newBuilder))))))
   (reset-meta!
     #'create-soft-limited
     (assoc
@@ -246,27 +243,26 @@
       'create-scaled-weight-limited
       :ns
       *ns*))
-  (def create-computing
-   (fn create_computing
-     ([f max_size]
-       ((.maximumSize (Caffeine/newBuilder) (long ^java.lang.Number max_size))
-         (.build
-           (reify
-             com.github.benmanes.caffeine.cache.CacheLoader
-             (load [this k] (^clojure.lang.IFn f k)))
-           (if (instance?
-                 clojure.lang.IFn
-                 (reify
-                   com.github.benmanes.caffeine.cache.CacheLoader
-                   (load [this k] (^clojure.lang.IFn f k))))
-             (instance?
-               com.github.benmanes.caffeine.cache.CacheLoader
-               (reify
-                 com.github.benmanes.caffeine.cache.CacheLoader
-                 (load [this k] (^clojure.lang.IFn f k))))
-             (reify
-               com.github.benmanes.caffeine.cache.CacheLoader
-               (load [this k] (^clojure.lang.IFn f k)))))))))
+  (defn create-computing
+    ([f max_size]
+      ((.maximumSize (Caffeine/newBuilder) (long ^java.lang.Number max_size))
+        (.build
+          (reify
+            com.github.benmanes.caffeine.cache.CacheLoader
+            (load [this k] (^clojure.lang.IFn f k)))
+          (if (instance?
+                clojure.lang.IFn
+                (reify
+                  com.github.benmanes.caffeine.cache.CacheLoader
+                  (load [this k] (^clojure.lang.IFn f k))))
+            (instance?
+              com.github.benmanes.caffeine.cache.CacheLoader
+              (reify
+                com.github.benmanes.caffeine.cache.CacheLoader
+                (load [this k] (^clojure.lang.IFn f k))))
+            (reify
+              com.github.benmanes.caffeine.cache.CacheLoader
+              (load [this k] (^clojure.lang.IFn f k))))))))
   (reset-meta!
     #'create-computing
     (assoc
@@ -275,12 +271,11 @@
       'create-computing
       :ns
       *ns*))
-  (def create-response-map
-   (fn create_response_map
-     ([^long timeout_minutes]
-       (adapt-caffeine-cache
-         (.build
-           (.expireAfterWrite (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES))))))
+  (defn create-response-map
+    ([^long timeout_minutes]
+      (adapt-caffeine-cache
+        (.build
+          (.expireAfterWrite (Caffeine/newBuilder) (long timeout_minutes) TimeUnit/MINUTES)))))
   (reset-meta!
     #'create-response-map
     (assoc

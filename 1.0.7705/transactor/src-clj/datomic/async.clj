@@ -13,34 +13,33 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.async" "binding-conveyor-fn")
     (deref #'clojure.core/binding-conveyor-fn))
-  (def daemon
-   (fn daemon
-     ([f base]
-       (let [n (get (swap! name-map update base (fnil inc 0)) base)
-             name (str base "-" n)
-             bound_f (binding-conveyor-fn f)]
-         (doto
-           (java.lang.Thread.
-             (fn fn__27662
-               ([]
-                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.async")]
-                   (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                     (.info
-                       ^org.slf4j.Logger logger
-                       (logger/process {:event :daemon/thread-started, :name name})))
-                   nil)
-                 (try
-                   (^clojure.lang.IFn bound_f)
-                   (finally
-                     (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.async")]
-                       (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                         (.info
-                           ^org.slf4j.Logger logger
-                           (logger/process {:event :daemon/thread-completed, :name name})))
-                       nil))))))
-           (.setName ^java.lang.String name)
-           (.setDaemon (boolean (.booleanValue true)))
-           (.start))))))
+  (defn daemon
+    ([f base]
+      (let [n (get (swap! name-map update base (fnil inc 0)) base)
+            name (str base "-" n)
+            bound_f (binding-conveyor-fn f)]
+        (doto
+          (java.lang.Thread.
+            (fn fn__27662
+              ([]
+                (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.async")]
+                  (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                    (.info
+                      ^org.slf4j.Logger logger
+                      (logger/process {:event :daemon/thread-started, :name name})))
+                  nil)
+                (try
+                  (^clojure.lang.IFn bound_f)
+                  (finally
+                    (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.async")]
+                      (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                        (.info
+                          ^org.slf4j.Logger logger
+                          (logger/process {:event :daemon/thread-completed, :name name})))
+                      nil))))))
+          (.setName ^java.lang.String name)
+          (.setDaemon (boolean (.booleanValue true)))
+          (.start)))))
   (reset-meta!
     #'daemon
     (assoc

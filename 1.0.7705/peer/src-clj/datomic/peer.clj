@@ -152,13 +152,12 @@
       'map->ConnectionState
       :ns
       *ns*))
-  (def get-cstate
-   (fn get_cstate
-     ([state_ref or_else]
-       (let [state (deref (deref state_ref) 0 or_else)]
-         (if (= state :datomic.peer/shutdown)
-           (error/state :db.error/connection-released "The connection has been released.")
-           state)))))
+  (defn get-cstate
+    ([state_ref or_else]
+      (let [state (deref (deref state_ref) 0 or_else)]
+        (if (= state :datomic.peer/shutdown)
+          (error/state :db.error/connection-released "The connection has been released.")
+          state))))
   (reset-meta!
     #'get-cstate
     (assoc
@@ -167,7 +166,7 @@
       'get-cstate
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       RemoteConnection
       (get-cluster [_])
@@ -177,8 +176,8 @@
         "mode is :initial for first connect from this peer, :reconnect after"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.peer" "RemoteConnection")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'RemoteConnection :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'RemoteConnection :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -188,13 +187,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer" "RemoteConnection"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "get-cluster")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -204,13 +203,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer" "RemoteConnection"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "get-olookup")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*)))
-    (let [protocol_signature__7436 (assoc
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*)))
+    (let [protocol_signature__7468 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -223,12 +222,12 @@
                                       "mode is :initial for first connect from this peer, :reconnect after"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer" "RemoteConnection"))
-          protocol_method_name__7437 (with-meta
-                                       (:name protocol_signature__7436)
-                                       protocol_signature__7436)]
+          protocol_method_name__7469 (with-meta
+                                       (:name protocol_signature__7468)
+                                       protocol_signature__7468)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "create-connection-state")
-        (assoc protocol_signature__7436 :name protocol_method_name__7437 :ns *ns*))))
+        (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*))))
   (defn await-tx-result
     ([prom]
       (let [result (try
@@ -249,7 +248,7 @@
   (.bindRoot (clojure.lang.RT/var "datomic.peer" "connection-lock") (java.lang.Object.))
   (.setMeta (clojure.lang.RT/var "datomic.peer" "connection-cache") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.peer" "connection-cache") (cache/create-soft-limited))
-  (let [protocol_metadata__7438 {:column (int 1)}]
+  (let [protocol_metadata__7470 {:column (int 1)}]
     (defprotocol
       TWatcher
       (sync-t [_ t] "Returns future that will get a database where (<= t (f db))")
@@ -260,8 +259,8 @@
       (release-pending-syncs [_ new-db] "Release any pending syncs on this db value"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.peer" "TWatcher")
-      (assoc (assoc protocol_metadata__7438 :doc nil) :name 'TWatcher :ns *ns*))
-    (let [protocol_signature__7439 (assoc
+      (assoc (assoc protocol_metadata__7470 :doc nil) :name 'TWatcher :ns *ns*))
+    (let [protocol_signature__7471 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'sync-t {:arglists (clojure.core/list ['_ 't])}),
@@ -270,13 +269,13 @@
                                       "Returns future that will get a database where (<= t (f db))"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer" "TWatcher"))
-          protocol_method_name__7440 (with-meta
-                                       (:name protocol_signature__7439)
-                                       protocol_signature__7439)]
+          protocol_method_name__7472 (with-meta
+                                       (:name protocol_signature__7471)
+                                       protocol_signature__7471)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "sync-t")
-        (assoc protocol_signature__7439 :name protocol_method_name__7440 :ns *ns*)))
-    (let [protocol_signature__7441 (assoc
+        (assoc protocol_signature__7471 :name protocol_method_name__7472 :ns *ns*)))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -287,13 +286,13 @@
                                       "Returns future that will get a database where background jobs requested up\nto t are completed.  Note that this may be before indexing is complete to t."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer" "TWatcher"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "sync-background-t")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -304,13 +303,13 @@
                                       "Return a promise that will be delivered by release-pending-syncs."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer" "TWatcher"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "wait-for-future-t")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*)))
-    (let [protocol_signature__7445 (assoc
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*)))
+    (let [protocol_signature__7477 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -320,12 +319,12 @@
                                       :doc "Release any pending syncs on this db value"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.peer" "TWatcher"))
-          protocol_method_name__7446 (with-meta
-                                       (:name protocol_signature__7445)
-                                       protocol_signature__7445)]
+          protocol_method_name__7478 (with-meta
+                                       (:name protocol_signature__7477)
+                                       protocol_signature__7477)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "release-pending-syncs")
-        (assoc protocol_signature__7445 :name protocol_method_name__7446 :ns *ns*))))
+        (assoc protocol_signature__7477 :name protocol_method_name__7478 :ns *ns*))))
   (deftype
     TWatcherImpl
     [q db_ref f lck]
@@ -396,8 +395,7 @@
       [this t]
       (let [prom (promise/settable-future)] (.add ^java.util.Queue q {:t t, :prom prom}) prom)))
   (clojure.core/import 'datomic.peer.TWatcherImpl)
-  (def ->TWatcherImpl
-   (fn __GT_TWatcherImpl ([q db_ref f lck] (datomic.peer.TWatcherImpl. q db_ref f lck))))
+  (defn ->TWatcherImpl ([q db_ref f lck] (datomic.peer.TWatcherImpl. q db_ref f lck)))
   (reset-meta!
     #'->TWatcherImpl
     (assoc
@@ -406,18 +404,17 @@
       '->TWatcherImpl
       :ns
       *ns*))
-  (def create-t-watcher
-   (fn create_t_watcher
-     ([f db_ref]
-       (datomic.peer.TWatcherImpl.
-         (java.util.PriorityQueue.
-           (int 11)
-           (reify
-             java.util.Comparator
-             (^int compare [this o1 o2] (clojure.lang.Util/compare (:t o1) (:t o2)))))
-         db_ref
-         f
-         (java.lang.Object.)))))
+  (defn create-t-watcher
+    ([f db_ref]
+      (datomic.peer.TWatcherImpl.
+        (java.util.PriorityQueue.
+          (int 11)
+          (reify
+            java.util.Comparator
+            (^int compare [this o1 o2] (clojure.lang.Util/compare (:t o1) (:t o2)))))
+        db_ref
+        f
+        (java.lang.Object.))))
   (reset-meta!
     #'create-t-watcher
     (assoc
@@ -426,20 +423,19 @@
       'create-t-watcher
       :ns
       *ns*))
-  (def accept-new-data
-   (fn accept_new_data
-     ([db data]
-       (let [nextT (.nextT ^datomic.Database db)
-             temp__5802__auto__ (seq
-                                  (drop-while
-                                    (fn fn__20352
-                                      ([p1__20351#]
-                                        (< (.getT ^datomic.impl.db.IDatum p1__20351#) nextT)))
-                                    data))]
-         (if temp__5802__auto__
-           (let [newdata temp__5802__auto__]
-             (.acceptDataCheck ^datomic.db.IDbImpl db newdata false))
-           db)))))
+  (defn accept-new-data
+    ([db data]
+      (let [nextT (.nextT ^datomic.Database db)
+            temp__5802__auto__ (seq
+                                 (drop-while
+                                   (fn fn__20352
+                                     ([p1__20351#]
+                                       (< (.getT ^datomic.impl.db.IDatum p1__20351#) nextT)))
+                                   data))]
+        (if temp__5802__auto__
+          (let [newdata temp__5802__auto__]
+            (.acceptDataCheck ^datomic.db.IDbImpl db newdata false))
+          db))))
   (reset-meta!
     #'accept-new-data
     (assoc
@@ -481,35 +477,34 @@
       'peer-queue-exceeded
       :ns
       *ns*))
-  (def fail-pending-txes
-   (fn fail_pending_txes
-     ([unsent_updates_queue pending_txes]
-       (queue/clear unsent_updates_queue)
-       (loop [seq_20359 (seq (cache/cache-keys pending_txes))
-              chunk_20360 nil
-              count_20361 0
-              i_20362 0]
-         (if (< i_20362 count_20361)
-           (let [k (.nth ^clojure.lang.Indexed chunk_20360 (int i_20362))]
-             (let [temp__5804__auto__ (cache/remove pending_txes k)]
-               (when temp__5804__auto__
-                 (let [prom temp__5804__auto__] (deliver prom (transactor-unavailable)))))
-             (recur seq_20359 chunk_20360 count_20361 (inc i_20362)))
-           (let [temp__5804__auto__ (seq seq_20359)]
-             (when temp__5804__auto__
-               (let [seq_20359 temp__5804__auto__]
-                 (if (chunked-seq? seq_20359)
-                   (let [c__6065__auto__ (chunk-first seq_20359)]
-                     (recur
-                       (chunk-rest seq_20359)
-                       c__6065__auto__
-                       (int (count c__6065__auto__))
-                       (int 0)))
-                   (let [k (first seq_20359)]
-                     (let [temp__5804__auto__ (cache/remove pending_txes k)]
-                       (when temp__5804__auto__
-                         (let [prom temp__5804__auto__] (deliver prom (transactor-unavailable)))))
-                     (recur (next seq_20359) nil 0 0)))))))))))
+  (defn fail-pending-txes
+    ([unsent_updates_queue pending_txes]
+      (queue/clear unsent_updates_queue)
+      (loop [seq_20359 (seq (cache/cache-keys pending_txes))
+             chunk_20360 nil
+             count_20361 0
+             i_20362 0]
+        (if (< i_20362 count_20361)
+          (let [k (.nth ^clojure.lang.Indexed chunk_20360 (int i_20362))]
+            (let [temp__5804__auto__ (cache/remove pending_txes k)]
+              (when temp__5804__auto__
+                (let [prom temp__5804__auto__] (deliver prom (transactor-unavailable)))))
+            (recur seq_20359 chunk_20360 count_20361 (inc i_20362)))
+          (let [temp__5804__auto__ (seq seq_20359)]
+            (when temp__5804__auto__
+              (let [seq_20359 temp__5804__auto__]
+                (if (chunked-seq? seq_20359)
+                  (let [c__6065__auto__ (chunk-first seq_20359)]
+                    (recur
+                      (chunk-rest seq_20359)
+                      c__6065__auto__
+                      (int (count c__6065__auto__))
+                      (int 0)))
+                  (let [k (first seq_20359)]
+                    (let [temp__5804__auto__ (cache/remove pending_txes k)]
+                      (when temp__5804__auto__
+                        (let [prom temp__5804__auto__] (deliver prom (transactor-unavailable)))))
+                    (recur (next seq_20359) nil 0 0))))))))))
   (reset-meta!
     #'fail-pending-txes
     (assoc
@@ -1056,33 +1051,32 @@
             nil))
         (common/async-shutdown (deref state_ref)))))
   (clojure.core/import 'datomic.peer.Connection)
-  (def ->Connection
-   (fn __GT_Connection
-     ([db_id
-       cluster
-       olookup
-       state_ref
-       db_ref
-       pending_txes
-       unsent_updates_queue
-       lucene_queue
-       tx_report_queue
-       tx_watcher
-       idx_watcher
-       bg_watcher]
-       (datomic.peer.Connection.
-         db_id
-         cluster
-         olookup
-         state_ref
-         db_ref
-         pending_txes
-         unsent_updates_queue
-         lucene_queue
-         tx_report_queue
-         tx_watcher
-         idx_watcher
-         bg_watcher))))
+  (defn ->Connection
+    ([db_id
+      cluster
+      olookup
+      state_ref
+      db_ref
+      pending_txes
+      unsent_updates_queue
+      lucene_queue
+      tx_report_queue
+      tx_watcher
+      idx_watcher
+      bg_watcher]
+      (datomic.peer.Connection.
+        db_id
+        cluster
+        olookup
+        state_ref
+        db_ref
+        pending_txes
+        unsent_updates_queue
+        lucene_queue
+        tx_report_queue
+        tx_watcher
+        idx_watcher
+        bg_watcher)))
   (reset-meta!
     #'->Connection
     (assoc
@@ -1158,9 +1152,8 @@
     (^void release [this] (do (common/async-shutdown this) nil))
     (async-shutdown [this] (when cluster (cluster/close cluster))))
   (clojure.core/import 'datomic.peer.StorageOnlyConnection)
-  (def ->StorageOnlyConnection
-   (fn __GT_StorageOnlyConnection
-     ([db_id cluster db log] (datomic.peer.StorageOnlyConnection. db_id cluster db log))))
+  (defn ->StorageOnlyConnection
+    ([db_id cluster db log] (datomic.peer.StorageOnlyConnection. db_id cluster db log)))
   (reset-meta!
     #'->StorageOnlyConnection
     (assoc
@@ -1177,32 +1170,31 @@
   (reset-meta!
     #'MAX_LUCENE_QUEUE
     (assoc {:const true, :column (int 1)} :name 'MAX_LUCENE_QUEUE :ns *ns*))
-  (def integrate-lucene
-   (fn integrate_lucene
-     ([db_ref q]
-       (loop [tx (queue/take q)]
-         (when-not (= tx :done)
-           (let [vec__20456 (loop [txes [tx] ntx (queue/poll q)]
-                              (if (or (= ntx :done) (nil? ntx))
-                                [txes ntx]
-                                (recur (conj txes ntx) (queue/poll q))))
-                 txes (nth vec__20456 (int 0) nil)
-                 ntx (nth vec__20456 (int 1) nil)
-                 db (deref db_ref)
-                 oft (:fulltext (:memidx db))
-                 nft (ftindex/update-fulltext
-                       oft
-                       (filter
-                         (fn fn__20462
-                           ([p1__20455#]
-                             (db/fulltext?
-                               db
-                               (java.lang.Integer/valueOf
-                                 (int (.getA ^datomic.impl.db.IDatum p1__20455#))))))
-                         (apply concat txes)))]
-             (swap! db_ref assoc-in [:memidx :fulltext] nft)
-             (monitor/add-stat :PeerFulltextBatch (java.lang.Integer/valueOf (int (count txes))))
-             (when-not (= ntx :done) (recur (queue/take q)))))))))
+  (defn integrate-lucene
+    ([db_ref q]
+      (loop [tx (queue/take q)]
+        (when-not (= tx :done)
+          (let [vec__20456 (loop [txes [tx] ntx (queue/poll q)]
+                             (if (or (= ntx :done) (nil? ntx))
+                               [txes ntx]
+                               (recur (conj txes ntx) (queue/poll q))))
+                txes (nth vec__20456 (int 0) nil)
+                ntx (nth vec__20456 (int 1) nil)
+                db (deref db_ref)
+                oft (:fulltext (:memidx db))
+                nft (ftindex/update-fulltext
+                      oft
+                      (filter
+                        (fn fn__20462
+                          ([p1__20455#]
+                            (db/fulltext?
+                              db
+                              (java.lang.Integer/valueOf
+                                (int (.getA ^datomic.impl.db.IDatum p1__20455#))))))
+                        (apply concat txes)))]
+            (swap! db_ref assoc-in [:memidx :fulltext] nft)
+            (monitor/add-stat :PeerFulltextBatch (java.lang.Integer/valueOf (int (count txes))))
+            (when-not (= ntx :done) (recur (queue/take q))))))))
   (reset-meta!
     #'integrate-lucene
     (assoc
@@ -1211,99 +1203,98 @@
       'integrate-lucene
       :ns
       *ns*))
-  (def create-connection
-   (fn create_connection
-     ([cluster_conf]
-       (let [unsent_updates_queue (java.util.concurrent.ArrayBlockingQueue. (int 128))
-             lucene_queue (java.util.concurrent.ArrayBlockingQueue. (int 128))
-             state_ref (promise)
-             cluster (coord/create-db-cluster cluster_conf)
-             system_cluster (coord/create-system-cluster cluster_conf)
-             olookup (domain/system-cache-olookup cluster)
-             pending_txes (cache/create-response-map 60)
-             db_ref (atom nil)
-             conn (datomic.peer.Connection.
-                    (common/getx cluster_conf :db-id)
-                    cluster
-                    olookup
-                    state_ref
-                    db_ref
-                    pending_txes
-                    unsent_updates_queue
-                    lucene_queue
-                    (atom nil)
-                    (create-t-watcher :basisT db_ref)
-                    (create-t-watcher :indexBasisT db_ref)
-                    (create-t-watcher :indexBasisT db_ref))
-             endpoint_ref (atom nil)
-             backoff (math/create-exponential {:x1 1, :y1 1000, :x2 10, :y2 120000})
-             reconnect_fn (fn reconnect_fn
-                            ([mode]
-                              (fail-pending-txes unsent_updates_queue pending_txes)
-                              (let [new_endpoint (coord/lookup-compatible-transactor-endpoint
-                                                   system_cluster)]
-                                (if (= new_endpoint (deref endpoint_ref))
-                                  {:old-endpoint
-                                   (select-keys new_endpoint [:host :port :timestamp])}
-                                  (do
-                                    (reset! endpoint_ref new_endpoint)
-                                    (create-connection-state
-                                      conn
-                                      cluster_conf
-                                      new_endpoint
-                                      mode))))))
-             state (^clojure.lang.IFn reconnect_fn :initial)]
-         (deliver
-           state_ref
-           (recon/reconnector-ref
-             :state
-             state
-             :reconnect
-             (fn fn__20468
-               ([]
-                 (common/retry-fn
-                   (partial reconnect_fn :reconnect)
-                   :pred
-                   (fn fn__20469
-                     ([p1__20465#] (not (instance? datomic.peer.ConnectionState p1__20465#))))
-                   :backoff
-                   1000
-                   :log-retry
-                   common/log-retry
-                   :max-retries
-                   (long java.lang.Long/MAX_VALUE))))
-             :cleanup
-             common/async-shutdown
-             :shutdown-state
-             :datomic.peer/shutdown))
-         (doto
-           (java.lang.Thread.
-             (fn fn__20473
-               ([]
-                 (try
-                   (do
-                     (integrate-lucene db_ref lucene_queue)
-                     (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
-                       (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                         (.info
-                           ^org.slf4j.Logger logger
-                           (logger/process "Shutting down lucene integration thread")))
-                       nil))
-                   (catch
-                     java.lang.Throwable
-                     t
-                     (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer") ex t]
-                       (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                         (.warn
-                           ^org.slf4j.Logger logger
-                           (logger/process "Peer fulltext integration failed")
-                           ^java.lang.Throwable ex)
-                         (logger/caused-by logger ex))
-                       nil)))))
-             "Datomic Fulltext Integration")
-           (.setDaemon (boolean (.booleanValue true)))
-           (.start))
-         conn))))
+  (defn create-connection
+    ([cluster_conf]
+      (let [unsent_updates_queue (java.util.concurrent.ArrayBlockingQueue. (int 128))
+            lucene_queue (java.util.concurrent.ArrayBlockingQueue. (int 128))
+            state_ref (promise)
+            cluster (coord/create-db-cluster cluster_conf)
+            system_cluster (coord/create-system-cluster cluster_conf)
+            olookup (domain/system-cache-olookup cluster)
+            pending_txes (cache/create-response-map 60)
+            db_ref (atom nil)
+            conn (datomic.peer.Connection.
+                   (common/getx cluster_conf :db-id)
+                   cluster
+                   olookup
+                   state_ref
+                   db_ref
+                   pending_txes
+                   unsent_updates_queue
+                   lucene_queue
+                   (atom nil)
+                   (create-t-watcher :basisT db_ref)
+                   (create-t-watcher :indexBasisT db_ref)
+                   (create-t-watcher :indexBasisT db_ref))
+            endpoint_ref (atom nil)
+            backoff (math/create-exponential {:x1 1, :y1 1000, :x2 10, :y2 120000})
+            reconnect_fn (fn reconnect_fn
+                           ([mode]
+                             (fail-pending-txes unsent_updates_queue pending_txes)
+                             (let [new_endpoint (coord/lookup-compatible-transactor-endpoint
+                                                  system_cluster)]
+                               (if (= new_endpoint (deref endpoint_ref))
+                                 {:old-endpoint
+                                  (select-keys new_endpoint [:host :port :timestamp])}
+                                 (do
+                                   (reset! endpoint_ref new_endpoint)
+                                   (create-connection-state
+                                     conn
+                                     cluster_conf
+                                     new_endpoint
+                                     mode))))))
+            state (^clojure.lang.IFn reconnect_fn :initial)]
+        (deliver
+          state_ref
+          (recon/reconnector-ref
+            :state
+            state
+            :reconnect
+            (fn fn__20468
+              ([]
+                (common/retry-fn
+                  (partial reconnect_fn :reconnect)
+                  :pred
+                  (fn fn__20469
+                    ([p1__20465#] (not (instance? datomic.peer.ConnectionState p1__20465#))))
+                  :backoff
+                  1000
+                  :log-retry
+                  common/log-retry
+                  :max-retries
+                  (long java.lang.Long/MAX_VALUE))))
+            :cleanup
+            common/async-shutdown
+            :shutdown-state
+            :datomic.peer/shutdown))
+        (doto
+          (java.lang.Thread.
+            (fn fn__20473
+              ([]
+                (try
+                  (do
+                    (integrate-lucene db_ref lucene_queue)
+                    (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
+                      (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                        (.info
+                          ^org.slf4j.Logger logger
+                          (logger/process "Shutting down lucene integration thread")))
+                      nil))
+                  (catch
+                    java.lang.Throwable
+                    t
+                    (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer") ex t]
+                      (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                        (.warn
+                          ^org.slf4j.Logger logger
+                          (logger/process "Peer fulltext integration failed")
+                          ^java.lang.Throwable ex)
+                        (logger/caused-by logger ex))
+                      nil)))))
+            "Datomic Fulltext Integration")
+          (.setDaemon (boolean (.booleanValue true)))
+          (.start))
+        conn)))
   (reset-meta!
     #'create-connection
     (assoc
@@ -1386,10 +1377,9 @@
     (^boolean requestIndex [this] (.booleanValue true))
     (^void release [this] (do (delete-local-database dbname) nil)))
   (clojure.core/import 'datomic.peer.LocalConnection)
-  (def ->LocalConnection
-   (fn __GT_LocalConnection
-     ([dbname db_ref tx_report_queue released tx_watcher]
-       (datomic.peer.LocalConnection. dbname db_ref tx_report_queue released tx_watcher))))
+  (defn ->LocalConnection
+    ([dbname db_ref tx_report_queue released tx_watcher]
+      (datomic.peer.LocalConnection. dbname db_ref tx_report_queue released tx_watcher)))
   (reset-meta!
     #'->LocalConnection
     (assoc
@@ -1496,14 +1486,13 @@
       'rename-local-database
       :ns
       *ns*))
-  (def read-only-local-database
-   (fn read_only_local_database
-     ([cluster_conf]
-       (let [db_name (:db-name cluster_conf)
-             conn (connect-local-database db_name)
-             db (deref (.-db-ref ^datomic.peer.LocalConnection conn))
-             log (->LocalLog db)]
-         (->StorageOnlyConnection db_name nil db log)))))
+  (defn read-only-local-database
+    ([cluster_conf]
+      (let [db_name (:db-name cluster_conf)
+            conn (connect-local-database db_name)
+            db (deref (.-db-ref ^datomic.peer.LocalConnection conn))
+            log (->LocalLog db)]
+        (->StorageOnlyConnection db_name nil db log))))
   (reset-meta!
     #'read-only-local-database
     (assoc
@@ -1512,38 +1501,37 @@
       'read-only-local-database
       :ns
       *ns*))
-  (def shutdown
-   (fn shutdown
-     ([shutdown_clojure]
-       (locking connection-lock
-        (loop [seq_20510 (seq (cache/cache-keys connection-cache))
-               chunk_20511 nil
-               count_20512 0
-               i_20513 0]
-          (if (< i_20513 count_20512)
-            (let [k (.nth ^clojure.lang.Indexed chunk_20511 (int i_20513))]
-              (let [temp__5804__auto__ (cache/remove connection-cache k)]
-                (when temp__5804__auto__
-                  (let [conn temp__5804__auto__] (deref (common/async-shutdown conn)))))
-              (recur seq_20510 chunk_20511 count_20512 (inc i_20513)))
-            (let [temp__5804__auto__ (seq seq_20510)]
-              (when temp__5804__auto__
-                (let [seq_20510 temp__5804__auto__]
-                  (if (chunked-seq? seq_20510)
-                    (let [c__6065__auto__ (chunk-first seq_20510)]
-                      (recur
-                        (chunk-rest seq_20510)
-                        c__6065__auto__
-                        (int (count c__6065__auto__))
-                        (int 0)))
-                    (let [k (first seq_20510)]
-                      (let [temp__5804__auto__ (cache/remove connection-cache k)]
-                        (when temp__5804__auto__
-                          (let [conn temp__5804__auto__] (deref (common/async-shutdown conn)))))
-                      (recur (next seq_20510) nil 0 0)))))))))
-       (conn/stop-all-connectors)
-       (reset! cluster-stack/kv-cache-ref nil)
-       (when shutdown_clojure (shutdown-agents)))))
+  (defn shutdown
+    ([shutdown_clojure]
+      (locking connection-lock
+       (loop [seq_20510 (seq (cache/cache-keys connection-cache))
+              chunk_20511 nil
+              count_20512 0
+              i_20513 0]
+         (if (< i_20513 count_20512)
+           (let [k (.nth ^clojure.lang.Indexed chunk_20511 (int i_20513))]
+             (let [temp__5804__auto__ (cache/remove connection-cache k)]
+               (when temp__5804__auto__
+                 (let [conn temp__5804__auto__] (deref (common/async-shutdown conn)))))
+             (recur seq_20510 chunk_20511 count_20512 (inc i_20513)))
+           (let [temp__5804__auto__ (seq seq_20510)]
+             (when temp__5804__auto__
+               (let [seq_20510 temp__5804__auto__]
+                 (if (chunked-seq? seq_20510)
+                   (let [c__6065__auto__ (chunk-first seq_20510)]
+                     (recur
+                       (chunk-rest seq_20510)
+                       c__6065__auto__
+                       (int (count c__6065__auto__))
+                       (int 0)))
+                   (let [k (first seq_20510)]
+                     (let [temp__5804__auto__ (cache/remove connection-cache k)]
+                       (when temp__5804__auto__
+                         (let [conn temp__5804__auto__] (deref (common/async-shutdown conn)))))
+                     (recur (next seq_20510) nil 0 0)))))))))
+      (conn/stop-all-connectors)
+      (reset! cluster-stack/kv-cache-ref nil)
+      (when shutdown_clojure (shutdown-agents))))
   (reset-meta!
     #'shutdown
     (assoc
@@ -1552,24 +1540,23 @@
       'shutdown
       :ns
       *ns*))
-  (def stop-connection
-   (fn stop_connection
-     ([p__20522]
-       (let [map__20523 p__20522
-             map__20523 (if (seq? map__20523)
-                          (if (next map__20523)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__20523))
-                            (if (seq map__20523) (first map__20523) {}))
-                          map__20523)
-             resolved_cluster_conf map__20523
-             db_id (get map__20523 :db-id)]
-         (when-not :db-id
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str :db-id)))))
-         (let [temp__5804__auto__ (get connection-cache resolved_cluster_conf)]
-           (when temp__5804__auto__
-             (let [conn temp__5804__auto__] (.release ^datomic.Connection conn))))
-         (cache/clear coord/db-cache)))))
+  (defn stop-connection
+    ([p__20522]
+      (let [map__20523 p__20522
+            map__20523 (if (seq? map__20523)
+                         (if (next map__20523)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__20523))
+                           (if (seq map__20523) (first map__20523) {}))
+                         map__20523)
+            resolved_cluster_conf map__20523
+            db_id (get map__20523 :db-id)]
+        (when-not :db-id
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str :db-id)))))
+        (let [temp__5804__auto__ (get connection-cache resolved_cluster_conf)]
+          (when temp__5804__auto__
+            (let [conn temp__5804__auto__] (.release ^datomic.Connection conn))))
+        (cache/clear coord/db-cache))))
   (reset-meta!
     #'stop-connection
     (assoc
@@ -1579,84 +1566,83 @@
       'stop-connection
       :ns
       *ns*))
-  (def get-connection
-   (fn get_connection
-     ([cluster_conf]
-       (let [m_20526 {:event :peer/get-connection,
-                      :cluster-conf (uri/loggable-cluster-conf cluster_conf)}
-             ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process (assoc m_20526 :phase :begin))))
-                               nil)
-             start__8553__auto__ (java.lang.System/nanoTime)
-             result__8554__auto__ (try
-                                    {:returned
-                                     (let [temp__5802__auto__ (coord/resolve-db-name cluster_conf)]
-                                       (if temp__5802__auto__
-                                         (let [map__20530 temp__5802__auto__
-                                               map__20530 (if (seq? map__20530)
-                                                            (if
-                                                              (next map__20530)
-                                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                                (to-array map__20530))
-                                                              (if
-                                                                (seq map__20530)
-                                                                (first map__20530)
-                                                                {}))
-                                                            map__20530)
-                                               resolved_cluster_conf map__20530
-                                               db_id (get map__20530 :db-id)]
-                                           (locking connection-lock
-                                            (let [temp__5802__auto__ (get
-                                                                       connection-cache
-                                                                       resolved_cluster_conf)]
-                                              (if temp__5802__auto__
-                                                (let [conn temp__5802__auto__] conn)
-                                                (let [conn (create-connection
-                                                             resolved_cluster_conf)]
-                                                  (let [logger (org.slf4j.LoggerFactory/getLogger
-                                                                 "datomic.peer")]
-                                                    (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                                      (.info
-                                                        ^org.slf4j.Logger logger
-                                                        (logger/process
-                                                          (merge
-                                                            {:event :peer/cache-connection}
-                                                            (uri/loggable-cluster-conf
-                                                              resolved_cluster_conf)))))
-                                                    nil)
-                                                  (cache/put
-                                                    connection-cache
-                                                    resolved_cluster_conf
-                                                    conn)
-                                                  conn)))))
-                                         (do
-                                           (throw
-                                             (java.lang.RuntimeException.
-                                               (str
-                                                 "Could not find "
-                                                 (:db-name cluster_conf)
-                                                 " in catalog")))
-                                           1)))}
-                                    (catch
-                                      java.lang.Throwable
-                                      t__8555__auto__
-                                      {:threw t__8555__auto__}))
-             elapsed_20527 (- (java.lang.System/nanoTime) start__8553__auto__)
-             msec_20528 (logger/format-as-msec (long elapsed_20527))]
-         (let [endmsg__8556__auto__ (merge
-                                      (assoc m_20526 :msec msec_20528 :phase :end)
-                                      (when (:threw result__8554__auto__)
-                                        {:threw (class (:threw result__8554__auto__))}))
-               logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
-           (when (.isDebugEnabled ^org.slf4j.Logger logger)
-             (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-           nil)
-         (if (contains? result__8554__auto__ :returned)
-           (:returned result__8554__auto__)
-           (do (throw (:threw result__8554__auto__)) nil))))))
+  (defn get-connection
+    ([cluster_conf]
+      (let [m_20526 {:event :peer/get-connection,
+                     :cluster-conf (uri/loggable-cluster-conf cluster_conf)}
+            ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process (assoc m_20526 :phase :begin))))
+                              nil)
+            start__8553__auto__ (java.lang.System/nanoTime)
+            result__8554__auto__ (try
+                                   {:returned
+                                    (let [temp__5802__auto__ (coord/resolve-db-name cluster_conf)]
+                                      (if temp__5802__auto__
+                                        (let [map__20530 temp__5802__auto__
+                                              map__20530 (if (seq? map__20530)
+                                                           (if
+                                                             (next map__20530)
+                                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                               (to-array map__20530))
+                                                             (if
+                                                               (seq map__20530)
+                                                               (first map__20530)
+                                                               {}))
+                                                           map__20530)
+                                              resolved_cluster_conf map__20530
+                                              db_id (get map__20530 :db-id)]
+                                          (locking connection-lock
+                                           (let [temp__5802__auto__ (get
+                                                                      connection-cache
+                                                                      resolved_cluster_conf)]
+                                             (if temp__5802__auto__
+                                               (let [conn temp__5802__auto__] conn)
+                                               (let [conn (create-connection
+                                                            resolved_cluster_conf)]
+                                                 (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                                "datomic.peer")]
+                                                   (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                                     (.info
+                                                       ^org.slf4j.Logger logger
+                                                       (logger/process
+                                                         (merge
+                                                           {:event :peer/cache-connection}
+                                                           (uri/loggable-cluster-conf
+                                                             resolved_cluster_conf)))))
+                                                   nil)
+                                                 (cache/put
+                                                   connection-cache
+                                                   resolved_cluster_conf
+                                                   conn)
+                                                 conn)))))
+                                        (do
+                                          (throw
+                                            (java.lang.RuntimeException.
+                                              (str
+                                                "Could not find "
+                                                (:db-name cluster_conf)
+                                                " in catalog")))
+                                          1)))}
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8555__auto__
+                                     {:threw t__8555__auto__}))
+            elapsed_20527 (- (java.lang.System/nanoTime) start__8553__auto__)
+            msec_20528 (logger/format-as-msec (long elapsed_20527))]
+        (let [endmsg__8556__auto__ (merge
+                                     (assoc m_20526 :msec msec_20528 :phase :end)
+                                     (when (:threw result__8554__auto__)
+                                       {:threw (class (:threw result__8554__auto__))}))
+              logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
+          (when (.isDebugEnabled ^org.slf4j.Logger logger)
+            (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+          nil)
+        (if (contains? result__8554__auto__ :returned)
+          (:returned result__8554__auto__)
+          (do (throw (:threw result__8554__auto__)) nil)))))
   (reset-meta!
     #'get-connection
     (assoc
@@ -1665,20 +1651,19 @@
       'get-connection
       :ns
       *ns*))
-  (def connect-to-backup
-   (fn connect_to_backup
-     ([backup_uri t]
-       (let [map__20543 (req/require-and-run 'datomic.backup/load-database backup_uri t)
-             map__20543 (if (seq? map__20543)
-                          (if (next map__20543)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__20543))
-                            (if (seq map__20543) (first map__20543) {}))
-                          map__20543)
-             db_id (get map__20543 :db-id)
-             db (get map__20543 :db)
-             log (get map__20543 :log)]
-         (->StorageOnlyConnection db_id nil db log)))))
+  (defn connect-to-backup
+    ([backup_uri t]
+      (let [map__20543 (req/require-and-run 'datomic.backup/load-database backup_uri t)
+            map__20543 (if (seq? map__20543)
+                         (if (next map__20543)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__20543))
+                           (if (seq map__20543) (first map__20543) {}))
+                         map__20543)
+            db_id (get map__20543 :db-id)
+            db (get map__20543 :db)
+            log (get map__20543 :log)]
+        (->StorageOnlyConnection db_id nil db log))))
   (reset-meta!
     #'connect-to-backup
     (assoc
@@ -1687,30 +1672,29 @@
       'connect-to-backup
       :ns
       *ns*))
-  (def connect-to-storage
-   (fn connect_to_storage
-     ([cluster_conf]
-       (let [map__20545 (coord/resolve-db-name cluster_conf)
-             map__20545 (if (seq? map__20545)
-                          (if (next map__20545)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__20545))
-                            (if (seq map__20545) (first map__20545) {}))
-                          map__20545)
-             resolved_conf map__20545
-             db_id (get map__20545 :db-id)
-             cluster (coord/create-db-cluster resolved_conf)
-             olookup (domain/system-cache-olookup cluster)
-             map__20546 (db-io/load-db-from-basis cluster olookup db_id nil true)
-             map__20546 (if (seq? map__20546)
-                          (if (next map__20546)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__20546))
-                            (if (seq map__20546) (first map__20546) {}))
-                          map__20546)
-             db (get map__20546 :db)
-             log (get map__20546 :log)]
-         (->StorageOnlyConnection db_id cluster db log)))))
+  (defn connect-to-storage
+    ([cluster_conf]
+      (let [map__20545 (coord/resolve-db-name cluster_conf)
+            map__20545 (if (seq? map__20545)
+                         (if (next map__20545)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__20545))
+                           (if (seq map__20545) (first map__20545) {}))
+                         map__20545)
+            resolved_conf map__20545
+            db_id (get map__20545 :db-id)
+            cluster (coord/create-db-cluster resolved_conf)
+            olookup (domain/system-cache-olookup cluster)
+            map__20546 (db-io/load-db-from-basis cluster olookup db_id nil true)
+            map__20546 (if (seq? map__20546)
+                         (if (next map__20546)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__20546))
+                           (if (seq map__20546) (first map__20546) {}))
+                         map__20546)
+            db (get map__20546 :db)
+            log (get map__20546 :log)]
+        (->StorageOnlyConnection db_id cluster db log))))
   (reset-meta!
     #'connect-to-storage
     (assoc
@@ -1719,19 +1703,18 @@
       'connect-to-storage
       :ns
       *ns*))
-  (def revert-to-log-version-1
-   (fn revert_to_log_version_1
-     ([p__20548]
-       (let [map__20549 p__20548
-             map__20549 (if (seq? map__20549)
-                          (if (next map__20549)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__20549))
-                            (if (seq map__20549) (first map__20549) {}))
-                          map__20549)
-             db_uri (get map__20549 :db-uri)
-             cluster (coord/create-db-cluster (coord/resolve-db-name (uri/parse db_uri)))]
-         (log/convert-log-version cluster 1)))))
+  (defn revert-to-log-version-1
+    ([p__20548]
+      (let [map__20549 p__20548
+            map__20549 (if (seq? map__20549)
+                         (if (next map__20549)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__20549))
+                           (if (seq map__20549) (first map__20549) {}))
+                         map__20549)
+            db_uri (get map__20549 :db-uri)
+            cluster (coord/create-db-cluster (coord/resolve-db-name (uri/parse db_uri)))]
+        (log/convert-log-version cluster 1))))
   (reset-meta!
     #'revert-to-log-version-1
     (assoc
@@ -1740,7 +1723,7 @@
       'revert-to-log-version-1
       :ns
       *ns*))
-  (def db (fn db ([conn] (.db ^datomic.Connection conn))))
+  (defn db ([conn] (.db ^datomic.Connection conn)))
   (reset-meta!
     #'db
     (assoc
@@ -1750,8 +1733,7 @@
       'db
       :ns
       *ns*))
-  (def transact
-   (fn transact ([conn txdata] (.transact ^datomic.Connection conn ^java.util.List txdata))))
+  (defn transact ([conn txdata] (.transact ^datomic.Connection conn ^java.util.List txdata)))
   (reset-meta!
     #'transact
     (assoc
@@ -1761,28 +1743,27 @@
       'transact
       :ns
       *ns*))
-  (def transact-all
-   (fn transact_all
-     ([conn txdata]
-       (loop [seq_20553 (seq txdata) chunk_20554 nil count_20555 0 i_20556 0]
-         (if (< i_20556 count_20555)
-           (let [tx (.nth ^clojure.lang.Indexed chunk_20554 (int i_20556))]
-             (deref (.transact ^datomic.Connection conn ^java.util.List tx))
-             (recur seq_20553 chunk_20554 count_20555 (inc i_20556)))
-           (let [temp__5804__auto__ (seq seq_20553)]
-             (when temp__5804__auto__
-               (let [seq_20553 temp__5804__auto__]
-                 (if (chunked-seq? seq_20553)
-                   (let [c__6065__auto__ (chunk-first seq_20553)]
-                     (recur
-                       (chunk-rest seq_20553)
-                       c__6065__auto__
-                       (int (count c__6065__auto__))
-                       (int 0)))
-                   (let [tx (first seq_20553)]
-                     (deref (.transact ^datomic.Connection conn ^java.util.List tx))
-                     (recur (next seq_20553) nil 0 0))))))))
-       :ok)))
+  (defn transact-all
+    ([conn txdata]
+      (loop [seq_20553 (seq txdata) chunk_20554 nil count_20555 0 i_20556 0]
+        (if (< i_20556 count_20555)
+          (let [tx (.nth ^clojure.lang.Indexed chunk_20554 (int i_20556))]
+            (deref (.transact ^datomic.Connection conn ^java.util.List tx))
+            (recur seq_20553 chunk_20554 count_20555 (inc i_20556)))
+          (let [temp__5804__auto__ (seq seq_20553)]
+            (when temp__5804__auto__
+              (let [seq_20553 temp__5804__auto__]
+                (if (chunked-seq? seq_20553)
+                  (let [c__6065__auto__ (chunk-first seq_20553)]
+                    (recur
+                      (chunk-rest seq_20553)
+                      c__6065__auto__
+                      (int (count c__6065__auto__))
+                      (int 0)))
+                  (let [tx (first seq_20553)]
+                    (deref (.transact ^datomic.Connection conn ^java.util.List tx))
+                    (recur (next seq_20553) nil 0 0))))))))
+      :ok))
   (reset-meta!
     #'transact-all
     (assoc
@@ -1892,35 +1873,34 @@
   (reset-meta!
     #'connect-uri
     (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'connect-uri :ns *ns*))
-  (def administer-system
-   (fn administer_system
-     ([p__20581]
-       (let [map__20582 p__20581
-             map__20582 (if (seq? map__20582)
-                          (if (next map__20582)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__20582))
-                            (if (seq map__20582) (first map__20582) {}))
-                          map__20582)
-             uri (get map__20582 :uri)
-             action (get map__20582 :action)]
-         (when (nil? action) (throw (java.lang.IllegalArgumentException. "Invalid options map.")))
-         (when (and (= action :upgrade-schema) (nil? uri))
-           (throw (java.lang.IllegalArgumentException. "Invalid options map.")))
-         (if (and (= action :upgrade-schema) uri)
-           (let [cluster_conf (uri/parse uri)
-                 _ (when (= (:protocol cluster_conf) :backup)
-                     (error/arg
-                       :db.error/unsupported-protocol
-                       (str "Unsupported protocol " (:protocol cluster_conf))))
-                 conn (connect-uri uri)]
-             (ensure-schema-level conn)
-             :completed)
-           (if (= action :release-object-cache)
-             (let [system_cache (domain/system-cache)] (cache/clear system_cache) :completed)
-             (do
-               (when :else (throw (java.lang.IllegalArgumentException. "Invalid options map.")))
-               nil)))))))
+  (defn administer-system
+    ([p__20581]
+      (let [map__20582 p__20581
+            map__20582 (if (seq? map__20582)
+                         (if (next map__20582)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__20582))
+                           (if (seq map__20582) (first map__20582) {}))
+                         map__20582)
+            uri (get map__20582 :uri)
+            action (get map__20582 :action)]
+        (when (nil? action) (throw (java.lang.IllegalArgumentException. "Invalid options map.")))
+        (when (and (= action :upgrade-schema) (nil? uri))
+          (throw (java.lang.IllegalArgumentException. "Invalid options map.")))
+        (if (and (= action :upgrade-schema) uri)
+          (let [cluster_conf (uri/parse uri)
+                _ (when (= (:protocol cluster_conf) :backup)
+                    (error/arg
+                      :db.error/unsupported-protocol
+                      (str "Unsupported protocol " (:protocol cluster_conf))))
+                conn (connect-uri uri)]
+            (ensure-schema-level conn)
+            :completed)
+          (if (= action :release-object-cache)
+            (let [system_cache (domain/system-cache)] (cache/clear system_cache) :completed)
+            (do
+              (when :else (throw (java.lang.IllegalArgumentException. "Invalid options map.")))
+              nil))))))
   (reset-meta!
     #'administer-system
     (assoc
@@ -1929,51 +1909,50 @@
       'administer-system
       :ns
       *ns*))
-  (def send-admin-request
-   (fn send_admin_request
-     ([cluster_conf request arg]
-       (let [m_20586 {:event :peer/transactor-admin-request,
-                      :cluster (uri/loggable-cluster-conf cluster_conf),
-                      :request request,
-                      :arg arg}
-             ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process (assoc m_20586 :phase :begin))))
-                               nil)
-             start__8553__auto__ (java.lang.System/nanoTime)
-             result__8554__auto__ (try
-                                    {:returned
-                                     (let [endpoint (or
-                                                      (coord/lookup-compatible-transactor-endpoint
-                                                        (coord/create-system-cluster cluster_conf))
-                                                      (error/raise
-                                                        :db.error/transactor-not-registered
-                                                        "No transactor registered"))]
-                                       (conn/admin-request
-                                         (conn/create-transactor-hornet-connector
-                                           cluster_conf
-                                           endpoint)
-                                         request
-                                         arg))}
-                                    (catch
-                                      java.lang.Throwable
-                                      t__8555__auto__
-                                      {:threw t__8555__auto__}))
-             elapsed_20587 (- (java.lang.System/nanoTime) start__8553__auto__)
-             msec_20588 (logger/format-as-msec (long elapsed_20587))]
-         (let [endmsg__8556__auto__ (merge
-                                      (assoc m_20586 :msec msec_20588 :phase :end)
-                                      (when (:threw result__8554__auto__)
-                                        {:threw (class (:threw result__8554__auto__))}))
-               logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
-           (when (.isDebugEnabled ^org.slf4j.Logger logger)
-             (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-           nil)
-         (if (contains? result__8554__auto__ :returned)
-           (:returned result__8554__auto__)
-           (do (throw (:threw result__8554__auto__)) nil))))))
+  (defn send-admin-request
+    ([cluster_conf request arg]
+      (let [m_20586 {:event :peer/transactor-admin-request,
+                     :cluster (uri/loggable-cluster-conf cluster_conf),
+                     :request request,
+                     :arg arg}
+            ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process (assoc m_20586 :phase :begin))))
+                              nil)
+            start__8553__auto__ (java.lang.System/nanoTime)
+            result__8554__auto__ (try
+                                   {:returned
+                                    (let [endpoint (or
+                                                     (coord/lookup-compatible-transactor-endpoint
+                                                       (coord/create-system-cluster cluster_conf))
+                                                     (error/raise
+                                                       :db.error/transactor-not-registered
+                                                       "No transactor registered"))]
+                                      (conn/admin-request
+                                        (conn/create-transactor-hornet-connector
+                                          cluster_conf
+                                          endpoint)
+                                        request
+                                        arg))}
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8555__auto__
+                                     {:threw t__8555__auto__}))
+            elapsed_20587 (- (java.lang.System/nanoTime) start__8553__auto__)
+            msec_20588 (logger/format-as-msec (long elapsed_20587))]
+        (let [endmsg__8556__auto__ (merge
+                                     (assoc m_20586 :msec msec_20588 :phase :end)
+                                     (when (:threw result__8554__auto__)
+                                       {:threw (class (:threw result__8554__auto__))}))
+              logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
+          (when (.isDebugEnabled ^org.slf4j.Logger logger)
+            (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+          nil)
+        (if (contains? result__8554__auto__ :returned)
+          (:returned result__8554__auto__)
+          (do (throw (:threw result__8554__auto__)) nil)))))
   (reset-meta!
     #'send-admin-request
     (assoc
@@ -1982,28 +1961,27 @@
       'send-admin-request
       :ns
       *ns*))
-  (def create-database
-   (fn create_database
-     ([uri desc]
-       (let [cluster_conf (uri/parse-db uri)
-             db_name (:db-name cluster_conf)
-             uri (:uri cluster_conf)
-             protocol (:protocol cluster_conf)]
-         (if (= protocol :mem)
-           (create-local-database db_name uri)
-           (let [result (send-admin-request
-                          cluster_conf
-                          :create-database
-                          (assoc desc :db-name db_name))]
-             (cond
-               (:created result) true
-               (:exists result) false
-               :default (do
-                          (error/raise
-                            :db.error/create-database-failed
-                            "Unable to create database"
-                            result)))))))
-     ([uri] (create-database uri nil))))
+  (defn create-database
+    ([uri desc]
+      (let [cluster_conf (uri/parse-db uri)
+            db_name (:db-name cluster_conf)
+            uri (:uri cluster_conf)
+            protocol (:protocol cluster_conf)]
+        (if (= protocol :mem)
+          (create-local-database db_name uri)
+          (let [result (send-admin-request
+                         cluster_conf
+                         :create-database
+                         (assoc desc :db-name db_name))]
+            (cond
+              (:created result) true
+              (:exists result) false
+              :default (do
+                         (error/raise
+                           :db.error/create-database-failed
+                           "Unable to create database"
+                           result)))))))
+    ([uri] (create-database uri nil)))
   (reset-meta!
     #'create-database
     (assoc
@@ -2045,24 +2023,23 @@
       'delete-database
       :ns
       *ns*))
-  (def rename-database
-   (fn rename_database
-     ([uri new_name]
-       (let [cluster_conf (uri/parse-db uri)
-             db_name (:db-name cluster_conf)
-             protocol (:protocol cluster_conf)]
-         (if (= protocol :mem)
-           (rename-local-database db_name new_name)
-           (let [result (send-admin-request
-                          cluster_conf
-                          :rename-database
-                          {:db-name db_name, :new-name new_name})]
-             (if (:renamed-to result)
-               true
-               (error/raise
-                 :db.error/rename-database-failed
-                 "Unable to rename database"
-                 result))))))))
+  (defn rename-database
+    ([uri new_name]
+      (let [cluster_conf (uri/parse-db uri)
+            db_name (:db-name cluster_conf)
+            protocol (:protocol cluster_conf)]
+        (if (= protocol :mem)
+          (rename-local-database db_name new_name)
+          (let [result (send-admin-request
+                         cluster_conf
+                         :rename-database
+                         {:db-name db_name, :new-name new_name})]
+            (if (:renamed-to result)
+              true
+              (error/raise
+                :db.error/rename-database-failed
+                "Unable to rename database"
+                result)))))))
   (reset-meta!
     #'rename-database
     (assoc
@@ -2084,13 +2061,12 @@
   (reset-meta!
     #'get-catalog
     (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'get-catalog :ns *ns*))
-  (def undelete-database
-   (fn undelete_database
-     ([db_id uri]
-       (let [cluster_conf (uri/parse uri)
-             cluster (coord/create-system-cluster cluster_conf)
-             db_name (:db-name cluster_conf)]
-         (if db_name (catalog/undelete-database cluster db_id db_name) {:no-db-name uri})))))
+  (defn undelete-database
+    ([db_id uri]
+      (let [cluster_conf (uri/parse uri)
+            cluster (coord/create-system-cluster cluster_conf)
+            db_name (:db-name cluster_conf)]
+        (if db_name (catalog/undelete-database cluster db_id db_name) {:no-db-name uri}))))
   (reset-meta!
     #'undelete-database
     (assoc
@@ -2124,8 +2100,7 @@
       'get-database-names
       :ns
       *ns*))
-  (def list-backups
-   (fn list_backups ([backup_uri] (req/require-and-run 'datomic.backup/list-backups backup_uri))))
+  (defn list-backups ([backup_uri] (req/require-and-run 'datomic.backup/list-backups backup_uri)))
   (reset-meta!
     #'list-backups
     (assoc
@@ -2153,7 +2128,7 @@
       'transactor-endpoint
       :ns
       *ns*))
-  (def t->tx (fn t__GT_tx (^long [^long t] (db/make-eid 3 t))))
+  (defn t->tx (^long [^long t] (db/make-eid 3 t)))
   (reset-meta!
     #'t->tx
     (assoc

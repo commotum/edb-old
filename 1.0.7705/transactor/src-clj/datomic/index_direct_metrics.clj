@@ -23,39 +23,38 @@
         (clojure.core/import 'datomic.index.DirNode)
         (clojure.core/import 'datomic.impl.db.IDatum))))
   (set! *warn-on-reflection* true)
-  (def index-totals
-   (fn index_totals
-     ([idx double_count_att_ids]
-       (let [totals (long-array 2)]
-         (when (instance? datomic.index.Index idx)
-           (let [idx idx
-                 r (.-root ^datomic.index.Index idx)
-                 lookup (.-lookup ^datomic.index.Index idx)
-                 n_dirs (count (.-dirids ^datomic.index.RootNode r))]
-             (dotimes [dir_idx n_dirs]
-               (let [d (index/get-dir-node r (long dir_idx) lookup false)
-                     n_segs (count (.-segids ^datomic.index.DirNode d))
-                     counts (.-counts ^datomic.index.DirNode d)
-                     keydata (.-keydata ^datomic.index.DirNode d)
-                     _ (aset ^longs totals (int 0) (long (+ (aget ^longs totals (int 0)) n_segs)))]
-                 (dotimes [seg_idx n_segs]
-                   (let [datom_count (aget ^ints counts (int seg_idx))
-                         datom_count (if (and
-                                           double_count_att_ids
-                                           (.contains
-                                             ^java.util.Set double_count_att_ids
-                                             (long
-                                               (.getA
-                                                 (.get ^java.util.List keydata (int seg_idx))))))
-                                       (* datom_count 2)
-                                       datom_count)
-                         _ (aset
-                             ^longs totals
-                             (int 1)
-                             (long (+ (aget ^longs totals (int 1)) datom_count)))]
-                     nil))))))
-         {:seg-count (long (aget ^longs totals (int 0))),
-          :datom-count (long (aget ^longs totals (int 1)))}))))
+  (defn index-totals
+    ([idx double_count_att_ids]
+      (let [totals (long-array 2)]
+        (when (instance? datomic.index.Index idx)
+          (let [idx idx
+                r (.-root ^datomic.index.Index idx)
+                lookup (.-lookup ^datomic.index.Index idx)
+                n_dirs (count (.-dirids ^datomic.index.RootNode r))]
+            (dotimes [dir_idx n_dirs]
+              (let [d (index/get-dir-node r (long dir_idx) lookup false)
+                    n_segs (count (.-segids ^datomic.index.DirNode d))
+                    counts (.-counts ^datomic.index.DirNode d)
+                    keydata (.-keydata ^datomic.index.DirNode d)
+                    _ (aset ^longs totals (int 0) (long (+ (aget ^longs totals (int 0)) n_segs)))]
+                (dotimes [seg_idx n_segs]
+                  (let [datom_count (aget ^ints counts (int seg_idx))
+                        datom_count (if (and
+                                          double_count_att_ids
+                                          (.contains
+                                            ^java.util.Set double_count_att_ids
+                                            (long
+                                              (.getA
+                                                (.get ^java.util.List keydata (int seg_idx))))))
+                                      (* datom_count 2)
+                                      datom_count)
+                        _ (aset
+                            ^longs totals
+                            (int 1)
+                            (long (+ (aget ^longs totals (int 1)) datom_count)))]
+                    nil))))))
+        {:seg-count (long (aget ^longs totals (int 0))),
+         :datom-count (long (aget ^longs totals (int 1)))})))
   (reset-meta!
     #'index-totals
     (assoc

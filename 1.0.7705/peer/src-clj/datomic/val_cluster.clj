@@ -27,14 +27,14 @@
           ['datomic.slf4j :as 'logger])
         (clojure.core/import 'java.nio.ByteBuffer))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       Impl
       (-get [_ val-key opts] "Impl of cluster/ClusteredStore that takes nilable opts map."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.val-cluster" "Impl")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Impl :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Impl :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -45,12 +45,12 @@
                                       "Impl of cluster/ClusteredStore that takes nilable opts map."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.val-cluster" "Impl"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.val-cluster" "-get")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (deftype
     ValCluster
     [val_store]
@@ -191,7 +191,7 @@
                 (:returned result__8554__auto__)
                 (do (throw (:threw result__8554__auto__)) nil))))))))
   (clojure.core/import 'datomic.val_cluster.ValCluster)
-  (def ->ValCluster (fn __GT_ValCluster ([val_store] (datomic.val_cluster.ValCluster. val_store))))
+  (defn ->ValCluster ([val_store] (datomic.val_cluster.ValCluster. val_store)))
   (reset-meta!
     #'->ValCluster
     (assoc
@@ -200,7 +200,7 @@
       '->ValCluster
       :ns
       *ns*))
-  (def val-cluster (fn val_cluster ([val_store] (datomic.val_cluster.ValCluster. val_store))))
+  (defn val-cluster ([val_store] (datomic.val_cluster.ValCluster. val_store)))
   (reset-meta!
     #'val-cluster
     (assoc

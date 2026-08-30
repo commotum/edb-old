@@ -127,8 +127,7 @@
   (reset-meta!
     #'ok?
     (assoc {:arglists (clojure.core/list ['results]), :column (int 1)} :name 'ok? :ns *ns*))
-  (def summarize
-   (fn summarize ([db db_uri results] {:ok (ok? results), :uri db_uri, :t (d/basis-t db)})))
+  (defn summarize ([db db_uri results] {:ok (ok? results), :uri db_uri, :t (d/basis-t db)}))
   (reset-meta!
     #'summarize
     (assoc
@@ -137,21 +136,20 @@
       'summarize
       :ns
       *ns*))
-  (def get-db-from-connection-resources
-   (fn get_db_from_connection_resources
-     ([p__19874]
-       (let [map__19875 p__19874
-             map__19875 (if (seq? map__19875)
-                          (if (next map__19875)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19875))
-                            (if (seq map__19875) (first map__19875) {}))
-                          map__19875)
-             cluster (get map__19875 :cluster)
-             olookup (get map__19875 :olookup)]
-         (db/db
-           (cluster/dbId cluster)
-           (index/load-index olookup (index/find-index-root-id cluster)))))))
+  (defn get-db-from-connection-resources
+    ([p__19874]
+      (let [map__19875 p__19874
+            map__19875 (if (seq? map__19875)
+                         (if (next map__19875)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19875))
+                           (if (seq map__19875) (first map__19875) {}))
+                         map__19875)
+            cluster (get map__19875 :cluster)
+            olookup (get map__19875 :olookup)]
+        (db/db
+          (cluster/dbId cluster)
+          (index/load-index olookup (index/find-index-root-id cluster))))))
   (reset-meta!
     #'get-db-from-connection-resources
     (assoc
@@ -186,11 +184,10 @@
       'find-zombie-datoms-with-summary
       :ns
       *ns*))
-  (def write-report
-   (fn write_report
-     ([report out_filename]
-       (with-open [edn_writer (apply jio/writer (str out_filename) {})]
-         (pp/pprint report edn_writer)))))
+  (defn write-report
+    ([report out_filename]
+      (with-open [edn_writer (apply jio/writer (str out_filename) {})]
+        (pp/pprint report edn_writer))))
   (reset-meta!
     #'write-report
     (assoc
@@ -199,15 +196,14 @@
       'write-report
       :ns
       *ns*))
-  (def write-zombie-datoms-report
-   (fn write_zombie_datoms_report
-     ([db_uri out_filename]
-       (let [db (get-db-from-uri db_uri)
-             results (find-zombie-datoms db)
-             summary (summarize db db_uri results)
-             r (assoc summary :results results)]
-         (write-report r out_filename)
-         summary))))
+  (defn write-zombie-datoms-report
+    ([db_uri out_filename]
+      (let [db (get-db-from-uri db_uri)
+            results (find-zombie-datoms db)
+            summary (summarize db db_uri results)
+            r (assoc summary :results results)]
+        (write-report r out_filename)
+        summary)))
   (reset-meta!
     #'write-zombie-datoms-report
     (assoc
@@ -216,12 +212,11 @@
       'write-zombie-datoms-report
       :ns
       *ns*))
-  (def -main
-   (fn _main
-     ([db_uri out_filename]
-       (println (write-zombie-datoms-report db_uri out_filename))
-       (java.lang.System/exit (int 0))
-       nil)))
+  (defn -main
+    ([db_uri out_filename]
+      (println (write-zombie-datoms-report db_uri out_filename))
+      (java.lang.System/exit (int 0))
+      nil))
   (reset-meta!
     #'-main
     (assoc

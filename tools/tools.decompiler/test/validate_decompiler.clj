@@ -1,9 +1,60 @@
 (require '[clojure.tools.decompiler :as decompiler]
          '[clojure.tools.decompiler.ast :as ast]
+         '[clojure.tools.decompiler.bc :as bc]
          '[clojure.tools.decompiler.compact :as compact]
          '[clojure.tools.decompiler.pprint :as decompiler.pprint]
          '[clojure.tools.decompiler.source :as source]
          '[clojure.tools.decompiler.sugar :as sugar])
+
+(let [root (java.nio.file.Files/createTempDirectory
+             "decompiler-invokedynamic-"
+             (make-array java.nio.file.attribute.FileAttribute 0))]
+  (try
+    (let [source-path (.resolve root "IndyFixture.java")
+          classes-path (.resolve root "classes")
+          compiler (javax.tools.ToolProvider/getSystemJavaCompiler)]
+      (assert compiler)
+      (java.nio.file.Files/createDirectories
+        classes-path
+        (make-array java.nio.file.attribute.FileAttribute 0))
+      (spit (.toFile source-path)
+            (str "public final class IndyFixture {"
+                 " public static String join(String left, int right) {"
+                 "  return left + right;"
+                 " }"
+                 "}"))
+      (assert
+        (zero?
+          (.run compiler nil nil nil
+                (into-array
+                  String
+                  ["-source" "11" "-target" "11" "-g:none"
+                   "-d" (.toString classes-path)
+                   (.toString source-path)]))))
+      (let [klass (bc/parse-class
+                    (.toString (.resolve classes-path "IndyFixture.class")))
+            method (first (filter #(= "join" (.getName %))
+                                  (.getMethods klass)))
+            instruction (first (filter #(= "invokedynamic" (:insn/name %))
+                                       (bc/parse-bytecode klass method)))
+            pool-element (:insn/pool-element instruction)]
+        (assert method)
+        (assert instruction)
+        (assert (= "makeConcatWithConstants" (:insn/target-name pool-element)))
+        (assert (= ["java.lang.String" "int"]
+                   (:insn/target-arg-types pool-element)))
+        (assert (= "java.lang.String" (:insn/target-ret-type pool-element)))
+        (assert (nat-int? (:insn/bootstrap-method-index pool-element)))))
+    (finally
+      (with-open [paths (java.nio.file.Files/walk
+                          root
+                          (make-array java.nio.file.FileVisitOption 0))]
+        (doseq [path (iterator-seq
+                       (.iterator
+                         (.sorted paths
+                                  (java.util.Comparator/reverseOrder))))]
+          (java.nio.file.Files/deleteIfExists path)))))
+  (println "decompiler invokedynamic constant-pool parsing passed"))
 
 (let [namespace-init-name "fixture.protocol__init"
       eager-class-name "fixture.protocol.EagerType"

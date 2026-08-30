@@ -55,21 +55,20 @@
   (reset-meta!
     #'retry-cause
     (assoc {:arglists (clojure.core/list ['result]), :column (int 1)} :name 'retry-cause :ns *ns*))
-  (def notify-retry
-   (fn notify_retry
-     ([result metric backoff attempts max_retries]
-       (monitor/add-stat metric backoff)
-       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-cluster")]
-         (when (.isInfoEnabled ^org.slf4j.Logger logger)
-           (.info
-             ^org.slf4j.Logger logger
-             (logger/process
-               {:event :kv-cluster/retry,
-                metric backoff,
-                :attempts attempts,
-                :max-retries max_retries,
-                :cause (retry-cause result)})))
-         nil))))
+  (defn notify-retry
+    ([result metric backoff attempts max_retries]
+      (monitor/add-stat metric backoff)
+      (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-cluster")]
+        (when (.isInfoEnabled ^org.slf4j.Logger logger)
+          (.info
+            ^org.slf4j.Logger logger
+            (logger/process
+              {:event :kv-cluster/retry,
+               metric backoff,
+               :attempts attempts,
+               :max-retries max_retries,
+               :cause (retry-cause result)})))
+        nil)))
   (reset-meta!
     #'notify-retry
     (assoc
@@ -102,63 +101,62 @@
       'linear-backoff
       :ns
       *ns*))
-  (def retry-fn
-   (fn retry_fn
-     ([sem metric nested group_ref backoff f]
-       (binding [kv/*retry* (partial retry-fn sem metric true group_ref backoff)]
-         (let [sem? (and (not nested) (= :exponential backoff))
-               max_retries (let [G__10519 backoff] (case G__10519 :linear 20 :exponential 9))
-               tid (.getId (java.lang.Thread/currentThread))
-               permit? (when sem?
-                         (let [permit? (.tryAcquire
-                                         ^java.util.concurrent.Semaphore sem
-                                         20
-                                         TimeUnit/SECONDS)]
-                           (when-not permit?
-                             (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-cluster")]
-                               (when (.isInfoEnabled ^org.slf4j.Logger logger)
-                                 (.info
-                                   ^org.slf4j.Logger logger
-                                   (logger/process {:event :kv-cluster/semaphore-timeout})))
-                               nil)
-                             (monitor/alarm :StorageSemaphoreTimeout))
-                           permit?))]
-           (try
-             (loop [retries 0 elapsed 0]
-               (do
-                 (when (= :exponential backoff) (swap! group_ref assoc (long tid) (long retries)))
-                 (let [delay (let [G__10523 backoff]
-                               (case
-                                 G__10523
-                                 :linear
-                                 (linear-backoff (long retries))
-                                 :exponential
-                                 (exponential-backoff (apply max 0 (vals (deref group_ref))))))
-                       _ (when (clojure.lang.Numbers/isPos delay)
-                           (java.lang.Thread/sleep (long ^java.lang.Number delay))
-                           nil)
-                       vec__10520 (let [start (java.lang.System/nanoTime)
-                                        result (try
-                                                 (^clojure.lang.IFn f)
-                                                 (catch java.lang.Throwable e e))]
-                                    [(long (quot (- (java.lang.System/nanoTime) start) 1000000))
-                                     result])
-                       ms (nth vec__10520 (int 0) nil)
-                       result (nth vec__10520 (int 1) nil)
-                       elapsed (+ elapsed (long ^java.lang.Number ms))]
-                   (if (and
-                         (instance? java.lang.Throwable result)
-                         (kv/retryable? result)
-                         (< retries max_retries)
-                         (or (< retries 3) (< elapsed 10000)))
-                     (do
-                       (notify-retry result metric delay (long retries) (long max_retries))
-                       (recur (inc retries) elapsed))
-                     (common/return-or-throw result)))))
-             (finally
-               (do
-                 (when permit? (.release ^java.util.concurrent.Semaphore sem))
-                 (swap! group_ref dissoc (long tid))))))))))
+  (defn retry-fn
+    ([sem metric nested group_ref backoff f]
+      (binding [kv/*retry* (partial retry-fn sem metric true group_ref backoff)]
+        (let [sem? (and (not nested) (= :exponential backoff))
+              max_retries (let [G__10519 backoff] (case G__10519 :linear 20 :exponential 9))
+              tid (.getId (java.lang.Thread/currentThread))
+              permit? (when sem?
+                        (let [permit? (.tryAcquire
+                                        ^java.util.concurrent.Semaphore sem
+                                        20
+                                        TimeUnit/SECONDS)]
+                          (when-not permit?
+                            (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.kv-cluster")]
+                              (when (.isInfoEnabled ^org.slf4j.Logger logger)
+                                (.info
+                                  ^org.slf4j.Logger logger
+                                  (logger/process {:event :kv-cluster/semaphore-timeout})))
+                              nil)
+                            (monitor/alarm :StorageSemaphoreTimeout))
+                          permit?))]
+          (try
+            (loop [retries 0 elapsed 0]
+              (do
+                (when (= :exponential backoff) (swap! group_ref assoc (long tid) (long retries)))
+                (let [delay (let [G__10523 backoff]
+                              (case
+                                G__10523
+                                :linear
+                                (linear-backoff (long retries))
+                                :exponential
+                                (exponential-backoff (apply max 0 (vals (deref group_ref))))))
+                      _ (when (clojure.lang.Numbers/isPos delay)
+                          (java.lang.Thread/sleep (long ^java.lang.Number delay))
+                          nil)
+                      vec__10520 (let [start (java.lang.System/nanoTime)
+                                       result (try
+                                                (^clojure.lang.IFn f)
+                                                (catch java.lang.Throwable e e))]
+                                   [(long (quot (- (java.lang.System/nanoTime) start) 1000000))
+                                    result])
+                      ms (nth vec__10520 (int 0) nil)
+                      result (nth vec__10520 (int 1) nil)
+                      elapsed (+ elapsed (long ^java.lang.Number ms))]
+                  (if (and
+                        (instance? java.lang.Throwable result)
+                        (kv/retryable? result)
+                        (< retries max_retries)
+                        (or (< retries 3) (< elapsed 10000)))
+                    (do
+                      (notify-retry result metric delay (long retries) (long max_retries))
+                      (recur (inc retries) elapsed))
+                    (common/return-or-throw result)))))
+            (finally
+              (do
+                (when permit? (.release ^java.util.concurrent.Semaphore sem))
+                (swap! group_ref dissoc (long tid)))))))))
   (reset-meta!
     #'retry-fn
     (assoc
@@ -212,11 +210,9 @@
   (reset-meta!
     #'same-ref?
     (assoc {:arglists (clojure.core/list ['r1 'r2]), :column (int 1)} :name 'same-ref? :ns *ns*))
-  (def mark-pod-garbage
-   (fn mark_pod_garbage
-     ([cs tail_keys_ref]
-       (events/publish
-         {:key :datomic.garbage/mark, :cluster cs, :garbage (deref tail_keys_ref)}))))
+  (defn mark-pod-garbage
+    ([cs tail_keys_ref]
+      (events/publish {:key :datomic.garbage/mark, :cluster cs, :garbage (deref tail_keys_ref)})))
   (reset-meta!
     #'mark-pod-garbage
     (assoc
@@ -901,27 +897,26 @@
         (cluster/close kvs)
         nil)))
   (clojure.core/import 'datomic.kv_cluster.KVCluster)
-  (def ->KVCluster
-   (fn __GT_KVCluster
-     ([kvs
-       path_map
-       exec
-       retrying_write
-       retrying_read
-       retrying_delete
-       protocol
-       protocol_nsec_k
-       pod_garbage_handler]
-       (datomic.kv_cluster.KVCluster.
-         kvs
-         path_map
-         exec
-         retrying_write
-         retrying_read
-         retrying_delete
-         protocol
-         protocol_nsec_k
-         pod_garbage_handler))))
+  (defn ->KVCluster
+    ([kvs
+      path_map
+      exec
+      retrying_write
+      retrying_read
+      retrying_delete
+      protocol
+      protocol_nsec_k
+      pod_garbage_handler]
+      (datomic.kv_cluster.KVCluster.
+        kvs
+        path_map
+        exec
+        retrying_write
+        retrying_read
+        retrying_delete
+        protocol
+        protocol_nsec_k
+        pod_garbage_handler)))
   (reset-meta!
     #'->KVCluster
     (assoc
@@ -945,67 +940,66 @@
   (reset-meta!
     #'PRIORITY_WRITE_CONCURRENCY
     (assoc {:const true, :column (int 1)} :name 'PRIORITY_WRITE_CONCURRENCY :ns *ns*))
-  (def kv-cluster
-   (fn kv_cluster
-     ([kvs p__10702]
-       (let [map__10703 p__10702
-             map__10703 (if (seq? map__10703)
-                          (if (next map__10703)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__10703))
-                            (if (seq map__10703) (first map__10703) {}))
-                          map__10703)
-             x map__10703
-             tenant (get map__10703 :tenant)
-             db_id (get map__10703 :db-id)
-             write_concurrency (get map__10703 :write-concurrency)
-             read_concurrency (get map__10703 :read-concurrency)
-             shared_pool? (get map__10703 :shared-pool? true)
-             protocol (get map__10703 :protocol :kvc)
-             pod_garbage_handler (get map__10703 :pod-garbage-handler mark-pod-garbage)
-             retrying_delete (get map__10703 :retrying-delete)
-             write_concurrency (or write_concurrency (config/property "datomic.writeConcurrency"))
-             read_concurrency (or read_concurrency (config/property "datomic.readConcurrency"))
-             retrying_delete (or
-                               retrying_delete
-                               (partial
-                                 retry-fn
-                                 (java.util.concurrent.Semaphore.
-                                   (int (config/property "datomic.deleteConcurrency"))
-                                   (boolean (.booleanValue true)))
-                                 :StorageDeleteBackoffMsec
-                                 false
-                                 (atom {})
-                                 :exponential))
-             protocol_nsec_k (keyword (str (name protocol) "-ns"))
-             idx (atom 0)
-             exec (if shared_pool?
-                    (shared-pool)
-                    (common/thread-pool {:nthreads write_concurrency, :name "storage"}))]
-         (datomic.kv_cluster.KVCluster.
-           kvs
-           {:tenant tenant, :db db_id}
-           exec
-           (partial
-             retry-fn
-             (java.util.concurrent.Semaphore.
-               (int (+ write_concurrency 2))
-               (boolean (.booleanValue true)))
-             :StoragePutBackoffMsec
-             false
-             (atom {}))
-           (partial
-             retry-fn
-             (java.util.concurrent.Semaphore.
-               (int ^java.lang.Number read_concurrency)
-               (boolean (.booleanValue true)))
-             :StorageGetBackoffMsec
-             false
-             (atom {}))
-           retrying_delete
-           protocol
-           protocol_nsec_k
-           pod_garbage_handler)))))
+  (defn kv-cluster
+    ([kvs p__10702]
+      (let [map__10703 p__10702
+            map__10703 (if (seq? map__10703)
+                         (if (next map__10703)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__10703))
+                           (if (seq map__10703) (first map__10703) {}))
+                         map__10703)
+            x map__10703
+            tenant (get map__10703 :tenant)
+            db_id (get map__10703 :db-id)
+            write_concurrency (get map__10703 :write-concurrency)
+            read_concurrency (get map__10703 :read-concurrency)
+            shared_pool? (get map__10703 :shared-pool? true)
+            protocol (get map__10703 :protocol :kvc)
+            pod_garbage_handler (get map__10703 :pod-garbage-handler mark-pod-garbage)
+            retrying_delete (get map__10703 :retrying-delete)
+            write_concurrency (or write_concurrency (config/property "datomic.writeConcurrency"))
+            read_concurrency (or read_concurrency (config/property "datomic.readConcurrency"))
+            retrying_delete (or
+                              retrying_delete
+                              (partial
+                                retry-fn
+                                (java.util.concurrent.Semaphore.
+                                  (int (config/property "datomic.deleteConcurrency"))
+                                  (boolean (.booleanValue true)))
+                                :StorageDeleteBackoffMsec
+                                false
+                                (atom {})
+                                :exponential))
+            protocol_nsec_k (keyword (str (name protocol) "-ns"))
+            idx (atom 0)
+            exec (if shared_pool?
+                   (shared-pool)
+                   (common/thread-pool {:nthreads write_concurrency, :name "storage"}))]
+        (datomic.kv_cluster.KVCluster.
+          kvs
+          {:tenant tenant, :db db_id}
+          exec
+          (partial
+            retry-fn
+            (java.util.concurrent.Semaphore.
+              (int (+ write_concurrency 2))
+              (boolean (.booleanValue true)))
+            :StoragePutBackoffMsec
+            false
+            (atom {}))
+          (partial
+            retry-fn
+            (java.util.concurrent.Semaphore.
+              (int ^java.lang.Number read_concurrency)
+              (boolean (.booleanValue true)))
+            :StorageGetBackoffMsec
+            false
+            (atom {}))
+          retrying_delete
+          protocol
+          protocol_nsec_k
+          pod_garbage_handler))))
   (reset-meta!
     #'kv-cluster
     (assoc

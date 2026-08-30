@@ -63,7 +63,7 @@
       'peer-message-type
       :ns
       *ns*))
-  (def submit-address (fn submit_address ([db_name] (str db_name ".tx-submit"))))
+  (defn submit-address ([db_name] (str db_name ".tx-submit")))
   (reset-meta!
     #'submit-address
     (assoc
@@ -72,7 +72,7 @@
       'submit-address
       :ns
       *ns*))
-  (def push-address (fn push_address ([db_name] (str db_name ".tx-result"))))
+  (defn push-address ([db_name] (str db_name ".tx-result")))
   (reset-meta!
     #'push-address
     (assoc
@@ -81,58 +81,57 @@
       'push-address
       :ns
       *ns*))
-  (def write-handlers
-   (fn write_handlers
-     ([cache]
-       (merge
-         fressian/user-write-handlers
-         index/common-write-handlers
-         {datomic.db.DbId
-          {"dbid"
-           (reify
-             org.fressian.handlers.WriteHandler
-             (^void write
-               [this ^org.fressian.Writer w o]
-               (do
-                 (let [dbid o]
-                   (.writeTag ^org.fressian.Writer w "dbid" (int 2))
-                   (.writeObject
-                     ^org.fressian.Writer w
-                     (:part dbid)
-                     (boolean (.booleanValue ^java.lang.Boolean cache)))
-                   (.writeObject
-                     ^org.fressian.Writer w
-                     (:idx dbid)
-                     (boolean (.booleanValue ^java.lang.Boolean cache))))
-                 nil)))},
-          datomic.db.Datum
-          {"datum"
-           (reify
-             org.fressian.handlers.WriteHandler
-             (^void write
-               [this ^org.fressian.Writer w o]
-               (do
-                 (let [datum o]
-                   (.writeTag ^org.fressian.Writer w "datum" (int 6))
-                   (.writeBoolean
-                     ^org.fressian.Writer w
-                     (boolean (.isAssertion ^datomic.impl.db.IDatum datum)))
-                   (.writeObject
-                     ^org.fressian.Writer w
-                     (java.lang.Integer/valueOf (int (.getP ^datomic.impl.db.IDatum datum)))
-                     (boolean (.booleanValue ^java.lang.Boolean cache)))
-                   (.writeObject
-                     ^org.fressian.Writer w
-                     (long (.eidx ^datomic.db.IDatumImpl datum))
-                     (boolean (.booleanValue ^java.lang.Boolean cache)))
-                   (.writeInt ^org.fressian.Writer w (long (.getA ^datomic.impl.db.IDatum datum)))
-                   (.writeObject ^org.fressian.Writer w (.getV ^datomic.impl.db.IDatum datum))
-                   (.writeObject
-                     ^org.fressian.Writer w
-                     (long (.getT ^datomic.impl.db.IDatum datum))
-                     (boolean (.booleanValue ^java.lang.Boolean cache))))
-                 nil)))}}))
-     ([] (write-handlers true))))
+  (defn write-handlers
+    ([cache]
+      (merge
+        fressian/user-write-handlers
+        index/common-write-handlers
+        {datomic.db.DbId
+         {"dbid"
+          (reify
+            org.fressian.handlers.WriteHandler
+            (^void write
+              [this ^org.fressian.Writer w o]
+              (do
+                (let [dbid o]
+                  (.writeTag ^org.fressian.Writer w "dbid" (int 2))
+                  (.writeObject
+                    ^org.fressian.Writer w
+                    (:part dbid)
+                    (boolean (.booleanValue ^java.lang.Boolean cache)))
+                  (.writeObject
+                    ^org.fressian.Writer w
+                    (:idx dbid)
+                    (boolean (.booleanValue ^java.lang.Boolean cache))))
+                nil)))},
+         datomic.db.Datum
+         {"datum"
+          (reify
+            org.fressian.handlers.WriteHandler
+            (^void write
+              [this ^org.fressian.Writer w o]
+              (do
+                (let [datum o]
+                  (.writeTag ^org.fressian.Writer w "datum" (int 6))
+                  (.writeBoolean
+                    ^org.fressian.Writer w
+                    (boolean (.isAssertion ^datomic.impl.db.IDatum datum)))
+                  (.writeObject
+                    ^org.fressian.Writer w
+                    (java.lang.Integer/valueOf (int (.getP ^datomic.impl.db.IDatum datum)))
+                    (boolean (.booleanValue ^java.lang.Boolean cache)))
+                  (.writeObject
+                    ^org.fressian.Writer w
+                    (long (.eidx ^datomic.db.IDatumImpl datum))
+                    (boolean (.booleanValue ^java.lang.Boolean cache)))
+                  (.writeInt ^org.fressian.Writer w (long (.getA ^datomic.impl.db.IDatum datum)))
+                  (.writeObject ^org.fressian.Writer w (.getV ^datomic.impl.db.IDatum datum))
+                  (.writeObject
+                    ^org.fressian.Writer w
+                    (long (.getT ^datomic.impl.db.IDatum datum))
+                    (boolean (.booleanValue ^java.lang.Boolean cache))))
+                nil)))}}))
+    ([] (write-handlers true)))
   (reset-meta!
     #'write-handlers
     (assoc

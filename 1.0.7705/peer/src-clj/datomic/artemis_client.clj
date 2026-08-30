@@ -90,12 +90,12 @@
     (clojure.lang.RT/var "datomic.artemis-client" "create-connector")
     (fn create_connector
       ([connector_class_name & kvs] (apply create-transport connector_class_name kvs))))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol HornetImpl (start-session* [_ creds args]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.artemis-client" "HornetImpl")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'HornetImpl :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'HornetImpl :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -105,12 +105,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.artemis-client" "HornetImpl"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.artemis-client" "start-session*")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (defn start-session ([factory creds & args] (start-session* factory creds args)))
   (reset-meta!
     #'start-session
@@ -330,15 +330,14 @@
     org.apache.activemq.artemis.api.core.client.ServerLocator
     common/AsyncShutdown
     {:async-shutdown (fn fn__17413 ([this] (.close this) (promise/delivered true)))})
-  (def create-temporary-queue
-   (fn create_temporary_queue
-     ([session address]
-       (let [queue_name (str address (common/rand-uuid))]
-         (.createTemporaryQueue
-           ^org.apache.activemq.artemis.api.core.client.ClientSession session
-           ^java.lang.String address
-           ^java.lang.String queue_name)
-         queue_name))))
+  (defn create-temporary-queue
+    ([session address]
+      (let [queue_name (str address (common/rand-uuid))]
+        (.createTemporaryQueue
+          ^org.apache.activemq.artemis.api.core.client.ClientSession session
+          ^java.lang.String address
+          ^java.lang.String queue_name)
+        queue_name)))
   (reset-meta!
     #'create-temporary-queue
     (assoc
@@ -350,16 +349,15 @@
       'create-temporary-queue
       :ns
       *ns*))
-  (def delete-queue
-   (fn delete_queue
-     ([session queue]
-       (try
-         (when-not (.isClosed ^org.apache.activemq.artemis.api.core.client.ClientSession session)
-           (.deleteQueue
-             ^org.apache.activemq.artemis.api.core.client.ClientSession session
-             ^java.lang.String queue)
-           nil)
-         (catch java.lang.Throwable t (error/report t))))))
+  (defn delete-queue
+    ([session queue]
+      (try
+        (when-not (.isClosed ^org.apache.activemq.artemis.api.core.client.ClientSession session)
+          (.deleteQueue
+            ^org.apache.activemq.artemis.api.core.client.ClientSession session
+            ^java.lang.String queue)
+          nil)
+        (catch java.lang.Throwable t (error/report t)))))
   (reset-meta!
     #'delete-queue
     (assoc
@@ -430,16 +428,15 @@
            (if temp__5802__auto__
              (let [msg temp__5802__auto__] msg)
              (do (throw (java.lang.InterruptedException.)) nil)))))})
-  (def set-handler
-   (fn set_handler
-     ([consumer handler]
-       (.setMessageHandler
-         ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer
-         (reify
-           org.apache.activemq.artemis.api.core.client.MessageHandler
-           (^void onMessage
-             [this ^org.apache.activemq.artemis.api.core.client.ClientMessage msg]
-             (do (^clojure.lang.IFn handler msg) nil)))))))
+  (defn set-handler
+    ([consumer handler]
+      (.setMessageHandler
+        ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer
+        (reify
+          org.apache.activemq.artemis.api.core.client.MessageHandler
+          (^void onMessage
+            [this ^org.apache.activemq.artemis.api.core.client.ClientMessage msg]
+            (do (^clojure.lang.IFn handler msg) nil))))))
   (reset-meta!
     #'set-handler
     (assoc
@@ -483,28 +480,27 @@
         (.createMessage
           ^org.apache.activemq.artemis.api.core.client.ClientSession session
           (boolean durable)))))
-  (def output-stream
-   (fn output_stream
-     ([msg]
-       (let [buf (.getBodyBuffer ^org.apache.activemq.artemis.api.core.client.ClientMessage msg)]
-         (proxy
-           [java.io.OutputStream]
-           []
-           (write
-             ([b]
-               (do
-                 (.writeByte
-                   ^org.apache.activemq.artemis.api.core.ActiveMQBuffer buf
-                   (unchecked-byte b))
-                 nil))
-             ([bs off len]
-               (do
-                 (.writeBytes
-                   ^org.apache.activemq.artemis.api.core.ActiveMQBuffer buf
-                   ^bytes bs
-                   (int off)
-                   (int len))
-                 nil))))))))
+  (defn output-stream
+    ([msg]
+      (let [buf (.getBodyBuffer ^org.apache.activemq.artemis.api.core.client.ClientMessage msg)]
+        (proxy
+          [java.io.OutputStream]
+          []
+          (write
+            ([b]
+              (do
+                (.writeByte
+                  ^org.apache.activemq.artemis.api.core.ActiveMQBuffer buf
+                  (unchecked-byte b))
+                nil))
+            ([bs off len]
+              (do
+                (.writeBytes
+                  ^org.apache.activemq.artemis.api.core.ActiveMQBuffer buf
+                  ^bytes bs
+                  (int off)
+                  (int len))
+                nil)))))))
   (reset-meta!
     #'output-stream
     (assoc
@@ -513,12 +509,11 @@
       'output-stream
       :ns
       *ns*))
-  (def input-stream
-   (fn input_stream
-     ([msg]
-       (let [buf (.getBodyBuffer ^org.apache.activemq.artemis.api.core.client.ClientMessage msg)]
-         (com.datomic.impl.peer.ActiveMQInputStream.
-           ^org.apache.activemq.artemis.api.core.ActiveMQBuffer buf)))))
+  (defn input-stream
+    ([msg]
+      (let [buf (.getBodyBuffer ^org.apache.activemq.artemis.api.core.client.ClientMessage msg)]
+        (com.datomic.impl.peer.ActiveMQInputStream.
+          ^org.apache.activemq.artemis.api.core.ActiveMQBuffer buf))))
   (reset-meta!
     #'input-stream
     (assoc
@@ -527,13 +522,12 @@
       'input-stream
       :ns
       *ns*))
-  (def create-fressian-message
-   (fn create_fressian_message
-     ([session lookup obj & message_args]
-       (let [msg (apply create-message session message_args)
-             fout (fressian/create-writer (output-stream msg) lookup)]
-         (.writeObject ^org.fressian.Writer fout obj)
-         msg))))
+  (defn create-fressian-message
+    ([session lookup obj & message_args]
+      (let [msg (apply create-message session message_args)
+            fout (fressian/create-writer (output-stream msg) lookup)]
+        (.writeObject ^org.fressian.Writer fout obj)
+        msg)))
   (reset-meta!
     #'create-fressian-message
     (assoc
@@ -542,15 +536,14 @@
       'create-fressian-message
       :ns
       *ns*))
-  (def create-serializer
-   (fn create_serializer
-     ([write_handlers]
-       (fn fn__17434
-         ([obj msg]
-           (let [fout (fressian/create-writer
-                        (output-stream msg)
-                        (merge fressian/clojure-write-handlers write_handlers))]
-             (.writeObject ^org.fressian.Writer fout obj)))))))
+  (defn create-serializer
+    ([write_handlers]
+      (fn fn__17434
+        ([obj msg]
+          (let [fout (fressian/create-writer
+                       (output-stream msg)
+                       (merge fressian/clojure-write-handlers write_handlers))]
+            (.writeObject ^org.fressian.Writer fout obj))))))
   (reset-meta!
     #'create-serializer
     (assoc
@@ -559,15 +552,14 @@
       'create-serializer
       :ns
       *ns*))
-  (def create-deserializer
-   (fn create_deserializer
-     ([read_handlers]
-       (fn fn__17437
-         ([msg]
-           (let [fin (fressian/create-reader
-                       (input-stream msg)
-                       (merge fressian/clojure-read-handlers read_handlers))]
-             (.readObject ^org.fressian.Reader fin)))))))
+  (defn create-deserializer
+    ([read_handlers]
+      (fn fn__17437
+        ([msg]
+          (let [fin (fressian/create-reader
+                      (input-stream msg)
+                      (merge fressian/clojure-read-handlers read_handlers))]
+            (.readObject ^org.fressian.Reader fin))))))
   (reset-meta!
     #'create-deserializer
     (assoc
@@ -576,10 +568,9 @@
       'create-deserializer
       :ns
       *ns*))
-  (def read-batch
-   (fn read_batch
-     ([msg read_handlers]
-       (fressian/read-batch (fressian/create-reader (input-stream msg) read_handlers)))))
+  (defn read-batch
+    ([msg read_handlers]
+      (fressian/read-batch (fressian/create-reader (input-stream msg) read_handlers))))
   (reset-meta!
     #'read-batch
     (assoc
@@ -588,34 +579,33 @@
       'read-batch
       :ns
       *ns*))
-  (def fressian-producer
-   (fn fressian_producer
-     ([hornet_session hornet_producer write_handlers]
-       (reify
-         datomic.queue.BlockingProducer
-         clojure.lang.IFn
-         (put
-           [this obj]
-           (try
-             (do
-               (.send
-                 ^org.apache.activemq.artemis.api.core.client.ClientProducer hornet_producer
-                 (this obj))
-               true)
-             (catch
-               java.lang.Throwable
-               t
-               (do
-                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.artemis-client") ex t]
-                   (when (.isWarnEnabled ^org.slf4j.Logger logger)
-                     (.warn
-                       ^org.slf4j.Logger logger
-                       (logger/process "Hornet send failed")
-                       ^java.lang.Throwable ex)
-                     (logger/caused-by logger ex))
-                   nil)
-                 false))))
-         (invoke [this obj] (create-fressian-message hornet_session write_handlers obj false))))))
+  (defn fressian-producer
+    ([hornet_session hornet_producer write_handlers]
+      (reify
+        datomic.queue.BlockingProducer
+        clojure.lang.IFn
+        (put
+          [this obj]
+          (try
+            (do
+              (.send
+                ^org.apache.activemq.artemis.api.core.client.ClientProducer hornet_producer
+                (this obj))
+              true)
+            (catch
+              java.lang.Throwable
+              t
+              (do
+                (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.artemis-client") ex t]
+                  (when (.isWarnEnabled ^org.slf4j.Logger logger)
+                    (.warn
+                      ^org.slf4j.Logger logger
+                      (logger/process "Hornet send failed")
+                      ^java.lang.Throwable ex)
+                    (logger/caused-by logger ex))
+                  nil)
+                false))))
+        (invoke [this obj] (create-fressian-message hornet_session write_handlers obj false)))))
   (reset-meta!
     #'fressian-producer
     (assoc
@@ -655,18 +645,17 @@
                   (throw ^java.lang.Throwable t__8798__auto__)
                   nil))))))))
   (clojure.core/import 'datomic.artemis_client.RpcClient)
-  (def ->RpcClient
-   (fn __GT_RpcClient
-     ([session producer consumer serializer response_map producer_queue consumer_queue cleanup]
-       (datomic.artemis_client.RpcClient.
-         session
-         producer
-         consumer
-         serializer
-         response_map
-         producer_queue
-         consumer_queue
-         cleanup))))
+  (defn ->RpcClient
+    ([session producer consumer serializer response_map producer_queue consumer_queue cleanup]
+      (datomic.artemis_client.RpcClient.
+        session
+        producer
+        consumer
+        serializer
+        response_map
+        producer_queue
+        consumer_queue
+        cleanup)))
   (reset-meta!
     #'->RpcClient
     (assoc
@@ -685,152 +674,148 @@
       '->RpcClient
       :ns
       *ns*))
-  (def create-rpc-client
-   (fn create_rpc_client
-     ([session request_address response_address & p__17451]
-       (let [vec__17452 p__17451
-             map__17455 (nth vec__17452 (int 0) nil)
-             map__17455 (if (seq? map__17455)
-                          (if (next map__17455)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__17455))
-                            (if (seq map__17455) (first map__17455) {}))
-                          map__17455)
-             read_handlers (get map__17455 :read-handlers)
-             write_handlers (get map__17455 :write-handlers)
-             serializer (create-serializer write_handlers)
-             deserializer (create-deserializer read_handlers)
-             response_map (cache/create-response-map 2)
-             cq (partial create-temporary-queue session)
-             dq (partial delete-queue session)
-             request_queue (^clojure.lang.IFn cq request_address)
-             cleanup (error/runonce
-                       (fn fn__17456
-                         ([]
-                           (try
-                             (^clojure.lang.IFn dq request_queue)
-                             (catch
-                               java.lang.Throwable
-                               t__8509__auto__
-                               (error/report t__8509__auto__)))
-                           nil)))]
-         (try
-           (let [response_queue (^clojure.lang.IFn cq response_address)
-                 cleanup (error/runonce
-                           (fn fn__17460
-                             ([]
-                               (try
-                                 (^clojure.lang.IFn dq response_queue)
-                                 (catch
-                                   java.lang.Throwable
-                                   t__8509__auto__
-                                   (error/report t__8509__auto__)))
-                               (^clojure.lang.IFn cleanup))))]
-             (try
-               (let [producer (create-producer session request_address)
-                     cleanup (error/runonce
-                               (fn fn__17464
-                                 ([]
-                                   (try
-                                     (do
-                                       (.close
-                                         ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
-                                       nil)
-                                     (catch
-                                       java.lang.Throwable
-                                       t__8509__auto__
-                                       (error/report t__8509__auto__)))
-                                   (^clojure.lang.IFn cleanup))))]
-                 (try
-                   (let [consumer (create-consumer session response_queue)
-                         cleanup (error/runonce
-                                   (fn fn__17468
-                                     ([]
-                                       (try
-                                         (do
-                                           (.close
-                                             ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
-                                           nil)
-                                         (catch
-                                           java.lang.Throwable
-                                           t__8509__auto__
-                                           (error/report t__8509__auto__)))
-                                       (^clojure.lang.IFn cleanup))))]
-                     (try
-                       (do
-                         (set-handler
-                           consumer
-                           (fn fn__17472
-                             ([msg]
-                               (let [map__17473 (^clojure.lang.IFn deserializer msg)
-                                     map__17473 (if (seq? map__17473)
-                                                  (if (next map__17473)
-                                                    (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                      (to-array map__17473))
-                                                    (if (seq map__17473) (first map__17473) {}))
-                                                  map__17473)
-                                     result map__17473
-                                     id (get map__17473 :id)
-                                     temp__5804__auto__ (cache/remove response_map id)]
-                                 (when temp__5804__auto__
-                                   (let [p temp__5804__auto__] (deliver p result)))))))
-                         (datomic.artemis_client.RpcClient.
-                           session
-                           producer
-                           consumer
-                           serializer
-                           response_map
-                           request_queue
-                           response_queue
-                           cleanup))
-                       (catch
-                         java.lang.Throwable
-                         t__8510__auto__
-                         (do
-                           (try
-                             (do
-                               (.close
-                                 ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
-                               nil)
-                             (catch
-                               java.lang.Throwable
-                               t__8509__auto__
-                               (error/report t__8509__auto__)))
-                           (throw ^java.lang.Throwable t__8510__auto__)
-                           nil))))
-                   (catch
-                     java.lang.Throwable
-                     t__8510__auto__
-                     (do
-                       (try
-                         (do
-                           (.close
-                             ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
-                           nil)
-                         (catch
-                           java.lang.Throwable
-                           t__8509__auto__
-                           (error/report t__8509__auto__)))
-                       (throw ^java.lang.Throwable t__8510__auto__)
-                       nil))))
-               (catch
-                 java.lang.Throwable
-                 t__8510__auto__
-                 (do
-                   (try
-                     (^clojure.lang.IFn dq response_queue)
-                     (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
-                   (throw ^java.lang.Throwable t__8510__auto__)
-                   nil))))
-           (catch
-             java.lang.Throwable
-             t__8510__auto__
-             (do
-               (try
-                 (^clojure.lang.IFn dq request_queue)
-                 (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
-               (throw ^java.lang.Throwable t__8510__auto__)
-               nil)))))))
+  (defn create-rpc-client
+    ([session request_address response_address & p__17451]
+      (let [vec__17452 p__17451
+            map__17455 (nth vec__17452 (int 0) nil)
+            map__17455 (if (seq? map__17455)
+                         (if (next map__17455)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__17455))
+                           (if (seq map__17455) (first map__17455) {}))
+                         map__17455)
+            read_handlers (get map__17455 :read-handlers)
+            write_handlers (get map__17455 :write-handlers)
+            serializer (create-serializer write_handlers)
+            deserializer (create-deserializer read_handlers)
+            response_map (cache/create-response-map 2)
+            cq (partial create-temporary-queue session)
+            dq (partial delete-queue session)
+            request_queue (^clojure.lang.IFn cq request_address)
+            cleanup (error/runonce
+                      (fn fn__17456
+                        ([]
+                          (try
+                            (^clojure.lang.IFn dq request_queue)
+                            (catch
+                              java.lang.Throwable
+                              t__8509__auto__
+                              (error/report t__8509__auto__)))
+                          nil)))]
+        (try
+          (let [response_queue (^clojure.lang.IFn cq response_address)
+                cleanup (error/runonce
+                          (fn fn__17460
+                            ([]
+                              (try
+                                (^clojure.lang.IFn dq response_queue)
+                                (catch
+                                  java.lang.Throwable
+                                  t__8509__auto__
+                                  (error/report t__8509__auto__)))
+                              (^clojure.lang.IFn cleanup))))]
+            (try
+              (let [producer (create-producer session request_address)
+                    cleanup (error/runonce
+                              (fn fn__17464
+                                ([]
+                                  (try
+                                    (do
+                                      (.close
+                                        ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
+                                      nil)
+                                    (catch
+                                      java.lang.Throwable
+                                      t__8509__auto__
+                                      (error/report t__8509__auto__)))
+                                  (^clojure.lang.IFn cleanup))))]
+                (try
+                  (let [consumer (create-consumer session response_queue)
+                        cleanup (error/runonce
+                                  (fn fn__17468
+                                    ([]
+                                      (try
+                                        (do
+                                          (.close
+                                            ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
+                                          nil)
+                                        (catch
+                                          java.lang.Throwable
+                                          t__8509__auto__
+                                          (error/report t__8509__auto__)))
+                                      (^clojure.lang.IFn cleanup))))]
+                    (try
+                      (do
+                        (set-handler
+                          consumer
+                          (fn fn__17472
+                            ([msg]
+                              (let [map__17473 (^clojure.lang.IFn deserializer msg)
+                                    map__17473 (if (seq? map__17473)
+                                                 (if (next map__17473)
+                                                   (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                     (to-array map__17473))
+                                                   (if (seq map__17473) (first map__17473) {}))
+                                                 map__17473)
+                                    result map__17473
+                                    id (get map__17473 :id)
+                                    temp__5804__auto__ (cache/remove response_map id)]
+                                (when temp__5804__auto__
+                                  (let [p temp__5804__auto__] (deliver p result)))))))
+                        (datomic.artemis_client.RpcClient.
+                          session
+                          producer
+                          consumer
+                          serializer
+                          response_map
+                          request_queue
+                          response_queue
+                          cleanup))
+                      (catch
+                        java.lang.Throwable
+                        t__8510__auto__
+                        (do
+                          (try
+                            (do
+                              (.close
+                                ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
+                              nil)
+                            (catch
+                              java.lang.Throwable
+                              t__8509__auto__
+                              (error/report t__8509__auto__)))
+                          (throw ^java.lang.Throwable t__8510__auto__)
+                          nil))))
+                  (catch
+                    java.lang.Throwable
+                    t__8510__auto__
+                    (do
+                      (try
+                        (do
+                          (.close
+                            ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
+                          nil)
+                        (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
+                      (throw ^java.lang.Throwable t__8510__auto__)
+                      nil))))
+              (catch
+                java.lang.Throwable
+                t__8510__auto__
+                (do
+                  (try
+                    (^clojure.lang.IFn dq response_queue)
+                    (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
+                  (throw ^java.lang.Throwable t__8510__auto__)
+                  nil))))
+          (catch
+            java.lang.Throwable
+            t__8510__auto__
+            (do
+              (try
+                (^clojure.lang.IFn dq request_queue)
+                (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
+              (throw ^java.lang.Throwable t__8510__auto__)
+              nil))))))
   (reset-meta!
     #'create-rpc-client
     (assoc
@@ -884,201 +869,193 @@
       '->RpcServer
       :ns
       *ns*))
-  (def create-rpc-server
-   (fn create_rpc_server
-     ([session_fn request_address response_address handler & p__17492]
-       (let [vec__17493 p__17492
-             map__17496 (nth vec__17493 (int 0) nil)
-             map__17496 (if (seq? map__17496)
-                          (if (next map__17496)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__17496))
-                            (if (seq map__17496) (first map__17496) {}))
-                          map__17496)
-             read_handlers (get map__17496 :read-handlers)
-             write_handlers (get map__17496 :write-handlers)
-             session (^clojure.lang.IFn session_fn)
-             serializer (create-serializer write_handlers)
-             deserializer (create-deserializer read_handlers)
-             cq (partial create-temporary-queue session)
-             dq (partial delete-queue session)
-             session session
-             cleanup (error/runonce
-                       (fn fn__17497
-                         ([]
-                           (try
-                             (common/async-shutdown session)
-                             (catch
-                               java.lang.Throwable
-                               t__8509__auto__
-                               (error/report t__8509__auto__)))
-                           nil)))]
-         (try
-           (let [request_queue (^clojure.lang.IFn cq request_address)
-                 cleanup (error/runonce
-                           (fn fn__17501
-                             ([]
-                               (try
-                                 (^clojure.lang.IFn dq request_queue)
-                                 (catch
-                                   java.lang.Throwable
-                                   t__8509__auto__
-                                   (error/report t__8509__auto__)))
-                               (^clojure.lang.IFn cleanup))))]
-             (try
-               (let [response_queue (^clojure.lang.IFn cq response_address)
-                     cleanup (error/runonce
-                               (fn fn__17505
-                                 ([]
-                                   (try
-                                     (^clojure.lang.IFn dq response_queue)
-                                     (catch
-                                       java.lang.Throwable
-                                       t__8509__auto__
-                                       (error/report t__8509__auto__)))
-                                   (^clojure.lang.IFn cleanup))))]
-                 (try
-                   (let [consumer (create-consumer session request_queue)
-                         cleanup (error/runonce
-                                   (fn fn__17509
-                                     ([]
-                                       (try
-                                         (do
-                                           (.close
-                                             ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
-                                           nil)
-                                         (catch
-                                           java.lang.Throwable
-                                           t__8509__auto__
-                                           (error/report t__8509__auto__)))
-                                       (^clojure.lang.IFn cleanup))))]
-                     (try
-                       (let [producer (create-producer session response_address)
-                             cleanup (error/runonce
-                                       (fn fn__17513
-                                         ([]
-                                           (try
-                                             (do
-                                               (.close
-                                                 ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
-                                               nil)
-                                             (catch
-                                               java.lang.Throwable
-                                               t__8509__auto__
-                                               (error/report t__8509__auto__)))
-                                           (^clojure.lang.IFn cleanup))))]
-                         (try
-                           (do
-                             (set-handler
-                               consumer
-                               (fn fn__17517
-                                 ([msg]
-                                   (let [map__17518 (^clojure.lang.IFn deserializer msg)
-                                         map__17518 (if (seq? map__17518)
-                                                      (if (next map__17518)
-                                                        (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                          (to-array map__17518))
-                                                        (if (seq map__17518)
-                                                          (first map__17518)
-                                                          {}))
-                                                      map__17518)
-                                         id (get map__17518 :id)
-                                         code (get map__17518 :code)
-                                         response (create-message session false)
-                                         result (try
-                                                  (let [handler_result (^clojure.lang.IFn handler
-                                                                         code)
-                                                        temp__5802__auto__ (:failed
-                                                                             handler_result)]
-                                                    (if temp__5802__auto__
-                                                      (let [failed temp__5802__auto__]
-                                                        {:id id, :failed failed})
-                                                      {:id id, :value handler_result}))
-                                                  (catch
-                                                    java.lang.Throwable
-                                                    e
-                                                    (do
-                                                      (let [logger
-                                                            (org.slf4j.LoggerFactory/getLogger
-                                                              "datomic.artemis-client")
-                                                            ex e]
-                                                        (when (.isWarnEnabled
-                                                                ^org.slf4j.Logger logger)
-                                                          (.warn
-                                                            ^org.slf4j.Logger logger
-                                                            (logger/process "command failed")
-                                                            ^java.lang.Throwable ex)
-                                                          (logger/caused-by logger ex))
-                                                        nil)
-                                                      {:id id,
-                                                       :failed
-                                                       (.getMessage ^java.lang.Throwable e)})))]
-                                     (^clojure.lang.IFn serializer result response)
-                                     (.send
-                                       ^org.apache.activemq.artemis.api.core.client.ClientProducer producer
-                                       ^org.apache.activemq.artemis.api.core.Message response)
-                                     nil))))
-                             (datomic.artemis_client.RpcServer. consumer producer cleanup))
-                           (catch
-                             java.lang.Throwable
-                             t__8510__auto__
-                             (do
-                               (try
-                                 (do
-                                   (.close
-                                     ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
-                                   nil)
-                                 (catch
-                                   java.lang.Throwable
-                                   t__8509__auto__
-                                   (error/report t__8509__auto__)))
-                               (throw ^java.lang.Throwable t__8510__auto__)
-                               nil))))
-                       (catch
-                         java.lang.Throwable
-                         t__8510__auto__
-                         (do
-                           (try
-                             (do
-                               (.close
-                                 ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
-                               nil)
-                             (catch
-                               java.lang.Throwable
-                               t__8509__auto__
-                               (error/report t__8509__auto__)))
-                           (throw ^java.lang.Throwable t__8510__auto__)
-                           nil))))
-                   (catch
-                     java.lang.Throwable
-                     t__8510__auto__
-                     (do
-                       (try
-                         (^clojure.lang.IFn dq response_queue)
-                         (catch
-                           java.lang.Throwable
-                           t__8509__auto__
-                           (error/report t__8509__auto__)))
-                       (throw ^java.lang.Throwable t__8510__auto__)
-                       nil))))
-               (catch
-                 java.lang.Throwable
-                 t__8510__auto__
-                 (do
-                   (try
-                     (^clojure.lang.IFn dq request_queue)
-                     (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
-                   (throw ^java.lang.Throwable t__8510__auto__)
-                   nil))))
-           (catch
-             java.lang.Throwable
-             t__8510__auto__
-             (do
-               (try
-                 (common/async-shutdown session)
-                 (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
-               (throw ^java.lang.Throwable t__8510__auto__)
-               nil)))))))
+  (defn create-rpc-server
+    ([session_fn request_address response_address handler & p__17492]
+      (let [vec__17493 p__17492
+            map__17496 (nth vec__17493 (int 0) nil)
+            map__17496 (if (seq? map__17496)
+                         (if (next map__17496)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__17496))
+                           (if (seq map__17496) (first map__17496) {}))
+                         map__17496)
+            read_handlers (get map__17496 :read-handlers)
+            write_handlers (get map__17496 :write-handlers)
+            session (^clojure.lang.IFn session_fn)
+            serializer (create-serializer write_handlers)
+            deserializer (create-deserializer read_handlers)
+            cq (partial create-temporary-queue session)
+            dq (partial delete-queue session)
+            session session
+            cleanup (error/runonce
+                      (fn fn__17497
+                        ([]
+                          (try
+                            (common/async-shutdown session)
+                            (catch
+                              java.lang.Throwable
+                              t__8509__auto__
+                              (error/report t__8509__auto__)))
+                          nil)))]
+        (try
+          (let [request_queue (^clojure.lang.IFn cq request_address)
+                cleanup (error/runonce
+                          (fn fn__17501
+                            ([]
+                              (try
+                                (^clojure.lang.IFn dq request_queue)
+                                (catch
+                                  java.lang.Throwable
+                                  t__8509__auto__
+                                  (error/report t__8509__auto__)))
+                              (^clojure.lang.IFn cleanup))))]
+            (try
+              (let [response_queue (^clojure.lang.IFn cq response_address)
+                    cleanup (error/runonce
+                              (fn fn__17505
+                                ([]
+                                  (try
+                                    (^clojure.lang.IFn dq response_queue)
+                                    (catch
+                                      java.lang.Throwable
+                                      t__8509__auto__
+                                      (error/report t__8509__auto__)))
+                                  (^clojure.lang.IFn cleanup))))]
+                (try
+                  (let [consumer (create-consumer session request_queue)
+                        cleanup (error/runonce
+                                  (fn fn__17509
+                                    ([]
+                                      (try
+                                        (do
+                                          (.close
+                                            ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
+                                          nil)
+                                        (catch
+                                          java.lang.Throwable
+                                          t__8509__auto__
+                                          (error/report t__8509__auto__)))
+                                      (^clojure.lang.IFn cleanup))))]
+                    (try
+                      (let [producer (create-producer session response_address)
+                            cleanup (error/runonce
+                                      (fn fn__17513
+                                        ([]
+                                          (try
+                                            (do
+                                              (.close
+                                                ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
+                                              nil)
+                                            (catch
+                                              java.lang.Throwable
+                                              t__8509__auto__
+                                              (error/report t__8509__auto__)))
+                                          (^clojure.lang.IFn cleanup))))]
+                        (try
+                          (do
+                            (set-handler
+                              consumer
+                              (fn fn__17517
+                                ([msg]
+                                  (let [map__17518 (^clojure.lang.IFn deserializer msg)
+                                        map__17518 (if (seq? map__17518)
+                                                     (if (next map__17518)
+                                                       (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                         (to-array map__17518))
+                                                       (if (seq map__17518) (first map__17518) {}))
+                                                     map__17518)
+                                        id (get map__17518 :id)
+                                        code (get map__17518 :code)
+                                        response (create-message session false)
+                                        result (try
+                                                 (let [handler_result (^clojure.lang.IFn handler
+                                                                        code)
+                                                       temp__5802__auto__ (:failed handler_result)]
+                                                   (if temp__5802__auto__
+                                                     (let [failed temp__5802__auto__]
+                                                       {:id id, :failed failed})
+                                                     {:id id, :value handler_result}))
+                                                 (catch
+                                                   java.lang.Throwable
+                                                   e
+                                                   (do
+                                                     (let [logger (org.slf4j.LoggerFactory/getLogger
+                                                                    "datomic.artemis-client")
+                                                           ex e]
+                                                       (when (.isWarnEnabled
+                                                               ^org.slf4j.Logger logger)
+                                                         (.warn
+                                                           ^org.slf4j.Logger logger
+                                                           (logger/process "command failed")
+                                                           ^java.lang.Throwable ex)
+                                                         (logger/caused-by logger ex))
+                                                       nil)
+                                                     {:id id,
+                                                      :failed
+                                                      (.getMessage ^java.lang.Throwable e)})))]
+                                    (^clojure.lang.IFn serializer result response)
+                                    (.send
+                                      ^org.apache.activemq.artemis.api.core.client.ClientProducer producer
+                                      ^org.apache.activemq.artemis.api.core.Message response)
+                                    nil))))
+                            (datomic.artemis_client.RpcServer. consumer producer cleanup))
+                          (catch
+                            java.lang.Throwable
+                            t__8510__auto__
+                            (do
+                              (try
+                                (do
+                                  (.close
+                                    ^org.apache.activemq.artemis.api.core.client.ClientProducer producer)
+                                  nil)
+                                (catch
+                                  java.lang.Throwable
+                                  t__8509__auto__
+                                  (error/report t__8509__auto__)))
+                              (throw ^java.lang.Throwable t__8510__auto__)
+                              nil))))
+                      (catch
+                        java.lang.Throwable
+                        t__8510__auto__
+                        (do
+                          (try
+                            (do
+                              (.close
+                                ^org.apache.activemq.artemis.api.core.client.ClientConsumer consumer)
+                              nil)
+                            (catch
+                              java.lang.Throwable
+                              t__8509__auto__
+                              (error/report t__8509__auto__)))
+                          (throw ^java.lang.Throwable t__8510__auto__)
+                          nil))))
+                  (catch
+                    java.lang.Throwable
+                    t__8510__auto__
+                    (do
+                      (try
+                        (^clojure.lang.IFn dq response_queue)
+                        (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
+                      (throw ^java.lang.Throwable t__8510__auto__)
+                      nil))))
+              (catch
+                java.lang.Throwable
+                t__8510__auto__
+                (do
+                  (try
+                    (^clojure.lang.IFn dq request_queue)
+                    (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
+                  (throw ^java.lang.Throwable t__8510__auto__)
+                  nil))))
+          (catch
+            java.lang.Throwable
+            t__8510__auto__
+            (do
+              (try
+                (common/async-shutdown session)
+                (catch java.lang.Throwable t__8509__auto__ (error/report t__8509__auto__)))
+              (throw ^java.lang.Throwable t__8510__auto__)
+              nil))))))
   (reset-meta!
     #'create-rpc-server
     (assoc
@@ -1095,17 +1072,16 @@
       'create-rpc-server
       :ns
       *ns*))
-  (def rpc-request
-   (fn rpc_request
-     ([conn request]
-       (let [id (common/rand-uuid) p (promise)]
-         (cache/put (.-response-map ^datomic.artemis_client.RpcClient conn) id p)
-         (let [msg (create-message (.-session ^datomic.artemis_client.RpcClient conn) false)]
-           ((.-serializer ^datomic.artemis_client.RpcClient conn) {:id id, :code request} msg)
-           (.send
-             (.-producer ^datomic.artemis_client.RpcClient conn)
-             ^org.apache.activemq.artemis.api.core.Message msg))
-         p))))
+  (defn rpc-request
+    ([conn request]
+      (let [id (common/rand-uuid) p (promise)]
+        (cache/put (.-response-map ^datomic.artemis_client.RpcClient conn) id p)
+        (let [msg (create-message (.-session ^datomic.artemis_client.RpcClient conn) false)]
+          ((.-serializer ^datomic.artemis_client.RpcClient conn) {:id id, :code request} msg)
+          (.send
+            (.-producer ^datomic.artemis_client.RpcClient conn)
+            ^org.apache.activemq.artemis.api.core.Message msg))
+        p)))
   (reset-meta!
     #'rpc-request
     (assoc

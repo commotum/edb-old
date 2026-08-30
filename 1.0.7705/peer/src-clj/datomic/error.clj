@@ -138,29 +138,25 @@
       :ns
       *ns*))
   (.setMacro #'create)
-  (def raise
-   (fn raise
-     ([code msg details cause]
-       (throw
-         (let [msg__8463__auto__ msg]
-           (clojure.lang.ExceptionInfo.
-             (str code " " msg__8463__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               clojure.lang.ExceptionInfo
-               msg__8463__auto__)
-             ^java.lang.Throwable cause))))
-     ([code msg details]
-       (throw
-         (let [msg__8462__auto__ msg]
-           (clojure.lang.ExceptionInfo.
-             (str code " " msg__8462__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               clojure.lang.ExceptionInfo
-               msg__8462__auto__)))))
-     ([code msg] (raise code msg nil))
-     ([code] (raise code "" nil))))
+  (defn raise
+    ([code msg details cause]
+      (throw
+        (let [msg__8463__auto__ msg]
+          (clojure.lang.ExceptionInfo.
+            (str code " " msg__8463__auto__)
+            (anomalize (assoc details :db/error code) clojure.lang.ExceptionInfo msg__8463__auto__)
+            ^java.lang.Throwable cause))))
+    ([code msg details]
+      (throw
+        (let [msg__8462__auto__ msg]
+          (clojure.lang.ExceptionInfo.
+            (str code " " msg__8462__auto__)
+            (anomalize
+              (assoc details :db/error code)
+              clojure.lang.ExceptionInfo
+              msg__8462__auto__)))))
+    ([code msg] (raise code msg nil))
+    ([code] (raise code "" nil)))
   (reset-meta!
     #'raise
     (assoc
@@ -171,29 +167,28 @@
       'raise
       :ns
       *ns*))
-  (def arg
-   (fn arg
-     ([code msg details cause]
-       (throw
-         (let [msg__8463__auto__ msg]
-           (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
-             (str code " " msg__8463__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               datomic.impl.Exceptions$IllegalArgumentExceptionInfo
-               msg__8463__auto__)
-             ^java.lang.Throwable cause))))
-     ([code msg details]
-       (throw
-         (let [msg__8462__auto__ msg]
-           (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
-             (str code " " msg__8462__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               datomic.impl.Exceptions$IllegalArgumentExceptionInfo
-               msg__8462__auto__)))))
-     ([code msg] (arg code msg nil))
-     ([code] (arg code "" nil))))
+  (defn arg
+    ([code msg details cause]
+      (throw
+        (let [msg__8463__auto__ msg]
+          (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
+            (str code " " msg__8463__auto__)
+            (anomalize
+              (assoc details :db/error code)
+              datomic.impl.Exceptions$IllegalArgumentExceptionInfo
+              msg__8463__auto__)
+            ^java.lang.Throwable cause))))
+    ([code msg details]
+      (throw
+        (let [msg__8462__auto__ msg]
+          (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
+            (str code " " msg__8462__auto__)
+            (anomalize
+              (assoc details :db/error code)
+              datomic.impl.Exceptions$IllegalArgumentExceptionInfo
+              msg__8462__auto__)))))
+    ([code msg] (arg code msg nil))
+    ([code] (arg code "" nil)))
   (reset-meta!
     #'arg
     (assoc
@@ -204,26 +199,25 @@
       'arg
       :ns
       *ns*))
-  (def eval-exception
-   (fn eval_exception
-     ([p__8471 t]
-       (let [map__8472 p__8471
-             map__8472 (if (seq? map__8472)
-                         (if (next map__8472)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8472))
-                           (if (seq map__8472) (first map__8472) {}))
-                         map__8472)
-             cmap map__8472
-             context (get map__8472 :context)
-             expr (get map__8472 :expr)
-             arguments (get map__8472 :arguments)
-             msg (str "Error evaluating " (name context) ": " expr)]
-         (ex-info
-           msg
-           {:cognitect.anomalies/category :cognitect.anomalies/fault,
-            :cognitect.anomalies/message msg,
-            :datomic/eval-exception cmap}
-           t)))))
+  (defn eval-exception
+    ([p__8471 t]
+      (let [map__8472 p__8471
+            map__8472 (if (seq? map__8472)
+                        (if (next map__8472)
+                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8472))
+                          (if (seq map__8472) (first map__8472) {}))
+                        map__8472)
+            cmap map__8472
+            context (get map__8472 :context)
+            expr (get map__8472 :expr)
+            arguments (get map__8472 :arguments)
+            msg (str "Error evaluating " (name context) ": " expr)]
+        (ex-info
+          msg
+          {:cognitect.anomalies/category :cognitect.anomalies/fault,
+           :cognitect.anomalies/message msg,
+           :datomic/eval-exception cmap}
+          t))))
   (reset-meta!
     #'eval-exception
     (assoc
@@ -254,29 +248,28 @@
       'add-details-to-msg
       :ns
       *ns*))
-  (def argd
-   (fn argd
-     ([code msg details cause]
-       (throw
-         (let [msg__8463__auto__ (add-details-to-msg msg details)]
-           (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
-             (str code " " msg__8463__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               datomic.impl.Exceptions$IllegalArgumentExceptionInfo
-               msg__8463__auto__)
-             ^java.lang.Throwable cause))))
-     ([code msg details]
-       (throw
-         (let [msg__8462__auto__ (add-details-to-msg msg details)]
-           (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
-             (str code " " msg__8462__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               datomic.impl.Exceptions$IllegalArgumentExceptionInfo
-               msg__8462__auto__)))))
-     ([code msg] (arg code msg nil))
-     ([code] (arg code "" nil))))
+  (defn argd
+    ([code msg details cause]
+      (throw
+        (let [msg__8463__auto__ (add-details-to-msg msg details)]
+          (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
+            (str code " " msg__8463__auto__)
+            (anomalize
+              (assoc details :db/error code)
+              datomic.impl.Exceptions$IllegalArgumentExceptionInfo
+              msg__8463__auto__)
+            ^java.lang.Throwable cause))))
+    ([code msg details]
+      (throw
+        (let [msg__8462__auto__ (add-details-to-msg msg details)]
+          (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
+            (str code " " msg__8462__auto__)
+            (anomalize
+              (assoc details :db/error code)
+              datomic.impl.Exceptions$IllegalArgumentExceptionInfo
+              msg__8462__auto__)))))
+    ([code msg] (arg code msg nil))
+    ([code] (arg code "" nil)))
   (reset-meta!
     #'argd
     (assoc
@@ -287,29 +280,28 @@
       'argd
       :ns
       *ns*))
-  (def state
-   (fn state
-     ([code msg details cause]
-       (throw
-         (let [msg__8463__auto__ msg]
-           (datomic.impl.Exceptions$IllegalStateExceptionInfo.
-             (str code " " msg__8463__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               datomic.impl.Exceptions$IllegalStateExceptionInfo
-               msg__8463__auto__)
-             ^java.lang.Throwable cause))))
-     ([code msg details]
-       (throw
-         (let [msg__8462__auto__ msg]
-           (datomic.impl.Exceptions$IllegalStateExceptionInfo.
-             (str code " " msg__8462__auto__)
-             (anomalize
-               (assoc details :db/error code)
-               datomic.impl.Exceptions$IllegalStateExceptionInfo
-               msg__8462__auto__)))))
-     ([code msg] (state code msg nil))
-     ([code] (state code "" nil))))
+  (defn state
+    ([code msg details cause]
+      (throw
+        (let [msg__8463__auto__ msg]
+          (datomic.impl.Exceptions$IllegalStateExceptionInfo.
+            (str code " " msg__8463__auto__)
+            (anomalize
+              (assoc details :db/error code)
+              datomic.impl.Exceptions$IllegalStateExceptionInfo
+              msg__8463__auto__)
+            ^java.lang.Throwable cause))))
+    ([code msg details]
+      (throw
+        (let [msg__8462__auto__ msg]
+          (datomic.impl.Exceptions$IllegalStateExceptionInfo.
+            (str code " " msg__8462__auto__)
+            (anomalize
+              (assoc details :db/error code)
+              datomic.impl.Exceptions$IllegalStateExceptionInfo
+              msg__8462__auto__)))))
+    ([code msg] (state code msg nil))
+    ([code] (state code "" nil)))
   (reset-meta!
     #'state
     (assoc
@@ -363,34 +355,33 @@
                         (clojure.core/list (symbol classname))
                         (clojure.core/list 'msg__8493__auto__)))))))
             (fn fn__8495 ([msg] (java.lang.RuntimeException. ^java.lang.String msg))))))))
-  (def deserialize-exception
-   (fn deserialize_exception
-     ([p__8499]
-       (let [map__8500 p__8499
-             map__8500 (if (seq? map__8500)
-                         (if (next map__8500)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8500))
-                           (if (seq map__8500) (first map__8500) {}))
-                         map__8500)
-             classname (get map__8500 :classname)
-             error (get map__8500 :error)
-             error_data (get map__8500 :error-data)]
-         (if error_data
-           (let [G__8501 classname]
-             (case
-               G__8501
-               "datomic.impl.Exceptions$IllegalStateExceptionInfo"
-               (datomic.impl.Exceptions$IllegalStateExceptionInfo.
-                 ^java.lang.String error
-                 ^clojure.lang.IPersistentMap error_data)
-               "datomic.impl.Exceptions$IllegalArgumentExceptionInfo"
-               (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
-                 ^java.lang.String error
-                 ^clojure.lang.IPersistentMap error_data)
-               "clojure.lang.ExceptionInfo"
-               (ex-info error error_data)
-               (java.lang.RuntimeException. ^java.lang.String error)))
-           ((exception-deserializer classname) error))))))
+  (defn deserialize-exception
+    ([p__8499]
+      (let [map__8500 p__8499
+            map__8500 (if (seq? map__8500)
+                        (if (next map__8500)
+                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc (to-array map__8500))
+                          (if (seq map__8500) (first map__8500) {}))
+                        map__8500)
+            classname (get map__8500 :classname)
+            error (get map__8500 :error)
+            error_data (get map__8500 :error-data)]
+        (if error_data
+          (let [G__8501 classname]
+            (case
+              G__8501
+              "datomic.impl.Exceptions$IllegalStateExceptionInfo"
+              (datomic.impl.Exceptions$IllegalStateExceptionInfo.
+                ^java.lang.String error
+                ^clojure.lang.IPersistentMap error_data)
+              "datomic.impl.Exceptions$IllegalArgumentExceptionInfo"
+              (datomic.impl.Exceptions$IllegalArgumentExceptionInfo.
+                ^java.lang.String error
+                ^clojure.lang.IPersistentMap error_data)
+              "clojure.lang.ExceptionInfo"
+              (ex-info error error_data)
+              (java.lang.RuntimeException. ^java.lang.String error)))
+          ((exception-deserializer classname) error)))))
   (reset-meta!
     #'deserialize-exception
     (assoc

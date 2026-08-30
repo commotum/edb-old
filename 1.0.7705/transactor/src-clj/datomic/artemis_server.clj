@@ -64,47 +64,46 @@
     (clojure.lang.RT/var "datomic.artemis-server" "create-acceptor")
     (fn create_acceptor
       ([acceptor_class_name & kvs] (apply client/create-transport acceptor_class_name kvs))))
-  (def create-configuration
-   (fn create_configuration
-     ([host port encrypt_channel]
-       (let [acfgs #{(create-acceptor in-vm-acceptor-factory :serverId port)
-                     (create-acceptor
-                       netty-acceptor-factory
-                       :port
-                       port
-                       :host
-                       host
-                       :sslEnabled
-                       encrypt_channel
-                       :verifyHost
-                       false
-                       :keyStorePath
-                       (or
-                         (java.lang.System/getProperty "javax.net.ssl.keyStore")
-                         "datomic/transactor-key.jks")
-                       :keyStorePassword
-                       (or
-                         (java.lang.System/getProperty "javax.net.ssl.keyStorePassword")
-                         "transactor")
-                       :trustStorePath
-                       (or
-                         (java.lang.System/getProperty "javax.net.ssl.trustStore")
-                         "datomic/transactor-trust.jks")
-                       :trustStorePassword
-                       (or
-                         (java.lang.System/getProperty "javax.net.ssl.trustStorePassword")
-                         "transactor"))}]
-         (doto
-           (org.apache.activemq.artemis.core.config.impl.ConfigurationImpl.)
-           (.setPersistenceEnabled (boolean (.booleanValue false)))
-           (.setSecurityEnabled (boolean (.booleanValue true)))
-           (.setClusterUser "HORNETQ.MANAGEMENT.ADMIN.USER")
-           (.setClusterPassword (crypto/random-string 256))
-           (.setJournalSyncTransactional (boolean (.booleanValue false)))
-           (.setJournalDirectory (deref work-dir))
-           (.setJournalSyncNonTransactional (boolean (.booleanValue false)))
-           (.setJournalType org.apache.activemq.artemis.core.server.JournalType/NIO)
-           (.setAcceptorConfigurations ^java.util.Set acfgs))))))
+  (defn create-configuration
+    ([host port encrypt_channel]
+      (let [acfgs #{(create-acceptor in-vm-acceptor-factory :serverId port)
+                    (create-acceptor
+                      netty-acceptor-factory
+                      :port
+                      port
+                      :host
+                      host
+                      :sslEnabled
+                      encrypt_channel
+                      :verifyHost
+                      false
+                      :keyStorePath
+                      (or
+                        (java.lang.System/getProperty "javax.net.ssl.keyStore")
+                        "datomic/transactor-key.jks")
+                      :keyStorePassword
+                      (or
+                        (java.lang.System/getProperty "javax.net.ssl.keyStorePassword")
+                        "transactor")
+                      :trustStorePath
+                      (or
+                        (java.lang.System/getProperty "javax.net.ssl.trustStore")
+                        "datomic/transactor-trust.jks")
+                      :trustStorePassword
+                      (or
+                        (java.lang.System/getProperty "javax.net.ssl.trustStorePassword")
+                        "transactor"))}]
+        (doto
+          (org.apache.activemq.artemis.core.config.impl.ConfigurationImpl.)
+          (.setPersistenceEnabled (boolean (.booleanValue false)))
+          (.setSecurityEnabled (boolean (.booleanValue true)))
+          (.setClusterUser "HORNETQ.MANAGEMENT.ADMIN.USER")
+          (.setClusterPassword (crypto/random-string 256))
+          (.setJournalSyncTransactional (boolean (.booleanValue false)))
+          (.setJournalDirectory (deref work-dir))
+          (.setJournalSyncNonTransactional (boolean (.booleanValue false)))
+          (.setJournalType org.apache.activemq.artemis.core.server.JournalType/NIO)
+          (.setAcceptorConfigurations ^java.util.Set acfgs)))))
   (reset-meta!
     #'create-configuration
     (assoc
@@ -118,20 +117,19 @@
       'create-configuration
       :ns
       *ns*))
-  (def remote-ips
-   (fn remote_ips
-     ([server]
-       (let [local_addrs #{"invm"}
-             control (.getActiveMQServerControl
-                       ^org.apache.activemq.artemis.core.server.ActiveMQServer server)
-             trim_addr (fn trim_addr
-                         ([addr] (string/replace (string/replace addr #":.*" "") #"^/" "")))
-             addrs (map
-                     trim_addr
-                     (when control
-                       (.listRemoteAddresses
-                         ^org.apache.activemq.artemis.core.management.impl.ActiveMQServerControlImpl control)))]
-         (into #{} (remove local_addrs addrs))))))
+  (defn remote-ips
+    ([server]
+      (let [local_addrs #{"invm"}
+            control (.getActiveMQServerControl
+                      ^org.apache.activemq.artemis.core.server.ActiveMQServer server)
+            trim_addr (fn trim_addr
+                        ([addr] (string/replace (string/replace addr #":.*" "") #"^/" "")))
+            addrs (map
+                    trim_addr
+                    (when control
+                      (.listRemoteAddresses
+                        ^org.apache.activemq.artemis.core.management.impl.ActiveMQServerControlImpl control)))]
+        (into #{} (remove local_addrs addrs)))))
   (reset-meta!
     #'remote-ips
     (assoc
@@ -216,34 +214,33 @@
     org.apache.activemq.artemis.core.server.ActiveMQServer
     common/AsyncShutdown
     {:async-shutdown (fn fn__27605 ([this] (.stop this) (promise/delivered true)))})
-  (def add-address-settings
-   (fn add_address_settings
-     ([server address & p__27607]
-       (let [map__27608 p__27607
-             map__27608 (if (seq? map__27608)
-                          (if (next map__27608)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__27608))
-                            (if (seq map__27608) (first map__27608) {}))
-                          map__27608)
-             maxSizeBytes (get map__27608 :maxSizeBytes)
-             addressFullMessagePolicy (get map__27608 :addressFullMessagePolicy)]
-         (when-not maxSizeBytes
-           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'maxSizeBytes)))))
-         (when-not addressFullMessagePolicy
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str 'addressFullMessagePolicy)))))
-         (.addMatch
-           (.getAddressSettingsRepository
-             ^org.apache.activemq.artemis.core.server.impl.ActiveMQServerImpl server)
-           ^java.lang.String address
-           (doto
-             (org.apache.activemq.artemis.core.settings.impl.AddressSettings.)
-             (.setMaxSizeBytes (long ^java.lang.Number maxSizeBytes))
-             (.setAddressFullMessagePolicy
-               ^org.apache.activemq.artemis.core.settings.impl.AddressFullMessagePolicy addressFullMessagePolicy)))
-         nil))))
+  (defn add-address-settings
+    ([server address & p__27607]
+      (let [map__27608 p__27607
+            map__27608 (if (seq? map__27608)
+                         (if (next map__27608)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__27608))
+                           (if (seq map__27608) (first map__27608) {}))
+                         map__27608)
+            maxSizeBytes (get map__27608 :maxSizeBytes)
+            addressFullMessagePolicy (get map__27608 :addressFullMessagePolicy)]
+        (when-not maxSizeBytes
+          (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'maxSizeBytes)))))
+        (when-not addressFullMessagePolicy
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str 'addressFullMessagePolicy)))))
+        (.addMatch
+          (.getAddressSettingsRepository
+            ^org.apache.activemq.artemis.core.server.impl.ActiveMQServerImpl server)
+          ^java.lang.String address
+          (doto
+            (org.apache.activemq.artemis.core.settings.impl.AddressSettings.)
+            (.setMaxSizeBytes (long ^java.lang.Number maxSizeBytes))
+            (.setAddressFullMessagePolicy
+              ^org.apache.activemq.artemis.core.settings.impl.AddressFullMessagePolicy addressFullMessagePolicy)))
+        nil)))
   (reset-meta!
     #'add-address-settings
     (assoc

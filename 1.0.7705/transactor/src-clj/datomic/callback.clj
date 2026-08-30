@@ -17,23 +17,22 @@
           ['clojure.set :as 'set]
           ['datomic.slf4j :as 'logger]))))
   (set! *warn-on-reflection* true)
-  (def has-callback-signature?
-   (fn has_callback_signature_QMARK_
-     ([cls mname]
-       (when-not (symbol? mname)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'symbol? 'mname))))))
-       (boolean
-         (seq
-           (filter
-             (fn fn__22615
-               ([member]
-                 (and
-                   (= (:name member) mname)
-                   (= (:parameter-types member) ['java.lang.Object])
-                   (= #{:public :static} (set/intersection #{:public :static} (:flags member))))))
-             (:members (reflect/reflect cls))))))))
+  (defn has-callback-signature?
+    ([cls mname]
+      (when-not (symbol? mname)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'symbol? 'mname))))))
+      (boolean
+        (seq
+          (filter
+            (fn fn__22615
+              ([member]
+                (and
+                  (= (:name member) mname)
+                  (= (:parameter-types member) ['java.lang.Object])
+                  (= #{:public :static} (set/intersection #{:public :static} (:flags member))))))
+            (:members (reflect/reflect cls)))))))
   (reset-meta!
     #'has-callback-signature?
     (assoc

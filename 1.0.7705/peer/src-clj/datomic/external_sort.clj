@@ -23,7 +23,7 @@
         (clojure.core/import 'java.util.ArrayList)
         (clojure.core/import 'datomic.iter.Iter))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       IO
       (make-temp-file [_] "Returns something that can be opened by io/input-stream")
@@ -31,8 +31,8 @@
       (delete-temp-file [_ fname] "Deletes thing created by make-temp-file"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.external-sort" "IO")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'IO :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'IO :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -43,13 +43,13 @@
                                       "Returns something that can be opened by io/input-stream"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.external-sort" "IO"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.external-sort" "make-temp-file")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -59,13 +59,13 @@
                                       :doc "Returns the size of the created file"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.external-sort" "IO"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.external-sort" "temp-file-size")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*)))
-    (let [protocol_signature__7436 (assoc
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*)))
+    (let [protocol_signature__7468 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -75,12 +75,12 @@
                                       :doc "Deletes thing created by make-temp-file"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.external-sort" "IO"))
-          protocol_method_name__7437 (with-meta
-                                       (:name protocol_signature__7436)
-                                       protocol_signature__7436)]
+          protocol_method_name__7469 (with-meta
+                                       (:name protocol_signature__7468)
+                                       protocol_signature__7468)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.external-sort" "delete-temp-file")
-        (assoc protocol_signature__7436 :name protocol_method_name__7437 :ns *ns*))))
+        (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*))))
   (defn temp-file-io
     ([dir]
       (reify
@@ -93,21 +93,20 @@
   (reset-meta!
     #'temp-file-io
     (assoc {:arglists (clojure.core/list ['dir]), :column (int 1)} :name 'temp-file-io :ns *ns*))
-  (def next-chunk
-   (fn next_chunk
-     ([max_size sizer iter]
-       (when iter
-         (let [a (java.util.ArrayList.)]
-           (loop [size 0 iter iter]
-             (let [item (.get ^datomic.iter.Iter iter)
-                   size (long (+ size (^clojure.lang.IFn sizer item)))]
-               (.add ^java.util.ArrayList a item)
-               (if (< size max_size)
-                 (let [temp__5802__auto__ (.next ^datomic.iter.Iter iter)]
-                   (if temp__5802__auto__
-                     (let [inext temp__5802__auto__] (recur size inext))
-                     [a nil]))
-                 [a (.next ^datomic.iter.Iter iter)]))))))))
+  (defn next-chunk
+    ([max_size sizer iter]
+      (when iter
+        (let [a (java.util.ArrayList.)]
+          (loop [size 0 iter iter]
+            (let [item (.get ^datomic.iter.Iter iter)
+                  size (long (+ size (^clojure.lang.IFn sizer item)))]
+              (.add ^java.util.ArrayList a item)
+              (if (< size max_size)
+                (let [temp__5802__auto__ (.next ^datomic.iter.Iter iter)]
+                  (if temp__5802__auto__
+                    (let [inext temp__5802__auto__] (recur size inext))
+                    [a nil]))
+                [a (.next ^datomic.iter.Iter iter)])))))))
   (reset-meta!
     #'next-chunk
     (assoc
@@ -118,21 +117,20 @@
       'next-chunk
       :ns
       *ns*))
-  (def chunk-seq
-   (fn chunk_seq
-     ([max_size sizer iter]
-       (map
-         first
-         (take-while
-           identity
-           (iterate
-             (fn fn__13466
-               ([p__13465]
-                 (let [vec__13467 p__13465
-                       chunk (nth vec__13467 (int 0) nil)
-                       more (nth vec__13467 (int 1) nil)]
-                   (when more (next-chunk max_size sizer more)))))
-             (next-chunk max_size sizer iter)))))))
+  (defn chunk-seq
+    ([max_size sizer iter]
+      (map
+        first
+        (take-while
+          identity
+          (iterate
+            (fn fn__13466
+              ([p__13465]
+                (let [vec__13467 p__13465
+                      chunk (nth vec__13467 (int 0) nil)
+                      more (nth vec__13467 (int 1) nil)]
+                  (when more (next-chunk max_size sizer more)))))
+            (next-chunk max_size sizer iter))))))
   (reset-meta!
     #'chunk-seq
     (assoc
@@ -141,7 +139,7 @@
       'chunk-seq
       :ns
       *ns*))
-  (let [protocol_metadata__7438 {:column (int 1)}]
+  (let [protocol_metadata__7470 {:column (int 1)}]
     (defprotocol
       ExternalSort
       (consume-iter [_ handler] "Call hanlder with final result")
@@ -149,8 +147,8 @@
       (merge-step [_] "Returns coll of new files made in this step"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.external-sort" "ExternalSort")
-      (assoc (assoc protocol_metadata__7438 :doc nil) :name 'ExternalSort :ns *ns*))
-    (let [protocol_signature__7439 (assoc
+      (assoc (assoc protocol_metadata__7470 :doc nil) :name 'ExternalSort :ns *ns*))
+    (let [protocol_signature__7471 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -160,13 +158,13 @@
                                       :doc "Call hanlder with final result"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.external-sort" "ExternalSort"))
-          protocol_method_name__7440 (with-meta
-                                       (:name protocol_signature__7439)
-                                       protocol_signature__7439)]
+          protocol_method_name__7472 (with-meta
+                                       (:name protocol_signature__7471)
+                                       protocol_signature__7471)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.external-sort" "consume-iter")
-        (assoc protocol_signature__7439 :name protocol_method_name__7440 :ns *ns*)))
-    (let [protocol_signature__7441 (assoc
+        (assoc protocol_signature__7471 :name protocol_method_name__7472 :ns *ns*)))
+    (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -176,13 +174,13 @@
                                       :doc "Call handler with iterator over merged files"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.external-sort" "ExternalSort"))
-          protocol_method_name__7442 (with-meta
-                                       (:name protocol_signature__7441)
-                                       protocol_signature__7441)]
+          protocol_method_name__7474 (with-meta
+                                       (:name protocol_signature__7473)
+                                       protocol_signature__7473)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.external-sort" "consume-files-iter")
-        (assoc protocol_signature__7441 :name protocol_method_name__7442 :ns *ns*)))
-    (let [protocol_signature__7443 (assoc
+        (assoc protocol_signature__7473 :name protocol_method_name__7474 :ns *ns*)))
+    (let [protocol_signature__7475 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'merge-step {:arglists (clojure.core/list ['_])}),
@@ -190,12 +188,12 @@
                                       :doc "Returns coll of new files made in this step"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.external-sort" "ExternalSort"))
-          protocol_method_name__7444 (with-meta
-                                       (:name protocol_signature__7443)
-                                       protocol_signature__7443)]
+          protocol_method_name__7476 (with-meta
+                                       (:name protocol_signature__7475)
+                                       protocol_signature__7475)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.external-sort" "merge-step")
-        (assoc protocol_signature__7443 :name protocol_method_name__7444 :ns *ns*))))
+        (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*))))
   (def MAX_MERGE 4)
   (reset-meta! #'MAX_MERGE (assoc {:const true, :column (int 1)} :name 'MAX_MERGE :ns *ns*))
   (deftype
@@ -281,17 +279,16 @@
                             (delete-temp-file io f)
                             (recur (next seq_13527) nil 0 0))))))))))))))
   (clojure.core/import 'datomic.external_sort.FileSystemSorter)
-  (def ->FileSystemSorter
-   (fn __GT_FileSystemSorter
-     ([pool cmp io file_iter_fn create_file_writer_fn prog_fn files]
-       (datomic.external_sort.FileSystemSorter.
-         pool
-         cmp
-         io
-         file_iter_fn
-         create_file_writer_fn
-         prog_fn
-         files))))
+  (defn ->FileSystemSorter
+    ([pool cmp io file_iter_fn create_file_writer_fn prog_fn files]
+      (datomic.external_sort.FileSystemSorter.
+        pool
+        cmp
+        io
+        file_iter_fn
+        create_file_writer_fn
+        prog_fn
+        files)))
   (reset-meta!
     #'->FileSystemSorter
     (assoc
@@ -302,57 +299,55 @@
       '->FileSystemSorter
       :ns
       *ns*))
-  (def file-system-sorter
-   (fn file_system_sorter
-     ([p__13553 iter]
-       (let [map__13554 p__13553
-             map__13554 (if (seq? map__13554)
-                          (if (next map__13554)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__13554))
-                            (if (seq map__13554) (first map__13554) {}))
-                          map__13554)
-             max_chunk_size (get map__13554 :max-chunk-size)
-             item_sizer (get map__13554 :item-sizer)
-             io (get map__13554 :io)
-             cmp (get map__13554 :cmp common/compare)
-             prog_fn (get map__13554 :prog-fn (constantly nil))
-             file_iter_fn (get map__13554 :file-iter-fn)
-             create_file_writer_fn (get map__13554 :create-file-writer-fn)
-             threads (get map__13554 :threads (config/property "datomic.externalSortPool"))
-             files (into
-                     []
-                     (map
-                       (fn fn__13555
-                         ([chunk]
-                           (let [f (make-temp-file io)]
-                             (with-open [os (io/output-stream f)]
-                               (let [write (^clojure.lang.IFn create_file_writer_fn os)]
-                                 (^clojure.lang.IFn prog_fn
-                                   {:before f,
-                                    :count (java.lang.Integer/valueOf (int (count chunk)))})
-                                 (reduce
-                                   (fn fn__13557
-                                     ([p1__13552# p2__13551#]
-                                       (^clojure.lang.IFn write p2__13551#)))
-                                   nil
-                                   (if cmp (sort cmp chunk) (sort chunk)))
-                                 (^clojure.lang.IFn prog_fn
-                                   {:after f,
-                                    :count (java.lang.Integer/valueOf (int (count chunk))),
-                                    :size (temp-file-size io f)})))
-                             f)))
-                       (chunk-seq max_chunk_size item_sizer iter)))
-             idx (atom 0)
-             pool (common/thread-pool {:nthreads threads, :name "external-sort"})]
-         (datomic.external_sort.FileSystemSorter.
-           pool
-           cmp
-           io
-           file_iter_fn
-           create_file_writer_fn
-           prog_fn
-           files)))))
+  (defn file-system-sorter
+    ([p__13553 iter]
+      (let [map__13554 p__13553
+            map__13554 (if (seq? map__13554)
+                         (if (next map__13554)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__13554))
+                           (if (seq map__13554) (first map__13554) {}))
+                         map__13554)
+            max_chunk_size (get map__13554 :max-chunk-size)
+            item_sizer (get map__13554 :item-sizer)
+            io (get map__13554 :io)
+            cmp (get map__13554 :cmp common/compare)
+            prog_fn (get map__13554 :prog-fn (constantly nil))
+            file_iter_fn (get map__13554 :file-iter-fn)
+            create_file_writer_fn (get map__13554 :create-file-writer-fn)
+            threads (get map__13554 :threads (config/property "datomic.externalSortPool"))
+            files (into
+                    []
+                    (map
+                      (fn fn__13555
+                        ([chunk]
+                          (let [f (make-temp-file io)]
+                            (with-open [os (io/output-stream f)]
+                              (let [write (^clojure.lang.IFn create_file_writer_fn os)]
+                                (^clojure.lang.IFn prog_fn
+                                  {:before f,
+                                   :count (java.lang.Integer/valueOf (int (count chunk)))})
+                                (reduce
+                                  (fn fn__13557
+                                    ([p1__13552# p2__13551#] (^clojure.lang.IFn write p2__13551#)))
+                                  nil
+                                  (if cmp (sort cmp chunk) (sort chunk)))
+                                (^clojure.lang.IFn prog_fn
+                                  {:after f,
+                                   :count (java.lang.Integer/valueOf (int (count chunk))),
+                                   :size (temp-file-size io f)})))
+                            f)))
+                      (chunk-seq max_chunk_size item_sizer iter)))
+            idx (atom 0)
+            pool (common/thread-pool {:nthreads threads, :name "external-sort"})]
+        (datomic.external_sort.FileSystemSorter.
+          pool
+          cmp
+          io
+          file_iter_fn
+          create_file_writer_fn
+          prog_fn
+          files))))
   (reset-meta!
     #'file-system-sorter
     (assoc

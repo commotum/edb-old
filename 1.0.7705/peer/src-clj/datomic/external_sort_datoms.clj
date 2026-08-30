@@ -107,33 +107,32 @@
              (if assert?
                (db/asserting-datum eid attrid v t)
                (db/retracting-datum eid attrid v t)))))}))
-  (def consume-sorted-datoms
-   (fn consume_sorted_datoms
-     ([iter p__13573 handler]
-       (let [map__13574 p__13573
-             map__13574 (if (seq? map__13574)
-                          (if (next map__13574)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__13574))
-                            (if (seq map__13574) (first map__13574) {}))
-                          map__13574)
-             cmp (get map__13574 :cmp)
-             dir (get map__13574 :dir)
-             max_chunk_size (get map__13574 :max-chunk-size)
-             prog_fn (get map__13574 :prog-fn)]
-         (es/consume-iter
-           (es/file-system-sorter
-             {:max-chunk-size max_chunk_size,
-              :item-sizer ms/memory-size,
-              :io (es/temp-file-io dir),
-              :prog-fn prog_fn,
-              :cmp cmp,
-              :file-iter-fn
-              (fn fn__13575 ([p1__13571#] (fress/reader-iter p1__13571# datom-read-handlers))),
-              :create-file-writer-fn
-              (fn fn__13577 ([p1__13572#] (create-file-writer p1__13572# datom-write-handlers)))}
-             iter)
-           handler)))))
+  (defn consume-sorted-datoms
+    ([iter p__13573 handler]
+      (let [map__13574 p__13573
+            map__13574 (if (seq? map__13574)
+                         (if (next map__13574)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__13574))
+                           (if (seq map__13574) (first map__13574) {}))
+                         map__13574)
+            cmp (get map__13574 :cmp)
+            dir (get map__13574 :dir)
+            max_chunk_size (get map__13574 :max-chunk-size)
+            prog_fn (get map__13574 :prog-fn)]
+        (es/consume-iter
+          (es/file-system-sorter
+            {:max-chunk-size max_chunk_size,
+             :item-sizer ms/memory-size,
+             :io (es/temp-file-io dir),
+             :prog-fn prog_fn,
+             :cmp cmp,
+             :file-iter-fn
+             (fn fn__13575 ([p1__13571#] (fress/reader-iter p1__13571# datom-read-handlers))),
+             :create-file-writer-fn
+             (fn fn__13577 ([p1__13572#] (create-file-writer p1__13572# datom-write-handlers)))}
+            iter)
+          handler))))
   (reset-meta!
     #'consume-sorted-datoms
     (assoc

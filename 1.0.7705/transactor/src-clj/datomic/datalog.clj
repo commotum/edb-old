@@ -141,15 +141,15 @@
   (reset-meta!
     #'maybe-cancel
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'maybe-cancel :ns *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       IJoin
       (join-project [xs ys join-map project-map-x project-map-y predctor])
       (join-project-with [ys xs join-map project-map-x project-map-y predctor]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.datalog" "IJoin")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'IJoin :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'IJoin :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -173,13 +173,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.datalog" "IJoin"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.datalog" "join-project")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -203,12 +203,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.datalog" "IJoin"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.datalog" "join-project-with")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*))))
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*))))
   (defn truep ([] (fn fn__15367 ([_] true))))
   (reset-meta!
     #'truep
@@ -229,20 +229,19 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.datalog" "iterator")
     (fn iterator ([xs] (.iterator ^java.lang.Iterable xs))))
-  (def matchf
-   (fn matchf
-     ([bindings]
-       (fn fn__15372
-         ([x y]
-           (loop [i 0]
-             (if (< i (alength ^"[Ljava.lang.Object;" bindings))
-               (let [b (aget ^"[Ljava.lang.Object;" bindings (int i))]
-                 (if b
-                   (if (= (nth x (unchecked-int i)) (nth y (unchecked-int ^java.lang.Number b)))
-                     (recur (inc i))
-                     false)
-                   (recur (inc i))))
-               true)))))))
+  (defn matchf
+    ([bindings]
+      (fn fn__15372
+        ([x y]
+          (loop [i 0]
+            (if (< i (alength ^"[Ljava.lang.Object;" bindings))
+              (let [b (aget ^"[Ljava.lang.Object;" bindings (int i))]
+                (if b
+                  (if (= (nth x (unchecked-int i)) (nth y (unchecked-int ^java.lang.Number b)))
+                    (recur (inc i))
+                    false)
+                  (recur (inc i))))
+              true))))))
   (reset-meta!
     #'matchf
     (assoc
@@ -251,22 +250,21 @@
       'matchf
       :ns
       *ns*))
-  (def hashxf
-   (fn hashxf
-     ([bindings]
-       (fn fn__15375
-         ([x]
-           (loop [i 0 h 0]
-             (if (< i (alength ^"[Ljava.lang.Object;" bindings))
-               (let [b (aget ^"[Ljava.lang.Object;" bindings (int i))]
-                 (recur
-                   (inc i)
-                   (if b
-                     (clojure.lang.Util/hashCombine
-                       (unchecked-int h)
-                       (int (clojure.lang.Util/hash (nth x (unchecked-int i)))))
-                     h)))
-               (long h))))))))
+  (defn hashxf
+    ([bindings]
+      (fn fn__15375
+        ([x]
+          (loop [i 0 h 0]
+            (if (< i (alength ^"[Ljava.lang.Object;" bindings))
+              (let [b (aget ^"[Ljava.lang.Object;" bindings (int i))]
+                (recur
+                  (inc i)
+                  (if b
+                    (clojure.lang.Util/hashCombine
+                      (unchecked-int h)
+                      (int (clojure.lang.Util/hash (nth x (unchecked-int i)))))
+                    h)))
+              (long h)))))))
   (reset-meta!
     #'hashxf
     (assoc
@@ -275,22 +273,21 @@
       'hashxf
       :ns
       *ns*))
-  (def hashyf
-   (fn hashyf
-     ([bindings]
-       (fn fn__15378
-         ([y]
-           (loop [i 0 h 0]
-             (if (< i (alength ^"[Ljava.lang.Object;" bindings))
-               (let [b (aget ^"[Ljava.lang.Object;" bindings (int i))]
-                 (recur
-                   (inc i)
-                   (if b
-                     (clojure.lang.Util/hashCombine
-                       (unchecked-int h)
-                       (int (clojure.lang.Util/hash (nth y (unchecked-int ^java.lang.Number b)))))
-                     h)))
-               (long h))))))))
+  (defn hashyf
+    ([bindings]
+      (fn fn__15378
+        ([y]
+          (loop [i 0 h 0]
+            (if (< i (alength ^"[Ljava.lang.Object;" bindings))
+              (let [b (aget ^"[Ljava.lang.Object;" bindings (int i))]
+                (recur
+                  (inc i)
+                  (if b
+                    (clojure.lang.Util/hashCombine
+                      (unchecked-int h)
+                      (int (clojure.lang.Util/hash (nth y (unchecked-int ^java.lang.Number b)))))
+                    h)))
+              (long h)))))))
   (reset-meta!
     #'hashyf
     (assoc
@@ -299,20 +296,19 @@
       'hashyf
       :ns
       *ns*))
-  (def partv
-   (fn partv
-     ([^long n coll]
-       (let [pv (fn pv
-                  ([iter]
-                    (lazy-seq
-                      (when (.hasNext ^java.util.Iterator iter)
-                        (cons
-                          (loop [i 0 ret (transient [])]
-                            (if (and (< i n) (.hasNext ^java.util.Iterator iter))
-                              (recur (inc i) (conj! ret (.next ^java.util.Iterator iter)))
-                              (persistent! ret)))
-                          (^clojure.lang.IFn pv iter))))))]
-         (^clojure.lang.IFn pv (.iterator ^java.lang.Iterable coll))))))
+  (defn partv
+    ([^long n coll]
+      (let [pv (fn pv
+                 ([iter]
+                   (lazy-seq
+                     (when (.hasNext ^java.util.Iterator iter)
+                       (cons
+                         (loop [i 0 ret (transient [])]
+                           (if (and (< i n) (.hasNext ^java.util.Iterator iter))
+                             (recur (inc i) (conj! ret (.next ^java.util.Iterator iter)))
+                             (persistent! ret)))
+                         (^clojure.lang.IFn pv iter))))))]
+        (^clojure.lang.IFn pv (.iterator ^java.lang.Iterable coll)))))
   (reset-meta!
     #'partv
     (assoc
@@ -323,16 +319,15 @@
       'partv
       :ns
       *ns*))
-  (def join-project-coll
-   (fn join_project_coll
-     ([xs ys join_map project_map_x project_map_y predctor]
-       (join-project-with
-         ys
-         xs
-         (zipmap (vals join_map) (keys join_map))
-         project_map_y
-         project_map_x
-         predctor))))
+  (defn join-project-coll
+    ([xs ys join_map project_map_x project_map_y predctor]
+      (join-project-with
+        ys
+        xs
+        (zipmap (vals join_map) (keys join_map))
+        project_map_y
+        project_map_x
+        predctor)))
   (reset-meta!
     #'join-project-coll
     (assoc
@@ -342,141 +337,138 @@
       'join-project-coll
       :ns
       *ns*))
-  (def join-project-coll-with
-   (fn join_project_coll_with
-     ([xs ys join_map project_map_x project_map_y predctor]
-       (cond
-         (< (count xs) (count ys)) (join-project-with
-                                     ys
-                                     xs
-                                     (zipmap (vals join_map) (keys join_map))
-                                     project_map_y
-                                     project_map_x
-                                     predctor)
-         (and
-           (empty? join_map)
-           (empty? project_map_y)
-           (=
-             (long (count project_map_x))
-             (if (instance? java.util.Map$Entry (first xs))
-               2
-               (java.lang.Integer/valueOf (int (count (first xs))))))
-           (= (keys project_map_x) (vals project_map_x))
-           (identical? truep predctor)
-           (instance? java.util.Set xs)) xs
-         :else (do
-                 (let [px_from (to-array (keys project_map_x))
-                       px_to (to-array (vals project_map_x))
-                       py_from (to-array (keys project_map_y))
-                       py_to (to-array (vals project_map_y))
-                       proj_count (count (into (set px_to) py_to))
-                       ks (seq (keys join_map))
-                       bindings (object-array (if ks (inc (apply max ks)) 0))
-                       _ (loop [seq_15390 (seq join_map) chunk_15391 nil count_15392 0 i_15393 0]
-                           (if (< i_15393 count_15392)
-                             (let [vec__15395 (.nth
-                                                ^clojure.lang.Indexed chunk_15391
-                                                (unchecked-int i_15393))
-                                   k (nth vec__15395 (unchecked-int 0) nil)
-                                   v (nth vec__15395 (unchecked-int 1) nil)]
-                               (aset ^"[Ljava.lang.Object;" bindings (unchecked-int k) v)
-                               (recur seq_15390 chunk_15391 count_15392 (inc i_15393)))
-                             (let [temp__5825__auto__ (seq seq_15390)]
-                               (when temp__5825__auto__
-                                 (let [seq_15390 temp__5825__auto__]
-                                   (if (chunked-seq? seq_15390)
-                                     (let [c__6090__auto__ (chunk-first seq_15390)]
-                                       (recur
-                                         (chunk-rest seq_15390)
-                                         c__6090__auto__
-                                         (count c__6090__auto__)
-                                         0))
-                                     (let [vec__15398 (first seq_15390)
-                                           k (nth vec__15398 (unchecked-int 0) nil)
-                                           v (nth vec__15398 (unchecked-int 1) nil)]
-                                       (aset ^"[Ljava.lang.Object;" bindings (unchecked-int k) v)
-                                       (recur (next seq_15390) nil 0 0))))))))
-                       match? (matchf bindings)
-                       hashx (hashxf bindings)
-                       hashy (hashyf bindings)
-                       project (fn project
-                                 ([x y]
-                                   (let [ret (object-array
-                                               (java.lang.Integer/valueOf (int proj_count)))]
-                                     (dotimes [i (alength ^"[Ljava.lang.Object;" px_from)]
-                                       (aset
-                                         ^"[Ljava.lang.Object;" ret
-                                         (unchecked-int
-                                           (aget ^"[Ljava.lang.Object;" px_to (int i)))
-                                         (nth
-                                           x
-                                           (unchecked-int
-                                             (aget ^"[Ljava.lang.Object;" px_from (int i))))))
-                                     (dotimes [i (alength ^"[Ljava.lang.Object;" py_from)]
-                                       (aset
-                                         ^"[Ljava.lang.Object;" ret
-                                         (unchecked-int
-                                           (aget ^"[Ljava.lang.Object;" py_to (int i)))
-                                         (nth
-                                           y
-                                           (unchecked-int
-                                             (aget ^"[Ljava.lang.Object;" py_from (int i))))))
-                                     (tuple ret))))
-                       ret (java.util.Collections/newSetFromMap
-                             (java.util.concurrent.ConcurrentHashMap.))
-                       ht (when (and (seq bindings) (> (count ys) 10))
-                            (let [ret (java.util.HashMap.) yiter (iterator ys)]
-                              (while
-                                (.hasNext ^java.util.Iterator yiter)
-                                (let [y (.next ^java.util.Iterator yiter)
-                                      h (^clojure.lang.IFn hashy y)
-                                      vs (or
-                                           (.get ^java.util.HashMap ret h)
-                                           (let [vs (java.util.ArrayList. (unchecked-int 2))]
-                                             (.put ^java.util.HashMap ret h vs)
-                                             vs))]
-                                  (.add ^java.util.ArrayList vs y)))
-                              ret))
-                       PART 10
-                       proc (fn proc
-                              ([xs]
-                                (let [pred (^clojure.lang.IFn predctor) xiter (iterator xs)]
-                                  (maybe-cancel)
-                                  (if ht
-                                    (do
-                                      (while
-                                        (.hasNext ^java.util.Iterator xiter)
-                                        (let [x (.next ^java.util.Iterator xiter)
-                                              temp__5825__auto__ (.get
-                                                                   ^java.util.Map ht
-                                                                   (^clojure.lang.IFn hashx x))]
-                                          (when temp__5825__auto__
-                                            (let [ys temp__5825__auto__ yiter (iterator ys)]
-                                              (while
-                                                (.hasNext ^java.util.Iterator yiter)
-                                                (let [y (.next ^java.util.Iterator yiter)]
-                                                  (when (^clojure.lang.IFn match? x y)
-                                                    (let [p (^clojure.lang.IFn project x y)]
-                                                      (when (^clojure.lang.IFn pred p)
-                                                        (.add ^java.util.Set ret p))))))
-                                              nil))))
-                                      nil)
-                                    (do
-                                      (while
-                                        (.hasNext ^java.util.Iterator xiter)
-                                        (let [x (.next ^java.util.Iterator xiter)
-                                              yiter (iterator ys)]
-                                          (while
-                                            (.hasNext ^java.util.Iterator yiter)
-                                            (let [y (.next ^java.util.Iterator yiter)]
-                                              (when (^clojure.lang.IFn match? x y)
-                                                (let [p (^clojure.lang.IFn project x y)]
-                                                  (when (^clojure.lang.IFn pred p)
-                                                    (.add ^java.util.Set ret p))))))
-                                          nil))
-                                      nil)))))]
-                   (qmapv proc (partv PART xs))
-                   ret))))))
+  (defn join-project-coll-with
+    ([xs ys join_map project_map_x project_map_y predctor]
+      (cond
+        (< (count xs) (count ys)) (join-project-with
+                                    ys
+                                    xs
+                                    (zipmap (vals join_map) (keys join_map))
+                                    project_map_y
+                                    project_map_x
+                                    predctor)
+        (and
+          (empty? join_map)
+          (empty? project_map_y)
+          (=
+            (long (count project_map_x))
+            (if (instance? java.util.Map$Entry (first xs))
+              2
+              (java.lang.Integer/valueOf (int (count (first xs))))))
+          (= (keys project_map_x) (vals project_map_x))
+          (identical? truep predctor)
+          (instance? java.util.Set xs)) xs
+        :else (do
+                (let [px_from (to-array (keys project_map_x))
+                      px_to (to-array (vals project_map_x))
+                      py_from (to-array (keys project_map_y))
+                      py_to (to-array (vals project_map_y))
+                      proj_count (count (into (set px_to) py_to))
+                      ks (seq (keys join_map))
+                      bindings (object-array (if ks (inc (apply max ks)) 0))
+                      _ (loop [seq_15390 (seq join_map) chunk_15391 nil count_15392 0 i_15393 0]
+                          (if (< i_15393 count_15392)
+                            (let [vec__15395 (.nth
+                                               ^clojure.lang.Indexed chunk_15391
+                                               (unchecked-int i_15393))
+                                  k (nth vec__15395 (unchecked-int 0) nil)
+                                  v (nth vec__15395 (unchecked-int 1) nil)]
+                              (aset ^"[Ljava.lang.Object;" bindings (unchecked-int k) v)
+                              (recur seq_15390 chunk_15391 count_15392 (inc i_15393)))
+                            (let [temp__5825__auto__ (seq seq_15390)]
+                              (when temp__5825__auto__
+                                (let [seq_15390 temp__5825__auto__]
+                                  (if (chunked-seq? seq_15390)
+                                    (let [c__6090__auto__ (chunk-first seq_15390)]
+                                      (recur
+                                        (chunk-rest seq_15390)
+                                        c__6090__auto__
+                                        (count c__6090__auto__)
+                                        0))
+                                    (let [vec__15398 (first seq_15390)
+                                          k (nth vec__15398 (unchecked-int 0) nil)
+                                          v (nth vec__15398 (unchecked-int 1) nil)]
+                                      (aset ^"[Ljava.lang.Object;" bindings (unchecked-int k) v)
+                                      (recur (next seq_15390) nil 0 0))))))))
+                      match? (matchf bindings)
+                      hashx (hashxf bindings)
+                      hashy (hashyf bindings)
+                      project (fn project
+                                ([x y]
+                                  (let [ret (object-array
+                                              (java.lang.Integer/valueOf (int proj_count)))]
+                                    (dotimes [i (alength ^"[Ljava.lang.Object;" px_from)]
+                                      (aset
+                                        ^"[Ljava.lang.Object;" ret
+                                        (unchecked-int (aget ^"[Ljava.lang.Object;" px_to (int i)))
+                                        (nth
+                                          x
+                                          (unchecked-int
+                                            (aget ^"[Ljava.lang.Object;" px_from (int i))))))
+                                    (dotimes [i (alength ^"[Ljava.lang.Object;" py_from)]
+                                      (aset
+                                        ^"[Ljava.lang.Object;" ret
+                                        (unchecked-int (aget ^"[Ljava.lang.Object;" py_to (int i)))
+                                        (nth
+                                          y
+                                          (unchecked-int
+                                            (aget ^"[Ljava.lang.Object;" py_from (int i))))))
+                                    (tuple ret))))
+                      ret (java.util.Collections/newSetFromMap
+                            (java.util.concurrent.ConcurrentHashMap.))
+                      ht (when (and (seq bindings) (> (count ys) 10))
+                           (let [ret (java.util.HashMap.) yiter (iterator ys)]
+                             (while
+                               (.hasNext ^java.util.Iterator yiter)
+                               (let [y (.next ^java.util.Iterator yiter)
+                                     h (^clojure.lang.IFn hashy y)
+                                     vs (or
+                                          (.get ^java.util.HashMap ret h)
+                                          (let [vs (java.util.ArrayList. (unchecked-int 2))]
+                                            (.put ^java.util.HashMap ret h vs)
+                                            vs))]
+                                 (.add ^java.util.ArrayList vs y)))
+                             ret))
+                      PART 10
+                      proc (fn proc
+                             ([xs]
+                               (let [pred (^clojure.lang.IFn predctor) xiter (iterator xs)]
+                                 (maybe-cancel)
+                                 (if ht
+                                   (do
+                                     (while
+                                       (.hasNext ^java.util.Iterator xiter)
+                                       (let [x (.next ^java.util.Iterator xiter)
+                                             temp__5825__auto__ (.get
+                                                                  ^java.util.Map ht
+                                                                  (^clojure.lang.IFn hashx x))]
+                                         (when temp__5825__auto__
+                                           (let [ys temp__5825__auto__ yiter (iterator ys)]
+                                             (while
+                                               (.hasNext ^java.util.Iterator yiter)
+                                               (let [y (.next ^java.util.Iterator yiter)]
+                                                 (when (^clojure.lang.IFn match? x y)
+                                                   (let [p (^clojure.lang.IFn project x y)]
+                                                     (when (^clojure.lang.IFn pred p)
+                                                       (.add ^java.util.Set ret p))))))
+                                             nil))))
+                                     nil)
+                                   (do
+                                     (while
+                                       (.hasNext ^java.util.Iterator xiter)
+                                       (let [x (.next ^java.util.Iterator xiter)
+                                             yiter (iterator ys)]
+                                         (while
+                                           (.hasNext ^java.util.Iterator yiter)
+                                           (let [y (.next ^java.util.Iterator yiter)]
+                                             (when (^clojure.lang.IFn match? x y)
+                                               (let [p (^clojure.lang.IFn project x y)]
+                                                 (when (^clojure.lang.IFn pred p)
+                                                   (.add ^java.util.Set ret p))))))
+                                         nil))
+                                     nil)))))]
+                  (qmapv proc (partv PART xs))
+                  ret)))))
   (reset-meta!
     #'join-project-coll-with
     (assoc
@@ -568,30 +560,29 @@
   (reset-meta!
     #'resolve-id
     (assoc {:arglists (clojure.core/list ['db 'x]), :column (int 1)} :name 'resolve-id :ns *ns*))
-  (def dbrel
-   (fn dbrel
-     ([db p__15434 starts whiles]
-       (let [vec__15435 p__15434
-             e (nth vec__15435 (unchecked-int 0) nil)
-             a (nth vec__15435 (unchecked-int 1) nil)
-             v (nth vec__15435 (unchecked-int 2) nil)
-             t (nth vec__15435 (unchecked-int 3) nil)
-             added (nth vec__15435 (unchecked-int 4) nil)
-             attrid (and a (long (db/require-id db a)))
-             attr (and attrid (db/attribute db attrid))
-             ref? (and attr (= 20 (.-vtypeid ^datomic.db.Attribute attr)))
-             key? (and attr (= 21 (.-vtypeid ^datomic.db.Attribute attr)))]
-         (datomic.datalog.DbRel.
-           db
-           ref?
-           key?
-           [(resolve-id db e)
-            attrid
-            (cond ref? (resolve-id db v) key? (db/normalize-kw v) :else (do v))
-            t
-            added]
-           starts
-           whiles)))))
+  (defn dbrel
+    ([db p__15434 starts whiles]
+      (let [vec__15435 p__15434
+            e (nth vec__15435 (unchecked-int 0) nil)
+            a (nth vec__15435 (unchecked-int 1) nil)
+            v (nth vec__15435 (unchecked-int 2) nil)
+            t (nth vec__15435 (unchecked-int 3) nil)
+            added (nth vec__15435 (unchecked-int 4) nil)
+            attrid (and a (long (db/require-id db a)))
+            attr (and attrid (db/attribute db attrid))
+            ref? (and attr (= 20 (.-vtypeid ^datomic.db.Attribute attr)))
+            key? (and attr (= 21 (.-vtypeid ^datomic.db.Attribute attr)))]
+        (datomic.datalog.DbRel.
+          db
+          ref?
+          key?
+          [(resolve-id db e)
+           attrid
+           (cond ref? (resolve-id db v) key? (db/normalize-kw v) :else (do v))
+           t
+           added]
+          starts
+          whiles))))
   (reset-meta!
     #'dbrel
     (assoc
@@ -600,12 +591,12 @@
       'dbrel
       :ns
       *ns*))
-  (let [protocol_metadata__7436 {:column (int 1)}]
+  (let [protocol_metadata__7468 {:column (int 1)}]
     (defprotocol ExtRel (extrel [src consts starts whiles]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.datalog" "ExtRel")
-      (assoc (assoc protocol_metadata__7436 :doc nil) :name 'ExtRel :ns *ns*))
-    (let [protocol_signature__7437 (assoc
+      (assoc (assoc protocol_metadata__7468 :doc nil) :name 'ExtRel :ns *ns*))
+    (let [protocol_signature__7469 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -616,12 +607,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.datalog" "ExtRel"))
-          protocol_method_name__7438 (with-meta
-                                       (:name protocol_signature__7437)
-                                       protocol_signature__7437)]
+          protocol_method_name__7470 (with-meta
+                                       (:name protocol_signature__7469)
+                                       protocol_signature__7469)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.datalog" "extrel")
-        (assoc protocol_signature__7437 :name protocol_method_name__7438 :ns *ns*))))
+        (assoc protocol_signature__7469 :name protocol_method_name__7470 :ns *ns*))))
   (defn extrel-coll
     ([src consts]
       (if (every? nil? consts)
@@ -1573,13 +1564,12 @@
       'extensional?
       :ns
       *ns*))
-  (def adorned-pred
-   (fn adorned_pred
-     ([query bindset]
-       [(first query)
-        (vec
-          (map (fn fn__15687 ([p1__15686#] (not (contains? bindset p1__15686#)))) (rest query)))])
-     ([query] [(first query) (vec (map variable? (rest query)))])))
+  (defn adorned-pred
+    ([query bindset]
+      [(first query)
+       (vec
+         (map (fn fn__15687 ([p1__15686#] (not (contains? bindset p1__15686#)))) (rest query)))])
+    ([query] [(first query) (vec (map variable? (rest query)))]))
   (reset-meta!
     #'adorned-pred
     (assoc
@@ -1602,39 +1592,38 @@
   (reset-meta!
     #'free-vars
     (assoc {:arglists (clojure.core/list ['c]), :column (int 1)} :name 'free-vars :ns *ns*))
-  (def unifying-vars
-   (fn unifying_vars
-     ([p__15695]
-       (let [vec__15696 p__15695
-             seq__15697 (seq vec__15696)
-             first__15698 (first seq__15697)
-             seq__15697 (next seq__15697)
-             p first__15698
-             cs seq__15697
-             c vec__15696
-             vec__15699 (if (source? p) cs c)
-             seq__15700 (seq vec__15699)
-             first__15701 (first seq__15700)
-             seq__15700 (next seq__15700)
-             p first__15701
-             cs seq__15700
-             c vec__15699]
-         (cond
-           (#{'not-join 'or-join} p) (flatten (first cs))
-           (#{'and 'not} p) (mapcat unifying-vars cs)
-           (= 'or p) (let [uvs (mapv
-                                 (fn fn__15702 ([p1__15694#] (set (unifying-vars p1__15694#))))
-                                 cs)]
-                       (when-not (apply = uvs)
-                         (throw
-                           (java.lang.AssertionError.
-                             (str
-                               "Assert failed: "
-                               (str "All clauses in 'or' must use same set of vars, had " uvs)
-                               "\n"
-                               (pr-str (clojure.core/list 'apply '= 'uvs))))))
-                       (first uvs))
-           :else (do (filter variable? (flatten c))))))))
+  (defn unifying-vars
+    ([p__15695]
+      (let [vec__15696 p__15695
+            seq__15697 (seq vec__15696)
+            first__15698 (first seq__15697)
+            seq__15697 (next seq__15697)
+            p first__15698
+            cs seq__15697
+            c vec__15696
+            vec__15699 (if (source? p) cs c)
+            seq__15700 (seq vec__15699)
+            first__15701 (first seq__15700)
+            seq__15700 (next seq__15700)
+            p first__15701
+            cs seq__15700
+            c vec__15699]
+        (cond
+          (#{'not-join 'or-join} p) (flatten (first cs))
+          (#{'and 'not} p) (mapcat unifying-vars cs)
+          (= 'or p) (let [uvs (mapv
+                                (fn fn__15702 ([p1__15694#] (set (unifying-vars p1__15694#))))
+                                cs)]
+                      (when-not (apply = uvs)
+                        (throw
+                          (java.lang.AssertionError.
+                            (str
+                              "Assert failed: "
+                              (str "All clauses in 'or' must use same set of vars, had " uvs)
+                              "\n"
+                              (pr-str (clojure.core/list 'apply '= 'uvs))))))
+                      (first uvs))
+          :else (do (filter variable? (flatten c)))))))
   (reset-meta!
     #'unifying-vars
     (assoc
@@ -1655,231 +1644,225 @@
   (reset-meta!
     #'used-srcs
     (assoc {:arglists (clojure.core/list ['srcs 'c]), :column (int 1)} :name 'used-srcs :ns *ns*))
-  (def sched-in-order
-   (fn sched_in_order
-     ([srcs prog p__15718 init_binds]
-       (let [vec__15719 p__15718
-             seq__15720 (seq vec__15719)
-             first__15721 (first seq__15720)
-             seq__15720 (next seq__15720)
-             vec__15722 first__15721
-             seq__15723 (seq vec__15722)
-             first__15724 (first seq__15723)
-             seq__15723 (next seq__15723)
-             hpred first__15724
-             hargs seq__15723
-             body seq__15720
-             rule vec__15719
-             src (fn src ([p1__15707#] (or (:tag (meta p1__15707#)) '$)))
-             pack (fn pack ([c] [(^clojure.lang.IFn src c) c]))
-             unpack (fn unpack ([p1__15708#] (nth p1__15708# (unchecked-int 1))))
-             cargs (fn cargs
+  (defn sched-in-order
+    ([srcs prog p__15718 init_binds]
+      (let [vec__15719 p__15718
+            seq__15720 (seq vec__15719)
+            first__15721 (first seq__15720)
+            seq__15720 (next seq__15720)
+            vec__15722 first__15721
+            seq__15723 (seq vec__15722)
+            first__15724 (first seq__15723)
+            seq__15723 (next seq__15723)
+            hpred first__15724
+            hargs seq__15723
+            body seq__15720
+            rule vec__15719
+            src (fn src ([p1__15707#] (or (:tag (meta p1__15707#)) '$)))
+            pack (fn pack ([c] [(^clojure.lang.IFn src c) c]))
+            unpack (fn unpack ([p1__15708#] (nth p1__15708# (unchecked-int 1))))
+            cargs (fn cargs
+                    ([clause]
+                      (cond
+                        (map? clause) (:argvars clause)
+                        (not-join-clause? clause) (free-vars clause)
+                        (extensional? prog (first clause)) clause
+                        :else (do (next clause)))))
+            extdb (fn extdb
+                    ([p__15743]
+                      (let [vec__15745 p__15743
+                            src (nth vec__15745 (unchecked-int 0) nil)
+                            c (nth vec__15745 (unchecked-int 1) nil)
+                            temp__5825__auto__ (and
+                                                 (not (map? c))
+                                                 (not (not-join-clause? c))
+                                                 (extensional? prog (first c))
+                                                 (^clojure.lang.IFn srcs src))]
+                        (when temp__5825__auto__
+                          (let [db temp__5825__auto__] (when (instance? datomic.db.IDb db) db))))))
+            cbinds (fn cbinds
                      ([clause]
                        (cond
-                         (map? clause) (:argvars clause)
+                         (map? clause) (concat (:argvars clause) (:binds clause))
                          (not-join-clause? clause) (free-vars clause)
-                         (extensional? prog (first clause)) clause
-                         :else (do (next clause)))))
-             extdb (fn extdb
-                     ([p__15743]
-                       (let [vec__15745 p__15743
-                             src (nth vec__15745 (unchecked-int 0) nil)
-                             c (nth vec__15745 (unchecked-int 1) nil)
-                             temp__5825__auto__ (and
-                                                  (not (map? c))
-                                                  (not (not-join-clause? c))
-                                                  (extensional? prog (first c))
-                                                  (^clojure.lang.IFn srcs src))]
-                         (when temp__5825__auto__
-                           (let [db temp__5825__auto__]
-                             (when (instance? datomic.db.IDb db) db))))))
-             cbinds (fn cbinds
-                      ([clause]
-                        (cond
-                          (map? clause) (concat (:argvars clause) (:binds clause))
-                          (not-join-clause? clause) (free-vars clause)
-                          :else (do (filter variable? clause)))))
-             sv_clause? (fn sv_clause_QMARK_
-                          ([p1__15709#]
-                            (and
-                              (map? p1__15709#)
-                              (nil? (:argvars p1__15709#))
-                              (#{:tuple :scalar} (:bind-type p1__15709#)))))
-             in_clause? (fn in_clause_QMARK_
-                          ([p1__15710#]
-                            (and
-                              (map? p1__15710#)
-                              (nil? (:argvars p1__15710#))
-                              (#{:rel :list} (:bind-type p1__15710#))
-                              (.startsWith (name (^clojure.lang.IFn src p1__15710#)) "$__in"))))
-             delay_ins (fn delay_ins
-                         ([cs]
-                           (let [vec__15765 (split-with in_clause? cs)
-                                 ins (nth vec__15765 (unchecked-int 0) nil)
-                                 cs (nth vec__15765 (unchecked-int 1) nil)
-                                 m (reduce
-                                     (fn fn__15768
-                                       ([m in]
-                                         (let [bset (set (^clojure.lang.IFn cbinds in))
-                                               uc (first
-                                                    (filter
-                                                      (fn fn__15769
-                                                        ([p1__15711#]
-                                                          (some
-                                                            bset
-                                                            (^clojure.lang.IFn cargs p1__15711#))))
-                                                      cs))]
-                                           (update-in m [uc] conj in))))
-                                     {}
-                                     ins)]
-                             (concat
-                               (reduce
-                                 (fn fn__15772
-                                   ([ret c]
-                                     (let [vec__15773 (find m c)
-                                           k (nth vec__15773 (unchecked-int 0) nil)
-                                           vs (nth vec__15773 (unchecked-int 1) nil)]
-                                       (if (identical? k c)
-                                         (into (conj ret (first vs) c) (next vs))
-                                         (conj ret c)))))
-                                 []
-                                 cs)
-                               (get m nil)))))
-             pred? (fn pred_QMARK_
-                     ([p1__15712#] (and (map? p1__15712#) (nil? (:binds p1__15712#)))))
-             vec__15725 (common/split-filter pred? body)
-             preds (nth vec__15725 (unchecked-int 0) nil)
-             npreds (nth vec__15725 (unchecked-int 1) nil)
-             vec__15728 (common/split-filter not-join-clause? npreds)
-             njcs (nth vec__15728 (unchecked-int 0) nil)
-             npreds (nth vec__15728 (unchecked-int 1) nil)
-             vec__15731 (common/split-filter sv_clause? npreds)
-             svs (nth vec__15731 (unchecked-int 0) nil)
-             npreds (nth vec__15731 (unchecked-int 1) nil)
-             body (concat svs preds njcs (^clojure.lang.IFn delay_ins npreds))
-             reqcnt (fn reqcnt
-                      ([clause]
-                        (when (contains? prog (first clause))
-                          (let [vec__15782 (find prog (first clause))
-                                p (nth vec__15782 (unchecked-int 0) nil)]
-                            (:reqcnt (meta p))))))
-             underbound? (fn underbound_QMARK_
-                           ([n bindings pc]
-                             (let [clause (^clojure.lang.IFn unpack pc)
-                                   args (^clojure.lang.IFn cargs clause)]
-                               (cond
-                                 (or (not-join-clause? clause) (map? clause)) (some
-                                                                                (fn 
-                                                                                  fn__15787
-                                                                                  ([p1__15713#]
-                                                                                    (and
-                                                                                      (variable?
-                                                                                        p1__15713#)
-                                                                                      (not
-                                                                                        (contains?
-                                                                                          bindings
-                                                                                          p1__15713#)))))
-                                                                                args)
-                                 (contains? prog (first clause)) (or
-                                                                   (let 
-                                                                     [rcnt
-                                                                      (^clojure.lang.IFn reqcnt
-                                                                        clause)]
-                                                                     (and
-                                                                       rcnt
-                                                                       (not
-                                                                         (every?
-                                                                           (fn 
-                                                                             fn__15790
-                                                                             ([p1__15714#]
-                                                                               (contains?
-                                                                                 bindings
-                                                                                 p1__15714#)))
-                                                                           (take rcnt args)))))
-                                                                   (and
-                                                                     (= hpred (first clause))
-                                                                     (not
-                                                                       (some
-                                                                         (fn 
-                                                                           fn__15792
-                                                                           ([p1__15715#]
-                                                                             (contains?
-                                                                               bindings
-                                                                               p1__15715#)))
-                                                                         (filter
-                                                                           variable?
-                                                                           args)))))
-                                 :else (do
-                                         (let [temp__5825__auto__ (^clojure.lang.IFn extdb pc)]
-                                           (when temp__5825__auto__
-                                             (let [db temp__5825__auto__]
-                                               (not
-                                                 (some
-                                                   (fn fn__15794
-                                                     ([p1__15716#]
-                                                       (or
-                                                         (not (variable? p1__15716#))
-                                                         (contains? bindings p1__15716#))))
-                                                   (take n clause)))))))))))
-             clauses (loop [clauses [] bindings (set init_binds) remclauses (map pack body)]
-                       (if (empty? remclauses)
-                         clauses
-                         (let [vec__15804 (split-with (partial underbound? 2 bindings) remclauses)
-                               skip (nth vec__15804 (unchecked-int 0) nil)
-                               ready (nth vec__15804 (unchecked-int 1) nil)
-                               vec__15807 (if (empty? ready)
-                                            (split-with
-                                              (partial underbound? 3 bindings)
-                                              remclauses)
-                                            [skip ready])
-                               skip (nth vec__15807 (unchecked-int 0) nil)
-                               ready (nth vec__15807 (unchecked-int 1) nil)
-                               _ (when (empty? ready)
-                                   (let [c (^clojure.lang.IFn unpack (first skip))]
-                                     (error/arg
-                                       :db.error/insufficient-binding
-                                       (cond
-                                         (not-join-clause? c) (str
-                                                                (vec
-                                                                  (remove bindings (free-vars c)))
-                                                                " not bound in not clause: "
-                                                                c)
-                                         (^clojure.lang.IFn reqcnt c) (str
-                                                                        (vec
-                                                                          (remove
-                                                                            bindings
-                                                                            (take
-                                                                              (^clojure.lang.IFn reqcnt
-                                                                                c)
-                                                                              (next c))))
-                                                                        " not bound in clause: "
-                                                                        c)
-                                         (map? c) (str
-                                                    (vec (remove bindings (:argvars c)))
-                                                    " not bound in expression clause: "
-                                                    (:clause c))
-                                         :else (do
-                                                 (str
-                                                   "Insufficient binding of db clause: "
-                                                   c
-                                                   " would cause full scan"))))))
-                               pc (first ready)
-                               c (^clojure.lang.IFn unpack pc)
-                               next_bindings (into bindings (^clojure.lang.IFn cbinds c))]
-                           (recur (conj clauses c) next_bindings (concat skip (rest ready))))))
-             blist (map
-                     (fn fn__15811 ([p1__15717#] (set (^clojure.lang.IFn cbinds p1__15717#))))
-                     (cons init_binds (conj clauses hargs)))
-             bup (next (reductions set/union blist))
-             bdown (nnext (reverse (reductions set/union (reverse blist))))
-             binds (-> (comp vec set/intersection)
-                    (map bup bdown)
-                    (vec)
-                    (pop)
-                    (conj (vec (filter variable? hargs))))
-             ret (partition 2 (interleave clauses binds))]
-         (query-stats/acc-with-phase-stats! :sched ret)
-         ret))))
+                         :else (do (filter variable? clause)))))
+            sv_clause? (fn sv_clause_QMARK_
+                         ([p1__15709#]
+                           (and
+                             (map? p1__15709#)
+                             (nil? (:argvars p1__15709#))
+                             (#{:tuple :scalar} (:bind-type p1__15709#)))))
+            in_clause? (fn in_clause_QMARK_
+                         ([p1__15710#]
+                           (and
+                             (map? p1__15710#)
+                             (nil? (:argvars p1__15710#))
+                             (#{:rel :list} (:bind-type p1__15710#))
+                             (.startsWith (name (^clojure.lang.IFn src p1__15710#)) "$__in"))))
+            delay_ins (fn delay_ins
+                        ([cs]
+                          (let [vec__15765 (split-with in_clause? cs)
+                                ins (nth vec__15765 (unchecked-int 0) nil)
+                                cs (nth vec__15765 (unchecked-int 1) nil)
+                                m (reduce
+                                    (fn fn__15768
+                                      ([m in]
+                                        (let [bset (set (^clojure.lang.IFn cbinds in))
+                                              uc (first
+                                                   (filter
+                                                     (fn fn__15769
+                                                       ([p1__15711#]
+                                                         (some
+                                                           bset
+                                                           (^clojure.lang.IFn cargs p1__15711#))))
+                                                     cs))]
+                                          (update-in m [uc] conj in))))
+                                    {}
+                                    ins)]
+                            (concat
+                              (reduce
+                                (fn fn__15772
+                                  ([ret c]
+                                    (let [vec__15773 (find m c)
+                                          k (nth vec__15773 (unchecked-int 0) nil)
+                                          vs (nth vec__15773 (unchecked-int 1) nil)]
+                                      (if (identical? k c)
+                                        (into (conj ret (first vs) c) (next vs))
+                                        (conj ret c)))))
+                                []
+                                cs)
+                              (get m nil)))))
+            pred? (fn pred_QMARK_
+                    ([p1__15712#] (and (map? p1__15712#) (nil? (:binds p1__15712#)))))
+            vec__15725 (common/split-filter pred? body)
+            preds (nth vec__15725 (unchecked-int 0) nil)
+            npreds (nth vec__15725 (unchecked-int 1) nil)
+            vec__15728 (common/split-filter not-join-clause? npreds)
+            njcs (nth vec__15728 (unchecked-int 0) nil)
+            npreds (nth vec__15728 (unchecked-int 1) nil)
+            vec__15731 (common/split-filter sv_clause? npreds)
+            svs (nth vec__15731 (unchecked-int 0) nil)
+            npreds (nth vec__15731 (unchecked-int 1) nil)
+            body (concat svs preds njcs (^clojure.lang.IFn delay_ins npreds))
+            reqcnt (fn reqcnt
+                     ([clause]
+                       (when (contains? prog (first clause))
+                         (let [vec__15782 (find prog (first clause))
+                               p (nth vec__15782 (unchecked-int 0) nil)]
+                           (:reqcnt (meta p))))))
+            underbound? (fn underbound_QMARK_
+                          ([n bindings pc]
+                            (let [clause (^clojure.lang.IFn unpack pc)
+                                  args (^clojure.lang.IFn cargs clause)]
+                              (cond
+                                (or (not-join-clause? clause) (map? clause)) (some
+                                                                               (fn 
+                                                                                 fn__15787
+                                                                                 ([p1__15713#]
+                                                                                   (and
+                                                                                     (variable?
+                                                                                       p1__15713#)
+                                                                                     (not
+                                                                                       (contains?
+                                                                                         bindings
+                                                                                         p1__15713#)))))
+                                                                               args)
+                                (contains? prog (first clause)) (or
+                                                                  (let 
+                                                                    [rcnt
+                                                                     (^clojure.lang.IFn reqcnt
+                                                                       clause)]
+                                                                    (and
+                                                                      rcnt
+                                                                      (not
+                                                                        (every?
+                                                                          (fn 
+                                                                            fn__15790
+                                                                            ([p1__15714#]
+                                                                              (contains?
+                                                                                bindings
+                                                                                p1__15714#)))
+                                                                          (take rcnt args)))))
+                                                                  (and
+                                                                    (= hpred (first clause))
+                                                                    (not
+                                                                      (some
+                                                                        (fn 
+                                                                          fn__15792
+                                                                          ([p1__15715#]
+                                                                            (contains?
+                                                                              bindings
+                                                                              p1__15715#)))
+                                                                        (filter variable? args)))))
+                                :else (do
+                                        (let [temp__5825__auto__ (^clojure.lang.IFn extdb pc)]
+                                          (when temp__5825__auto__
+                                            (let [db temp__5825__auto__]
+                                              (not
+                                                (some
+                                                  (fn fn__15794
+                                                    ([p1__15716#]
+                                                      (or
+                                                        (not (variable? p1__15716#))
+                                                        (contains? bindings p1__15716#))))
+                                                  (take n clause)))))))))))
+            clauses (loop [clauses [] bindings (set init_binds) remclauses (map pack body)]
+                      (if (empty? remclauses)
+                        clauses
+                        (let [vec__15804 (split-with (partial underbound? 2 bindings) remclauses)
+                              skip (nth vec__15804 (unchecked-int 0) nil)
+                              ready (nth vec__15804 (unchecked-int 1) nil)
+                              vec__15807 (if (empty? ready)
+                                           (split-with (partial underbound? 3 bindings) remclauses)
+                                           [skip ready])
+                              skip (nth vec__15807 (unchecked-int 0) nil)
+                              ready (nth vec__15807 (unchecked-int 1) nil)
+                              _ (when (empty? ready)
+                                  (let [c (^clojure.lang.IFn unpack (first skip))]
+                                    (error/arg
+                                      :db.error/insufficient-binding
+                                      (cond
+                                        (not-join-clause? c) (str
+                                                               (vec
+                                                                 (remove bindings (free-vars c)))
+                                                               " not bound in not clause: "
+                                                               c)
+                                        (^clojure.lang.IFn reqcnt c) (str
+                                                                       (vec
+                                                                         (remove
+                                                                           bindings
+                                                                           (take
+                                                                             (^clojure.lang.IFn reqcnt
+                                                                               c)
+                                                                             (next c))))
+                                                                       " not bound in clause: "
+                                                                       c)
+                                        (map? c) (str
+                                                   (vec (remove bindings (:argvars c)))
+                                                   " not bound in expression clause: "
+                                                   (:clause c))
+                                        :else (do
+                                                (str
+                                                  "Insufficient binding of db clause: "
+                                                  c
+                                                  " would cause full scan"))))))
+                              pc (first ready)
+                              c (^clojure.lang.IFn unpack pc)
+                              next_bindings (into bindings (^clojure.lang.IFn cbinds c))]
+                          (recur (conj clauses c) next_bindings (concat skip (rest ready))))))
+            blist (map
+                    (fn fn__15811 ([p1__15717#] (set (^clojure.lang.IFn cbinds p1__15717#))))
+                    (cons init_binds (conj clauses hargs)))
+            bup (next (reductions set/union blist))
+            bdown (nnext (reverse (reductions set/union (reverse blist))))
+            binds (-> (comp vec set/intersection)
+                   (map bup bdown)
+                   (vec)
+                   (pop)
+                   (conj (vec (filter variable? hargs))))
+            ret (partition 2 (interleave clauses binds))]
+        (query-stats/acc-with-phase-stats! :sched ret)
+        ret)))
   (reset-meta!
     #'sched-in-order
     (assoc
@@ -1998,18 +1981,17 @@
       'push-preds
       :ns
       *ns*))
-  (def recursive?
-   (fn recursive_QMARK_
-     ([prog pred seen]
-       (if (or (map? pred) (extensional? prog pred))
-         false
-         (or
-           (contains? seen pred)
-           (let [seen (conj seen pred) rules (get prog pred)]
-             (some
-               (fn fn__15871 ([p1__15870#] (recursive? prog p1__15870# seen)))
-               (map first (remove map? (mapcat rest rules))))))))
-     ([prog pred] (recursive? prog pred #{}))))
+  (defn recursive?
+    ([prog pred seen]
+      (if (or (map? pred) (extensional? prog pred))
+        false
+        (or
+          (contains? seen pred)
+          (let [seen (conj seen pred) rules (get prog pred)]
+            (some
+              (fn fn__15871 ([p1__15870#] (recursive? prog p1__15870# seen)))
+              (map first (remove map? (mapcat rest rules))))))))
+    ([prog pred] (recursive? prog pred #{})))
   (reset-meta!
     #'recursive?
     (assoc
@@ -2030,191 +2012,189 @@
   (reset-meta!
     #'tuple->rel
     (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'tuple->rel :ns *ns*))
-  (def compile-expr-clause
-   (fn compile_expr_clause
-     ([sources vars expr bind_type binds]
-       (let [params (vec (concat sources vars))
-             projection (keep-indexed
-                          (fn fn__15881
-                            ([p1__15880# p2__15879#] (when-not (blank? p2__15879#) p1__15880#)))
-                          binds)
-             retlen (+ (count vars) (count projection))
-             gret (gensym)
-             term (gensym)
-             fexpr (if bind_type
-                     (seq
-                       (concat
-                         (clojure.core/list 'clojure.core/fn)
-                         (clojure.core/list params)
-                         (clojure.core/list
-                           (seq
-                             (concat
-                               (clojure.core/list 'clojure.core/mapv)
-                               (clojure.core/list
-                                 (seq
-                                   (concat
-                                     (clojure.core/list 'clojure.core/fn)
-                                     (clojure.core/list
-                                       (apply vector (seq (concat (clojure.core/list term)))))
-                                     (clojure.core/list
-                                       (seq
-                                         (concat
-                                           (clojure.core/list 'clojure.core/let)
-                                           (clojure.core/list
-                                             (apply
-                                               vector
-                                               (seq
-                                                 (concat
-                                                   (clojure.core/list gret)
-                                                   (clojure.core/list
-                                                     (seq
-                                                       (concat
-                                                         (clojure.core/list
-                                                           'clojure.core/object-array)
-                                                         (clojure.core/list (long retlen)))))))))
-                                           (let [iter__6398__auto__ (fn 
-                                                                      iter__15883
-                                                                      ([s__15884]
-                                                                        (lazy-seq
-                                                                          (let 
-                                                                            [s__15884 s__15884
+  (defn compile-expr-clause
+    ([sources vars expr bind_type binds]
+      (let [params (vec (concat sources vars))
+            projection (keep-indexed
+                         (fn fn__15881
+                           ([p1__15880# p2__15879#] (when-not (blank? p2__15879#) p1__15880#)))
+                         binds)
+            retlen (+ (count vars) (count projection))
+            gret (gensym)
+            term (gensym)
+            fexpr (if bind_type
+                    (seq
+                      (concat
+                        (clojure.core/list 'clojure.core/fn)
+                        (clojure.core/list params)
+                        (clojure.core/list
+                          (seq
+                            (concat
+                              (clojure.core/list 'clojure.core/mapv)
+                              (clojure.core/list
+                                (seq
+                                  (concat
+                                    (clojure.core/list 'clojure.core/fn)
+                                    (clojure.core/list
+                                      (apply vector (seq (concat (clojure.core/list term)))))
+                                    (clojure.core/list
+                                      (seq
+                                        (concat
+                                          (clojure.core/list 'clojure.core/let)
+                                          (clojure.core/list
+                                            (apply
+                                              vector
+                                              (seq
+                                                (concat
+                                                  (clojure.core/list gret)
+                                                  (clojure.core/list
+                                                    (seq
+                                                      (concat
+                                                        (clojure.core/list
+                                                          'clojure.core/object-array)
+                                                        (clojure.core/list (long retlen)))))))))
+                                          (let [iter__6398__auto__ (fn 
+                                                                     iter__15883
+                                                                     ([s__15884]
+                                                                       (lazy-seq
+                                                                         (let 
+                                                                           [s__15884 s__15884
+                                                                            temp__5825__auto__
+                                                                            (seq s__15884)]
+                                                                           (when
                                                                              temp__5825__auto__
-                                                                             (seq s__15884)]
-                                                                            (when
-                                                                              temp__5825__auto__
-                                                                              (let 
-                                                                                [s__15884
-                                                                                 temp__5825__auto__]
-                                                                                (if
-                                                                                  (chunked-seq?
-                                                                                    s__15884)
-                                                                                  (let 
-                                                                                    [c__6396__auto__
-                                                                                     (chunk-first
-                                                                                       s__15884)
-                                                                                     size__6397__auto__
-                                                                                     (count
-                                                                                       c__6396__auto__)
-                                                                                     b__15886
-                                                                                     (chunk-buffer
-                                                                                       (java.lang.Integer/valueOf
-                                                                                         (int
-                                                                                           size__6397__auto__)))]
-                                                                                    (if
-                                                                                      (loop 
-                                                                                        [i__15885
-                                                                                         0]
-                                                                                        (if
-                                                                                          (<
-                                                                                            i__15885
-                                                                                            size__6397__auto__)
-                                                                                          (let 
-                                                                                            [i
-                                                                                             (.nth
-                                                                                               ^clojure.lang.Indexed c__6396__auto__
-                                                                                               (unchecked-int
-                                                                                                 i__15885))]
-                                                                                            (chunk-append
-                                                                                              b__15886
-                                                                                              (seq
-                                                                                                (concat
-                                                                                                  (clojure.core/list
-                                                                                                    'clojure.core/aset)
-                                                                                                  (clojure.core/list
-                                                                                                    gret)
-                                                                                                  (clojure.core/list
-                                                                                                    i)
-                                                                                                  (clojure.core/list
-                                                                                                    (nth
-                                                                                                      vars
-                                                                                                      (unchecked-int
-                                                                                                        ^java.lang.Number i))))))
-                                                                                            (recur
-                                                                                              (inc
-                                                                                                i__15885)))
-                                                                                          true))
-                                                                                      (chunk-cons
-                                                                                        (chunk
-                                                                                          b__15886)
-                                                                                        (^clojure.lang.IFn iter__15883
-                                                                                          (chunk-rest
-                                                                                            s__15884)))
-                                                                                      (chunk-cons
-                                                                                        (chunk
-                                                                                          b__15886)
-                                                                                        nil)))
-                                                                                  (let 
-                                                                                    [i
-                                                                                     (first
-                                                                                       s__15884)]
-                                                                                    (cons
-                                                                                      (seq
-                                                                                        (concat
-                                                                                          (clojure.core/list
-                                                                                            'clojure.core/aset)
-                                                                                          (clojure.core/list
-                                                                                            gret)
-                                                                                          (clojure.core/list
-                                                                                            i)
-                                                                                          (clojure.core/list
-                                                                                            (nth
-                                                                                              vars
+                                                                             (let 
+                                                                               [s__15884
+                                                                                temp__5825__auto__]
+                                                                               (if
+                                                                                 (chunked-seq?
+                                                                                   s__15884)
+                                                                                 (let 
+                                                                                   [c__6396__auto__
+                                                                                    (chunk-first
+                                                                                      s__15884)
+                                                                                    size__6397__auto__
+                                                                                    (count
+                                                                                      c__6396__auto__)
+                                                                                    b__15886
+                                                                                    (chunk-buffer
+                                                                                      (java.lang.Integer/valueOf
+                                                                                        (int
+                                                                                          size__6397__auto__)))]
+                                                                                   (if
+                                                                                     (loop 
+                                                                                       [i__15885 0]
+                                                                                       (if
+                                                                                         (<
+                                                                                           i__15885
+                                                                                           size__6397__auto__)
+                                                                                         (let 
+                                                                                           [i
+                                                                                            (.nth
+                                                                                              ^clojure.lang.Indexed c__6396__auto__
                                                                                               (unchecked-int
-                                                                                                ^java.lang.Number i)))))
-                                                                                      (^clojure.lang.IFn iter__15883
-                                                                                        (rest
-                                                                                          s__15884)))))))))))]
-                                             (^clojure.lang.IFn iter__6398__auto__
-                                               (range
-                                                 (java.lang.Integer/valueOf (int (count vars))))))
-                                           (map-indexed
-                                             (fn fn__15896
-                                               ([i proj]
-                                                 (seq
-                                                   (concat
-                                                     (clojure.core/list 'clojure.core/aset)
-                                                     (clojure.core/list gret)
-                                                     (clojure.core/list (+ i (count vars)))
-                                                     (clojure.core/list
-                                                       (seq
-                                                         (concat
-                                                           (clojure.core/list 'clojure.core/nth)
-                                                           (clojure.core/list term)
-                                                           (clojure.core/list proj))))))))
-                                             projection)
-                                           (clojure.core/list
-                                             (seq
-                                               (concat
-                                                 (clojure.core/list 'datomic.datalog/tuple)
-                                                 (clojure.core/list gret))))))))))
-                               (clojure.core/list
-                                 (let [G__15898 bind_type]
-                                   (case
-                                     G__15898
-                                     :scalar
-                                     (seq
-                                       (concat
-                                         (clojure.core/list 'datomic.datalog/scalar->rel)
-                                         (clojure.core/list expr)))
-                                     :tuple
-                                     (seq
-                                       (concat
-                                         (clojure.core/list 'datomic.datalog/tuple->rel)
-                                         (clojure.core/list expr)))
-                                     :list
-                                     (seq
-                                       (concat
-                                         (clojure.core/list 'clojure.core/mapv)
-                                         (clojure.core/list 'clojure.core/vector)
-                                         (clojure.core/list expr)))
-                                     :rel
-                                     expr))))))))
-                     (seq
-                       (concat
-                         (clojure.core/list 'clojure.core/fn)
-                         (clojure.core/list params)
-                         (clojure.core/list expr))))]
-         (binding [*ns* (find-ns 'datomic.extensions) *warn-on-reflection* true] (eval fexpr))))))
+                                                                                                i__15885))]
+                                                                                           (chunk-append
+                                                                                             b__15886
+                                                                                             (seq
+                                                                                               (concat
+                                                                                                 (clojure.core/list
+                                                                                                   'clojure.core/aset)
+                                                                                                 (clojure.core/list
+                                                                                                   gret)
+                                                                                                 (clojure.core/list
+                                                                                                   i)
+                                                                                                 (clojure.core/list
+                                                                                                   (nth
+                                                                                                     vars
+                                                                                                     (unchecked-int
+                                                                                                       ^java.lang.Number i))))))
+                                                                                           (recur
+                                                                                             (inc
+                                                                                               i__15885)))
+                                                                                         true))
+                                                                                     (chunk-cons
+                                                                                       (chunk
+                                                                                         b__15886)
+                                                                                       (^clojure.lang.IFn iter__15883
+                                                                                         (chunk-rest
+                                                                                           s__15884)))
+                                                                                     (chunk-cons
+                                                                                       (chunk
+                                                                                         b__15886)
+                                                                                       nil)))
+                                                                                 (let 
+                                                                                   [i
+                                                                                    (first
+                                                                                      s__15884)]
+                                                                                   (cons
+                                                                                     (seq
+                                                                                       (concat
+                                                                                         (clojure.core/list
+                                                                                           'clojure.core/aset)
+                                                                                         (clojure.core/list
+                                                                                           gret)
+                                                                                         (clojure.core/list
+                                                                                           i)
+                                                                                         (clojure.core/list
+                                                                                           (nth
+                                                                                             vars
+                                                                                             (unchecked-int
+                                                                                               ^java.lang.Number i)))))
+                                                                                     (^clojure.lang.IFn iter__15883
+                                                                                       (rest
+                                                                                         s__15884)))))))))))]
+                                            (^clojure.lang.IFn iter__6398__auto__
+                                              (range
+                                                (java.lang.Integer/valueOf (int (count vars))))))
+                                          (map-indexed
+                                            (fn fn__15896
+                                              ([i proj]
+                                                (seq
+                                                  (concat
+                                                    (clojure.core/list 'clojure.core/aset)
+                                                    (clojure.core/list gret)
+                                                    (clojure.core/list (+ i (count vars)))
+                                                    (clojure.core/list
+                                                      (seq
+                                                        (concat
+                                                          (clojure.core/list 'clojure.core/nth)
+                                                          (clojure.core/list term)
+                                                          (clojure.core/list proj))))))))
+                                            projection)
+                                          (clojure.core/list
+                                            (seq
+                                              (concat
+                                                (clojure.core/list 'datomic.datalog/tuple)
+                                                (clojure.core/list gret))))))))))
+                              (clojure.core/list
+                                (let [G__15898 bind_type]
+                                  (case
+                                    G__15898
+                                    :scalar
+                                    (seq
+                                      (concat
+                                        (clojure.core/list 'datomic.datalog/scalar->rel)
+                                        (clojure.core/list expr)))
+                                    :tuple
+                                    (seq
+                                      (concat
+                                        (clojure.core/list 'datomic.datalog/tuple->rel)
+                                        (clojure.core/list expr)))
+                                    :list
+                                    (seq
+                                      (concat
+                                        (clojure.core/list 'clojure.core/mapv)
+                                        (clojure.core/list 'clojure.core/vector)
+                                        (clojure.core/list expr)))
+                                    :rel
+                                    expr))))))))
+                    (seq
+                      (concat
+                        (clojure.core/list 'clojure.core/fn)
+                        (clojure.core/list params)
+                        (clojure.core/list expr))))]
+        (binding [*ns* (find-ns 'datomic.extensions) *warn-on-reflection* true] (eval fexpr)))))
   (reset-meta!
     #'compile-expr-clause
     (assoc
@@ -2239,93 +2219,92 @@
   (reset-meta!
     #'binding-type
     (assoc {:arglists (clojure.core/list ['binds]), :column (int 1)} :name 'binding-type :ns *ns*))
-  (def expr-clause
-   (fn expr_clause
-     ([p__15905]
-       (let [vec__15906 p__15905
-             call (nth vec__15906 (unchecked-int 0) nil)
-             binds (nth vec__15906 (unchecked-int 1) nil)
-             xtra (nth vec__15906 (unchecked-int 2) nil)
-             clause vec__15906]
-         (if (instance? java.util.List call)
-           (let [vec__15909 (list* call)
-                 seq__15910 (seq vec__15909)
-                 first__15911 (first seq__15910)
-                 seq__15910 (next seq__15910)
-                 f first__15911
-                 body seq__15910
-                 expr vec__15909
-                 vars (seq (set (filter variable? body)))
-                 sources (seq (set (filter source? body)))
-                 _ (when-not (or (not= f 'ground) (nil? vars))
-                     (throw
-                       (java.lang.AssertionError.
-                         (str
-                           "Assert failed: "
-                           "Can't have variable in ground expression"
-                           "\n"
-                           (pr-str
-                             (clojure.core/list
-                               'or
-                               (clojure.core/list 'not= 'f (clojure.core/list 'quote 'ground))
-                               (clojure.core/list 'nil? 'vars))))))
-                     nil)
-                 bind_type (binding-type binds)
-                 binds (and
-                         binds
-                         (vec
-                           (let [G__15912 bind_type]
-                             (case
-                               G__15912
-                               :scalar
-                               [binds]
-                               :tuple
-                               binds
-                               :list
-                               [(first binds)]
-                               :rel
-                               (first binds)))))
-                 has_blanks? (and binds (some blank? binds))
-                 needs_source (not (nil? sources))
-                 f (if (and (= f 'ground) (nil? vars) needs_source (not has_blanks?))
-                     (let [G__15913 bind_type]
-                       (case
-                         G__15913
-                         :scalar
-                         (fn fn__15914 ([p1__15902#] (vector (vector p1__15902#))))
-                         :tuple
-                         (fn fn__15916 ([p1__15904#] (vector p1__15904#)))
-                         :list
-                         (fn fn__15918 ([p1__15903#] (mapv vector p1__15903#)))
-                         :rel
-                         identity))
-                     (compile-expr-clause sources vars expr bind_type binds))
-                 binds (if has_blanks? (vec (remove blank? binds)) binds)]
-             (when-not (< (count sources) 2)
-               (throw
-                 (java.lang.AssertionError.
-                   (str
-                     "Assert failed: "
-                     "Can't have more than one data source in expression"
-                     "\n"
-                     (pr-str (clojure.core/list '< (clojure.core/list 'count 'sources) 2))))))
-             (when-not (nil? xtra)
-               (throw
-                 (java.lang.AssertionError.
-                   (str
-                     "Assert failed: "
-                     (str "Can't have anything after binding expression: " xtra)
-                     "\n"
-                     (pr-str (clojure.core/list 'nil? 'xtra))))))
-             (let [ret {:argvars vars,
-                        :fn f,
-                        :clause clause,
-                        :binds binds,
-                        :bind-type bind_type,
-                        :needs-source needs_source}
-                   ret (if sources (with-meta ret {:tag (first sources)}) ret)]
-               ret))
-           clause)))))
+  (defn expr-clause
+    ([p__15905]
+      (let [vec__15906 p__15905
+            call (nth vec__15906 (unchecked-int 0) nil)
+            binds (nth vec__15906 (unchecked-int 1) nil)
+            xtra (nth vec__15906 (unchecked-int 2) nil)
+            clause vec__15906]
+        (if (instance? java.util.List call)
+          (let [vec__15909 (list* call)
+                seq__15910 (seq vec__15909)
+                first__15911 (first seq__15910)
+                seq__15910 (next seq__15910)
+                f first__15911
+                body seq__15910
+                expr vec__15909
+                vars (seq (set (filter variable? body)))
+                sources (seq (set (filter source? body)))
+                _ (when-not (or (not= f 'ground) (nil? vars))
+                    (throw
+                      (java.lang.AssertionError.
+                        (str
+                          "Assert failed: "
+                          "Can't have variable in ground expression"
+                          "\n"
+                          (pr-str
+                            (clojure.core/list
+                              'or
+                              (clojure.core/list 'not= 'f (clojure.core/list 'quote 'ground))
+                              (clojure.core/list 'nil? 'vars))))))
+                    nil)
+                bind_type (binding-type binds)
+                binds (and
+                        binds
+                        (vec
+                          (let [G__15912 bind_type]
+                            (case
+                              G__15912
+                              :scalar
+                              [binds]
+                              :tuple
+                              binds
+                              :list
+                              [(first binds)]
+                              :rel
+                              (first binds)))))
+                has_blanks? (and binds (some blank? binds))
+                needs_source (not (nil? sources))
+                f (if (and (= f 'ground) (nil? vars) needs_source (not has_blanks?))
+                    (let [G__15913 bind_type]
+                      (case
+                        G__15913
+                        :scalar
+                        (fn fn__15914 ([p1__15902#] (vector (vector p1__15902#))))
+                        :tuple
+                        (fn fn__15916 ([p1__15904#] (vector p1__15904#)))
+                        :list
+                        (fn fn__15918 ([p1__15903#] (mapv vector p1__15903#)))
+                        :rel
+                        identity))
+                    (compile-expr-clause sources vars expr bind_type binds))
+                binds (if has_blanks? (vec (remove blank? binds)) binds)]
+            (when-not (< (count sources) 2)
+              (throw
+                (java.lang.AssertionError.
+                  (str
+                    "Assert failed: "
+                    "Can't have more than one data source in expression"
+                    "\n"
+                    (pr-str (clojure.core/list '< (clojure.core/list 'count 'sources) 2))))))
+            (when-not (nil? xtra)
+              (throw
+                (java.lang.AssertionError.
+                  (str
+                    "Assert failed: "
+                    (str "Can't have anything after binding expression: " xtra)
+                    "\n"
+                    (pr-str (clojure.core/list 'nil? 'xtra))))))
+            (let [ret {:argvars vars,
+                       :fn f,
+                       :clause clause,
+                       :binds binds,
+                       :bind-type bind_type,
+                       :needs-source needs_source}
+                  ret (if sources (with-meta ret {:tag (first sources)}) ret)]
+              ret))
+          clause))))
   (reset-meta!
     #'expr-clause
     (assoc
@@ -2406,19 +2385,18 @@
       'lift-consts-from-preds
       :ns
       *ns*))
-  (def all-pred
-   (fn all_pred
-     ([p__15954]
-       (let [vec__15955 p__15954
-             seq__15956 (seq vec__15955)
-             first__15957 (first seq__15956)
-             seq__15956 (next seq__15956)
-             p first__15957
-             cs seq__15956
-             c vec__15955]
-         (cond
-           (#{'and 'not 'or} p) (every? all-pred cs)
-           (and (instance? java.util.List p) (nil? cs)) (do true))))))
+  (defn all-pred
+    ([p__15954]
+      (let [vec__15955 p__15954
+            seq__15956 (seq vec__15955)
+            first__15957 (first seq__15956)
+            seq__15956 (next seq__15956)
+            p first__15957
+            cs seq__15956
+            c vec__15955]
+        (cond
+          (#{'and 'not 'or} p) (every? all-pred cs)
+          (and (instance? java.util.List p) (nil? cs)) (do true)))))
   (reset-meta!
     #'all-pred
     (assoc
@@ -2427,20 +2405,19 @@
       'all-pred
       :ns
       *ns*))
-  (def to-pred
-   (fn to_pred
-     ([p__15960]
-       (let [vec__15961 p__15960
-             seq__15962 (seq vec__15961)
-             first__15963 (first seq__15962)
-             seq__15962 (next seq__15962)
-             p first__15963
-             cs seq__15962
-             c vec__15961]
-         (cond
-           (#{'and 'or} p) (cons p (map to-pred cs))
-           (= 'not p) (clojure.core/list p (list* 'and (map to-pred cs)))
-           :else (do p))))))
+  (defn to-pred
+    ([p__15960]
+      (let [vec__15961 p__15960
+            seq__15962 (seq vec__15961)
+            first__15963 (first seq__15962)
+            seq__15962 (next seq__15962)
+            p first__15963
+            cs seq__15962
+            c vec__15961]
+        (cond
+          (#{'and 'or} p) (cons p (map to-pred cs))
+          (= 'not p) (clojure.core/list p (list* 'and (map to-pred cs)))
+          :else (do p)))))
   (reset-meta!
     #'to-pred
     (assoc
@@ -2449,32 +2426,31 @@
       'to-pred
       :ns
       *ns*))
-  (def not-or-all-pred
-   (fn not_or_all_pred
-     ([p__15965]
-       (let [vec__15966 p__15965
-             seq__15967 (seq vec__15966)
-             first__15968 (first seq__15967)
-             seq__15967 (next seq__15967)
-             p first__15968
-             cs seq__15967
-             c vec__15966]
-         (if (and (#{'not 'or} p) (all-pred c))
-           (let [vs (vec (unifying-var-set c)) pred (to-pred c)]
-             (apply
-               vector
-               (seq
-                 (-> (clojure.core/list 'clojure.core/fn)
-                  (concat
-                    (clojure.core/list (apply vector (seq (concat vs))))
-                    (clojure.core/list pred))
-                  (seq)
-                  (clojure.core/list)
-                  (concat vs)
-                  (seq)
-                  (clojure.core/list)
-                  (concat)))))
-           c)))))
+  (defn not-or-all-pred
+    ([p__15965]
+      (let [vec__15966 p__15965
+            seq__15967 (seq vec__15966)
+            first__15968 (first seq__15967)
+            seq__15967 (next seq__15967)
+            p first__15968
+            cs seq__15967
+            c vec__15966]
+        (if (and (#{'not 'or} p) (all-pred c))
+          (let [vs (vec (unifying-var-set c)) pred (to-pred c)]
+            (apply
+              vector
+              (seq
+                (-> (clojure.core/list 'clojure.core/fn)
+                 (concat
+                   (clojure.core/list (apply vector (seq (concat vs))))
+                   (clojure.core/list pred))
+                 (seq)
+                 (clojure.core/list)
+                 (concat vs)
+                 (seq)
+                 (clojure.core/list)
+                 (concat)))))
+          c))))
   (reset-meta!
     #'not-or-all-pred
     (assoc
@@ -2483,20 +2459,19 @@
       'not-or-all-pred
       :ns
       *ns*))
-  (def not-or->not-or-join
-   (fn not_or__GT_not_or_join
-     ([p__15971]
-       (let [vec__15972 p__15971
-             seq__15973 (seq vec__15972)
-             first__15974 (first seq__15973)
-             seq__15973 (next seq__15973)
-             p first__15974
-             cs seq__15973
-             c vec__15972]
-         (if (#{'not 'or} p)
-           (let [vs (vec (unifying-var-set c))]
-             (with-meta (list* ({'not 'not-join, 'or 'or-join} p) vs cs) (meta c)))
-           c)))))
+  (defn not-or->not-or-join
+    ([p__15971]
+      (let [vec__15972 p__15971
+            seq__15973 (seq vec__15972)
+            first__15974 (first seq__15973)
+            seq__15973 (next seq__15973)
+            p first__15974
+            cs seq__15973
+            c vec__15972]
+        (if (#{'not 'or} p)
+          (let [vs (vec (unifying-var-set c))]
+            (with-meta (list* ({'not 'not-join, 'or 'or-join} p) vs cs) (meta c)))
+          c))))
   (reset-meta!
     #'not-or->not-or-join
     (assoc
@@ -2505,33 +2480,32 @@
       'not-or->not-or-join
       :ns
       *ns*))
-  (def normalize-or-join
-   (fn normalize_or_join
-     ([p__15977]
-       (let [vec__15978 p__15977
-             seq__15979 (seq vec__15978)
-             first__15980 (first seq__15979)
-             seq__15979 (next seq__15979)
-             p first__15980
-             first__15980 (first seq__15979)
-             seq__15979 (next seq__15979)
-             vs first__15980
-             cs seq__15979
-             c vec__15978]
-         (if (= 'or-join p)
-           (let [cs (map
-                      (fn fn__15981
-                        ([p1__15976#]
-                          (if (= 'and (first p1__15976#))
-                            (rest p1__15976#)
-                            (clojure.core/list p1__15976#))))
-                      cs)]
-             (when (empty? vs)
-               (error/arg
-                 :db.error/or-binding-empty
-                 (str "'or' cannot have empty binding set: " c)))
-             (with-meta (list* p vs cs) (meta c)))
-           c)))))
+  (defn normalize-or-join
+    ([p__15977]
+      (let [vec__15978 p__15977
+            seq__15979 (seq vec__15978)
+            first__15980 (first seq__15979)
+            seq__15979 (next seq__15979)
+            p first__15980
+            first__15980 (first seq__15979)
+            seq__15979 (next seq__15979)
+            vs first__15980
+            cs seq__15979
+            c vec__15978]
+        (if (= 'or-join p)
+          (let [cs (map
+                     (fn fn__15981
+                       ([p1__15976#]
+                         (if (= 'and (first p1__15976#))
+                           (rest p1__15976#)
+                           (clojure.core/list p1__15976#))))
+                     cs)]
+            (when (empty? vs)
+              (error/arg
+                :db.error/or-binding-empty
+                (str "'or' cannot have empty binding set: " c)))
+            (with-meta (list* p vs cs) (meta c)))
+          c))))
   (reset-meta!
     #'normalize-or-join
     (assoc
@@ -2540,21 +2514,20 @@
       'normalize-or-join
       :ns
       *ns*))
-  (def or-join->rule-preds
-   (fn or_join__GT_rule_preds
-     ([p__15984]
-       (let [vec__15985 p__15984
-             seq__15986 (seq vec__15985)
-             first__15987 (first seq__15986)
-             seq__15986 (next seq__15986)
-             p first__15987
-             first__15987 (first seq__15986)
-             seq__15986 (next seq__15986)
-             vs first__15987
-             cs seq__15986
-             rname (gensym "arule__")
-             head (cons rname vs)]
-         (mapv (partial cons (with-meta head #:query-stats{:clause (list* p [vs])})) cs)))))
+  (defn or-join->rule-preds
+    ([p__15984]
+      (let [vec__15985 p__15984
+            seq__15986 (seq vec__15985)
+            first__15987 (first seq__15986)
+            seq__15986 (next seq__15986)
+            p first__15987
+            first__15987 (first seq__15986)
+            seq__15986 (next seq__15986)
+            vs first__15987
+            cs seq__15986
+            rname (gensym "arule__")
+            head (cons rname vs)]
+        (mapv (partial cons (with-meta head #:query-stats{:clause (list* p [vs])})) cs))))
   (reset-meta!
     #'or-join->rule-preds
     (assoc
@@ -2732,54 +2705,53 @@
     (cache/create-computing rule-map 1000))
   (.setMeta (clojure.lang.RT/var "datomic.datalog" "q") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.datalog" "q") (clojure.lang.RT/var "datomic.query" "q"))
-  (def eval-not-join
-   (fn eval_not_join
-     ([srcs prog inrel inbinds p__16044]
-       (let [vec__16045 p__16044
-             seq__16046 (seq vec__16045)
-             first__16047 (first seq__16046)
-             seq__16046 (next seq__16046)
-             _ first__16047
-             first__16047 (first seq__16046)
-             seq__16046 (next seq__16046)
-             vars first__16047
-             cs seq__16046
-             not_join_clause vec__16045
-             used (used-srcs srcs not_join_clause)
-             dbs (select-keys srcs used)
-             csrc (:tag (meta not_join_clause))
-             dbs (cond-> dbs csrc (assoc '$ (get srcs csrc)))
-             uvs (set vars)
-             binds (map
-                     (fn fn__16049
-                       ([p1__16043#] (or (^clojure.lang.IFn uvs p1__16043#) (gensym "?nb__"))))
-                     inbinds)
-             query (apply
-                     hash-map
-                     (seq
-                       (concat
-                         (clojure.core/list :find)
-                         (clojure.core/list binds)
-                         (clojure.core/list :in)
-                         (clojure.core/list
-                           (apply
-                             vector
-                             (seq
-                               (concat
-                                 (keys dbs)
-                                 (clojure.core/list '%)
-                                 (clojure.core/list
-                                   (apply
-                                     vector
-                                     (seq
-                                       (concat
-                                         (clojure.core/list
-                                           (apply vector (seq (concat binds))))))))))))
-                         (clojure.core/list :where)
-                         (clojure.core/list (apply vector (seq (concat cs)))))))
-             G__16052 (java.util.HashSet. ^java.util.Collection inrel)]
-         (.removeAll ^java.util.AbstractSet G__16052 (q query (conj (vec (vals dbs)) prog inrel)))
-         G__16052))))
+  (defn eval-not-join
+    ([srcs prog inrel inbinds p__16044]
+      (let [vec__16045 p__16044
+            seq__16046 (seq vec__16045)
+            first__16047 (first seq__16046)
+            seq__16046 (next seq__16046)
+            _ first__16047
+            first__16047 (first seq__16046)
+            seq__16046 (next seq__16046)
+            vars first__16047
+            cs seq__16046
+            not_join_clause vec__16045
+            used (used-srcs srcs not_join_clause)
+            dbs (select-keys srcs used)
+            csrc (:tag (meta not_join_clause))
+            dbs (cond-> dbs csrc (assoc '$ (get srcs csrc)))
+            uvs (set vars)
+            binds (map
+                    (fn fn__16049
+                      ([p1__16043#] (or (^clojure.lang.IFn uvs p1__16043#) (gensym "?nb__"))))
+                    inbinds)
+            query (apply
+                    hash-map
+                    (seq
+                      (concat
+                        (clojure.core/list :find)
+                        (clojure.core/list binds)
+                        (clojure.core/list :in)
+                        (clojure.core/list
+                          (apply
+                            vector
+                            (seq
+                              (concat
+                                (keys dbs)
+                                (clojure.core/list '%)
+                                (clojure.core/list
+                                  (apply
+                                    vector
+                                    (seq
+                                      (concat
+                                        (clojure.core/list
+                                          (apply vector (seq (concat binds))))))))))))
+                        (clojure.core/list :where)
+                        (clojure.core/list (apply vector (seq (concat cs)))))))
+            G__16052 (java.util.HashSet. ^java.util.Collection inrel)]
+        (.removeAll ^java.util.AbstractSet G__16052 (q query (conj (vec (vals dbs)) prog inrel)))
+        G__16052)))
   (reset-meta!
     #'eval-not-join
     (assoc
@@ -2795,128 +2767,125 @@
       'eval-not-join
       :ns
       *ns*))
-  (def eval-clause
-   (fn eval_clause
-     ([db srcs prog oprog clause predctor inrel inbinds next_binds sched_fn src ans ins top_bounds]
-       (query-stats/merge-with-clause-stats!
-         {:clause clause,
-          :rows-in (java.lang.Integer/valueOf (int (count inrel))),
-          :binds-in inbinds,
-          :binds-out next_binds})
-       (maybe-cancel)
-       (if (not-join-clause? clause)
-         (let [nrel (eval-not-join srcs oprog inrel inbinds clause)
-               ret (project nrel inbinds next_binds)]
-           (query-stats/merge-with-clause-stats!
-             {:rows-out (java.lang.Integer/valueOf (int (count ret)))})
-           ret)
-         (let [exf (and (map? clause) (:binds clause))
-               exp (and (map? clause) (nil? (:binds clause)))
-               ext? (and (not (or exf exp)) (extensional? prog (first clause)))
-               args (cond
-                      ext? clause
-                      (or exf exp) (concat (:argvars clause) (:binds clause))
-                      :else (do (rest clause)))
-               _ (when (some nil? args)
-                   (error/arg
-                     :db.error/invalid-clause
-                     (str "Can't have nil args in clause: " clause)))
-               consts (mapv
-                        (fn fn__16060
-                          ([p1__16054#]
-                            (if (variable-or-blank? p1__16054#)
-                              (some-> top_bounds (:consts) (^clojure.lang.IFn p1__16054#))
-                              p1__16054#)))
-                        args)
-               starts (mapv
-                        (fn fn__16063
-                          ([p1__16055#] (some-> top_bounds (:starts) (get p1__16055#))))
-                        args)
-               whiles (mapv
-                        (fn fn__16066
-                          ([p1__16056#] (some-> top_bounds (:whiles) (get p1__16056#))))
-                        args)
-               vec__16057 (create-join-maps inbinds args next_binds)
-               join (nth vec__16057 (unchecked-int 0) nil)
-               projx (nth vec__16057 (unchecked-int 1) nil)
-               projy (nth vec__16057 (unchecked-int 2) nil)
-               root? (and (empty? join) (empty? inbinds))
-               ret (try
-                     (if ext?
-                       (join-project
-                         (if (and root? (empty? inrel)) #{[]} inrel)
-                         (extrel db consts starts whiles)
-                         join
-                         projx
-                         projy
-                         predctor)
-                       (if exf
-                         (join-project
-                           (if (and root? (empty? inrel)) #{[]} inrel)
-                           (fnrel db clause consts)
-                           join
-                           projx
-                           projy
-                           predctor)
-                         (if exp
-                           (join-project
-                             (if (and root? (empty? inrel)) #{[]} inrel)
-                             (predrel db clause consts)
-                             join
-                             projx
-                             projy
-                             nil)
-                           (if (get prog (first clause))
-                             (let [bindset (set inbinds)
-                                   apred (adorned-pred clause bindset)
-                                   outbinds (filter bindset (filter variable? (next clause)))
-                                   pred (first clause)
-                                   aresk [src pred]]
-                               (query-stats/with-phase-stats
-                                 (fn fn__16070
-                                   ([]
-                                     (eval-query
-                                       db
-                                       prog
-                                       oprog
-                                       apred
-                                       (project inrel inbinds outbinds)
-                                       sched_fn
-                                       src
-                                       ans
-                                       ins
-                                       nil
-                                       (when top_bounds
-                                         {:consts consts, :starts starts, :whiles whiles})))))
-                               (join-project
-                                 (if (and root? (empty? inrel)) #{[]} inrel)
-                                 (get ans aresk [])
-                                 join
-                                 projx
-                                 projy
-                                 predctor))
-                             (do
-                               (when :else
-                                 (throw
-                                   (java.lang.IllegalArgumentException.
-                                     (str "Undefined predicate: " (first clause)))))
-                               nil)))))
-                     (catch
-                       java.lang.Exception
-                       ex
-                       (do
-                         (throw
-                           (java.lang.Exception.
-                             (str
-                               "processing clause: "
-                               clause
-                               ", message: "
-                               (.getMessage ^java.lang.Throwable ex))
-                             ^java.lang.Throwable ex))
-                         nil)))]
-           (query-stats/merge-with-clause-stats!
-             {:rows-out (java.lang.Integer/valueOf (int (count ret)))})
-           ret)))))
+  (defn eval-clause
+    ([db srcs prog oprog clause predctor inrel inbinds next_binds sched_fn src ans ins top_bounds]
+      (query-stats/merge-with-clause-stats!
+        {:clause clause,
+         :rows-in (java.lang.Integer/valueOf (int (count inrel))),
+         :binds-in inbinds,
+         :binds-out next_binds})
+      (maybe-cancel)
+      (if (not-join-clause? clause)
+        (let [nrel (eval-not-join srcs oprog inrel inbinds clause)
+              ret (project nrel inbinds next_binds)]
+          (query-stats/merge-with-clause-stats!
+            {:rows-out (java.lang.Integer/valueOf (int (count ret)))})
+          ret)
+        (let [exf (and (map? clause) (:binds clause))
+              exp (and (map? clause) (nil? (:binds clause)))
+              ext? (and (not (or exf exp)) (extensional? prog (first clause)))
+              args (cond
+                     ext? clause
+                     (or exf exp) (concat (:argvars clause) (:binds clause))
+                     :else (do (rest clause)))
+              _ (when (some nil? args)
+                  (error/arg
+                    :db.error/invalid-clause
+                    (str "Can't have nil args in clause: " clause)))
+              consts (mapv
+                       (fn fn__16060
+                         ([p1__16054#]
+                           (if (variable-or-blank? p1__16054#)
+                             (some-> top_bounds (:consts) (^clojure.lang.IFn p1__16054#))
+                             p1__16054#)))
+                       args)
+              starts (mapv
+                       (fn fn__16063 ([p1__16055#] (some-> top_bounds (:starts) (get p1__16055#))))
+                       args)
+              whiles (mapv
+                       (fn fn__16066 ([p1__16056#] (some-> top_bounds (:whiles) (get p1__16056#))))
+                       args)
+              vec__16057 (create-join-maps inbinds args next_binds)
+              join (nth vec__16057 (unchecked-int 0) nil)
+              projx (nth vec__16057 (unchecked-int 1) nil)
+              projy (nth vec__16057 (unchecked-int 2) nil)
+              root? (and (empty? join) (empty? inbinds))
+              ret (try
+                    (if ext?
+                      (join-project
+                        (if (and root? (empty? inrel)) #{[]} inrel)
+                        (extrel db consts starts whiles)
+                        join
+                        projx
+                        projy
+                        predctor)
+                      (if exf
+                        (join-project
+                          (if (and root? (empty? inrel)) #{[]} inrel)
+                          (fnrel db clause consts)
+                          join
+                          projx
+                          projy
+                          predctor)
+                        (if exp
+                          (join-project
+                            (if (and root? (empty? inrel)) #{[]} inrel)
+                            (predrel db clause consts)
+                            join
+                            projx
+                            projy
+                            nil)
+                          (if (get prog (first clause))
+                            (let [bindset (set inbinds)
+                                  apred (adorned-pred clause bindset)
+                                  outbinds (filter bindset (filter variable? (next clause)))
+                                  pred (first clause)
+                                  aresk [src pred]]
+                              (query-stats/with-phase-stats
+                                (fn fn__16070
+                                  ([]
+                                    (eval-query
+                                      db
+                                      prog
+                                      oprog
+                                      apred
+                                      (project inrel inbinds outbinds)
+                                      sched_fn
+                                      src
+                                      ans
+                                      ins
+                                      nil
+                                      (when top_bounds
+                                        {:consts consts, :starts starts, :whiles whiles})))))
+                              (join-project
+                                (if (and root? (empty? inrel)) #{[]} inrel)
+                                (get ans aresk [])
+                                join
+                                projx
+                                projy
+                                predctor))
+                            (do
+                              (when :else
+                                (throw
+                                  (java.lang.IllegalArgumentException.
+                                    (str "Undefined predicate: " (first clause)))))
+                              nil)))))
+                    (catch
+                      java.lang.Exception
+                      ex
+                      (do
+                        (throw
+                          (java.lang.Exception.
+                            (str
+                              "processing clause: "
+                              clause
+                              ", message: "
+                              (.getMessage ^java.lang.Throwable ex))
+                            ^java.lang.Throwable ex))
+                        nil)))]
+          (query-stats/merge-with-clause-stats!
+            {:rows-out (java.lang.Integer/valueOf (int (count ret)))})
+          ret))))
   (reset-meta!
     #'eval-clause
     (assoc
@@ -2962,92 +2931,91 @@
       'remap-bounds
       :ns
       *ns*))
-  (def eval-rule
-   (fn eval_rule
-     ([db prog oprog p__16090 p__16091 inrel sched_fn src ans ins top_bounds nested_bounds]
-       (let [vec__16092 p__16090
-             seq__16093 (seq vec__16092)
-             first__16094 (first seq__16093)
-             seq__16093 (next seq__16093)
-             head first__16094
-             body seq__16093
-             rule vec__16092
-             vec__16095 p__16091
-             pred (nth vec__16095 (unchecked-int 0) nil)
-             adorn (nth vec__16095 (unchecked-int 1) nil)
-             apred vec__16095
-             vec__16098 head
-             seq__16099 (seq vec__16098)
-             first__16100 (first seq__16099)
-             seq__16099 (next seq__16099)
-             hpred first__16100
-             hargs seq__16099
-             aresk [src pred]
-             inbinds (keep-indexed
-                       (fn fn__16101 ([i a] (when-not (^clojure.lang.IFn adorn i) a)))
-                       hargs)
-             multi? (and (map? db) (not (instance? datomic.db.IDb db)))
-             srcs (if multi? db {'$ db})
-             cbs (push-preds srcs (^clojure.lang.IFn sched_fn srcs prog rule inbinds))
-             top_bounds (if nested_bounds (remap-bounds nested_bounds hargs) top_bounds)
-             res (try
-                   (loop [sbinds inbinds sup inrel cbs cbs]
-                     (if cbs
-                       (let [vec__16104 (first cbs)
-                             c (nth vec__16104 (unchecked-int 0) nil)
-                             next_binds (nth vec__16104 (unchecked-int 1) nil)
-                             predctor (nth vec__16104 (unchecked-int 2) nil)
-                             csrc (:tag (meta c))
-                             cdb (cond
-                                   (and csrc multi?) (let [x (get db csrc)]
-                                                       (when (nil? x)
-                                                         (throw
-                                                           (java.lang.Exception.
-                                                             (str
-                                                               "Unable to find data source: "
-                                                               csrc
-                                                               " in: "
-                                                               (keys db)))))
-                                                       x)
-                                   multi? (get db '$)
-                                   :else (do db))
-                             sup1 (query-stats/with-clause-stats
-                                    (fn fn__16107
-                                      ([]
-                                        (eval-clause
-                                          cdb
-                                          srcs
-                                          prog
-                                          oprog
-                                          c
-                                          predctor
-                                          sup
-                                          sbinds
-                                          next_binds
-                                          sched_fn
-                                          (or csrc src)
-                                          ans
-                                          ins
-                                          top_bounds))))]
-                         (recur next_binds sup1 (next cbs)))
-                       (project sup sbinds (vec (filter variable? hargs)))))
-                   (catch
-                     java.lang.Exception
-                     ex
-                     (do
-                       (throw
-                         (java.lang.Exception.
-                           (str
-                             "processing rule: "
-                             head
-                             ", message: "
-                             (.getMessage ^java.lang.Throwable ex))
-                           ^java.lang.Throwable ex))
-                       nil)))
-             anspred (get ans aresk (java.util.HashSet.))]
-         (.addAll ^java.util.Set anspred ^java.util.Collection res)
-         (.put ^java.util.Map ans aresk anspred)
-         nil))))
+  (defn eval-rule
+    ([db prog oprog p__16090 p__16091 inrel sched_fn src ans ins top_bounds nested_bounds]
+      (let [vec__16092 p__16090
+            seq__16093 (seq vec__16092)
+            first__16094 (first seq__16093)
+            seq__16093 (next seq__16093)
+            head first__16094
+            body seq__16093
+            rule vec__16092
+            vec__16095 p__16091
+            pred (nth vec__16095 (unchecked-int 0) nil)
+            adorn (nth vec__16095 (unchecked-int 1) nil)
+            apred vec__16095
+            vec__16098 head
+            seq__16099 (seq vec__16098)
+            first__16100 (first seq__16099)
+            seq__16099 (next seq__16099)
+            hpred first__16100
+            hargs seq__16099
+            aresk [src pred]
+            inbinds (keep-indexed
+                      (fn fn__16101 ([i a] (when-not (^clojure.lang.IFn adorn i) a)))
+                      hargs)
+            multi? (and (map? db) (not (instance? datomic.db.IDb db)))
+            srcs (if multi? db {'$ db})
+            cbs (push-preds srcs (^clojure.lang.IFn sched_fn srcs prog rule inbinds))
+            top_bounds (if nested_bounds (remap-bounds nested_bounds hargs) top_bounds)
+            res (try
+                  (loop [sbinds inbinds sup inrel cbs cbs]
+                    (if cbs
+                      (let [vec__16104 (first cbs)
+                            c (nth vec__16104 (unchecked-int 0) nil)
+                            next_binds (nth vec__16104 (unchecked-int 1) nil)
+                            predctor (nth vec__16104 (unchecked-int 2) nil)
+                            csrc (:tag (meta c))
+                            cdb (cond
+                                  (and csrc multi?) (let [x (get db csrc)]
+                                                      (when (nil? x)
+                                                        (throw
+                                                          (java.lang.Exception.
+                                                            (str
+                                                              "Unable to find data source: "
+                                                              csrc
+                                                              " in: "
+                                                              (keys db)))))
+                                                      x)
+                                  multi? (get db '$)
+                                  :else (do db))
+                            sup1 (query-stats/with-clause-stats
+                                   (fn fn__16107
+                                     ([]
+                                       (eval-clause
+                                         cdb
+                                         srcs
+                                         prog
+                                         oprog
+                                         c
+                                         predctor
+                                         sup
+                                         sbinds
+                                         next_binds
+                                         sched_fn
+                                         (or csrc src)
+                                         ans
+                                         ins
+                                         top_bounds))))]
+                        (recur next_binds sup1 (next cbs)))
+                      (project sup sbinds (vec (filter variable? hargs)))))
+                  (catch
+                    java.lang.Exception
+                    ex
+                    (do
+                      (throw
+                        (java.lang.Exception.
+                          (str
+                            "processing rule: "
+                            head
+                            ", message: "
+                            (.getMessage ^java.lang.Throwable ex))
+                          ^java.lang.Throwable ex))
+                      nil)))
+            anspred (get ans aresk (java.util.HashSet.))]
+        (.addAll ^java.util.Set anspred ^java.util.Collection res)
+        (.put ^java.util.Map ans aresk anspred)
+        nil)))
   (reset-meta!
     #'eval-rule
     (assoc
@@ -3070,64 +3038,59 @@
       'eval-rule
       :ns
       *ns*))
-  (def eval-query
-   (fn eval_query
-     ([db prog oprog p__16114 input sched_fn src ans ins top_bounds nested_bounds]
-       (let [vec__16115 p__16114
-             pred (nth vec__16115 (unchecked-int 0) nil)
-             adorn (nth vec__16115 (unchecked-int 1) nil)
-             apred vec__16115
-             iresk [src apred]
-             inpred (get ins iresk (java.util.HashSet.))
-             input (java.util.HashSet. ^java.util.Collection input)]
-         (.removeAll ^java.util.AbstractSet input ^java.util.Collection inpred)
-         (when (or (not (.isEmpty ^java.util.HashSet input)) (every? identity adorn))
-           (let [rules (get prog pred)]
-             (.addAll ^java.util.Set inpred ^java.util.Collection input)
-             (.put ^java.util.Map ins iresk inpred)
-             (loop [seq_16118 (seq rules) chunk_16119 nil count_16120 0 i_16121 0]
-               (if (< i_16121 count_16120)
-                 (let [rule (.nth ^clojure.lang.Indexed chunk_16119 (unchecked-int i_16121))]
-                   (eval-rule
-                     db
-                     prog
-                     oprog
-                     rule
-                     apred
-                     input
-                     sched_fn
-                     src
-                     ans
-                     ins
-                     top_bounds
-                     nested_bounds)
-                   (recur seq_16118 chunk_16119 count_16120 (inc i_16121)))
-                 (let [temp__5825__auto__ (seq seq_16118)]
-                   (when temp__5825__auto__
-                     (let [seq_16118 temp__5825__auto__]
-                       (if (chunked-seq? seq_16118)
-                         (let [c__6090__auto__ (chunk-first seq_16118)]
-                           (recur
-                             (chunk-rest seq_16118)
-                             c__6090__auto__
-                             (count c__6090__auto__)
-                             0))
-                         (let [rule (first seq_16118)]
-                           (eval-rule
-                             db
-                             prog
-                             oprog
-                             rule
-                             apred
-                             input
-                             sched_fn
-                             src
-                             ans
-                             ins
-                             top_bounds
-                             nested_bounds)
-                           (recur (next seq_16118) nil 0 0))))))))))
-         nil))))
+  (defn eval-query
+    ([db prog oprog p__16114 input sched_fn src ans ins top_bounds nested_bounds]
+      (let [vec__16115 p__16114
+            pred (nth vec__16115 (unchecked-int 0) nil)
+            adorn (nth vec__16115 (unchecked-int 1) nil)
+            apred vec__16115
+            iresk [src apred]
+            inpred (get ins iresk (java.util.HashSet.))
+            input (java.util.HashSet. ^java.util.Collection input)]
+        (.removeAll ^java.util.AbstractSet input ^java.util.Collection inpred)
+        (when (or (not (.isEmpty ^java.util.HashSet input)) (every? identity adorn))
+          (let [rules (get prog pred)]
+            (.addAll ^java.util.Set inpred ^java.util.Collection input)
+            (.put ^java.util.Map ins iresk inpred)
+            (loop [seq_16118 (seq rules) chunk_16119 nil count_16120 0 i_16121 0]
+              (if (< i_16121 count_16120)
+                (let [rule (.nth ^clojure.lang.Indexed chunk_16119 (unchecked-int i_16121))]
+                  (eval-rule
+                    db
+                    prog
+                    oprog
+                    rule
+                    apred
+                    input
+                    sched_fn
+                    src
+                    ans
+                    ins
+                    top_bounds
+                    nested_bounds)
+                  (recur seq_16118 chunk_16119 count_16120 (inc i_16121)))
+                (let [temp__5825__auto__ (seq seq_16118)]
+                  (when temp__5825__auto__
+                    (let [seq_16118 temp__5825__auto__]
+                      (if (chunked-seq? seq_16118)
+                        (let [c__6090__auto__ (chunk-first seq_16118)]
+                          (recur (chunk-rest seq_16118) c__6090__auto__ (count c__6090__auto__) 0))
+                        (let [rule (first seq_16118)]
+                          (eval-rule
+                            db
+                            prog
+                            oprog
+                            rule
+                            apred
+                            input
+                            sched_fn
+                            src
+                            ans
+                            ins
+                            top_bounds
+                            nested_bounds)
+                          (recur (next seq_16118) nil 0 0))))))))))
+        nil)))
   (reset-meta!
     #'eval-query
     (assoc
@@ -3173,25 +3136,24 @@
       'bound-consts
       :ns
       *ns*))
-  (def ranges
-   (fn ranges
-     ([in_consts query]
-       [(reduce-kv
-          (fn fn__16133 ([m v c] (assoc m v (if (variable? c) (get in_consts c) c))))
-          {}
-          (:range-starts query))
-        (let [cmps {'= =, '< ext/<, '<= ext/<=}]
-          (reduce-kv
-            (fn fn__16136
-              ([m v p__16135]
-                (let [vec__16137 p__16135
-                      cmpsym (nth vec__16137 (unchecked-int 0) nil)
-                      cb (nth vec__16137 (unchecked-int 1) nil)
-                      c (if (variable? cb) (get in_consts cb) cb)
-                      cmp (^clojure.lang.IFn cmps cmpsym)]
-                  (assoc m v (fn fn__16140 ([p1__16132#] (^clojure.lang.IFn cmp p1__16132# c)))))))
-            {}
-            (:range-whiles query)))])))
+  (defn ranges
+    ([in_consts query]
+      [(reduce-kv
+         (fn fn__16133 ([m v c] (assoc m v (if (variable? c) (get in_consts c) c))))
+         {}
+         (:range-starts query))
+       (let [cmps {'= =, '< ext/<, '<= ext/<=}]
+         (reduce-kv
+           (fn fn__16136
+             ([m v p__16135]
+               (let [vec__16137 p__16135
+                     cmpsym (nth vec__16137 (unchecked-int 0) nil)
+                     cb (nth vec__16137 (unchecked-int 1) nil)
+                     c (if (variable? cb) (get in_consts cb) cb)
+                     cmp (^clojure.lang.IFn cmps cmpsym)]
+                 (assoc m v (fn fn__16140 ([p1__16132#] (^clojure.lang.IFn cmp p1__16132# c)))))))
+           {}
+           (:range-whiles query)))]))
   (reset-meta!
     #'ranges
     (assoc
@@ -3200,70 +3162,69 @@
       'ranges
       :ns
       *ns*))
-  (def qsqr
-   (fn qsqr
-     ([db query sched_fn]
-       (let [map__16144 query
-             map__16144 (if (seq? map__16144)
-                          (if (next map__16144)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16144))
-                            (if (seq map__16144) (first map__16144) {}))
-                          map__16144)
-             from (get map__16144 :in)
-             pargs (get map__16144 :find)
-             clauses (get map__16144 :where)
-             db (if from (zipmap from db) (first db))
-             inrel (java.util.HashSet.)
-             pred (gensym "q__")
-             q (cons pred pargs)
-             oprog (when from (get db '%))
-             prog (when oprog (get rule-cache oprog))
-             prog (merge prog (:arules query))
-             prog (assoc prog pred [(cons q clauses)])
-             rec (recursive? prog pred)
-             in_consts (bound-consts db query)
-             vec__16145 (ranges in_consts query)
-             range_starts (nth vec__16145 (unchecked-int 0) nil)
-             range_whiles (nth vec__16145 (unchecked-int 1) nil)
-             top_bounds {:consts in_consts, :starts range_starts, :whiles range_whiles}
-             ans (java.util.HashMap.)
-             apred (adorned-pred q)
-             aresk [nil pred]
-             cancel (atom nil)]
-         (let [temp__5825__auto__ (when (contains? query :timeout) (first (:timeout query)))]
-           (when temp__5825__auto__
-             (let [timeout temp__5825__auto__ f (fn f ([] (reset! cancel "timeout elapsed")))]
-               (.schedule
-                 cancel-service
-                 ^java.util.concurrent.Callable f
-                 (long timeout)
-                 TimeUnit/MILLISECONDS))))
-         (push-thread-bindings (hash-map #'*cancel* cancel))
-         (try
-           (loop [asnap {} round 0]
-             (do
-               (query-stats/with-phase-stats
-                 (fn fn__16150
-                   ([]
-                     (eval-query
-                       db
-                       prog
-                       oprog
-                       apred
-                       inrel
-                       sched_fn
-                       nil
-                       ans
-                       (java.util.HashMap.)
-                       top_bounds
-                       nil))))
-               (let [asnap_next (zipmap (keys ans) (map count (vals ans)))]
-                 (if (or (not rec) (= asnap_next asnap))
-                   (get ans aresk (java.util.HashSet.))
-                   (recur asnap_next (inc round))))))
-           (finally (pop-thread-bindings)))))
-     ([db query] (qsqr db query sched-in-order))))
+  (defn qsqr
+    ([db query sched_fn]
+      (let [map__16144 query
+            map__16144 (if (seq? map__16144)
+                         (if (next map__16144)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16144))
+                           (if (seq map__16144) (first map__16144) {}))
+                         map__16144)
+            from (get map__16144 :in)
+            pargs (get map__16144 :find)
+            clauses (get map__16144 :where)
+            db (if from (zipmap from db) (first db))
+            inrel (java.util.HashSet.)
+            pred (gensym "q__")
+            q (cons pred pargs)
+            oprog (when from (get db '%))
+            prog (when oprog (get rule-cache oprog))
+            prog (merge prog (:arules query))
+            prog (assoc prog pred [(cons q clauses)])
+            rec (recursive? prog pred)
+            in_consts (bound-consts db query)
+            vec__16145 (ranges in_consts query)
+            range_starts (nth vec__16145 (unchecked-int 0) nil)
+            range_whiles (nth vec__16145 (unchecked-int 1) nil)
+            top_bounds {:consts in_consts, :starts range_starts, :whiles range_whiles}
+            ans (java.util.HashMap.)
+            apred (adorned-pred q)
+            aresk [nil pred]
+            cancel (atom nil)]
+        (let [temp__5825__auto__ (when (contains? query :timeout) (first (:timeout query)))]
+          (when temp__5825__auto__
+            (let [timeout temp__5825__auto__ f (fn f ([] (reset! cancel "timeout elapsed")))]
+              (.schedule
+                cancel-service
+                ^java.util.concurrent.Callable f
+                (long timeout)
+                TimeUnit/MILLISECONDS))))
+        (push-thread-bindings (hash-map #'*cancel* cancel))
+        (try
+          (loop [asnap {} round 0]
+            (do
+              (query-stats/with-phase-stats
+                (fn fn__16150
+                  ([]
+                    (eval-query
+                      db
+                      prog
+                      oprog
+                      apred
+                      inrel
+                      sched_fn
+                      nil
+                      ans
+                      (java.util.HashMap.)
+                      top_bounds
+                      nil))))
+              (let [asnap_next (zipmap (keys ans) (map count (vals ans)))]
+                (if (or (not rec) (= asnap_next asnap))
+                  (get ans aresk (java.util.HashSet.))
+                  (recur asnap_next (inc round))))))
+          (finally (pop-thread-bindings)))))
+    ([db query] (qsqr db query sched-in-order)))
   (reset-meta!
     #'qsqr
     (assoc

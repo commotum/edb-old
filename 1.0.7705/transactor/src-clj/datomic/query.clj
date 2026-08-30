@@ -113,36 +113,35 @@
       'ref-val
       :ns
       *ns*))
-  (def eav
-   (fn eav
-     ([db e a]
-       (if (db/reverse-lookup? db a)
-         (rae db e (keyword (namespace a) (subs (name a) 1)))
-         (let [attrid (db/resolve-id db a)
-               eid (db/resolve-id db e)
-               iter (db/windowed
-                      db
-                      (fn fn__16495
-                        ([p1__16492#]
-                          (and
-                            (= eid (long (.getE ^datomic.impl.db.IDatum p1__16492#)))
-                            (= attrid (long (.getA ^datomic.impl.db.IDatum p1__16492#))))))
-                      (.seekEAVT ^datomic.db.IDb db (db/datum db :e eid :a attrid)))
-               attr (and attrid (db/attribute db attrid))
-               vtypeid (and attr (.-vtypeid ^datomic.db.Attribute attr))
-               ref? (and vtypeid (= vtypeid 20))
-               maybe_bind (fn maybe_bind ([v] (ref-val db ref? v)))]
-           (when iter
-             (if (and attr (= 36 (.-cardinality ^datomic.db.Attribute attr)))
-               (iter/reduce
-                 (fn fn__16500
-                   ([p1__16493# p2__16494#]
-                     (conj
-                       p1__16493#
-                       (^clojure.lang.IFn maybe_bind (.getV ^datomic.impl.db.IDatum p2__16494#)))))
-                 #{}
-                 iter)
-               (^clojure.lang.IFn maybe_bind (.getV (.get ^datomic.iter.Iter iter))))))))))
+  (defn eav
+    ([db e a]
+      (if (db/reverse-lookup? db a)
+        (rae db e (keyword (namespace a) (subs (name a) 1)))
+        (let [attrid (db/resolve-id db a)
+              eid (db/resolve-id db e)
+              iter (db/windowed
+                     db
+                     (fn fn__16495
+                       ([p1__16492#]
+                         (and
+                           (= eid (long (.getE ^datomic.impl.db.IDatum p1__16492#)))
+                           (= attrid (long (.getA ^datomic.impl.db.IDatum p1__16492#))))))
+                     (.seekEAVT ^datomic.db.IDb db (db/datum db :e eid :a attrid)))
+              attr (and attrid (db/attribute db attrid))
+              vtypeid (and attr (.-vtypeid ^datomic.db.Attribute attr))
+              ref? (and vtypeid (= vtypeid 20))
+              maybe_bind (fn maybe_bind ([v] (ref-val db ref? v)))]
+          (when iter
+            (if (and attr (= 36 (.-cardinality ^datomic.db.Attribute attr)))
+              (iter/reduce
+                (fn fn__16500
+                  ([p1__16493# p2__16494#]
+                    (conj
+                      p1__16493#
+                      (^clojure.lang.IFn maybe_bind (.getV ^datomic.impl.db.IDatum p2__16494#)))))
+                #{}
+                iter)
+              (^clojure.lang.IFn maybe_bind (.getV (.get ^datomic.iter.Iter iter)))))))))
   (reset-meta!
     #'eav
     (assoc
@@ -151,39 +150,38 @@
       'eav
       :ns
       *ns*))
-  (def get-lazy-entity
-   (fn get_lazy_entity
-     ([db ent]
-       (let [eid (db/resolve-id db ent)
-             ret (iter/reduce
-                   (fn fn__16509
-                     ([ret d]
-                       (let [attrid (.getA ^datomic.impl.db.IDatum d)
-                             attr (.elementAt
-                                    ^datomic.db.IDbImpl db
-                                    (java.lang.Integer/valueOf (int attrid)))
-                             attrk (if attr
-                                     (.kw ^datomic.db.Attribute attr)
-                                     (.keywordOf
-                                       ^datomic.db.IDb db
-                                       (java.lang.Integer/valueOf (int attrid))))
-                             v (.getV ^datomic.impl.db.IDatum d)
-                             vtypeid (and attr (.-vtypeid ^datomic.db.Attribute attr))
-                             ref? (and vtypeid (= vtypeid 20))
-                             val (ref-val db ref? v)]
-                         (assoc
-                           (or ret {})
-                           attrk
-                           (if (and attr (= 36 (.-cardinality ^datomic.db.Attribute attr)))
-                             (conj (get ret attrk #{}) val)
-                             val)))))
-                   nil
-                   (db/windowed
-                     db
-                     (fn fn__16515
-                       ([p1__16507#] (= eid (long (.getE ^datomic.impl.db.IDatum p1__16507#)))))
-                     (.seekEAVT ^datomic.db.IDb db (db/datum db :e eid))))]
-         ret))))
+  (defn get-lazy-entity
+    ([db ent]
+      (let [eid (db/resolve-id db ent)
+            ret (iter/reduce
+                  (fn fn__16509
+                    ([ret d]
+                      (let [attrid (.getA ^datomic.impl.db.IDatum d)
+                            attr (.elementAt
+                                   ^datomic.db.IDbImpl db
+                                   (java.lang.Integer/valueOf (int attrid)))
+                            attrk (if attr
+                                    (.kw ^datomic.db.Attribute attr)
+                                    (.keywordOf
+                                      ^datomic.db.IDb db
+                                      (java.lang.Integer/valueOf (int attrid))))
+                            v (.getV ^datomic.impl.db.IDatum d)
+                            vtypeid (and attr (.-vtypeid ^datomic.db.Attribute attr))
+                            ref? (and vtypeid (= vtypeid 20))
+                            val (ref-val db ref? v)]
+                        (assoc
+                          (or ret {})
+                          attrk
+                          (if (and attr (= 36 (.-cardinality ^datomic.db.Attribute attr)))
+                            (conj (get ret attrk #{}) val)
+                            val)))))
+                  nil
+                  (db/windowed
+                    db
+                    (fn fn__16515
+                      ([p1__16507#] (= eid (long (.getE ^datomic.impl.db.IDatum p1__16507#)))))
+                    (.seekEAVT ^datomic.db.IDb db (db/datum db :e eid))))]
+        ret)))
   (reset-meta!
     #'get-lazy-entity
     (assoc
@@ -360,7 +358,7 @@
       (print-method
         (merge (.cache ^datomic.query.EMapImpl m) (.-edits ^datomic.query.EntityMap m))
         w)))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       Immutify
       (immutify
@@ -368,8 +366,8 @@
         "Return immutable form of x. Presumes that if top of a data structure\nis immutable, rest is too."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.query" "Immutify")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Immutify :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Immutify :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'immutify {:arglists (clojure.core/list ['x])}),
@@ -378,12 +376,12 @@
                                       "Return immutable form of x. Presumes that if top of a data structure\nis immutable, rest is too."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.query" "Immutify"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.query" "immutify")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend nil Immutify {:immutify (fn fn__16579 ([x] x))})
   (extend java.lang.Object Immutify {:immutify (fn fn__16581 ([x] x))})
   (extend
@@ -427,37 +425,36 @@
   (reset-meta!
     #'listq->mapq
     (assoc {:arglists (clojure.core/list ['lq]), :column (int 1)} :name 'listq->mapq :ns *ns*))
-  (def move-sources-to-meta
-   (fn move_sources_to_meta
-     ([p__16603]
-       (let [map__16604 p__16603
-             map__16604 (if (seq? map__16604)
-                          (if (next map__16604)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16604))
-                            (if (seq map__16604) (first map__16604) {}))
-                          map__16604)
-             q map__16604
-             srcs (get map__16604 :in)
-             clauses (get map__16604 :where)]
-         (if srcs
-           (let [sset (set srcs)]
-             (assoc
-               q
-               :where
-               (map
-                 (fn fn__16605
-                   ([p1__16602#]
-                     (if (^clojure.lang.IFn sset (first p1__16602#))
-                       (with-meta (next p1__16602#) {:tag (first p1__16602#)})
-                       (do
-                         (when (datalog/source? (first p1__16602#))
-                           (throw
-                             (java.lang.IllegalArgumentException.
-                               (str "Data source not supplied: " (first p1__16602#)))))
-                         (when :else p1__16602#)))))
-                 clauses)))
-           q)))))
+  (defn move-sources-to-meta
+    ([p__16603]
+      (let [map__16604 p__16603
+            map__16604 (if (seq? map__16604)
+                         (if (next map__16604)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16604))
+                           (if (seq map__16604) (first map__16604) {}))
+                         map__16604)
+            q map__16604
+            srcs (get map__16604 :in)
+            clauses (get map__16604 :where)]
+        (if srcs
+          (let [sset (set srcs)]
+            (assoc
+              q
+              :where
+              (map
+                (fn fn__16605
+                  ([p1__16602#]
+                    (if (^clojure.lang.IFn sset (first p1__16602#))
+                      (with-meta (next p1__16602#) {:tag (first p1__16602#)})
+                      (do
+                        (when (datalog/source? (first p1__16602#))
+                          (throw
+                            (java.lang.IllegalArgumentException.
+                              (str "Data source not supplied: " (first p1__16602#)))))
+                        (when :else p1__16602#)))))
+                clauses)))
+          q))))
   (reset-meta!
     #'move-sources-to-meta
     (assoc
@@ -776,44 +773,43 @@
       'process-aggregates
       :ns
       *ns*))
-  (def process-find-bindings
-   (fn process_find_bindings
-     ([p__16710]
-       (let [map__16711 p__16710
-             map__16711 (if (seq? map__16711)
-                          (if (next map__16711)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16711))
-                            (if (seq map__16711) (first map__16711) {}))
-                          map__16711)
-             qmap map__16711
-             find (get map__16711 :find)]
-         (cond
-           (and
-             (= 1 (long (count find)))
-             (instance? java.util.List (first find))
-             (every?
-               (fn fn__16712
-                 ([p1__16709#]
-                   (or (datalog/variable? p1__16709#) (instance? java.util.List p1__16709#))))
-               (first find))) (assoc qmap :find (first find) :find-bindings 'first-tuple)
-           (and
-             (= 1 (long (count find)))
-             (instance? java.util.List (first find))
-             (= 2 (long (count (first find))))
-             (= '... (second (first find)))) (assoc
-                                               qmap
-                                               :find
-                                               (take 1 (first find))
-                                               :find-bindings
-                                               'one-column)
-           (and (= 2 (long (count find))) (= '. (second find))) (assoc
-                                                                  qmap
-                                                                  :find
-                                                                  (take 1 find)
-                                                                  :find-bindings
-                                                                  'one-value)
-           :default (do qmap))))))
+  (defn process-find-bindings
+    ([p__16710]
+      (let [map__16711 p__16710
+            map__16711 (if (seq? map__16711)
+                         (if (next map__16711)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16711))
+                           (if (seq map__16711) (first map__16711) {}))
+                         map__16711)
+            qmap map__16711
+            find (get map__16711 :find)]
+        (cond
+          (and
+            (= 1 (long (count find)))
+            (instance? java.util.List (first find))
+            (every?
+              (fn fn__16712
+                ([p1__16709#]
+                  (or (datalog/variable? p1__16709#) (instance? java.util.List p1__16709#))))
+              (first find))) (assoc qmap :find (first find) :find-bindings 'first-tuple)
+          (and
+            (= 1 (long (count find)))
+            (instance? java.util.List (first find))
+            (= 2 (long (count (first find))))
+            (= '... (second (first find)))) (assoc
+                                              qmap
+                                              :find
+                                              (take 1 (first find))
+                                              :find-bindings
+                                              'one-column)
+          (and (= 2 (long (count find))) (= '. (second find))) (assoc
+                                                                 qmap
+                                                                 :find
+                                                                 (take 1 find)
+                                                                 :find-bindings
+                                                                 'one-value)
+          :default (do qmap)))))
   (reset-meta!
     #'process-find-bindings
     (assoc
@@ -842,51 +838,50 @@
       'normalize-pull
       :ns
       *ns*))
-  (def process-pulls
-   (fn process_pulls
-     ([p__16729]
-       (let [map__16730 p__16729
-             map__16730 (if (seq? map__16730)
-                          (if (next map__16730)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16730))
-                            (if (seq map__16730) (first map__16730) {}))
-                          map__16730)
-             qmap map__16730
-             find (get map__16730 :find)
-             in (get map__16730 :in)
-             pull? (fn pull_QMARK_
-                     ([p1__16726#]
-                       (and (instance? java.util.List p1__16726#) (= 'pull (first p1__16726#)))))]
-         (if (some pull? find)
-           (assoc
-             qmap
-             :pull
-             (mapv
-               (fn fn__16734
-                 ([p1__16727#]
-                   (if (^clojure.lang.IFn pull? p1__16727#)
-                     (let [vec__16735 (normalize-pull p1__16727#)
-                           _ (nth vec__16735 (int 0) nil)
-                           db (nth vec__16735 (int 1) nil)
-                           var (nth vec__16735 (int 2) nil)
-                           pattern (nth vec__16735 (int 3) nil)]
-                       (when (and (symbol? pattern) (not (some #{pattern} in)))
-                         (error/arg
-                           :db.error/pattern-not-bound
-                           (str "Pull pattern not found in inputs: " pattern)))
-                       {:db db, :var var, :pattern pattern})
-                     p1__16727#)))
-               find)
-             :find
-             (mapv
-               (fn fn__16740
-                 ([p1__16728#]
-                   (if (^clojure.lang.IFn pull? p1__16728#)
-                     (first (filter datalog/variable? p1__16728#))
-                     p1__16728#)))
-               find))
-           qmap)))))
+  (defn process-pulls
+    ([p__16729]
+      (let [map__16730 p__16729
+            map__16730 (if (seq? map__16730)
+                         (if (next map__16730)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16730))
+                           (if (seq map__16730) (first map__16730) {}))
+                         map__16730)
+            qmap map__16730
+            find (get map__16730 :find)
+            in (get map__16730 :in)
+            pull? (fn pull_QMARK_
+                    ([p1__16726#]
+                      (and (instance? java.util.List p1__16726#) (= 'pull (first p1__16726#)))))]
+        (if (some pull? find)
+          (assoc
+            qmap
+            :pull
+            (mapv
+              (fn fn__16734
+                ([p1__16727#]
+                  (if (^clojure.lang.IFn pull? p1__16727#)
+                    (let [vec__16735 (normalize-pull p1__16727#)
+                          _ (nth vec__16735 (int 0) nil)
+                          db (nth vec__16735 (int 1) nil)
+                          var (nth vec__16735 (int 2) nil)
+                          pattern (nth vec__16735 (int 3) nil)]
+                      (when (and (symbol? pattern) (not (some #{pattern} in)))
+                        (error/arg
+                          :db.error/pattern-not-bound
+                          (str "Pull pattern not found in inputs: " pattern)))
+                      {:db db, :var var, :pattern pattern})
+                    p1__16727#)))
+              find)
+            :find
+            (mapv
+              (fn fn__16740
+                ([p1__16728#]
+                  (if (^clojure.lang.IFn pull? p1__16728#)
+                    (first (filter datalog/variable? p1__16728#))
+                    p1__16728#)))
+              find))
+          qmap))))
   (reset-meta!
     #'process-pulls
     (assoc
@@ -1043,18 +1038,17 @@
       'compile-construct-1
       :ns
       *ns*))
-  (def compile-construct-n
-   (fn compile_construct_n
-     ([find_clause construct_clause]
-       (let [smap (zipmap find_clause (range))]
-         (seq
-           (concat
-             (clojure.core/list 'clojure.core/fn)
-             (clojure.core/list (apply vector (seq (concat (clojure.core/list 'tuple)))))
-             (clojure.core/list
-               (apply
-                 vector
-                 (seq (concat (mapv (partial compile-construct-1 smap) construct_clause)))))))))))
+  (defn compile-construct-n
+    ([find_clause construct_clause]
+      (let [smap (zipmap find_clause (range))]
+        (seq
+          (concat
+            (clojure.core/list 'clojure.core/fn)
+            (clojure.core/list (apply vector (seq (concat (clojure.core/list 'tuple)))))
+            (clojure.core/list
+              (apply
+                vector
+                (seq (concat (mapv (partial compile-construct-1 smap) construct_clause))))))))))
   (reset-meta!
     #'compile-construct-n
     (assoc
@@ -1092,54 +1086,53 @@
       'resolve-qualified-fn
       :ns
       *ns*))
-  (def resolve-qualified-fns
-   (fn resolve_qualified_fns
-     ([p__16776]
-       (let [map__16777 p__16776
-             map__16777 (if (seq? map__16777)
-                          (if (next map__16777)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16777))
-                            (if (seq map__16777) (first map__16777) {}))
-                          map__16777)
-             where (get map__16777 :where)
-             group (get map__16777 :group)]
-         (loop [seq_16778 (seq (map first where)) chunk_16779 nil count_16780 0 i_16781 0]
-           (if (< i_16781 count_16780)
-             (let [clause (.nth ^clojure.lang.Indexed chunk_16779 (int i_16781))]
-               (resolve-qualified-fn clause)
-               (recur seq_16778 chunk_16779 count_16780 (inc i_16781)))
-             (let [temp__5825__auto__ (seq seq_16778)]
-               (when temp__5825__auto__
-                 (let [seq_16778 temp__5825__auto__]
-                   (if (chunked-seq? seq_16778)
-                     (let [c__6090__auto__ (chunk-first seq_16778)]
-                       (recur
-                         (chunk-rest seq_16778)
-                         c__6090__auto__
-                         (int (count c__6090__auto__))
-                         (int 0)))
-                     (let [clause (first seq_16778)]
-                       (resolve-qualified-fn clause)
-                       (recur (next seq_16778) nil 0 0))))))))
-         (loop [seq_16782 (seq group) chunk_16783 nil count_16784 0 i_16785 0]
-           (if (< i_16785 count_16784)
-             (let [clause (.nth ^clojure.lang.Indexed chunk_16783 (int i_16785))]
-               (resolve-qualified-fn clause)
-               (recur seq_16782 chunk_16783 count_16784 (inc i_16785)))
-             (let [temp__5825__auto__ (seq seq_16782)]
-               (when temp__5825__auto__
-                 (let [seq_16782 temp__5825__auto__]
-                   (if (chunked-seq? seq_16782)
-                     (let [c__6090__auto__ (chunk-first seq_16782)]
-                       (recur
-                         (chunk-rest seq_16782)
-                         c__6090__auto__
-                         (int (count c__6090__auto__))
-                         (int 0)))
-                     (let [clause (first seq_16782)]
-                       (resolve-qualified-fn clause)
-                       (recur (next seq_16782) nil 0 0))))))))))))
+  (defn resolve-qualified-fns
+    ([p__16776]
+      (let [map__16777 p__16776
+            map__16777 (if (seq? map__16777)
+                         (if (next map__16777)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16777))
+                           (if (seq map__16777) (first map__16777) {}))
+                         map__16777)
+            where (get map__16777 :where)
+            group (get map__16777 :group)]
+        (loop [seq_16778 (seq (map first where)) chunk_16779 nil count_16780 0 i_16781 0]
+          (if (< i_16781 count_16780)
+            (let [clause (.nth ^clojure.lang.Indexed chunk_16779 (int i_16781))]
+              (resolve-qualified-fn clause)
+              (recur seq_16778 chunk_16779 count_16780 (inc i_16781)))
+            (let [temp__5825__auto__ (seq seq_16778)]
+              (when temp__5825__auto__
+                (let [seq_16778 temp__5825__auto__]
+                  (if (chunked-seq? seq_16778)
+                    (let [c__6090__auto__ (chunk-first seq_16778)]
+                      (recur
+                        (chunk-rest seq_16778)
+                        c__6090__auto__
+                        (int (count c__6090__auto__))
+                        (int 0)))
+                    (let [clause (first seq_16778)]
+                      (resolve-qualified-fn clause)
+                      (recur (next seq_16778) nil 0 0))))))))
+        (loop [seq_16782 (seq group) chunk_16783 nil count_16784 0 i_16785 0]
+          (if (< i_16785 count_16784)
+            (let [clause (.nth ^clojure.lang.Indexed chunk_16783 (int i_16785))]
+              (resolve-qualified-fn clause)
+              (recur seq_16782 chunk_16783 count_16784 (inc i_16785)))
+            (let [temp__5825__auto__ (seq seq_16782)]
+              (when temp__5825__auto__
+                (let [seq_16782 temp__5825__auto__]
+                  (if (chunked-seq? seq_16782)
+                    (let [c__6090__auto__ (chunk-first seq_16782)]
+                      (recur
+                        (chunk-rest seq_16782)
+                        c__6090__auto__
+                        (int (count c__6090__auto__))
+                        (int 0)))
+                    (let [clause (first seq_16782)]
+                      (resolve-qualified-fn clause)
+                      (recur (next seq_16782) nil 0 0)))))))))))
   (reset-meta!
     #'resolve-qualified-fns
     (assoc
@@ -1271,29 +1264,28 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.query" "query-cache")
     (cache/create-computing load-query 1000))
-  (def group-fv
-   (fn group_fv
-     ([find_clause group_clause]
-       (let [smap (zipmap find_clause (range))
-             gns (find-ns 'datomic.aggregation)
-             list? (fn list_QMARK_ ([p1__16815#] (instance? java.util.List p1__16815#)))]
-         (mapv
-           (fn fn__16819
-             ([p1__16816#]
-               (if (^clojure.lang.IFn list? p1__16816#)
-                 (let [temp__5823__auto__ (ns-resolve gns (first p1__16816#))]
-                   (if temp__5823__auto__
-                     (let [agg_fn temp__5823__auto__]
-                       [(^clojure.lang.IFn smap (last p1__16816#))
-                        (apply partial agg_fn (butlast (rest p1__16816#)))])
-                     (error/arg
-                       :db.error/invalid-aggregate
-                       (str
-                         "Argument "
-                         (first p1__16816#)
-                         " in :find is not an aggregate function"))))
-                 (^clojure.lang.IFn smap p1__16816#))))
-           group_clause)))))
+  (defn group-fv
+    ([find_clause group_clause]
+      (let [smap (zipmap find_clause (range))
+            gns (find-ns 'datomic.aggregation)
+            list? (fn list_QMARK_ ([p1__16815#] (instance? java.util.List p1__16815#)))]
+        (mapv
+          (fn fn__16819
+            ([p1__16816#]
+              (if (^clojure.lang.IFn list? p1__16816#)
+                (let [temp__5823__auto__ (ns-resolve gns (first p1__16816#))]
+                  (if temp__5823__auto__
+                    (let [agg_fn temp__5823__auto__]
+                      [(^clojure.lang.IFn smap (last p1__16816#))
+                       (apply partial agg_fn (butlast (rest p1__16816#)))])
+                    (error/arg
+                      :db.error/invalid-aggregate
+                      (str
+                        "Argument "
+                        (first p1__16816#)
+                        " in :find is not an aggregate function"))))
+                (^clojure.lang.IFn smap p1__16816#))))
+          group_clause))))
   (reset-meta!
     #'group-fv
     (assoc
@@ -1339,49 +1331,48 @@
   (reset-meta!
     #'xf-tuple
     (assoc {:arglists (clojure.core/list ['fv 'tuple]), :column (int 1)} :name 'xf-tuple :ns *ns*))
-  (def pull-fv
-   (fn pull_fv
-     ([p__16845 srcs]
-       (let [map__16846 p__16845
-             map__16846 (if (seq? map__16846)
-                          (if (next map__16846)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16846))
-                            (if (seq map__16846) (first map__16846) {}))
-                          map__16846)
-             qmap map__16846
-             find (get map__16846 :find)
-             pull (get map__16846 :pull)
-             with (get map__16846 :with)
-             in (get map__16846 :in)
-             smap (zipmap find (range))
-             srcmap (zipmap in srcs)
-             colct (- (count find) (count with))]
-         (reduce
-           (fn fn__16848
-             ([m p__16847]
-               (let [map__16849 p__16847
-                     map__16849 (if (seq? map__16849)
-                                  (if (next map__16849)
-                                    (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                      (to-array map__16849))
-                                    (if (seq map__16849) (first map__16849) {}))
-                                  map__16849)
-                     db (get map__16849 :db)
-                     var (get map__16849 :var)
-                     pattern (get map__16849 :pattern)]
-                 (assoc
-                   m
-                   (common/getx smap var)
-                   (fn fn__16850
-                     ([p1__16844#]
-                       (first
-                         (pull/pull
-                           (get srcmap db (first srcs))
-                           (get srcmap pattern pattern)
-                           [p1__16844#]))))))))
-           (vec (repeat (long colct) identity))
-           (filter map? pull))))))
+  (defn pull-fv
+    ([p__16845 srcs]
+      (let [map__16846 p__16845
+            map__16846 (if (seq? map__16846)
+                         (if (next map__16846)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16846))
+                           (if (seq map__16846) (first map__16846) {}))
+                         map__16846)
+            qmap map__16846
+            find (get map__16846 :find)
+            pull (get map__16846 :pull)
+            with (get map__16846 :with)
+            in (get map__16846 :in)
+            smap (zipmap find (range))
+            srcmap (zipmap in srcs)
+            colct (- (count find) (count with))]
+        (reduce
+          (fn fn__16848
+            ([m p__16847]
+              (let [map__16849 p__16847
+                    map__16849 (if (seq? map__16849)
+                                 (if (next map__16849)
+                                   (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                     (to-array map__16849))
+                                   (if (seq map__16849) (first map__16849) {}))
+                                 map__16849)
+                    db (get map__16849 :db)
+                    var (get map__16849 :var)
+                    pattern (get map__16849 :pattern)]
+                (assoc
+                  m
+                  (common/getx smap var)
+                  (fn fn__16850
+                    ([p1__16844#]
+                      (first
+                        (pull/pull
+                          (get srcmap db (first srcs))
+                          (get srcmap pattern pattern)
+                          [p1__16844#]))))))))
+          (vec (repeat (long colct) identity))
+          (filter map? pull)))))
   (reset-meta!
     #'pull-fv
     (assoc
@@ -1391,23 +1382,22 @@
       'pull-fv
       :ns
       *ns*))
-  (def sort-collection-by-indexed
-   (fn sort_collection_by_indexed
-     ([coll ^long idx]
-       (let [cmp (reify
-                   java.util.Comparator
-                   (^int compare
-                     [this a b]
-                     (.intValue
-                       (let [aval (.nth ^clojure.lang.Indexed a (int idx))
-                             bval (.nth ^clojure.lang.Indexed b (int idx))]
-                         (if (and (instance? java.lang.Long aval) (instance? java.lang.Long bval))
-                           (java.lang.Integer/valueOf
-                             (int (.compareTo ^java.lang.Long aval ^java.lang.Long bval)))
-                           (long (common/compare aval bval)))))))
-             G__16857 (java.util.ArrayList. ^java.util.Collection coll)]
-         (.sort ^java.util.ArrayList G__16857 ^java.util.Comparator cmp)
-         G__16857))))
+  (defn sort-collection-by-indexed
+    ([coll ^long idx]
+      (let [cmp (reify
+                  java.util.Comparator
+                  (^int compare
+                    [this a b]
+                    (.intValue
+                      (let [aval (.nth ^clojure.lang.Indexed a (int idx))
+                            bval (.nth ^clojure.lang.Indexed b (int idx))]
+                        (if (and (instance? java.lang.Long aval) (instance? java.lang.Long bval))
+                          (java.lang.Integer/valueOf
+                            (int (.compareTo ^java.lang.Long aval ^java.lang.Long bval)))
+                          (long (common/compare aval bval)))))))
+            G__16857 (java.util.ArrayList. ^java.util.Collection coll)]
+        (.sort ^java.util.ArrayList G__16857 ^java.util.Comparator cmp)
+        G__16857)))
   (reset-meta!
     #'sort-collection-by-indexed
     (assoc
@@ -1487,22 +1477,20 @@
   (reset-meta!
     #'q*
     (assoc {:arglists (clojure.core/list ['query 'srcs]), :column (int 1)} :name 'q* :ns *ns*))
-  (def query*
-   (fn query_STAR_
-     ([query_map]
-       (let [timeout (:timeout query_map)
-             qmap (cond-> (mapify-query (:query query_map)) timeout (assoc :timeout [timeout]))]
-         (q* qmap (:args query_map))))))
+  (defn query*
+    ([query_map]
+      (let [timeout (:timeout query_map)
+            qmap (cond-> (mapify-query (:query query_map)) timeout (assoc :timeout [timeout]))]
+        (q* qmap (:args query_map)))))
   (reset-meta!
     #'query*
     (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'query* :ns *ns*))
-  (def apply-pf
-   (fn apply_pf
-     ([p__16882]
-       (let [vec__16883 p__16882
-             result (nth vec__16883 (int 0) nil)
-             pf (nth vec__16883 (int 1) nil)]
-         (if pf (mapv pf result) result)))))
+  (defn apply-pf
+    ([p__16882]
+      (let [vec__16883 p__16882
+            result (nth vec__16883 (int 0) nil)
+            pf (nth vec__16883 (int 1) nil)]
+        (if pf (mapv pf result) result))))
   (reset-meta!
     #'apply-pf
     (assoc
@@ -1515,30 +1503,29 @@
   (reset-meta!
     #'q
     (assoc {:arglists (clojure.core/list ['query 'srcs]), :column (int 1)} :name 'q :ns *ns*))
-  (def query
-   (fn query
-     ([p__16888]
-       (let [map__16889 p__16888
-             map__16889 (if (seq? map__16889)
-                          (if (next map__16889)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16889))
-                            (if (seq map__16889) (first map__16889) {}))
-                          map__16889)
-             query_map map__16889
-             io_context (get map__16889 :io-context)
-             query_stats (get map__16889 :query-stats)
-             f (fn f ([] (apply-pf (query* query_map))))
-             f (if io_context
-                 (fn fn__16892
-                   ([]
-                     (io-stats/throw-if-ex!
-                       (io-stats/with-io-stats f {:io-context io_context, :api :query}))))
-                 f)
-             f (if query_stats
-                 (fn fn__16894 ([] (query-stats/with-query-stats f {:query (:query query_map)})))
-                 f)]
-         (^clojure.lang.IFn f)))))
+  (defn query
+    ([p__16888]
+      (let [map__16889 p__16888
+            map__16889 (if (seq? map__16889)
+                         (if (next map__16889)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16889))
+                           (if (seq map__16889) (first map__16889) {}))
+                         map__16889)
+            query_map map__16889
+            io_context (get map__16889 :io-context)
+            query_stats (get map__16889 :query-stats)
+            f (fn f ([] (apply-pf (query* query_map))))
+            f (if io_context
+                (fn fn__16892
+                  ([]
+                    (io-stats/throw-if-ex!
+                      (io-stats/with-io-stats f {:io-context io_context, :api :query}))))
+                f)
+            f (if query_stats
+                (fn fn__16894 ([] (query-stats/with-query-stats f {:query (:query query_map)})))
+                f)]
+        (^clojure.lang.IFn f))))
   (reset-meta!
     #'query
     (assoc
@@ -1548,42 +1535,41 @@
       'query
       :ns
       *ns*))
-  (def qseq
-   (fn qseq
-     ([query_map args] (qseq {:query query_map, :args args}))
-     ([p__16897]
-       (let [map__16898 p__16897
-             map__16898 (if (seq? map__16898)
-                          (if (next map__16898)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16898))
-                            (if (seq map__16898) (first map__16898) {}))
-                          map__16898)
-             query_map map__16898
-             offset (get map__16898 :offset 0)
-             limit (get map__16898 :limit (long java.lang.Long/MAX_VALUE))
-             io_context (get map__16898 :io-context)
-             f (fn f ([] (query* query_map)))
-             map__16899 (when io_context
-                          (io-stats/throw-if-ex!
-                            (io-stats/with-io-stats f {:io-context io_context, :api :qseq})))
-             map__16899 (if (seq? map__16899)
-                          (if (next map__16899)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__16899))
-                            (if (seq map__16899) (first map__16899) {}))
-                          map__16899)
-             ret (get map__16899 :ret)
-             io_stats (get map__16899 :io-stats)
-             ret (if io_context ret (^clojure.lang.IFn f))
-             vec__16900 ret
-             result (nth vec__16900 (int 0) nil)
-             pf (nth vec__16900 (int 1) nil)
-             xform (common/result-xform offset limit pf)
-             cseq (qs/counted-seq
-                    (sequence xform result)
-                    (common/result-count offset limit result))]
-         (if io_context {:ret cseq, :io-stats io_stats} cseq)))))
+  (defn qseq
+    ([query_map args] (qseq {:query query_map, :args args}))
+    ([p__16897]
+      (let [map__16898 p__16897
+            map__16898 (if (seq? map__16898)
+                         (if (next map__16898)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16898))
+                           (if (seq map__16898) (first map__16898) {}))
+                         map__16898)
+            query_map map__16898
+            offset (get map__16898 :offset 0)
+            limit (get map__16898 :limit (long java.lang.Long/MAX_VALUE))
+            io_context (get map__16898 :io-context)
+            f (fn f ([] (query* query_map)))
+            map__16899 (when io_context
+                         (io-stats/throw-if-ex!
+                           (io-stats/with-io-stats f {:io-context io_context, :api :qseq})))
+            map__16899 (if (seq? map__16899)
+                         (if (next map__16899)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__16899))
+                           (if (seq map__16899) (first map__16899) {}))
+                         map__16899)
+            ret (get map__16899 :ret)
+            io_stats (get map__16899 :io-stats)
+            ret (if io_context ret (^clojure.lang.IFn f))
+            vec__16900 ret
+            result (nth vec__16900 (int 0) nil)
+            pf (nth vec__16900 (int 1) nil)
+            xform (common/result-xform offset limit pf)
+            cseq (qs/counted-seq
+                   (sequence xform result)
+                   (common/result-count offset limit result))]
+        (if io_context {:ret cseq, :io-stats io_stats} cseq))))
   (reset-meta!
     #'qseq
     (assoc

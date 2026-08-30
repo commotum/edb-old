@@ -29,21 +29,20 @@
         (clojure.core/import 'datomic.impl.db.IDatum)
         (clojure.core/import 'java.util.Comparator)
         (clojure.core/import 'java.util.ArrayList))))
-  (def datum->doc
-   (fn datum__GT_doc
-     ([datum]
-       (lucene/document
-         (lucene/long-field "e" (.getE ^datomic.impl.db.IDatum datum))
-         (lucene/long-field "t" (.getT ^datomic.impl.db.IDatum datum))
-         (lucene/string-field
-           "v"
-           (.getV ^datomic.impl.db.IDatum datum)
-           :store
-           true
-           :index
-           true
-           :analyze
-           true)))))
+  (defn datum->doc
+    ([datum]
+      (lucene/document
+        (lucene/long-field "e" (.getE ^datomic.impl.db.IDatum datum))
+        (lucene/long-field "t" (.getT ^datomic.impl.db.IDatum datum))
+        (lucene/string-field
+          "v"
+          (.getV ^datomic.impl.db.IDatum datum)
+          :store
+          true
+          :index
+          true
+          :analyze
+          true))))
   (reset-meta!
     #'datum->doc
     (assoc
@@ -52,12 +51,12 @@
       'datum->doc
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol LuceneProvider (fulltext-attr-reader [this attr]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.fulltext-index" "LuceneProvider")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'LuceneProvider :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'LuceneProvider :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -69,12 +68,12 @@
                                      (clojure.lang.RT/var
                                        "datomic.fulltext-index"
                                        "LuceneProvider"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.fulltext-index" "fulltext-attr-reader")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (.setMeta
     (clojure.lang.RT/var "datomic.fulltext-index" "->PersistentFulltext")
     {:declared true, :column (int 1)})

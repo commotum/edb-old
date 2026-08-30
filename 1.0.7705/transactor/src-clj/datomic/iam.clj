@@ -316,29 +316,28 @@
       'get-account-id-command
       :ns
       *ns*))
-  (def create-user-command
-   (fn create_user_command
-     ([p__26939]
-       (let [map__26940 p__26939
-             map__26940 (if (seq? map__26940)
-                          (if (next map__26940)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26940))
-                            (if (seq map__26940) (first map__26940) {}))
-                          map__26940)
-             user_name (get map__26940 :user-name)]
-         (try
-           (let [s__6444__auto__ (java.io.StringWriter.)]
-             (binding [*out* s__6444__auto__]
-               (do
-                 (println
-                   (:User
-                     (aws-helpers/invoke (client) {:op :CreateUser, :req {:UserName user_name}})))
-                 (str s__6444__auto__))))
-           (catch
-             java.lang.Exception
-             ex
-             (when-not (canom/conflict? (ex-data ex)) (throw ^java.lang.Throwable ex) nil)))))))
+  (defn create-user-command
+    ([p__26939]
+      (let [map__26940 p__26939
+            map__26940 (if (seq? map__26940)
+                         (if (next map__26940)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26940))
+                           (if (seq map__26940) (first map__26940) {}))
+                         map__26940)
+            user_name (get map__26940 :user-name)]
+        (try
+          (let [s__6444__auto__ (java.io.StringWriter.)]
+            (binding [*out* s__6444__auto__]
+              (do
+                (println
+                  (:User
+                    (aws-helpers/invoke (client) {:op :CreateUser, :req {:UserName user_name}})))
+                (str s__6444__auto__))))
+          (catch
+            java.lang.Exception
+            ex
+            (when-not (canom/conflict? (ex-data ex)) (throw ^java.lang.Throwable ex) nil))))))
   (reset-meta!
     #'create-user-command
     (assoc
@@ -347,23 +346,22 @@
       'create-user-command
       :ns
       *ns*))
-  (def create-group-command
-   (fn create_group_command
-     ([p__26943]
-       (let [map__26944 p__26943
-             map__26944 (if (seq? map__26944)
-                          (if (next map__26944)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26944))
-                            (if (seq map__26944) (first map__26944) {}))
-                          map__26944)
-             group_name (get map__26944 :group-name)
-             results (:Group
-                       (aws-helpers/invoke
-                         (client)
-                         {:op :CreateGroup, :req {:GroupName group_name}}))
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__] (do (println results) (str s__6444__auto__)))))))
+  (defn create-group-command
+    ([p__26943]
+      (let [map__26944 p__26943
+            map__26944 (if (seq? map__26944)
+                         (if (next map__26944)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26944))
+                           (if (seq map__26944) (first map__26944) {}))
+                         map__26944)
+            group_name (get map__26944 :group-name)
+            results (:Group
+                      (aws-helpers/invoke
+                        (client)
+                        {:op :CreateGroup, :req {:GroupName group_name}}))
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__] (do (println results) (str s__6444__auto__))))))
   (reset-meta!
     #'create-group-command
     (assoc
@@ -372,47 +370,46 @@
       'create-group-command
       :ns
       *ns*))
-  (def create-access-key-command
-   (fn create_access_key_command
-     ([p__26947]
-       (let [map__26948 p__26947
-             map__26948 (if (seq? map__26948)
-                          (if (next map__26948)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26948))
-                            (if (seq map__26948) (first map__26948) {}))
-                          map__26948)
-             user_name (get map__26948 :user-name)]
-         (try
-           (let [new_creds (:AccessKey
-                             (aws-helpers/invoke
-                               (client)
-                               {:op :CreateAccessKey, :req {:UserName user_name}}))
-                 s__6444__auto__ (java.io.StringWriter.)]
-             (binding [*out* s__6444__auto__]
-               (do
-                 (println (str (:AccessKeyId new_creds) " " (:SecretAccessKey new_creds)))
-                 (str s__6444__auto__))))
-           (catch
-             java.lang.Exception
-             ex
-             (if (canom/conflict? (ex-data ex))
-               (cli/fail
-                 (let [s__6444__auto__ (java.io.StringWriter.)]
-                   (binding [*out* s__6444__auto__]
-                     (do
-                       (println "**ERROR**")
-                       (println "Cannot create additional access keys for user ${USERNAME}.")
-                       (println
-                         "Either delete one of the existing access keys, or use an existing access-key-id/secret-key pair.")
-                       (println
-                         "Go to the the IAM tab of your AWS Console: https://console.aws.amazon.com/iam/home#s=Users")
-                       (println "and follow the path below to delete an access key:")
-                       (println
-                         "Iam Home > Users > ${USERNAME} > Security Credentials > Manage Access Keys")
-                       (println "****")
-                       (str s__6444__auto__)))))
-               (do (throw ^java.lang.Throwable ex) nil))))))))
+  (defn create-access-key-command
+    ([p__26947]
+      (let [map__26948 p__26947
+            map__26948 (if (seq? map__26948)
+                         (if (next map__26948)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26948))
+                           (if (seq map__26948) (first map__26948) {}))
+                         map__26948)
+            user_name (get map__26948 :user-name)]
+        (try
+          (let [new_creds (:AccessKey
+                            (aws-helpers/invoke
+                              (client)
+                              {:op :CreateAccessKey, :req {:UserName user_name}}))
+                s__6444__auto__ (java.io.StringWriter.)]
+            (binding [*out* s__6444__auto__]
+              (do
+                (println (str (:AccessKeyId new_creds) " " (:SecretAccessKey new_creds)))
+                (str s__6444__auto__))))
+          (catch
+            java.lang.Exception
+            ex
+            (if (canom/conflict? (ex-data ex))
+              (cli/fail
+                (let [s__6444__auto__ (java.io.StringWriter.)]
+                  (binding [*out* s__6444__auto__]
+                    (do
+                      (println "**ERROR**")
+                      (println "Cannot create additional access keys for user ${USERNAME}.")
+                      (println
+                        "Either delete one of the existing access keys, or use an existing access-key-id/secret-key pair.")
+                      (println
+                        "Go to the the IAM tab of your AWS Console: https://console.aws.amazon.com/iam/home#s=Users")
+                      (println "and follow the path below to delete an access key:")
+                      (println
+                        "Iam Home > Users > ${USERNAME} > Security Credentials > Manage Access Keys")
+                      (println "****")
+                      (str s__6444__auto__)))))
+              (do (throw ^java.lang.Throwable ex) nil)))))))
   (reset-meta!
     #'create-access-key-command
     (assoc
@@ -421,53 +418,52 @@
       'create-access-key-command
       :ns
       *ns*))
-  (def create-credentials-command
-   (fn create_credentials_command
-     ([p__26954]
-       (let [map__26955 p__26954
-             map__26955 (if (seq? map__26955)
-                          (if (next map__26955)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26955))
-                            (if (seq map__26955) (first map__26955) {}))
-                          map__26955)
-             prefix (get map__26955 :prefix)
-             iam_client (client)
-             peer_user_name {:UserName (str prefix "-peer")}
-             dynamo_user_name {:UserName (str prefix "-transactor-dynamo")}
-             metrics_user_name {:UserName (str prefix "-transactor-metrics")}
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (aws-helpers/invoke iam_client {:op :CreateUser, :req peer_user_name})
-             (println (str "peer.username=" (:UserName peer_user_name)))
-             (let [peer_access_key (:AccessKey
-                                     (aws-helpers/invoke
-                                       iam_client
-                                       {:op :CreateAccessKey, :req peer_user_name}))]
-               (println (str "peer.aws-access-key-id=" (:AccessKeyId peer_access_key)))
-               (println (str "peer.aws-secret-key=" (:SecretAccessKey peer_access_key))))
-             (aws-helpers/invoke iam_client {:op :CreateUser, :req dynamo_user_name})
-             (println (str "transactor.dynamo.username=" (:UserName dynamo_user_name)))
-             (let [dynamo_access_key (:AccessKey
+  (defn create-credentials-command
+    ([p__26954]
+      (let [map__26955 p__26954
+            map__26955 (if (seq? map__26955)
+                         (if (next map__26955)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26955))
+                           (if (seq map__26955) (first map__26955) {}))
+                         map__26955)
+            prefix (get map__26955 :prefix)
+            iam_client (client)
+            peer_user_name {:UserName (str prefix "-peer")}
+            dynamo_user_name {:UserName (str prefix "-transactor-dynamo")}
+            metrics_user_name {:UserName (str prefix "-transactor-metrics")}
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (aws-helpers/invoke iam_client {:op :CreateUser, :req peer_user_name})
+            (println (str "peer.username=" (:UserName peer_user_name)))
+            (let [peer_access_key (:AccessKey
+                                    (aws-helpers/invoke
+                                      iam_client
+                                      {:op :CreateAccessKey, :req peer_user_name}))]
+              (println (str "peer.aws-access-key-id=" (:AccessKeyId peer_access_key)))
+              (println (str "peer.aws-secret-key=" (:SecretAccessKey peer_access_key))))
+            (aws-helpers/invoke iam_client {:op :CreateUser, :req dynamo_user_name})
+            (println (str "transactor.dynamo.username=" (:UserName dynamo_user_name)))
+            (let [dynamo_access_key (:AccessKey
+                                      (aws-helpers/invoke
+                                        iam_client
+                                        {:op :CreateAccessKey, :req dynamo_user_name}))]
+              (println
+                (str "transactor.dynamo.aws-access-key-id=" (:AccessKeyId dynamo_access_key)))
+              (println
+                (str "transactor.dynamo.aws-secret-key=" (:SecretAccessKey dynamo_access_key))))
+            (aws-helpers/invoke iam_client {:op :CreateUser, :req metrics_user_name})
+            (println (str "transactor.metrics.username=" (:UserName metrics_user_name)))
+            (let [metrics_access_key (:AccessKey
                                        (aws-helpers/invoke
                                          iam_client
-                                         {:op :CreateAccessKey, :req dynamo_user_name}))]
-               (println
-                 (str "transactor.dynamo.aws-access-key-id=" (:AccessKeyId dynamo_access_key)))
-               (println
-                 (str "transactor.dynamo.aws-secret-key=" (:SecretAccessKey dynamo_access_key))))
-             (aws-helpers/invoke iam_client {:op :CreateUser, :req metrics_user_name})
-             (println (str "transactor.metrics.username=" (:UserName metrics_user_name)))
-             (let [metrics_access_key (:AccessKey
-                                        (aws-helpers/invoke
-                                          iam_client
-                                          {:op :CreateAccessKey, :req metrics_user_name}))]
-               (println
-                 (str "transactor.metrics.aws-access-key-id=" (:AccessKeyId metrics_access_key)))
-               (println
-                 (str "transactor.metrics.aws-secret-key=" (:SecretAccessKey metrics_access_key))))
-             (str s__6444__auto__)))))))
+                                         {:op :CreateAccessKey, :req metrics_user_name}))]
+              (println
+                (str "transactor.metrics.aws-access-key-id=" (:AccessKeyId metrics_access_key)))
+              (println
+                (str "transactor.metrics.aws-secret-key=" (:SecretAccessKey metrics_access_key))))
+            (str s__6444__auto__))))))
   (reset-meta!
     #'create-credentials-command
     (assoc
@@ -476,31 +472,30 @@
       'create-credentials-command
       :ns
       *ns*))
-  (def dynamo-r-policy-command
-   (fn dynamo_r_policy_command
-     ([p__26958]
-       (let [map__26959 p__26958
-             map__26959 (if (seq? map__26959)
-                          (if (next map__26959)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26959))
-                            (if (seq map__26959) (first map__26959) {}))
-                          map__26959)
-             account_id (get map__26959 :account-id)
-             table_name (get map__26959 :table-name)
-             arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (json/pprint
-               {"Statement"
-                [{"Effect" "Allow",
-                  "Action"
-                  ["dynamodb:GetItem" "dynamodb:BatchGetItem" "dynamodb:Scan" "dynamodb:Query"],
-                  "Resource" arn}]}
-               :escape-slash
-               false)
-             (str s__6444__auto__)))))))
+  (defn dynamo-r-policy-command
+    ([p__26958]
+      (let [map__26959 p__26958
+            map__26959 (if (seq? map__26959)
+                         (if (next map__26959)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26959))
+                           (if (seq map__26959) (first map__26959) {}))
+                         map__26959)
+            account_id (get map__26959 :account-id)
+            table_name (get map__26959 :table-name)
+            arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (json/pprint
+              {"Statement"
+               [{"Effect" "Allow",
+                 "Action"
+                 ["dynamodb:GetItem" "dynamodb:BatchGetItem" "dynamodb:Scan" "dynamodb:Query"],
+                 "Resource" arn}]}
+              :escape-slash
+              false)
+            (str s__6444__auto__))))))
   (reset-meta!
     #'dynamo-r-policy-command
     (assoc
@@ -509,27 +504,26 @@
       'dynamo-r-policy-command
       :ns
       *ns*))
-  (def dynamo-rw-policy-command
-   (fn dynamo_rw_policy_command
-     ([p__26962]
-       (let [map__26963 p__26962
-             map__26963 (if (seq? map__26963)
-                          (if (next map__26963)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26963))
-                            (if (seq map__26963) (first map__26963) {}))
-                          map__26963)
-             account_id (get map__26963 :account-id)
-             table_name (get map__26963 :table-name)
-             arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (json/pprint
-               {"Statement" [{"Effect" "Allow", "Action" ["dynamodb:*"], "Resource" arn}]}
-               :escape-slash
-               false)
-             (str s__6444__auto__)))))))
+  (defn dynamo-rw-policy-command
+    ([p__26962]
+      (let [map__26963 p__26962
+            map__26963 (if (seq? map__26963)
+                         (if (next map__26963)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26963))
+                           (if (seq map__26963) (first map__26963) {}))
+                         map__26963)
+            account_id (get map__26963 :account-id)
+            table_name (get map__26963 :table-name)
+            arn (str "arn:aws:dynamodb:*:" account_id ":table/" table_name)
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (json/pprint
+              {"Statement" [{"Effect" "Allow", "Action" ["dynamodb:*"], "Resource" arn}]}
+              :escape-slash
+              false)
+            (str s__6444__auto__))))))
   (reset-meta!
     #'dynamo-rw-policy-command
     (assoc
@@ -538,22 +532,21 @@
       'dynamo-rw-policy-command
       :ns
       *ns*))
-  (def metrics-w-policy-command
-   (fn metrics_w_policy_command
-     ([_] (metrics-w-policy-command))
-     ([]
-       (let [s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (json/pprint
-               {"Statement"
-                [{"Effect" "Allow",
-                  "Action" ["cloudwatch:PutMetricData" "cloudwatch:PutMetricDataBatch"],
-                  "Resource" "*",
-                  "Condition" {"Bool" {"aws:SecureTransport" "true"}}}]}
-               :escape-slash
-               false)
-             (str s__6444__auto__)))))))
+  (defn metrics-w-policy-command
+    ([_] (metrics-w-policy-command))
+    ([]
+      (let [s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (json/pprint
+              {"Statement"
+               [{"Effect" "Allow",
+                 "Action" ["cloudwatch:PutMetricData" "cloudwatch:PutMetricDataBatch"],
+                 "Resource" "*",
+                 "Condition" {"Bool" {"aws:SecureTransport" "true"}}}]}
+              :escape-slash
+              false)
+            (str s__6444__auto__))))))
   (reset-meta!
     #'metrics-w-policy-command
     (assoc
@@ -562,27 +555,26 @@
       'metrics-w-policy-command
       :ns
       *ns*))
-  (def s3-w-policy-command
-   (fn s3_w_policy_command
-     ([p__26968]
-       (let [map__26969 p__26968
-             map__26969 (if (seq? map__26969)
-                          (if (next map__26969)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26969))
-                            (if (seq map__26969) (first map__26969) {}))
-                          map__26969)
-             bucket_name (get map__26969 :bucket-name)
-             arn (str "arn:aws:s3:::" bucket_name)
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (json/pprint
-               {"Statement"
-                [{"Effect" "Allow", "Action" ["s3:PutObject"], "Resource" [arn (str arn "/*")]}]}
-               :escape-slash
-               false)
-             (str s__6444__auto__)))))))
+  (defn s3-w-policy-command
+    ([p__26968]
+      (let [map__26969 p__26968
+            map__26969 (if (seq? map__26969)
+                         (if (next map__26969)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26969))
+                           (if (seq map__26969) (first map__26969) {}))
+                         map__26969)
+            bucket_name (get map__26969 :bucket-name)
+            arn (str "arn:aws:s3:::" bucket_name)
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (json/pprint
+              {"Statement"
+               [{"Effect" "Allow", "Action" ["s3:PutObject"], "Resource" [arn (str arn "/*")]}]}
+              :escape-slash
+              false)
+            (str s__6444__auto__))))))
   (reset-meta!
     #'s3-w-policy-command
     (assoc
@@ -591,26 +583,25 @@
       's3-w-policy-command
       :ns
       *ns*))
-  (def assign-peer-user-command
-   (fn assign_peer_user_command
-     ([p__26972]
-       (let [map__26973 p__26972
-             map__26973 (if (seq? map__26973)
-                          (if (next map__26973)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26973))
-                            (if (seq map__26973) (first map__26973) {}))
-                          map__26973)
-             user_name (get map__26973 :user-name)
-             table_name (get map__26973 :table-name)
-             policy_name (str user_name "-" table_name "-peer")
-             iam_client (client)
-             policy_doc (dynamo-r-policy-command
-                          {:account-id (get-account-id client), :table-name table_name})]
-         (aws-helpers/invoke
-           iam_client
-           {:op :PutUserPolicy,
-            :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}})))))
+  (defn assign-peer-user-command
+    ([p__26972]
+      (let [map__26973 p__26972
+            map__26973 (if (seq? map__26973)
+                         (if (next map__26973)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26973))
+                           (if (seq map__26973) (first map__26973) {}))
+                         map__26973)
+            user_name (get map__26973 :user-name)
+            table_name (get map__26973 :table-name)
+            policy_name (str user_name "-" table_name "-peer")
+            iam_client (client)
+            policy_doc (dynamo-r-policy-command
+                         {:account-id (get-account-id client), :table-name table_name})]
+        (aws-helpers/invoke
+          iam_client
+          {:op :PutUserPolicy,
+           :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}}))))
   (reset-meta!
     #'assign-peer-user-command
     (assoc
@@ -619,26 +610,25 @@
       'assign-peer-user-command
       :ns
       *ns*))
-  (def assign-transactor-dynamo-user-command
-   (fn assign_transactor_dynamo_user_command
-     ([p__26975]
-       (let [map__26976 p__26975
-             map__26976 (if (seq? map__26976)
-                          (if (next map__26976)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26976))
-                            (if (seq map__26976) (first map__26976) {}))
-                          map__26976)
-             user_name (get map__26976 :user-name)
-             table_name (get map__26976 :table-name)
-             policy_name (str user_name "-" table_name "-transactor-dynamo")
-             iam_client (client)
-             policy_doc (dynamo-rw-policy-command
-                          {:account-id (get-account-id iam_client), :table-name table_name})]
-         (aws-helpers/invoke
-           iam_client
-           {:op :PutUserPolicy,
-            :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}})))))
+  (defn assign-transactor-dynamo-user-command
+    ([p__26975]
+      (let [map__26976 p__26975
+            map__26976 (if (seq? map__26976)
+                         (if (next map__26976)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26976))
+                           (if (seq map__26976) (first map__26976) {}))
+                         map__26976)
+            user_name (get map__26976 :user-name)
+            table_name (get map__26976 :table-name)
+            policy_name (str user_name "-" table_name "-transactor-dynamo")
+            iam_client (client)
+            policy_doc (dynamo-rw-policy-command
+                         {:account-id (get-account-id iam_client), :table-name table_name})]
+        (aws-helpers/invoke
+          iam_client
+          {:op :PutUserPolicy,
+           :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}}))))
   (reset-meta!
     #'assign-transactor-dynamo-user-command
     (assoc
@@ -647,25 +637,24 @@
       'assign-transactor-dynamo-user-command
       :ns
       *ns*))
-  (def assign-transactor-log-user-command
-   (fn assign_transactor_log_user_command
-     ([p__26978]
-       (let [map__26979 p__26978
-             map__26979 (if (seq? map__26979)
-                          (if (next map__26979)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26979))
-                            (if (seq map__26979) (first map__26979) {}))
-                          map__26979)
-             user_name (get map__26979 :user-name)
-             bucket_name (get map__26979 :bucket-name)
-             policy_name (str user_name "-transactor-s3")
-             iam_client (client)
-             policy_doc (s3-w-policy-command {:bucket-name bucket_name})]
-         (aws-helpers/invoke
-           iam_client
-           {:op :PutUserPolicy,
-            :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}})))))
+  (defn assign-transactor-log-user-command
+    ([p__26978]
+      (let [map__26979 p__26978
+            map__26979 (if (seq? map__26979)
+                         (if (next map__26979)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26979))
+                           (if (seq map__26979) (first map__26979) {}))
+                         map__26979)
+            user_name (get map__26979 :user-name)
+            bucket_name (get map__26979 :bucket-name)
+            policy_name (str user_name "-transactor-s3")
+            iam_client (client)
+            policy_doc (s3-w-policy-command {:bucket-name bucket_name})]
+        (aws-helpers/invoke
+          iam_client
+          {:op :PutUserPolicy,
+           :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}}))))
   (reset-meta!
     #'assign-transactor-log-user-command
     (assoc
@@ -674,24 +663,23 @@
       'assign-transactor-log-user-command
       :ns
       *ns*))
-  (def assign-transactor-metrics-user-command
-   (fn assign_transactor_metrics_user_command
-     ([p__26981]
-       (let [map__26982 p__26981
-             map__26982 (if (seq? map__26982)
-                          (if (next map__26982)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__26982))
-                            (if (seq map__26982) (first map__26982) {}))
-                          map__26982)
-             user_name (get map__26982 :user-name)
-             policy_name (str user_name "-transactor-metrics")
-             iam_client (client)
-             policy_doc (metrics-w-policy-command)]
-         (aws-helpers/invoke
-           iam_client
-           {:op :PutUserPolicy,
-            :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}})))))
+  (defn assign-transactor-metrics-user-command
+    ([p__26981]
+      (let [map__26982 p__26981
+            map__26982 (if (seq? map__26982)
+                         (if (next map__26982)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__26982))
+                           (if (seq map__26982) (first map__26982) {}))
+                         map__26982)
+            user_name (get map__26982 :user-name)
+            policy_name (str user_name "-transactor-metrics")
+            iam_client (client)
+            policy_doc (metrics-w-policy-command)]
+        (aws-helpers/invoke
+          iam_client
+          {:op :PutUserPolicy,
+           :req {:UserName user_name, :PolicyName policy_name, :PolicyDocument policy_doc}}))))
   (reset-meta!
     #'assign-transactor-metrics-user-command
     (assoc

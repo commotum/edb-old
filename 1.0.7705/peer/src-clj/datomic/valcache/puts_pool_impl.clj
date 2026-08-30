@@ -115,39 +115,38 @@
       '->ValcachePutsPoolImpl
       :ns
       *ns*))
-  (def create-valcache-puts-pool
-   (fn create_valcache_puts_pool
-     ([p__17752]
-       (let [map__17753 p__17752
-             map__17753 (if (seq? map__17753)
-                          (if (next map__17753)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__17753))
-                            (if (seq map__17753) (first map__17753) {}))
-                          map__17753)
-             limit (get map__17753 :limit)
-             threads (get map__17753 :threads)
-             idx (atom 0)
-             exec (java.util.concurrent.ThreadPoolExecutor.
-                    (int threads)
-                    (int threads)
-                    0
-                    TimeUnit/MILLISECONDS
-                    (java.util.concurrent.LinkedBlockingQueue.)
-                    (reify
-                      java.util.concurrent.ThreadFactory
-                      (^java.lang.Thread newThread
-                        [this ^java.lang.Runnable runnable]
-                        (let [G__17755 (java.lang.Thread.
-                                         ^java.lang.Runnable runnable
-                                         (str (gensym "valcache-direct-") (swap! idx inc)))]
-                          (.setDaemon ^java.lang.Thread G__17755 (boolean (.booleanValue true)))
-                          G__17755))))
-             puts (java.util.concurrent.ConcurrentHashMap.)]
-         (datomic.valcache.puts_pool_impl.ValcachePutsPoolImpl. limit puts exec)))
-     ([]
-       (create-valcache-puts-pool
-         {:limit 1000, :threads (config/property "datomic.valcachePutsPool")}))))
+  (defn create-valcache-puts-pool
+    ([p__17752]
+      (let [map__17753 p__17752
+            map__17753 (if (seq? map__17753)
+                         (if (next map__17753)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__17753))
+                           (if (seq map__17753) (first map__17753) {}))
+                         map__17753)
+            limit (get map__17753 :limit)
+            threads (get map__17753 :threads)
+            idx (atom 0)
+            exec (java.util.concurrent.ThreadPoolExecutor.
+                   (int threads)
+                   (int threads)
+                   0
+                   TimeUnit/MILLISECONDS
+                   (java.util.concurrent.LinkedBlockingQueue.)
+                   (reify
+                     java.util.concurrent.ThreadFactory
+                     (^java.lang.Thread newThread
+                       [this ^java.lang.Runnable runnable]
+                       (let [G__17755 (java.lang.Thread.
+                                        ^java.lang.Runnable runnable
+                                        (str (gensym "valcache-direct-") (swap! idx inc)))]
+                         (.setDaemon ^java.lang.Thread G__17755 (boolean (.booleanValue true)))
+                         G__17755))))
+            puts (java.util.concurrent.ConcurrentHashMap.)]
+        (datomic.valcache.puts_pool_impl.ValcachePutsPoolImpl. limit puts exec)))
+    ([]
+      (create-valcache-puts-pool
+        {:limit 1000, :threads (config/property "datomic.valcachePutsPool")})))
   (reset-meta!
     #'create-valcache-puts-pool
     (assoc

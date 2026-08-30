@@ -17,11 +17,10 @@
           ['datomic.aws.client.api :as 'aws])
         (clojure.core/import 'software.amazon.awssdk.services.s3.S3Client))))
   (set! *warn-on-reflection* true)
-  (def client
-   (fn client
-     ([creds opts] (aws-helpers/sync-client (S3Client/builder) creds opts))
-     ([opts] (aws-helpers/sync-client (S3Client/builder) opts))
-     ([] (aws-helpers/sync-client (S3Client/builder) {}))))
+  (defn client
+    ([creds opts] (aws-helpers/sync-client (S3Client/builder) creds opts))
+    ([opts] (aws-helpers/sync-client (S3Client/builder) opts))
+    ([] (aws-helpers/sync-client (S3Client/builder) {})))
   (reset-meta!
     #'client
     (assoc

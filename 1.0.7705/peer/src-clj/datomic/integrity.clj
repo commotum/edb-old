@@ -115,28 +115,27 @@
     :ddb+s3
     fn__21975
     ([uri] (uri/create (merge (uri/parse uri) {:skip-efs true}))))
-  (def progress-reduce
-   (fn progress_reduce
-     ([f val p__21977 coll]
-       (let [map__21978 p__21977
-             map__21978 (if (seq? map__21978)
-                          (if (next map__21978)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21978))
-                            (if (seq map__21978) (first map__21978) {}))
-                          map__21978)
-             progress (get map__21978 :progress)
-             n (get map__21978 :n)]
-         (if progress
-           (let [pf (fn pf
-                      ([p__21979 item]
-                        (let [vec__21981 p__21979
-                              c (nth vec__21981 (int 0) nil)
-                              acc (nth vec__21981 (int 1) nil)]
-                          (when (zero? (mod c n)) (^clojure.lang.IFn progress acc n))
-                          [(inc c) (^clojure.lang.IFn f acc item)])))]
-             (second (reduce pf [0 val] coll)))
-           (reduce f val coll))))))
+  (defn progress-reduce
+    ([f val p__21977 coll]
+      (let [map__21978 p__21977
+            map__21978 (if (seq? map__21978)
+                         (if (next map__21978)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21978))
+                           (if (seq map__21978) (first map__21978) {}))
+                         map__21978)
+            progress (get map__21978 :progress)
+            n (get map__21978 :n)]
+        (if progress
+          (let [pf (fn pf
+                     ([p__21979 item]
+                       (let [vec__21981 p__21979
+                             c (nth vec__21981 (int 0) nil)
+                             acc (nth vec__21981 (int 1) nil)]
+                         (when (zero? (mod c n)) (^clojure.lang.IFn progress acc n))
+                         [(inc c) (^clojure.lang.IFn f acc item)])))]
+            (second (reduce pf [0 val] coll)))
+          (reduce f val coll)))))
   (reset-meta!
     #'progress-reduce
     (assoc
@@ -207,15 +206,14 @@
   (reset-meta!
     #'dups
     (assoc {:arglists (clojure.core/list ['db 'attr]), :column (int 1)} :name 'dups :ns *ns*))
-  (def restatement?
-   (fn restatement_QMARK_
-     ([p__21994]
-       (let [vec__21995 p__21994 d1 (nth vec__21995 (int 0) nil) d2 (nth vec__21995 (int 1) nil)]
-         (and
-           (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
-           (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
-           (= (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))
-           (= (boolean (.added ^datomic.Datom d1)) (boolean (.added ^datomic.Datom d2))))))))
+  (defn restatement?
+    ([p__21994]
+      (let [vec__21995 p__21994 d1 (nth vec__21995 (int 0) nil) d2 (nth vec__21995 (int 1) nil)]
+        (and
+          (= (.e ^datomic.Datom d1) (.e ^datomic.Datom d2))
+          (= (.a ^datomic.Datom d1) (.a ^datomic.Datom d2))
+          (= (.v ^datomic.Datom d1) (.v ^datomic.Datom d2))
+          (= (boolean (.added ^datomic.Datom d1)) (boolean (.added ^datomic.Datom d2)))))))
   (reset-meta!
     #'restatement?
     (assoc
@@ -307,20 +305,10 @@
   (reset-meta!
     #'progress-dot-fn
     (assoc {:arglists (clojure.core/list ['n]), :column (int 1)} :name 'progress-dot-fn :ns *ns*))
-  (def datom-comparator
-   (fn datom_comparator
-     ([sort]
-       (let [G__22043 sort]
-         (case
-           G__22043
-           :aevt
-           db/aevt-cmp
-           :avet
-           db/avet-cmp
-           :eavt
-           db/eavt-cmp
-           :vaet
-           db/raet-cmp)))))
+  (defn datom-comparator
+    ([sort]
+      (let [G__22043 sort]
+        (case G__22043 :aevt db/aevt-cmp :avet db/avet-cmp :eavt db/eavt-cmp :vaet db/raet-cmp))))
   (reset-meta!
     #'datom-comparator
     (assoc
@@ -505,44 +493,43 @@
       'unsorted-datoms
       :ns
       *ns*))
-  (def validate-index-sorts
-   (fn validate_index_sorts
-     ([db order]
-       (loop [seq_22092 (seq [:eavt :aevt :avet :vaet]) chunk_22093 nil count_22094 0 i_22095 0]
-         (if (< i_22095 count_22094)
-           (let [sort (.nth ^clojure.lang.Indexed chunk_22093 (int i_22095))]
-             (println "Validating " sort)
-             (let [temp__5804__auto__ (unsorted-datoms db sort order (progress-dot-fn 10000))]
-               (when temp__5804__auto__
-                 (let [s temp__5804__auto__]
-                   (throw (ex-info (str "Disorderly datom pairs " (first s)) {:pairs s}))))
-               nil)
-             (println)
-             (recur seq_22092 chunk_22093 count_22094 (inc i_22095)))
-           (let [temp__5804__auto__ (seq seq_22092)]
-             (when temp__5804__auto__
-               (let [seq_22092 temp__5804__auto__]
-                 (if (chunked-seq? seq_22092)
-                   (let [c__6065__auto__ (chunk-first seq_22092)]
-                     (recur
-                       (chunk-rest seq_22092)
-                       c__6065__auto__
-                       (int (count c__6065__auto__))
-                       (int 0)))
-                   (let [sort (first seq_22092)]
-                     (println "Validating " sort)
-                     (let [temp__5804__auto__ (unsorted-datoms
-                                                db
-                                                sort
-                                                order
-                                                (progress-dot-fn 10000))]
-                       (when temp__5804__auto__
-                         (let [s temp__5804__auto__]
-                           (throw (ex-info (str "Disorderly datom pairs " (first s)) {:pairs s}))))
-                       nil)
-                     (println)
-                     (recur (next seq_22092) nil 0 0)))))))))
-     ([db] (validate-index-sorts db :strict))))
+  (defn validate-index-sorts
+    ([db order]
+      (loop [seq_22092 (seq [:eavt :aevt :avet :vaet]) chunk_22093 nil count_22094 0 i_22095 0]
+        (if (< i_22095 count_22094)
+          (let [sort (.nth ^clojure.lang.Indexed chunk_22093 (int i_22095))]
+            (println "Validating " sort)
+            (let [temp__5804__auto__ (unsorted-datoms db sort order (progress-dot-fn 10000))]
+              (when temp__5804__auto__
+                (let [s temp__5804__auto__]
+                  (throw (ex-info (str "Disorderly datom pairs " (first s)) {:pairs s}))))
+              nil)
+            (println)
+            (recur seq_22092 chunk_22093 count_22094 (inc i_22095)))
+          (let [temp__5804__auto__ (seq seq_22092)]
+            (when temp__5804__auto__
+              (let [seq_22092 temp__5804__auto__]
+                (if (chunked-seq? seq_22092)
+                  (let [c__6065__auto__ (chunk-first seq_22092)]
+                    (recur
+                      (chunk-rest seq_22092)
+                      c__6065__auto__
+                      (int (count c__6065__auto__))
+                      (int 0)))
+                  (let [sort (first seq_22092)]
+                    (println "Validating " sort)
+                    (let [temp__5804__auto__ (unsorted-datoms
+                                               db
+                                               sort
+                                               order
+                                               (progress-dot-fn 10000))]
+                      (when temp__5804__auto__
+                        (let [s temp__5804__auto__]
+                          (throw (ex-info (str "Disorderly datom pairs " (first s)) {:pairs s}))))
+                      nil)
+                    (println)
+                    (recur (next seq_22092) nil 0 0)))))))))
+    ([db] (validate-index-sorts db :strict)))
   (reset-meta!
     #'validate-index-sorts
     (assoc
@@ -639,64 +626,61 @@
       'validate-history-pairs
       :ns
       *ns*))
-  (def selfcheck-index-cli
-   (fn selfcheck_index_cli
-     ([p__22122]
-       (let [map__22123 p__22122
-             map__22123 (if (seq? map__22123)
-                          (if (next map__22123)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22123))
-                            (if (seq map__22123) (first map__22123) {}))
-                          map__22123)
-             uri (get map__22123 :uri)
-             uri (enhance-uri uri)
-             conn (d/connect uri)
-             db (d/db conn)]
-         (loop [seq_22124 (seq [:eavt :aevt :avet :vaet]) chunk_22125 nil count_22126 0 i_22127 0]
-           (if (< i_22127 count_22126)
-             (let [index (.nth ^clojure.lang.Indexed chunk_22125 (int i_22127))]
-               (print "Self-checking " index)
-               (let [count (atom 0)
-                     progress (fn progress
-                                ([]
-                                  (when (zero? (mod (swap! count inc) 10000))
-                                    (print ".")
-                                    (flush))))
-                     problem (first (unfindable-datom-seq db index progress))]
-                 (when problem
-                   (throw
-                     (ex-info
-                       (str "Unable to seek to " (pr-str problem) " in " index)
-                       {:datom problem, :index index})))
-                 (println "\nChecked " (deref count) " datoms"))
-               (recur seq_22124 chunk_22125 count_22126 (inc i_22127)))
-             (let [temp__5804__auto__ (seq seq_22124)]
-               (when temp__5804__auto__
-                 (let [seq_22124 temp__5804__auto__]
-                   (if (chunked-seq? seq_22124)
-                     (let [c__6065__auto__ (chunk-first seq_22124)]
-                       (recur
-                         (chunk-rest seq_22124)
-                         c__6065__auto__
-                         (int (count c__6065__auto__))
-                         (int 0)))
-                     (let [index (first seq_22124)]
-                       (print "Self-checking " index)
-                       (let [count (atom 0)
-                             progress (fn progress
-                                        ([]
-                                          (when (zero? (mod (swap! count inc) 10000))
-                                            (print ".")
-                                            (flush))))
-                             problem (first (unfindable-datom-seq db index progress))]
-                         (when problem
-                           (throw
-                             (ex-info
-                               (str "Unable to seek to " (pr-str problem) " in " index)
-                               {:datom problem, :index index})))
-                         (println "\nChecked " (deref count) " datoms"))
-                       (recur (next seq_22124) nil 0 0))))))))))))
+  (defn selfcheck-index-cli
+    ([p__22122]
+      (let [map__22123 p__22122
+            map__22123 (if (seq? map__22123)
+                         (if (next map__22123)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22123))
+                           (if (seq map__22123) (first map__22123) {}))
+                         map__22123)
+            uri (get map__22123 :uri)
+            uri (enhance-uri uri)
+            conn (d/connect uri)
+            db (d/db conn)]
+        (loop [seq_22124 (seq [:eavt :aevt :avet :vaet]) chunk_22125 nil count_22126 0 i_22127 0]
+          (if (< i_22127 count_22126)
+            (let [index (.nth ^clojure.lang.Indexed chunk_22125 (int i_22127))]
+              (print "Self-checking " index)
+              (let [count (atom 0)
+                    progress (fn progress
+                               ([]
+                                 (when (zero? (mod (swap! count inc) 10000)) (print ".") (flush))))
+                    problem (first (unfindable-datom-seq db index progress))]
+                (when problem
+                  (throw
+                    (ex-info
+                      (str "Unable to seek to " (pr-str problem) " in " index)
+                      {:datom problem, :index index})))
+                (println "\nChecked " (deref count) " datoms"))
+              (recur seq_22124 chunk_22125 count_22126 (inc i_22127)))
+            (let [temp__5804__auto__ (seq seq_22124)]
+              (when temp__5804__auto__
+                (let [seq_22124 temp__5804__auto__]
+                  (if (chunked-seq? seq_22124)
+                    (let [c__6065__auto__ (chunk-first seq_22124)]
+                      (recur
+                        (chunk-rest seq_22124)
+                        c__6065__auto__
+                        (int (count c__6065__auto__))
+                        (int 0)))
+                    (let [index (first seq_22124)]
+                      (print "Self-checking " index)
+                      (let [count (atom 0)
+                            progress (fn progress
+                                       ([]
+                                         (when (zero? (mod (swap! count inc) 10000))
+                                           (print ".")
+                                           (flush))))
+                            problem (first (unfindable-datom-seq db index progress))]
+                        (when problem
+                          (throw
+                            (ex-info
+                              (str "Unable to seek to " (pr-str problem) " in " index)
+                              {:datom problem, :index index})))
+                        (println "\nChecked " (deref count) " datoms"))
+                      (recur (next seq_22124) nil 0 0)))))))))))
   (reset-meta!
     #'selfcheck-index-cli
     (assoc
@@ -741,128 +725,125 @@
       'mk-index-pred
       :ns
       *ns*))
-  (def crosscheck-log
-   (fn crosscheck_log
-     ([log db index progress]
-       (do
-         (let [m_22147 {:event :integrity/crosscheck-log, :index index, :db (:id db)}
-               ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger
-                                              "datomic.integrity")]
-                                 (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                   (.debug
-                                     ^org.slf4j.Logger logger
-                                     (logger/process (assoc m_22147 :phase :begin))))
-                                 nil)
-               start__8553__auto__ (java.lang.System/nanoTime)
-               result__8554__auto__ (try
-                                      {:returned nil}
-                                      (catch
-                                        java.lang.Throwable
-                                        t__8555__auto__
-                                        {:threw t__8555__auto__}))
-               elapsed_22148 (- (java.lang.System/nanoTime) start__8553__auto__)
-               msec_22149 (logger/format-as-msec (long elapsed_22148))]
-           (let [endmsg__8556__auto__ (merge
-                                        (assoc m_22147 :msec msec_22149 :phase :end)
-                                        (when (:threw result__8554__auto__)
-                                          {:threw (class (:threw result__8554__auto__))}))
-                 logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
-             (when (.isDebugEnabled ^org.slf4j.Logger logger)
-               (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-             nil)
-           (if (contains? result__8554__auto__ :returned)
-             (:returned result__8554__auto__)
-             (throw (:threw result__8554__auto__))))
-         (let [temp__5802__auto__ (seq (iter/iter-seq (log/seek-tx log 0)))]
-           (when temp__5802__auto__
-             (let [log_seq temp__5802__auto__
-                   tupler (make-tupler index)
-                   nohists (tools/ever-nohistory-attrs db)
-                   basis_t (d/basis-t db)
-                   limit_tx (d/t->tx (long ^java.lang.Number basis_t))
-                   hist (d/history db)
-                   index_pred (mk-index-pred db index)]
-               (reduce
-                 (fn fn__22152
-                   ([ctr tx]
-                     (loop [seq_22153 (seq
-                                        (take-while
-                                          (fn fn__22157
-                                            ([p1__22146#] (<= (:tx p1__22146#) limit_tx)))
-                                          (:data tx)))
-                            chunk_22154 nil
-                            count_22155 0
-                            i_22156 0]
-                       (if (< i_22156 count_22155)
-                         (let [d (.nth ^clojure.lang.Indexed chunk_22154 (int i_22156))]
-                           (when (and (.added ^datomic.Datom d) (^clojure.lang.IFn index_pred d))
-                             (let [dnow (first (db/datoms db index (^clojure.lang.IFn tupler d)))]
-                               (if (= d dnow)
-                                 (when progress (^clojure.lang.IFn progress :current))
-                                 (if (contains? nohists (:a d))
-                                   (when progress (^clojure.lang.IFn progress :nohistory))
-                                   (let [dhist (first
+  (defn crosscheck-log
+    ([log db index progress]
+      (do
+        (let [m_22147 {:event :integrity/crosscheck-log, :index index, :db (:id db)}
+              ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
+                                (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                  (.debug
+                                    ^org.slf4j.Logger logger
+                                    (logger/process (assoc m_22147 :phase :begin))))
+                                nil)
+              start__8553__auto__ (java.lang.System/nanoTime)
+              result__8554__auto__ (try
+                                     {:returned nil}
+                                     (catch
+                                       java.lang.Throwable
+                                       t__8555__auto__
+                                       {:threw t__8555__auto__}))
+              elapsed_22148 (- (java.lang.System/nanoTime) start__8553__auto__)
+              msec_22149 (logger/format-as-msec (long elapsed_22148))]
+          (let [endmsg__8556__auto__ (merge
+                                       (assoc m_22147 :msec msec_22149 :phase :end)
+                                       (when (:threw result__8554__auto__)
+                                         {:threw (class (:threw result__8554__auto__))}))
+                logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
+            (when (.isDebugEnabled ^org.slf4j.Logger logger)
+              (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+            nil)
+          (if (contains? result__8554__auto__ :returned)
+            (:returned result__8554__auto__)
+            (throw (:threw result__8554__auto__))))
+        (let [temp__5802__auto__ (seq (iter/iter-seq (log/seek-tx log 0)))]
+          (when temp__5802__auto__
+            (let [log_seq temp__5802__auto__
+                  tupler (make-tupler index)
+                  nohists (tools/ever-nohistory-attrs db)
+                  basis_t (d/basis-t db)
+                  limit_tx (d/t->tx (long ^java.lang.Number basis_t))
+                  hist (d/history db)
+                  index_pred (mk-index-pred db index)]
+              (reduce
+                (fn fn__22152
+                  ([ctr tx]
+                    (loop [seq_22153 (seq
+                                       (take-while
+                                         (fn fn__22157
+                                           ([p1__22146#] (<= (:tx p1__22146#) limit_tx)))
+                                         (:data tx)))
+                           chunk_22154 nil
+                           count_22155 0
+                           i_22156 0]
+                      (if (< i_22156 count_22155)
+                        (let [d (.nth ^clojure.lang.Indexed chunk_22154 (int i_22156))]
+                          (when (and (.added ^datomic.Datom d) (^clojure.lang.IFn index_pred d))
+                            (let [dnow (first (db/datoms db index (^clojure.lang.IFn tupler d)))]
+                              (if (= d dnow)
+                                (when progress (^clojure.lang.IFn progress :current))
+                                (if (contains? nohists (:a d))
+                                  (when progress (^clojure.lang.IFn progress :nohistory))
+                                  (let [dhist (first
+                                                (db/datoms
+                                                  hist
+                                                  index
+                                                  (^clojure.lang.IFn tupler d)))]
+                                    (if (= d dhist)
+                                      (when progress (^clojure.lang.IFn progress :history))
+                                      (throw
+                                        (ex-info
+                                          (str "Unable to seek to " (pr-str d) " in " index)
+                                          {:datom d,
+                                           :dhist dhist,
+                                           :index index,
+                                           :basis-t basis_t}))))))))
+                          (recur seq_22153 chunk_22154 count_22155 (inc i_22156)))
+                        (let [temp__5804__auto__ (seq seq_22153)]
+                          (when temp__5804__auto__
+                            (let [seq_22153 temp__5804__auto__]
+                              (if (chunked-seq? seq_22153)
+                                (let [c__6065__auto__ (chunk-first seq_22153)]
+                                  (recur
+                                    (chunk-rest seq_22153)
+                                    c__6065__auto__
+                                    (int (count c__6065__auto__))
+                                    (int 0)))
+                                (let [d (first seq_22153)]
+                                  (when (and
+                                          (.added ^datomic.Datom d)
+                                          (^clojure.lang.IFn index_pred d))
+                                    (let [dnow (first
                                                  (db/datoms
-                                                   hist
+                                                   db
                                                    index
                                                    (^clojure.lang.IFn tupler d)))]
-                                     (if (= d dhist)
-                                       (when progress (^clojure.lang.IFn progress :history))
-                                       (throw
-                                         (ex-info
-                                           (str "Unable to seek to " (pr-str d) " in " index)
-                                           {:datom d,
-                                            :dhist dhist,
-                                            :index index,
-                                            :basis-t basis_t}))))))))
-                           (recur seq_22153 chunk_22154 count_22155 (inc i_22156)))
-                         (let [temp__5804__auto__ (seq seq_22153)]
-                           (when temp__5804__auto__
-                             (let [seq_22153 temp__5804__auto__]
-                               (if (chunked-seq? seq_22153)
-                                 (let [c__6065__auto__ (chunk-first seq_22153)]
-                                   (recur
-                                     (chunk-rest seq_22153)
-                                     c__6065__auto__
-                                     (int (count c__6065__auto__))
-                                     (int 0)))
-                                 (let [d (first seq_22153)]
-                                   (when (and
-                                           (.added ^datomic.Datom d)
-                                           (^clojure.lang.IFn index_pred d))
-                                     (let [dnow (first
-                                                  (db/datoms
-                                                    db
-                                                    index
-                                                    (^clojure.lang.IFn tupler d)))]
-                                       (if (= d dnow)
-                                         (when progress (^clojure.lang.IFn progress :current))
-                                         (if (contains? nohists (:a d))
-                                           (when progress (^clojure.lang.IFn progress :nohistory))
-                                           (let [dhist (first
-                                                         (db/datoms
-                                                           hist
-                                                           index
-                                                           (^clojure.lang.IFn tupler d)))]
-                                             (if (= d dhist)
-                                               (when progress
-                                                 (^clojure.lang.IFn progress :history))
-                                               (throw
-                                                 (ex-info
-                                                   (str
-                                                     "Unable to seek to "
-                                                     (pr-str d)
-                                                     " in "
-                                                     index)
-                                                   {:datom d,
-                                                    :dhist dhist,
-                                                    :index index,
-                                                    :basis-t basis_t}))))))))
-                                   (recur (next seq_22153) nil 0 0))))))))
-                     (inc ctr)))
-                 0
-                 log_seq))))))
-     ([log db index] (crosscheck-log log db index nil))))
+                                      (if (= d dnow)
+                                        (when progress (^clojure.lang.IFn progress :current))
+                                        (if (contains? nohists (:a d))
+                                          (when progress (^clojure.lang.IFn progress :nohistory))
+                                          (let [dhist (first
+                                                        (db/datoms
+                                                          hist
+                                                          index
+                                                          (^clojure.lang.IFn tupler d)))]
+                                            (if (= d dhist)
+                                              (when progress (^clojure.lang.IFn progress :history))
+                                              (throw
+                                                (ex-info
+                                                  (str
+                                                    "Unable to seek to "
+                                                    (pr-str d)
+                                                    " in "
+                                                    index)
+                                                  {:datom d,
+                                                   :dhist dhist,
+                                                   :index index,
+                                                   :basis-t basis_t}))))))))
+                                  (recur (next seq_22153) nil 0 0))))))))
+                    (inc ctr)))
+                0
+                log_seq))))))
+    ([log db index] (crosscheck-log log db index nil)))
   (reset-meta!
     #'crosscheck-log
     (assoc
@@ -872,42 +853,41 @@
       'crosscheck-log
       :ns
       *ns*))
-  (def crosscheck-log-representations
-   (fn crosscheck_log_representations
-     ([uri progress]
-       (let [uri (enhance-uri uri)
-             map__22170 (tools/connection-resources uri)
-             map__22170 (if (seq? map__22170)
-                          (if (next map__22170)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22170))
-                            (if (seq map__22170) (first map__22170) {}))
-                          map__22170)
-             cluster (get map__22170 :cluster)
-             olookup (get map__22170 :olookup)
-             conn (d/connect uri)
-             db (d/db conn)
-             log_1 (log/find-log cluster olookup)
-             log_2 (log/create-log-val cluster olookup db)
-             rep_1 (iter/iter-seq (log/seek-tx log_1 0))
-             rep_2 (iter/iter-seq (log/seek-tx log_2 0))
-             diffs (remove
-                     (fn fn__22172
-                       ([p__22171]
-                         (let [vec__22173 p__22171
-                               a (nth vec__22173 (int 0) nil)
-                               b (nth vec__22173 (int 1) nil)]
-                           (^clojure.lang.IFn progress)
-                           (= (dissoc a :id) (dissoc b :id)))))
-                     (map vector rep_1 rep_2))
-             desc {:basis-t (:basisT db),
-                   :index-basis-t (:indexBasisT db),
-                   :tail-1 (first (:txes (:tail log_1))),
-                   :tail-2 (first (:txes (:tail log_2)))}]
-         (when (seq diffs)
-           (throw (ex-info "Log representations did not match" (assoc desc :diffs diffs))))
-         desc))
-     ([uri] (crosscheck-log-representations uri (progress-dot-fn 1000)))))
+  (defn crosscheck-log-representations
+    ([uri progress]
+      (let [uri (enhance-uri uri)
+            map__22170 (tools/connection-resources uri)
+            map__22170 (if (seq? map__22170)
+                         (if (next map__22170)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22170))
+                           (if (seq map__22170) (first map__22170) {}))
+                         map__22170)
+            cluster (get map__22170 :cluster)
+            olookup (get map__22170 :olookup)
+            conn (d/connect uri)
+            db (d/db conn)
+            log_1 (log/find-log cluster olookup)
+            log_2 (log/create-log-val cluster olookup db)
+            rep_1 (iter/iter-seq (log/seek-tx log_1 0))
+            rep_2 (iter/iter-seq (log/seek-tx log_2 0))
+            diffs (remove
+                    (fn fn__22172
+                      ([p__22171]
+                        (let [vec__22173 p__22171
+                              a (nth vec__22173 (int 0) nil)
+                              b (nth vec__22173 (int 1) nil)]
+                          (^clojure.lang.IFn progress)
+                          (= (dissoc a :id) (dissoc b :id)))))
+                    (map vector rep_1 rep_2))
+            desc {:basis-t (:basisT db),
+                  :index-basis-t (:indexBasisT db),
+                  :tail-1 (first (:txes (:tail log_1))),
+                  :tail-2 (first (:txes (:tail log_2)))}]
+        (when (seq diffs)
+          (throw (ex-info "Log representations did not match" (assoc desc :diffs diffs))))
+        desc))
+    ([uri] (crosscheck-log-representations uri (progress-dot-fn 1000))))
   (reset-meta!
     #'crosscheck-log-representations
     (assoc
@@ -916,106 +896,102 @@
       'crosscheck-log-representations
       :ns
       *ns*))
-  (def crosscheck-log-cli
-   (fn crosscheck_log_cli
-     ([p__22178]
-       (let [map__22179 p__22178
-             map__22179 (if (seq? map__22179)
-                          (if (next map__22179)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22179))
-                            (if (seq map__22179) (first map__22179) {}))
-                          map__22179)
-             uri (get map__22179 :uri)]
-         (println)
-         (let [uri (enhance-uri uri) cr (tools/connection-resources uri) conn (d/connect uri)]
-           (loop [seq_22180 (seq [:eavt :aevt :avet :vaet])
-                  chunk_22181 nil
-                  count_22182 0
-                  i_22183 0]
-             (if (< i_22183 count_22182)
-               (let [index (.nth ^clojure.lang.Indexed chunk_22181 (int i_22183))]
-                 (print "Checking " index " against log")
-                 (flush)
-                 (let [current (atom 0)
-                       history (atom 0)
-                       nohistory (atom 0)
-                       log (log/find-log (:cluster cr) (:olookup cr))
-                       txes (crosscheck-log
-                              log
-                              (d/db conn)
-                              index
-                              (fn fn__22184
-                                ([result]
-                                  (let [G__22185 result]
-                                    (case
-                                      G__22185
-                                      :history
-                                      (when (zero? (mod (swap! history inc) 10000))
-                                        (print "-")
-                                        (flush))
-                                      :current
-                                      (when (zero? (mod (swap! current inc) 10000))
-                                        (print ".")
-                                        (flush))
-                                      :nohistory
-                                      (when (zero? (mod (swap! nohistory inc) 10000))
-                                        (print "~")
-                                        (flush)))))))]
-                   (println
-                     "\n"
-                     {:txes txes,
-                      :current-datoms (deref current),
-                      :history-datoms (deref history),
-                      :nohistory-dropped (deref nohistory)}
-                     "\n"))
-                 (recur seq_22180 chunk_22181 count_22182 (inc i_22183)))
-               (let [temp__5804__auto__ (seq seq_22180)]
-                 (when temp__5804__auto__
-                   (let [seq_22180 temp__5804__auto__]
-                     (if (chunked-seq? seq_22180)
-                       (let [c__6065__auto__ (chunk-first seq_22180)]
-                         (recur
-                           (chunk-rest seq_22180)
-                           c__6065__auto__
-                           (int (count c__6065__auto__))
-                           (int 0)))
-                       (let [index (first seq_22180)]
-                         (print "Checking " index " against log")
-                         (flush)
-                         (let [current (atom 0)
-                               history (atom 0)
-                               nohistory (atom 0)
-                               log (log/find-log (:cluster cr) (:olookup cr))
-                               txes (crosscheck-log
-                                      log
-                                      (d/db conn)
-                                      index
-                                      (fn fn__22187
-                                        ([result]
-                                          (let [G__22188 result]
-                                            (case
-                                              G__22188
-                                              :history
-                                              (when (zero? (mod (swap! history inc) 10000))
-                                                (print "-")
-                                                (flush))
-                                              :current
-                                              (when (zero? (mod (swap! current inc) 10000))
-                                                (print ".")
-                                                (flush))
-                                              :nohistory
-                                              (when (zero? (mod (swap! nohistory inc) 10000))
-                                                (print "~")
-                                                (flush)))))))]
-                           (println
-                             "\n"
-                             {:txes txes,
-                              :current-datoms (deref current),
-                              :history-datoms (deref history),
-                              :nohistory-dropped (deref nohistory)}
-                             "\n"))
-                         (recur (next seq_22180) nil 0 0)))))))))))))
+  (defn crosscheck-log-cli
+    ([p__22178]
+      (let [map__22179 p__22178
+            map__22179 (if (seq? map__22179)
+                         (if (next map__22179)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22179))
+                           (if (seq map__22179) (first map__22179) {}))
+                         map__22179)
+            uri (get map__22179 :uri)]
+        (println)
+        (let [uri (enhance-uri uri) cr (tools/connection-resources uri) conn (d/connect uri)]
+          (loop [seq_22180 (seq [:eavt :aevt :avet :vaet]) chunk_22181 nil count_22182 0 i_22183 0]
+            (if (< i_22183 count_22182)
+              (let [index (.nth ^clojure.lang.Indexed chunk_22181 (int i_22183))]
+                (print "Checking " index " against log")
+                (flush)
+                (let [current (atom 0)
+                      history (atom 0)
+                      nohistory (atom 0)
+                      log (log/find-log (:cluster cr) (:olookup cr))
+                      txes (crosscheck-log
+                             log
+                             (d/db conn)
+                             index
+                             (fn fn__22184
+                               ([result]
+                                 (let [G__22185 result]
+                                   (case
+                                     G__22185
+                                     :history
+                                     (when (zero? (mod (swap! history inc) 10000))
+                                       (print "-")
+                                       (flush))
+                                     :current
+                                     (when (zero? (mod (swap! current inc) 10000))
+                                       (print ".")
+                                       (flush))
+                                     :nohistory
+                                     (when (zero? (mod (swap! nohistory inc) 10000))
+                                       (print "~")
+                                       (flush)))))))]
+                  (println
+                    "\n"
+                    {:txes txes,
+                     :current-datoms (deref current),
+                     :history-datoms (deref history),
+                     :nohistory-dropped (deref nohistory)}
+                    "\n"))
+                (recur seq_22180 chunk_22181 count_22182 (inc i_22183)))
+              (let [temp__5804__auto__ (seq seq_22180)]
+                (when temp__5804__auto__
+                  (let [seq_22180 temp__5804__auto__]
+                    (if (chunked-seq? seq_22180)
+                      (let [c__6065__auto__ (chunk-first seq_22180)]
+                        (recur
+                          (chunk-rest seq_22180)
+                          c__6065__auto__
+                          (int (count c__6065__auto__))
+                          (int 0)))
+                      (let [index (first seq_22180)]
+                        (print "Checking " index " against log")
+                        (flush)
+                        (let [current (atom 0)
+                              history (atom 0)
+                              nohistory (atom 0)
+                              log (log/find-log (:cluster cr) (:olookup cr))
+                              txes (crosscheck-log
+                                     log
+                                     (d/db conn)
+                                     index
+                                     (fn fn__22187
+                                       ([result]
+                                         (let [G__22188 result]
+                                           (case
+                                             G__22188
+                                             :history
+                                             (when (zero? (mod (swap! history inc) 10000))
+                                               (print "-")
+                                               (flush))
+                                             :current
+                                             (when (zero? (mod (swap! current inc) 10000))
+                                               (print ".")
+                                               (flush))
+                                             :nohistory
+                                             (when (zero? (mod (swap! nohistory inc) 10000))
+                                               (print "~")
+                                               (flush)))))))]
+                          (println
+                            "\n"
+                            {:txes txes,
+                             :current-datoms (deref current),
+                             :history-datoms (deref history),
+                             :nohistory-dropped (deref nohistory)}
+                            "\n"))
+                        (recur (next seq_22180) nil 0 0))))))))))))
   (reset-meta!
     #'crosscheck-log-cli
     (assoc
@@ -1275,31 +1251,30 @@
       :ns
       *ns*))
   (.setMacro #'defcrosscheck)
-  (def crosscheck-eavt-eavt
-   (fn crosscheck_eavt_eavt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
-         (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'eavt " but not in " 'eavt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-eavt-eavt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-eavt-eavt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
+        (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'eavt " but not in " 'eavt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-eavt-eavt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-eavt-eavt
     (assoc
@@ -1310,31 +1285,30 @@
       'crosscheck-eavt-eavt
       :ns
       *ns*))
-  (def crosscheck-aevt-aevt
-   (fn crosscheck_aevt_aevt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
-         (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'aevt " but not in " 'aevt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-aevt-aevt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-aevt-aevt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
+        (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'aevt " but not in " 'aevt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-aevt-aevt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-aevt-aevt
     (assoc
@@ -1345,31 +1319,30 @@
       'crosscheck-aevt-aevt
       :ns
       *ns*))
-  (def crosscheck-avet-avet
-   (fn crosscheck_avet_avet
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :avet)]
-         (loop [i (db/filter-retractions (.seekAVET ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekAVET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'avet " but not in " 'avet)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-avet-avet,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-avet-avet
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :avet)]
+        (loop [i (db/filter-retractions (.seekAVET ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekAVET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'avet " but not in " 'avet)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-avet-avet,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-avet-avet
     (assoc
@@ -1380,31 +1353,30 @@
       'crosscheck-avet-avet
       :ns
       *ns*))
-  (def crosscheck-raet-raet
-   (fn crosscheck_raet_raet
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :raet)]
-         (loop [i (db/filter-retractions (.seekRAET ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekRAET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'raet " but not in " 'raet)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-raet-raet,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-raet-raet
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :raet)]
+        (loop [i (db/filter-retractions (.seekRAET ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekRAET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'raet " but not in " 'raet)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-raet-raet,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-raet-raet
     (assoc
@@ -1415,31 +1387,30 @@
       'crosscheck-raet-raet
       :ns
       *ns*))
-  (def crosscheck-eavt-aevt
-   (fn crosscheck_eavt_aevt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
-         (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'eavt " but not in " 'aevt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-eavt-aevt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-eavt-aevt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
+        (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'eavt " but not in " 'aevt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-eavt-aevt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-eavt-aevt
     (assoc
@@ -1450,31 +1421,30 @@
       'crosscheck-eavt-aevt
       :ns
       *ns*))
-  (def crosscheck-aevt-eavt
-   (fn crosscheck_aevt_eavt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
-         (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'aevt " but not in " 'eavt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-aevt-eavt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-aevt-eavt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
+        (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'aevt " but not in " 'eavt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-aevt-eavt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-aevt-eavt
     (assoc
@@ -1485,31 +1455,30 @@
       'crosscheck-aevt-eavt
       :ns
       *ns*))
-  (def crosscheck-avet-eavt
-   (fn crosscheck_avet_eavt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
-         (loop [i (db/filter-retractions (.seekAVET ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'avet " but not in " 'eavt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-avet-eavt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-avet-eavt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
+        (loop [i (db/filter-retractions (.seekAVET ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'avet " but not in " 'eavt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-avet-eavt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-avet-eavt
     (assoc
@@ -1520,31 +1489,30 @@
       'crosscheck-avet-eavt
       :ns
       *ns*))
-  (def crosscheck-avet-aevt
-   (fn crosscheck_avet_aevt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
-         (loop [i (db/filter-retractions (.seekAVET ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'avet " but not in " 'aevt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-avet-aevt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-avet-aevt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
+        (loop [i (db/filter-retractions (.seekAVET ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'avet " but not in " 'aevt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-avet-aevt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-avet-aevt
     (assoc
@@ -1555,31 +1523,30 @@
       'crosscheck-avet-aevt
       :ns
       *ns*))
-  (def crosscheck-raet-aevt
-   (fn crosscheck_raet_aevt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
-         (loop [i (db/filter-retractions (.seekRAET ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'raet " but not in " 'aevt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-raet-aevt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-raet-aevt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :aevt)]
+        (loop [i (db/filter-retractions (.seekRAET ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekAEVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'raet " but not in " 'aevt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-raet-aevt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-raet-aevt
     (assoc
@@ -1590,31 +1557,30 @@
       'crosscheck-raet-aevt
       :ns
       *ns*))
-  (def crosscheck-raet-eavt
-   (fn crosscheck_raet_eavt
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
-         (loop [i (db/filter-retractions (.seekRAET ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'raet " but not in " 'eavt)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-raet-eavt,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-raet-eavt
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :eavt)]
+        (loop [i (db/filter-retractions (.seekRAET ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekEAVT ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'raet " but not in " 'eavt)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-raet-eavt,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-raet-eavt
     (assoc
@@ -1625,31 +1591,30 @@
       'crosscheck-raet-eavt
       :ns
       *ns*))
-  (def crosscheck-aevt-avet
-   (fn crosscheck_aevt_avet
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :avet)]
-         (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekAVET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'aevt " but not in " 'avet)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-aevt-avet,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-aevt-avet
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :avet)]
+        (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekAVET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'aevt " but not in " 'avet)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-aevt-avet,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-aevt-avet
     (assoc
@@ -1660,31 +1625,30 @@
       'crosscheck-aevt-avet
       :ns
       *ns*))
-  (def crosscheck-eavt-avet
-   (fn crosscheck_eavt_avet
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :avet)]
-         (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekAVET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'eavt " but not in " 'avet)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-eavt-avet,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-eavt-avet
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :avet)]
+        (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekAVET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'eavt " but not in " 'avet)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-eavt-avet,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-eavt-avet
     (assoc
@@ -1695,31 +1659,30 @@
       'crosscheck-eavt-avet
       :ns
       *ns*))
-  (def crosscheck-aevt-raet
-   (fn crosscheck_aevt_raet
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :raet)]
-         (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekRAET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'aevt " but not in " 'raet)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-aevt-raet,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-aevt-raet
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :raet)]
+        (loop [i (db/filter-retractions (.seekAEVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekRAET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'aevt " but not in " 'raet)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-aevt-raet,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-aevt-raet
     (assoc
@@ -1730,31 +1693,30 @@
       'crosscheck-aevt-raet
       :ns
       *ns*))
-  (def crosscheck-eavt-raet
-   (fn crosscheck_eavt_raet
-     ([db1 db2 progress]
-       (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :raet)]
-         (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
-           (do
-             (^clojure.lang.IFn progress (long c))
-             (if i
-               (let [datum (.get ^datomic.iter.Iter i)]
-                 (if (^clojure.lang.IFn index_pred datum)
-                   (do
-                     (when-not (=
-                                 (.get
-                                   (.seekRAET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
-                                 datum)
-                       (throw
-                         (ex-info
-                           (str "Found " (pr-str datum) " in " 'eavt " but not in " 'raet)
-                           {:datom datum, :db2 db2, :db1 db2})))
-                     (recur (.next ^datomic.iter.Iter i) (inc c)))
-                   (recur (.next ^datomic.iter.Iter i) c)))
-               {:check 'crosscheck-eavt-raet,
-                :next-t (.getNextT ^datomic.db.IDb db1),
-                :count (long c),
-                :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))})))))))
+  (defn crosscheck-eavt-raet
+    ([db1 db2 progress]
+      (let [start (java.lang.System/nanoTime) index_pred (mk-index-pred db2 :raet)]
+        (loop [i (db/filter-retractions (.seekEAVT ^datomic.db.IDb db1 (db/datum db1))) c 0]
+          (do
+            (^clojure.lang.IFn progress (long c))
+            (if i
+              (let [datum (.get ^datomic.iter.Iter i)]
+                (if (^clojure.lang.IFn index_pred datum)
+                  (do
+                    (when-not (=
+                                (.get
+                                  (.seekRAET ^datomic.db.IDb db2 ^datomic.impl.db.IDatum datum))
+                                datum)
+                      (throw
+                        (ex-info
+                          (str "Found " (pr-str datum) " in " 'eavt " but not in " 'raet)
+                          {:datom datum, :db2 db2, :db1 db2})))
+                    (recur (.next ^datomic.iter.Iter i) (inc c)))
+                  (recur (.next ^datomic.iter.Iter i) c)))
+              {:check 'crosscheck-eavt-raet,
+               :next-t (.getNextT ^datomic.db.IDb db1),
+               :count (long c),
+               :msec (long (quot (- (java.lang.System/nanoTime) start) 1000000))}))))))
   (reset-meta!
     #'crosscheck-eavt-raet
     (assoc
@@ -1765,7 +1727,7 @@
       'crosscheck-eavt-raet
       :ns
       *ns*))
-  (def get-db (fn get_db ([o] (if (instance? datomic.Database o) o (d/db o)))))
+  (defn get-db ([o] (if (instance? datomic.Database o) o (d/db o))))
   (reset-meta!
     #'get-db
     (assoc
@@ -2071,63 +2033,62 @@
       'validate-t-order*
       :ns
       *ns*))
-  (def validate-t-order
-   (fn validate_t_order
-     ([uri log_fn progress]
-       (let [m_22260 {:event :integrity/validate-t-order, :log-fn log_fn}
-             ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process (assoc m_22260 :phase :begin))))
-                               nil)
-             start__8553__auto__ (java.lang.System/nanoTime)
-             result__8554__auto__ (try
-                                    {:returned
-                                     (let [uri (enhance-uri uri)
-                                           map__22264 (tools/connection-resources uri)
-                                           map__22264 (if (seq? map__22264)
-                                                        (if (next map__22264)
-                                                          (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                            (to-array map__22264))
-                                                          (if (seq map__22264)
-                                                            (first map__22264)
-                                                            {}))
-                                                        map__22264)
-                                           cluster (get map__22264 :cluster)
-                                           olookup (get map__22264 :olookup)
-                                           temp__5802__auto__ (let 
-                                                                [G__22265 log_fn]
-                                                                (case
-                                                                  G__22265
-                                                                  :create-log-val
-                                                                  (log/create-log-val
-                                                                    cluster
-                                                                    olookup
-                                                                    (d/db (d/connect uri)))
-                                                                  :find-log
-                                                                  (log/find-log cluster olookup)))]
-                                       (if temp__5802__auto__
-                                         (let [log temp__5802__auto__]
-                                           (validate-t-order* log progress))
-                                         0))}
-                                    (catch
-                                      java.lang.Throwable
-                                      t__8555__auto__
-                                      {:threw t__8555__auto__}))
-             elapsed_22261 (- (java.lang.System/nanoTime) start__8553__auto__)
-             msec_22262 (logger/format-as-msec (long elapsed_22261))]
-         (let [endmsg__8556__auto__ (merge
-                                      (assoc m_22260 :msec msec_22262 :phase :end)
-                                      (when (:threw result__8554__auto__)
-                                        {:threw (class (:threw result__8554__auto__))}))
-               logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
-           (when (.isDebugEnabled ^org.slf4j.Logger logger)
-             (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-           nil)
-         (if (contains? result__8554__auto__ :returned)
-           (:returned result__8554__auto__)
-           (do (throw (:threw result__8554__auto__)) nil))))))
+  (defn validate-t-order
+    ([uri log_fn progress]
+      (let [m_22260 {:event :integrity/validate-t-order, :log-fn log_fn}
+            ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process (assoc m_22260 :phase :begin))))
+                              nil)
+            start__8553__auto__ (java.lang.System/nanoTime)
+            result__8554__auto__ (try
+                                   {:returned
+                                    (let [uri (enhance-uri uri)
+                                          map__22264 (tools/connection-resources uri)
+                                          map__22264 (if (seq? map__22264)
+                                                       (if (next map__22264)
+                                                         (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                                           (to-array map__22264))
+                                                         (if (seq map__22264)
+                                                           (first map__22264)
+                                                           {}))
+                                                       map__22264)
+                                          cluster (get map__22264 :cluster)
+                                          olookup (get map__22264 :olookup)
+                                          temp__5802__auto__ (let 
+                                                               [G__22265 log_fn]
+                                                               (case
+                                                                 G__22265
+                                                                 :create-log-val
+                                                                 (log/create-log-val
+                                                                   cluster
+                                                                   olookup
+                                                                   (d/db (d/connect uri)))
+                                                                 :find-log
+                                                                 (log/find-log cluster olookup)))]
+                                      (if temp__5802__auto__
+                                        (let [log temp__5802__auto__]
+                                          (validate-t-order* log progress))
+                                        0))}
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8555__auto__
+                                     {:threw t__8555__auto__}))
+            elapsed_22261 (- (java.lang.System/nanoTime) start__8553__auto__)
+            msec_22262 (logger/format-as-msec (long elapsed_22261))]
+        (let [endmsg__8556__auto__ (merge
+                                     (assoc m_22260 :msec msec_22262 :phase :end)
+                                     (when (:threw result__8554__auto__)
+                                       {:threw (class (:threw result__8554__auto__))}))
+              logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
+          (when (.isDebugEnabled ^org.slf4j.Logger logger)
+            (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+          nil)
+        (if (contains? result__8554__auto__ :returned)
+          (:returned result__8554__auto__)
+          (do (throw (:threw result__8554__auto__)) nil)))))
   (reset-meta!
     #'validate-t-order
     (assoc
@@ -2136,21 +2097,20 @@
       'validate-t-order
       :ns
       *ns*))
-  (def log-dir-entry-seq
-   (fn log_dir_entry_seq
-     ([p__22273 t]
-       (let [map__22274 p__22273
-             map__22274 (if (seq? map__22274)
-                          (if (next map__22274)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22274))
-                            (if (seq map__22274) (first map__22274) {}))
-                          map__22274)
-             cluster (get map__22274 :cluster)
-             olookup (get map__22274 :olookup)
-             temp__5804__auto__ (log/seek-tx (log/find-log cluster olookup) t)]
-         (when temp__5804__auto__
-           (let [tree_iter temp__5804__auto__] (mapcat identity (log/log-dir-seq tree_iter))))))))
+  (defn log-dir-entry-seq
+    ([p__22273 t]
+      (let [map__22274 p__22273
+            map__22274 (if (seq? map__22274)
+                         (if (next map__22274)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22274))
+                           (if (seq map__22274) (first map__22274) {}))
+                         map__22274)
+            cluster (get map__22274 :cluster)
+            olookup (get map__22274 :olookup)
+            temp__5804__auto__ (log/seek-tx (log/find-log cluster olookup) t)]
+        (when temp__5804__auto__
+          (let [tree_iter temp__5804__auto__] (mapcat identity (log/log-dir-seq tree_iter)))))))
   (reset-meta!
     #'log-dir-entry-seq
     (assoc
@@ -2159,22 +2119,21 @@
       'log-dir-entry-seq
       :ns
       *ns*))
-  (def log-seg-t-seq
-   (fn log_seg_t_seq
-     ([p__22277 t]
-       (let [map__22278 p__22277
-             map__22278 (if (seq? map__22278)
-                          (if (next map__22278)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22278))
-                            (if (seq map__22278) (first map__22278) {}))
-                          map__22278)
-             cluster (get map__22278 :cluster)
-             olookup (get map__22278 :olookup)
-             temp__5804__auto__ (log/seek-tx (log/find-log cluster olookup) t)]
-         (when temp__5804__auto__
-           (let [tree_iter temp__5804__auto__]
-             (map :t (mapcat identity (log/log-seg-seq tree_iter)))))))))
+  (defn log-seg-t-seq
+    ([p__22277 t]
+      (let [map__22278 p__22277
+            map__22278 (if (seq? map__22278)
+                         (if (next map__22278)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22278))
+                           (if (seq map__22278) (first map__22278) {}))
+                         map__22278)
+            cluster (get map__22278 :cluster)
+            olookup (get map__22278 :olookup)
+            temp__5804__auto__ (log/seek-tx (log/find-log cluster olookup) t)]
+        (when temp__5804__auto__
+          (let [tree_iter temp__5804__auto__]
+            (map :t (mapcat identity (log/log-seg-seq tree_iter))))))))
   (reset-meta!
     #'log-seg-t-seq
     (assoc
@@ -2183,193 +2142,187 @@
       'log-seg-t-seq
       :ns
       *ns*))
-  (def crosscheck-dir-segs
-   (fn crosscheck_dir_segs
-     ([p__22282 progress]
-       (let [map__22283 p__22282
-             map__22283 (if (seq? map__22283)
-                          (if (next map__22283)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22283))
-                            (if (seq map__22283) (first map__22283) {}))
-                          map__22283)
-             cluster (get map__22283 :cluster)
-             olookup (get map__22283 :olookup)
-             m_22284 {:event :integrity/crosscheck-dir-segs}
-             ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
-                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
-                                 (.debug
-                                   ^org.slf4j.Logger logger
-                                   (logger/process (assoc m_22284 :phase :begin))))
-                               nil)
-             start__8553__auto__ (java.lang.System/nanoTime)
-             result__8554__auto__ (try
-                                    {:returned
-                                     (let [temp__5804__auto__ (log/find-log cluster olookup)]
-                                       (when temp__5804__auto__
-                                         (let [log temp__5804__auto__
-                                               temp__5804__auto__ (log/seek-tx log 0)]
-                                           (when temp__5804__auto__
-                                             (let [tree_iter temp__5804__auto__]
-                                               (loop [seq_22288 (seq (log/log-dir-seq tree_iter))
-                                                      chunk_22289 nil
-                                                      count_22290 0
-                                                      i_22291 0]
-                                                 (if (< i_22291 count_22290)
-                                                   (let [adir (.nth
-                                                                ^clojure.lang.Indexed chunk_22289
-                                                                (int i_22291))]
-                                                     (when progress
-                                                       (^clojure.lang.IFn progress adir))
-                                                     (let [bad_dirs (seq
-                                                                      (remove
-                                                                        (fn 
-                                                                          fn__22293
-                                                                          ([p1__22281#]
-                                                                            (=
-                                                                              (:dir-t p1__22281#)
-                                                                              (:seg-t
-                                                                                p1__22281#))))
-                                                                        (dir-seg-info-seq
-                                                                          adir
-                                                                          olookup)))]
-                                                       (when-not (not bad_dirs)
-                                                         (let [form__21885__auto__
-                                                               (clojure.core/list 'not 'bad-dirs)
-                                                               error__21886__auto__
-                                                               (ex-info
-                                                                 "Assertion failed, see ex-data for details"
-                                                                 {:bindings
-                                                                  {'map__22283 map__22283,
-                                                                   'start__8553__auto__
-                                                                   (long start__8553__auto__),
-                                                                   'olookup olookup,
-                                                                   (.withMeta
-                                                                     'chunk_22289
-                                                                     {:tag 'clojure.lang.IChunk})
-                                                                   chunk_22289,
-                                                                   'progress progress,
-                                                                   'log log,
-                                                                   'adir adir,
-                                                                   '___8552__auto__
-                                                                   ___8552__auto__,
-                                                                   'count_22290 (long count_22290),
-                                                                   'tree-iter tree_iter,
-                                                                   'p__22282 p__22282,
-                                                                   'bad-dirs bad_dirs,
-                                                                   'seq_22288 seq_22288,
-                                                                   'temp__5804__auto__
-                                                                   temp__5804__auto__,
-                                                                   'm_22284 m_22284,
-                                                                   'i_22291 (long i_22291),
-                                                                   'cluster cluster},
-                                                                  :form form__21885__auto__})]
-                                                           (if
-                                                             datomic.assert/*assert-handler*
-                                                             (datomic.assert/*assert-handler*
-                                                               error__21886__auto__)
-                                                             (throw
-                                                               ^java.lang.Throwable error__21886__auto__)))))
-                                                     (recur
-                                                       seq_22288
-                                                       chunk_22289
-                                                       count_22290
-                                                       (inc i_22291)))
-                                                   (let [temp__5804__auto__ (seq seq_22288)]
-                                                     (when temp__5804__auto__
-                                                       (let [seq_22288 temp__5804__auto__]
-                                                         (if (chunked-seq? seq_22288)
-                                                           (let 
-                                                             [c__6065__auto__
-                                                              (chunk-first seq_22288)]
-                                                             (recur
-                                                               (chunk-rest seq_22288)
-                                                               c__6065__auto__
-                                                               (int (count c__6065__auto__))
-                                                               (int 0)))
-                                                           (let 
-                                                             [adir (first seq_22288)]
-                                                             (when
-                                                               progress
-                                                               (^clojure.lang.IFn progress adir))
-                                                             (let 
-                                                               [bad_dirs
-                                                                (seq
-                                                                  (remove
-                                                                    (fn 
-                                                                      fn__22295
-                                                                      ([p1__22281#]
-                                                                        (=
-                                                                          (:dir-t p1__22281#)
-                                                                          (:seg-t p1__22281#))))
-                                                                    (dir-seg-info-seq
-                                                                      adir
-                                                                      olookup)))]
-                                                               (when-not
-                                                                 (not bad_dirs)
-                                                                 (let 
-                                                                   [form__21885__auto__
-                                                                    (clojure.core/list
-                                                                      'not
-                                                                      'bad-dirs)
-                                                                    error__21886__auto__
-                                                                    (ex-info
-                                                                      "Assertion failed, see ex-data for details"
-                                                                      {:bindings
-                                                                       {'map__22283 map__22283,
-                                                                        'start__8553__auto__
-                                                                        (long start__8553__auto__),
-                                                                        'olookup olookup,
-                                                                        (.withMeta
-                                                                          'chunk_22289
-                                                                          {:tag
-                                                                           'clojure.lang.IChunk})
-                                                                        chunk_22289,
-                                                                        'progress progress,
-                                                                        'log log,
-                                                                        'adir adir,
-                                                                        '___8552__auto__
-                                                                        ___8552__auto__,
-                                                                        'count_22290
-                                                                        (long count_22290),
-                                                                        'tree-iter tree_iter,
-                                                                        'p__22282 p__22282,
-                                                                        'bad-dirs bad_dirs,
-                                                                        'seq_22288 seq_22288,
-                                                                        'temp__5804__auto__
-                                                                        temp__5804__auto__,
-                                                                        'm_22284 m_22284,
-                                                                        'i_22291 (long i_22291),
-                                                                        'cluster cluster},
-                                                                       :form form__21885__auto__})]
-                                                                   (if
-                                                                     datomic.assert/*assert-handler*
-                                                                     (datomic.assert/*assert-handler*
-                                                                       error__21886__auto__)
-                                                                     (throw
-                                                                       ^java.lang.Throwable error__21886__auto__)))))
-                                                             (recur
-                                                               (next seq_22288)
-                                                               nil
-                                                               0
-                                                               0)))))))))))))}
-                                    (catch
-                                      java.lang.Throwable
-                                      t__8555__auto__
-                                      {:threw t__8555__auto__}))
-             elapsed_22285 (- (java.lang.System/nanoTime) start__8553__auto__)
-             msec_22286 (logger/format-as-msec (long elapsed_22285))]
-         (let [endmsg__8556__auto__ (merge
-                                      (assoc m_22284 :msec msec_22286 :phase :end)
-                                      (when (:threw result__8554__auto__)
-                                        {:threw (class (:threw result__8554__auto__))}))
-               logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
-           (when (.isDebugEnabled ^org.slf4j.Logger logger)
-             (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
-           nil)
-         (if (contains? result__8554__auto__ :returned)
-           (:returned result__8554__auto__)
-           (do (throw (:threw result__8554__auto__)) nil))))))
+  (defn crosscheck-dir-segs
+    ([p__22282 progress]
+      (let [map__22283 p__22282
+            map__22283 (if (seq? map__22283)
+                         (if (next map__22283)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22283))
+                           (if (seq map__22283) (first map__22283) {}))
+                         map__22283)
+            cluster (get map__22283 :cluster)
+            olookup (get map__22283 :olookup)
+            m_22284 {:event :integrity/crosscheck-dir-segs}
+            ___8552__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
+                              (when (.isDebugEnabled ^org.slf4j.Logger logger)
+                                (.debug
+                                  ^org.slf4j.Logger logger
+                                  (logger/process (assoc m_22284 :phase :begin))))
+                              nil)
+            start__8553__auto__ (java.lang.System/nanoTime)
+            result__8554__auto__ (try
+                                   {:returned
+                                    (let [temp__5804__auto__ (log/find-log cluster olookup)]
+                                      (when temp__5804__auto__
+                                        (let [log temp__5804__auto__
+                                              temp__5804__auto__ (log/seek-tx log 0)]
+                                          (when temp__5804__auto__
+                                            (let [tree_iter temp__5804__auto__]
+                                              (loop [seq_22288 (seq (log/log-dir-seq tree_iter))
+                                                     chunk_22289 nil
+                                                     count_22290 0
+                                                     i_22291 0]
+                                                (if (< i_22291 count_22290)
+                                                  (let [adir (.nth
+                                                               ^clojure.lang.Indexed chunk_22289
+                                                               (int i_22291))]
+                                                    (when progress
+                                                      (^clojure.lang.IFn progress adir))
+                                                    (let [bad_dirs (seq
+                                                                     (remove
+                                                                       (fn 
+                                                                         fn__22293
+                                                                         ([p1__22281#]
+                                                                           (=
+                                                                             (:dir-t p1__22281#)
+                                                                             (:seg-t p1__22281#))))
+                                                                       (dir-seg-info-seq
+                                                                         adir
+                                                                         olookup)))]
+                                                      (when-not (not bad_dirs)
+                                                        (let [form__21885__auto__
+                                                              (clojure.core/list 'not 'bad-dirs)
+                                                              error__21886__auto__
+                                                              (ex-info
+                                                                "Assertion failed, see ex-data for details"
+                                                                {:bindings
+                                                                 {'map__22283 map__22283,
+                                                                  'start__8553__auto__
+                                                                  (long start__8553__auto__),
+                                                                  'olookup olookup,
+                                                                  (.withMeta
+                                                                    'chunk_22289
+                                                                    {:tag 'clojure.lang.IChunk})
+                                                                  chunk_22289,
+                                                                  'progress progress,
+                                                                  'log log,
+                                                                  'adir adir,
+                                                                  '___8552__auto__ ___8552__auto__,
+                                                                  'count_22290 (long count_22290),
+                                                                  'tree-iter tree_iter,
+                                                                  'p__22282 p__22282,
+                                                                  'bad-dirs bad_dirs,
+                                                                  'seq_22288 seq_22288,
+                                                                  'temp__5804__auto__
+                                                                  temp__5804__auto__,
+                                                                  'm_22284 m_22284,
+                                                                  'i_22291 (long i_22291),
+                                                                  'cluster cluster},
+                                                                 :form form__21885__auto__})]
+                                                          (if datomic.assert/*assert-handler*
+                                                            (datomic.assert/*assert-handler*
+                                                              error__21886__auto__)
+                                                            (throw
+                                                              ^java.lang.Throwable error__21886__auto__)))))
+                                                    (recur
+                                                      seq_22288
+                                                      chunk_22289
+                                                      count_22290
+                                                      (inc i_22291)))
+                                                  (let [temp__5804__auto__ (seq seq_22288)]
+                                                    (when temp__5804__auto__
+                                                      (let [seq_22288 temp__5804__auto__]
+                                                        (if (chunked-seq? seq_22288)
+                                                          (let [c__6065__auto__
+                                                                (chunk-first seq_22288)]
+                                                            (recur
+                                                              (chunk-rest seq_22288)
+                                                              c__6065__auto__
+                                                              (int (count c__6065__auto__))
+                                                              (int 0)))
+                                                          (let [adir (first seq_22288)]
+                                                            (when
+                                                              progress
+                                                              (^clojure.lang.IFn progress adir))
+                                                            (let 
+                                                              [bad_dirs
+                                                               (seq
+                                                                 (remove
+                                                                   (fn 
+                                                                     fn__22295
+                                                                     ([p1__22281#]
+                                                                       (=
+                                                                         (:dir-t p1__22281#)
+                                                                         (:seg-t p1__22281#))))
+                                                                   (dir-seg-info-seq
+                                                                     adir
+                                                                     olookup)))]
+                                                              (when-not
+                                                                (not bad_dirs)
+                                                                (let 
+                                                                  [form__21885__auto__
+                                                                   (clojure.core/list
+                                                                     'not
+                                                                     'bad-dirs)
+                                                                   error__21886__auto__
+                                                                   (ex-info
+                                                                     "Assertion failed, see ex-data for details"
+                                                                     {:bindings
+                                                                      {'map__22283 map__22283,
+                                                                       'start__8553__auto__
+                                                                       (long start__8553__auto__),
+                                                                       'olookup olookup,
+                                                                       (.withMeta
+                                                                         'chunk_22289
+                                                                         {:tag
+                                                                          'clojure.lang.IChunk})
+                                                                       chunk_22289,
+                                                                       'progress progress,
+                                                                       'log log,
+                                                                       'adir adir,
+                                                                       '___8552__auto__
+                                                                       ___8552__auto__,
+                                                                       'count_22290
+                                                                       (long count_22290),
+                                                                       'tree-iter tree_iter,
+                                                                       'p__22282 p__22282,
+                                                                       'bad-dirs bad_dirs,
+                                                                       'seq_22288 seq_22288,
+                                                                       'temp__5804__auto__
+                                                                       temp__5804__auto__,
+                                                                       'm_22284 m_22284,
+                                                                       'i_22291 (long i_22291),
+                                                                       'cluster cluster},
+                                                                      :form form__21885__auto__})]
+                                                                  (if
+                                                                    datomic.assert/*assert-handler*
+                                                                    (datomic.assert/*assert-handler*
+                                                                      error__21886__auto__)
+                                                                    (throw
+                                                                      ^java.lang.Throwable error__21886__auto__)))))
+                                                            (recur
+                                                              (next seq_22288)
+                                                              nil
+                                                              0
+                                                              0)))))))))))))}
+                                   (catch
+                                     java.lang.Throwable
+                                     t__8555__auto__
+                                     {:threw t__8555__auto__}))
+            elapsed_22285 (- (java.lang.System/nanoTime) start__8553__auto__)
+            msec_22286 (logger/format-as-msec (long elapsed_22285))]
+        (let [endmsg__8556__auto__ (merge
+                                     (assoc m_22284 :msec msec_22286 :phase :end)
+                                     (when (:threw result__8554__auto__)
+                                       {:threw (class (:threw result__8554__auto__))}))
+              logger (org.slf4j.LoggerFactory/getLogger "datomic.integrity")]
+          (when (.isDebugEnabled ^org.slf4j.Logger logger)
+            (.debug ^org.slf4j.Logger logger (logger/process endmsg__8556__auto__)))
+          nil)
+        (if (contains? result__8554__auto__ :returned)
+          (:returned result__8554__auto__)
+          (do (throw (:threw result__8554__auto__)) nil)))))
   (reset-meta!
     #'crosscheck-dir-segs
     (assoc
@@ -2378,29 +2331,28 @@
       'crosscheck-dir-segs
       :ns
       *ns*))
-  (def merge-seqs
-   (fn merge_seqs
-     ([cmp s1 s2 s3 s4] (merge-seqs cmp s1 (merge-seqs cmp s2 s3 s4)))
-     ([cmp s1 s2 s3] (merge-seqs cmp s1 (merge-seqs cmp s2 s3)))
-     ([cmp s1 s2]
-       (let [s1 (seq s1) s2 (seq s2)]
-         (if (and s1 s2)
-           (let [vec__22312 s1
-                 seq__22313 (seq vec__22312)
-                 first__22314 (first seq__22313)
-                 seq__22313 (next seq__22313)
-                 o1 first__22314
-                 m1 seq__22313
-                 vec__22315 s2
-                 seq__22316 (seq vec__22315)
-                 first__22317 (first seq__22316)
-                 seq__22316 (next seq__22316)
-                 o2 first__22317
-                 m2 seq__22316]
-             (if (< (.compare ^java.util.Comparator cmp o1 o2) 0)
-               (lazy-seq (cons o1 (merge-seqs cmp m1 s2)))
-               (lazy-seq (cons o2 (merge-seqs cmp s1 m2)))))
-           (or s1 s2))))))
+  (defn merge-seqs
+    ([cmp s1 s2 s3 s4] (merge-seqs cmp s1 (merge-seqs cmp s2 s3 s4)))
+    ([cmp s1 s2 s3] (merge-seqs cmp s1 (merge-seqs cmp s2 s3)))
+    ([cmp s1 s2]
+      (let [s1 (seq s1) s2 (seq s2)]
+        (if (and s1 s2)
+          (let [vec__22312 s1
+                seq__22313 (seq vec__22312)
+                first__22314 (first seq__22313)
+                seq__22313 (next seq__22313)
+                o1 first__22314
+                m1 seq__22313
+                vec__22315 s2
+                seq__22316 (seq vec__22315)
+                first__22317 (first seq__22316)
+                seq__22316 (next seq__22316)
+                o2 first__22317
+                m2 seq__22316]
+            (if (< (.compare ^java.util.Comparator cmp o1 o2) 0)
+              (lazy-seq (cons o1 (merge-seqs cmp m1 s2)))
+              (lazy-seq (cons o2 (merge-seqs cmp s1 m2)))))
+          (or s1 s2)))))
   (reset-meta!
     #'merge-seqs
     (assoc
@@ -2414,70 +2366,69 @@
       'merge-seqs
       :ns
       *ns*))
-  (def aevt-dquark-seq
-   (fn aevt_dquark_seq
-     ([db d]
-       (map
-         (fn fn__22326 ([p1__22325#] (dissoc p1__22325# :datom)))
-         (apply
-           merge-seqs
-           (reify
-             java.util.Comparator
-             (^int compare [this x y] (.compare db/aevt-cmp (:datom x) (:datom y))))
-           (map
-             (fn fn__22331
-               ([p__22330]
-                 (let [vec__22332 p__22330
-                       index (nth vec__22332 (int 0) nil)
-                       iter (nth vec__22332 (int 1) nil)]
-                   (map
-                     (fn fn__22336
-                       ([p__22335]
-                         (let [map__22337 p__22335
-                               map__22337 (if (seq? map__22337)
-                                            (if (next map__22337)
-                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                (to-array map__22337))
-                                              (if (seq map__22337) (first map__22337) {}))
-                                            map__22337)
-                               datom map__22337
-                               e (get map__22337 :e)
-                               a (get map__22337 :a)
-                               v (get map__22337 :v)
-                               tx (get map__22337 :tx)
-                               added (get map__22337 :added)]
-                           {:v v,
-                            :index index,
-                            :datom datom,
-                            :attrid a,
-                            :added added,
-                            :part
-                            (db/resolve-kw db (long (db/eid->part (long ^java.lang.Number e)))),
-                            :eidx (long (db/eid->eidx (long ^java.lang.Number e))),
-                            :t (long (d/tx->t tx)),
-                            :a (db/resolve-kw db a)})))
-                     (iter/iter-seq iter)))))
-             [[:memidx (btset/seek (:aevt (:memidx db)) d)]
-              [:indexing
-               (btset/seek
-                 (let [temp__5804__auto__ (:indexing db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
-                 d)]
-              [:index
-               (btset/seek
-                 (let [temp__5804__auto__ (:index db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
-                 d)]
-              [:mid-index
-               (btset/seek
-                 (let [temp__5804__auto__ (:mid-index db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
-                 d)]
-              [:history
-               (btset/seek
-                 (let [temp__5804__auto__ (:history db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
-                 d)]]))))))
+  (defn aevt-dquark-seq
+    ([db d]
+      (map
+        (fn fn__22326 ([p1__22325#] (dissoc p1__22325# :datom)))
+        (apply
+          merge-seqs
+          (reify
+            java.util.Comparator
+            (^int compare [this x y] (.compare db/aevt-cmp (:datom x) (:datom y))))
+          (map
+            (fn fn__22331
+              ([p__22330]
+                (let [vec__22332 p__22330
+                      index (nth vec__22332 (int 0) nil)
+                      iter (nth vec__22332 (int 1) nil)]
+                  (map
+                    (fn fn__22336
+                      ([p__22335]
+                        (let [map__22337 p__22335
+                              map__22337 (if (seq? map__22337)
+                                           (if (next map__22337)
+                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                               (to-array map__22337))
+                                             (if (seq map__22337) (first map__22337) {}))
+                                           map__22337)
+                              datom map__22337
+                              e (get map__22337 :e)
+                              a (get map__22337 :a)
+                              v (get map__22337 :v)
+                              tx (get map__22337 :tx)
+                              added (get map__22337 :added)]
+                          {:v v,
+                           :index index,
+                           :datom datom,
+                           :attrid a,
+                           :added added,
+                           :part
+                           (db/resolve-kw db (long (db/eid->part (long ^java.lang.Number e)))),
+                           :eidx (long (db/eid->eidx (long ^java.lang.Number e))),
+                           :t (long (d/tx->t tx)),
+                           :a (db/resolve-kw db a)})))
+                    (iter/iter-seq iter)))))
+            [[:memidx (btset/seek (:aevt (:memidx db)) d)]
+             [:indexing
+              (btset/seek
+                (let [temp__5804__auto__ (:indexing db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
+                d)]
+             [:index
+              (btset/seek
+                (let [temp__5804__auto__ (:index db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
+                d)]
+             [:mid-index
+              (btset/seek
+                (let [temp__5804__auto__ (:mid-index db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
+                d)]
+             [:history
+              (btset/seek
+                (let [temp__5804__auto__ (:history db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:aevt index))))
+                d)]])))))
   (reset-meta!
     #'aevt-dquark-seq
     (assoc
@@ -2486,69 +2437,68 @@
       'aevt-dquark-seq
       :ns
       *ns*))
-  (def eavt-dquark-seq
-   (fn eavt_dquark_seq
-     ([db d]
-       (map
-         (fn fn__22346 ([p1__22345#] (dissoc p1__22345# :datom)))
-         (apply
-           merge-seqs
-           (reify
-             java.util.Comparator
-             (^int compare [this x y] (.compare db/aevt-cmp (:datom x) (:datom y))))
-           (map
-             (fn fn__22351
-               ([p__22350]
-                 (let [vec__22352 p__22350
-                       index (nth vec__22352 (int 0) nil)
-                       iter (nth vec__22352 (int 1) nil)]
-                   (map
-                     (fn fn__22356
-                       ([p__22355]
-                         (let [map__22357 p__22355
-                               map__22357 (if (seq? map__22357)
-                                            (if (next map__22357)
-                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                (to-array map__22357))
-                                              (if (seq map__22357) (first map__22357) {}))
-                                            map__22357)
-                               datom map__22357
-                               e (get map__22357 :e)
-                               a (get map__22357 :a)
-                               v (get map__22357 :v)
-                               tx (get map__22357 :tx)
-                               added (get map__22357 :added)]
-                           {:datom datom,
-                            :index index,
-                            :part
-                            (db/resolve-kw db (long (db/eid->part (long ^java.lang.Number e)))),
-                            :eidx (long (db/eid->eidx (long ^java.lang.Number e))),
-                            :a (db/resolve-kw db a),
-                            :v v,
-                            :t (long (d/tx->t tx)),
-                            :added added})))
-                     (iter/iter-seq iter)))))
-             [[:memidx (btset/seek (:eavt (:memidx db)) d)]
-              [:indexing
-               (btset/seek
-                 (let [temp__5804__auto__ (:indexing db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
-                 d)]
-              [:index
-               (btset/seek
-                 (let [temp__5804__auto__ (:index db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
-                 d)]
-              [:mid-index
-               (btset/seek
-                 (let [temp__5804__auto__ (:mid-index db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
-                 d)]
-              [:history
-               (btset/seek
-                 (let [temp__5804__auto__ (:history db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
-                 d)]]))))))
+  (defn eavt-dquark-seq
+    ([db d]
+      (map
+        (fn fn__22346 ([p1__22345#] (dissoc p1__22345# :datom)))
+        (apply
+          merge-seqs
+          (reify
+            java.util.Comparator
+            (^int compare [this x y] (.compare db/aevt-cmp (:datom x) (:datom y))))
+          (map
+            (fn fn__22351
+              ([p__22350]
+                (let [vec__22352 p__22350
+                      index (nth vec__22352 (int 0) nil)
+                      iter (nth vec__22352 (int 1) nil)]
+                  (map
+                    (fn fn__22356
+                      ([p__22355]
+                        (let [map__22357 p__22355
+                              map__22357 (if (seq? map__22357)
+                                           (if (next map__22357)
+                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                               (to-array map__22357))
+                                             (if (seq map__22357) (first map__22357) {}))
+                                           map__22357)
+                              datom map__22357
+                              e (get map__22357 :e)
+                              a (get map__22357 :a)
+                              v (get map__22357 :v)
+                              tx (get map__22357 :tx)
+                              added (get map__22357 :added)]
+                          {:datom datom,
+                           :index index,
+                           :part
+                           (db/resolve-kw db (long (db/eid->part (long ^java.lang.Number e)))),
+                           :eidx (long (db/eid->eidx (long ^java.lang.Number e))),
+                           :a (db/resolve-kw db a),
+                           :v v,
+                           :t (long (d/tx->t tx)),
+                           :added added})))
+                    (iter/iter-seq iter)))))
+            [[:memidx (btset/seek (:eavt (:memidx db)) d)]
+             [:indexing
+              (btset/seek
+                (let [temp__5804__auto__ (:indexing db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
+                d)]
+             [:index
+              (btset/seek
+                (let [temp__5804__auto__ (:index db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
+                d)]
+             [:mid-index
+              (btset/seek
+                (let [temp__5804__auto__ (:mid-index db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
+                d)]
+             [:history
+              (btset/seek
+                (let [temp__5804__auto__ (:history db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:eavt index))))
+                d)]])))))
   (reset-meta!
     #'eavt-dquark-seq
     (assoc
@@ -2557,69 +2507,68 @@
       'eavt-dquark-seq
       :ns
       *ns*))
-  (def avet-dquark-seq
-   (fn avet_dquark_seq
-     ([db d]
-       (map
-         (fn fn__22366 ([p1__22365#] (dissoc p1__22365# :datom)))
-         (apply
-           merge-seqs
-           (reify
-             java.util.Comparator
-             (^int compare [this x y] (.compare db/aevt-cmp (:datom x) (:datom y))))
-           (map
-             (fn fn__22371
-               ([p__22370]
-                 (let [vec__22372 p__22370
-                       index (nth vec__22372 (int 0) nil)
-                       iter (nth vec__22372 (int 1) nil)]
-                   (map
-                     (fn fn__22376
-                       ([p__22375]
-                         (let [map__22377 p__22375
-                               map__22377 (if (seq? map__22377)
-                                            (if (next map__22377)
-                                              (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                                (to-array map__22377))
-                                              (if (seq map__22377) (first map__22377) {}))
-                                            map__22377)
-                               datom map__22377
-                               e (get map__22377 :e)
-                               a (get map__22377 :a)
-                               v (get map__22377 :v)
-                               tx (get map__22377 :tx)
-                               added (get map__22377 :added)]
-                           {:datom datom,
-                            :index index,
-                            :part
-                            (db/resolve-kw db (long (db/eid->part (long ^java.lang.Number e)))),
-                            :eidx (long (db/eid->eidx (long ^java.lang.Number e))),
-                            :a (db/resolve-kw db a),
-                            :v v,
-                            :t (long (d/tx->t tx)),
-                            :added added})))
-                     (iter/iter-seq iter)))))
-             [[:memidx (btset/seek (:avet (:memidx db)) d)]
-              [:indexing
-               (btset/seek
-                 (let [temp__5804__auto__ (:indexing db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
-                 d)]
-              [:index
-               (btset/seek
-                 (let [temp__5804__auto__ (:index db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
-                 d)]
-              [:mid-index
-               (btset/seek
-                 (let [temp__5804__auto__ (:mid-index db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
-                 d)]
-              [:history
-               (btset/seek
-                 (let [temp__5804__auto__ (:history db)]
-                   (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
-                 d)]]))))))
+  (defn avet-dquark-seq
+    ([db d]
+      (map
+        (fn fn__22366 ([p1__22365#] (dissoc p1__22365# :datom)))
+        (apply
+          merge-seqs
+          (reify
+            java.util.Comparator
+            (^int compare [this x y] (.compare db/aevt-cmp (:datom x) (:datom y))))
+          (map
+            (fn fn__22371
+              ([p__22370]
+                (let [vec__22372 p__22370
+                      index (nth vec__22372 (int 0) nil)
+                      iter (nth vec__22372 (int 1) nil)]
+                  (map
+                    (fn fn__22376
+                      ([p__22375]
+                        (let [map__22377 p__22375
+                              map__22377 (if (seq? map__22377)
+                                           (if (next map__22377)
+                                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                               (to-array map__22377))
+                                             (if (seq map__22377) (first map__22377) {}))
+                                           map__22377)
+                              datom map__22377
+                              e (get map__22377 :e)
+                              a (get map__22377 :a)
+                              v (get map__22377 :v)
+                              tx (get map__22377 :tx)
+                              added (get map__22377 :added)]
+                          {:datom datom,
+                           :index index,
+                           :part
+                           (db/resolve-kw db (long (db/eid->part (long ^java.lang.Number e)))),
+                           :eidx (long (db/eid->eidx (long ^java.lang.Number e))),
+                           :a (db/resolve-kw db a),
+                           :v v,
+                           :t (long (d/tx->t tx)),
+                           :added added})))
+                    (iter/iter-seq iter)))))
+            [[:memidx (btset/seek (:avet (:memidx db)) d)]
+             [:indexing
+              (btset/seek
+                (let [temp__5804__auto__ (:indexing db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
+                d)]
+             [:index
+              (btset/seek
+                (let [temp__5804__auto__ (:index db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
+                d)]
+             [:mid-index
+              (btset/seek
+                (let [temp__5804__auto__ (:mid-index db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
+                d)]
+             [:history
+              (btset/seek
+                (let [temp__5804__auto__ (:history db)]
+                  (when temp__5804__auto__ (let [index temp__5804__auto__] (:avet index))))
+                d)]])))))
   (reset-meta!
     #'avet-dquark-seq
     (assoc
@@ -2851,45 +2800,43 @@
   (reset-meta!
     #'tx-instant-ts
     (assoc {:arglists (clojure.core/list ['db]), :column (int 1)} :name 'tx-instant-ts :ns *ns*))
-  (def seq-diffs
-   (fn seq_diffs
-     ([colla collb progress n]
-       (let [G__22448 (seq colla)
-             vec__22450 G__22448
-             seq__22451 (seq vec__22450)
-             first__22452 (first seq__22451)
-             seq__22451 (next seq__22451)
-             a first__22452
-             morea seq__22451
-             G__22449 (seq collb)
-             vec__22453 G__22449
-             seq__22454 (seq vec__22453)
-             first__22455 (first seq__22454)
-             seq__22454 (next seq__22454)
-             b first__22455
-             moreb seq__22454
-             n n]
-         (loop [G__22448 G__22448 G__22449 G__22449 n n]
-           (let [vec__22456 G__22448
-                 seq__22457 (seq vec__22456)
-                 first__22458 (first seq__22457)
-                 seq__22457 (next seq__22457)
-                 a first__22458
-                 morea seq__22457
-                 vec__22459 G__22449
-                 seq__22460 (seq vec__22459)
-                 first__22461 (first seq__22460)
-                 seq__22460 (next seq__22460)
-                 b first__22461
-                 moreb seq__22460
-                 n n]
-             (^clojure.lang.IFn progress n)
-             (when (or a b)
-               (if (= a b)
-                 (recur morea moreb (inc n))
-                 (lazy-seq
-                   (cons {:a a, :b b, :n n} (seq-diffs morea moreb progress (inc n))))))))))
-     ([colla collb progress] (seq-diffs colla collb progress 0))))
+  (defn seq-diffs
+    ([colla collb progress n]
+      (let [G__22448 (seq colla)
+            vec__22450 G__22448
+            seq__22451 (seq vec__22450)
+            first__22452 (first seq__22451)
+            seq__22451 (next seq__22451)
+            a first__22452
+            morea seq__22451
+            G__22449 (seq collb)
+            vec__22453 G__22449
+            seq__22454 (seq vec__22453)
+            first__22455 (first seq__22454)
+            seq__22454 (next seq__22454)
+            b first__22455
+            moreb seq__22454
+            n n]
+        (loop [G__22448 G__22448 G__22449 G__22449 n n]
+          (let [vec__22456 G__22448
+                seq__22457 (seq vec__22456)
+                first__22458 (first seq__22457)
+                seq__22457 (next seq__22457)
+                a first__22458
+                morea seq__22457
+                vec__22459 G__22449
+                seq__22460 (seq vec__22459)
+                first__22461 (first seq__22460)
+                seq__22460 (next seq__22460)
+                b first__22461
+                moreb seq__22460
+                n n]
+            (^clojure.lang.IFn progress n)
+            (when (or a b)
+              (if (= a b)
+                (recur morea moreb (inc n))
+                (lazy-seq (cons {:a a, :b b, :n n} (seq-diffs morea moreb progress (inc n))))))))))
+    ([colla collb progress] (seq-diffs colla collb progress 0)))
   (reset-meta!
     #'seq-diffs
     (assoc
@@ -3015,19 +2962,18 @@
   (reset-meta!
     #'aevt-avet-stats
     (assoc {:arglists (clojure.core/list ['db]), :column (int 1)} :name 'aevt-avet-stats :ns *ns*))
-  (def aevt-avet-stats-consistent?
-   (fn aevt_avet_stats_consistent_QMARK_
-     ([p__22493]
-       (let [map__22494 p__22493
-             map__22494 (if (seq? map__22494)
-                          (if (next map__22494)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22494))
-                            (if (seq map__22494) (first map__22494) {}))
-                          map__22494)
-             aevt_total (get map__22494 :aevt-total)
-             avet_total (get map__22494 :avet-total)]
-         (= aevt_total avet_total)))))
+  (defn aevt-avet-stats-consistent?
+    ([p__22493]
+      (let [map__22494 p__22493
+            map__22494 (if (seq? map__22494)
+                         (if (next map__22494)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22494))
+                           (if (seq map__22494) (first map__22494) {}))
+                         map__22494)
+            aevt_total (get map__22494 :aevt-total)
+            avet_total (get map__22494 :avet-total)]
+        (= aevt_total avet_total))))
   (reset-meta!
     #'aevt-avet-stats-consistent?
     (assoc
@@ -3117,13 +3063,12 @@
     (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'validate-all :ns *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.integrity" "diagnostics") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.integrity" "diagnostics") tools/diagnostics)
-  (def describe-segment
-   (fn describe_segment
-     ([uri segment_id]
-       (let [uri (enhance-uri uri)
-             cr (tools/connection-resources uri)
-             buf (:buf (deref (cluster/get-val (:cluster cr) (str segment_id))))]
-         (dio/describe-bbuf buf)))))
+  (defn describe-segment
+    ([uri segment_id]
+      (let [uri (enhance-uri uri)
+            cr (tools/connection-resources uri)
+            buf (:buf (deref (cluster/get-val (:cluster cr) (str segment_id))))]
+        (dio/describe-bbuf buf))))
   (reset-meta!
     #'describe-segment
     (assoc
@@ -3435,130 +3380,129 @@
   (reset-meta!
     #'index-sort-root-keys
     (assoc {:column (int 1)} :name 'index-sort-root-keys :ns *ns*))
-  (def -main*
-   (fn _main_STAR_
-     ([p__22563]
-       (let [map__22564 p__22563
-             map__22564 (if (seq? map__22564)
-                          (if (next map__22564)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__22564))
-                            (if (seq map__22564) (first map__22564) {}))
-                          map__22564)
-             uri (get map__22564 :uri)
-             validate (get map__22564 :validate)]
-         (let [uri (enhance-uri uri)]
-           (println "\nDiagnostics:")
-           (pp/pprint
-             (try
-               (diagnostics uri)
-               (catch
-                 java.lang.Throwable
-                 t__22560__auto__
-                 (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
-         (when validate
-           (let [uri (enhance-uri uri)]
-             (println
-               (str
-                 "\nValidating database at "
-                 uri
-                 ".\nThis read-only process will read every segment of the database,\nreporting data to stdout and stacktraces to stderr.\nValidation can take a long time!"))
-             (println "\nMissing log tail identities:")
-             (prn
-               (seq
-                 (try
-                   (filter
-                     (fn fn__22568 ([p1__22562#] (= 1 (long (count p1__22562#)))))
-                     (pod-storage-seq uri))
-                   (catch
-                     java.lang.Throwable
-                     t__22560__auto__
-                     (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
-             (println "\nMissing log segments: ")
-             (prn
-               (seq
-                 (try
-                   (remove :seg (log-storage-seq uri))
-                   (catch
-                     java.lang.Throwable
-                     t__22560__auto__
-                     (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
-             (loop [seq_22573 (seq index-sort-root-keys) chunk_22574 nil count_22575 0 i_22576 0]
-               (if (< i_22576 count_22575)
-                 (let [k (.nth ^clojure.lang.Indexed chunk_22574 (int i_22576))]
-                   (println "\nMissing segments in " k)
-                   (prn
-                     (seq
-                       (try
-                         (remove :seg (index-storage-seq uri k))
-                         (catch
-                           java.lang.Throwable
-                           t__22560__auto__
-                           (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
-                   (recur seq_22573 chunk_22574 count_22575 (inc i_22576)))
-                 (let [temp__5804__auto__ (seq seq_22573)]
-                   (when temp__5804__auto__
-                     (let [seq_22573 temp__5804__auto__]
-                       (if (chunked-seq? seq_22573)
-                         (let [c__6065__auto__ (chunk-first seq_22573)]
-                           (recur
-                             (chunk-rest seq_22573)
-                             c__6065__auto__
-                             (int (count c__6065__auto__))
-                             (int 0)))
-                         (let [k (first seq_22573)]
-                           (println "\nMissing segments in " k)
-                           (prn
-                             (seq
-                               (try
-                                 (remove :seg (index-storage-seq uri k))
-                                 (catch
-                                   java.lang.Throwable
-                                   t__22560__auto__
-                                   (do
-                                     (.printStackTrace ^java.lang.Throwable t__22560__auto__)
-                                     nil)))))
-                           (recur (next seq_22573) nil 0 0))))))))
-             (loop [seq_22581 (seq [:fulltext :fulltext-hist])
-                    chunk_22582 nil
-                    count_22583 0
-                    i_22584 0]
-               (if (< i_22584 count_22583)
-                 (let [k (.nth ^clojure.lang.Indexed chunk_22582 (int i_22584))]
-                   (println "\nMissing segments in " k)
-                   (prn
-                     (seq
-                       (try
-                         (remove :seg (fulltext-storage-seq uri k))
-                         (catch
-                           java.lang.Throwable
-                           t__22560__auto__
-                           (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
-                   (recur seq_22581 chunk_22582 count_22583 (inc i_22584)))
-                 (let [temp__5804__auto__ (seq seq_22581)]
-                   (when temp__5804__auto__
-                     (let [seq_22581 temp__5804__auto__]
-                       (if (chunked-seq? seq_22581)
-                         (let [c__6065__auto__ (chunk-first seq_22581)]
-                           (recur
-                             (chunk-rest seq_22581)
-                             c__6065__auto__
-                             (int (count c__6065__auto__))
-                             (int 0)))
-                         (let [k (first seq_22581)]
-                           (println "\nMissing segments in " k)
-                           (prn
-                             (seq
-                               (try
-                                 (remove :seg (fulltext-storage-seq uri k))
-                                 (catch
-                                   java.lang.Throwable
-                                   t__22560__auto__
-                                   (do
-                                     (.printStackTrace ^java.lang.Throwable t__22560__auto__)
-                                     nil)))))
-                           (recur (next seq_22581) nil 0 0))))))))
-             (println "\nDone!")))))))
+  (defn -main*
+    ([p__22563]
+      (let [map__22564 p__22563
+            map__22564 (if (seq? map__22564)
+                         (if (next map__22564)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__22564))
+                           (if (seq map__22564) (first map__22564) {}))
+                         map__22564)
+            uri (get map__22564 :uri)
+            validate (get map__22564 :validate)]
+        (let [uri (enhance-uri uri)]
+          (println "\nDiagnostics:")
+          (pp/pprint
+            (try
+              (diagnostics uri)
+              (catch
+                java.lang.Throwable
+                t__22560__auto__
+                (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
+        (when validate
+          (let [uri (enhance-uri uri)]
+            (println
+              (str
+                "\nValidating database at "
+                uri
+                ".\nThis read-only process will read every segment of the database,\nreporting data to stdout and stacktraces to stderr.\nValidation can take a long time!"))
+            (println "\nMissing log tail identities:")
+            (prn
+              (seq
+                (try
+                  (filter
+                    (fn fn__22568 ([p1__22562#] (= 1 (long (count p1__22562#)))))
+                    (pod-storage-seq uri))
+                  (catch
+                    java.lang.Throwable
+                    t__22560__auto__
+                    (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
+            (println "\nMissing log segments: ")
+            (prn
+              (seq
+                (try
+                  (remove :seg (log-storage-seq uri))
+                  (catch
+                    java.lang.Throwable
+                    t__22560__auto__
+                    (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
+            (loop [seq_22573 (seq index-sort-root-keys) chunk_22574 nil count_22575 0 i_22576 0]
+              (if (< i_22576 count_22575)
+                (let [k (.nth ^clojure.lang.Indexed chunk_22574 (int i_22576))]
+                  (println "\nMissing segments in " k)
+                  (prn
+                    (seq
+                      (try
+                        (remove :seg (index-storage-seq uri k))
+                        (catch
+                          java.lang.Throwable
+                          t__22560__auto__
+                          (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
+                  (recur seq_22573 chunk_22574 count_22575 (inc i_22576)))
+                (let [temp__5804__auto__ (seq seq_22573)]
+                  (when temp__5804__auto__
+                    (let [seq_22573 temp__5804__auto__]
+                      (if (chunked-seq? seq_22573)
+                        (let [c__6065__auto__ (chunk-first seq_22573)]
+                          (recur
+                            (chunk-rest seq_22573)
+                            c__6065__auto__
+                            (int (count c__6065__auto__))
+                            (int 0)))
+                        (let [k (first seq_22573)]
+                          (println "\nMissing segments in " k)
+                          (prn
+                            (seq
+                              (try
+                                (remove :seg (index-storage-seq uri k))
+                                (catch
+                                  java.lang.Throwable
+                                  t__22560__auto__
+                                  (do
+                                    (.printStackTrace ^java.lang.Throwable t__22560__auto__)
+                                    nil)))))
+                          (recur (next seq_22573) nil 0 0))))))))
+            (loop [seq_22581 (seq [:fulltext :fulltext-hist])
+                   chunk_22582 nil
+                   count_22583 0
+                   i_22584 0]
+              (if (< i_22584 count_22583)
+                (let [k (.nth ^clojure.lang.Indexed chunk_22582 (int i_22584))]
+                  (println "\nMissing segments in " k)
+                  (prn
+                    (seq
+                      (try
+                        (remove :seg (fulltext-storage-seq uri k))
+                        (catch
+                          java.lang.Throwable
+                          t__22560__auto__
+                          (do (.printStackTrace ^java.lang.Throwable t__22560__auto__) nil)))))
+                  (recur seq_22581 chunk_22582 count_22583 (inc i_22584)))
+                (let [temp__5804__auto__ (seq seq_22581)]
+                  (when temp__5804__auto__
+                    (let [seq_22581 temp__5804__auto__]
+                      (if (chunked-seq? seq_22581)
+                        (let [c__6065__auto__ (chunk-first seq_22581)]
+                          (recur
+                            (chunk-rest seq_22581)
+                            c__6065__auto__
+                            (int (count c__6065__auto__))
+                            (int 0)))
+                        (let [k (first seq_22581)]
+                          (println "\nMissing segments in " k)
+                          (prn
+                            (seq
+                              (try
+                                (remove :seg (fulltext-storage-seq uri k))
+                                (catch
+                                  java.lang.Throwable
+                                  t__22560__auto__
+                                  (do
+                                    (.printStackTrace ^java.lang.Throwable t__22560__auto__)
+                                    nil)))))
+                          (recur (next seq_22581) nil 0 0))))))))
+            (println "\nDone!"))))))
   (reset-meta!
     #'-main*
     (assoc

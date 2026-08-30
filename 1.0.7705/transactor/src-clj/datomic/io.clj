@@ -65,7 +65,7 @@
         (clojure.core/import 'java.util.zip.GZIPInputStream)
         (clojure.core/import 'java.util.zip.GZIPOutputStream))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       ByteSource
       (slurp-bytes
@@ -73,8 +73,8 @@
         "Returns copy unless owner always treats arrays as values. Does not consume owner."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.io" "ByteSource")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'ByteSource :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'ByteSource :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -85,12 +85,12 @@
                                       "Returns copy unless owner always treats arrays as values. Does not consume owner."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.io" "ByteSource"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.io" "slurp-bytes")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend
     java.nio.ByteBuffer
     ByteSource
@@ -102,12 +102,12 @@
                bytes (byte-array (java.lang.Integer/valueOf (int n)))]
            (.get ^java.nio.ByteBuffer buff ^bytes bytes)
            bytes)))})
-  (let [protocol_metadata__7434 {:column (int 1)}]
+  (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol Coercions (as-uri ^URI [x] "Coerce argument to a URI"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.io" "Coercions")
-      (assoc (assoc protocol_metadata__7434 :doc nil) :name 'Coercions :ns *ns*))
-    (let [protocol_signature__7435 (assoc
+      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'Coercions :ns *ns*))
+    (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -118,12 +118,12 @@
                                       :doc "Coerce argument to a URI"}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.io" "Coercions"))
-          protocol_method_name__7436 (with-meta
-                                       (:name protocol_signature__7435)
-                                       protocol_signature__7435)]
+          protocol_method_name__7468 (with-meta
+                                       (:name protocol_signature__7467)
+                                       protocol_signature__7467)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.io" "as-uri")
-        (assoc protocol_signature__7435 :name protocol_method_name__7436 :ns *ns*))))
+        (assoc protocol_signature__7467 :name protocol_method_name__7468 :ns *ns*))))
   (extend nil Coercions {:as-uri (fn fn__9486 ([s] nil))})
   (extend
     java.lang.String
@@ -140,16 +140,15 @@
       'byte-source->buffer
       :ns
       *ns*))
-  (def alias-buf-bytes
-   (fn alias_buf_bytes
-     ([buff]
-       (if (and
-             (.hasArray ^java.nio.ByteBuffer buff)
-             (=
-               (long (.remaining ^java.nio.Buffer buff))
-               (long (alength (.array ^java.nio.ByteBuffer buff)))))
-         (.array ^java.nio.ByteBuffer buff)
-         (slurp-bytes buff)))))
+  (defn alias-buf-bytes
+    ([buff]
+      (if (and
+            (.hasArray ^java.nio.ByteBuffer buff)
+            (=
+              (long (.remaining ^java.nio.Buffer buff))
+              (long (alength (.array ^java.nio.ByteBuffer buff)))))
+        (.array ^java.nio.ByteBuffer buff)
+        (slurp-bytes buff))))
   (reset-meta!
     #'alias-buf-bytes
     (assoc
@@ -158,8 +157,7 @@
       'alias-buf-bytes
       :ns
       *ns*))
-  (def string->bbuf
-   (fn string__GT_bbuf ([s] (ByteBuffer/wrap (.getBytes ^java.lang.String s "UTF-8")))))
+  (defn string->bbuf ([s] (ByteBuffer/wrap (.getBytes ^java.lang.String s "UTF-8"))))
   (reset-meta!
     #'string->bbuf
     (assoc
@@ -168,7 +166,7 @@
       'string->bbuf
       :ns
       *ns*))
-  (def bbuf->string (fn bbuf__GT_string ([bb] (java.lang.String. (alias-buf-bytes bb) "UTF-8"))))
+  (defn bbuf->string ([bb] (java.lang.String. (alias-buf-bytes bb) "UTF-8")))
   (reset-meta!
     #'bbuf->string
     (assoc
@@ -177,19 +175,18 @@
       'bbuf->string
       :ns
       *ns*))
-  (def expand-byte-array
-   (fn expand_byte_array
-     ([buf valid_bytes new_length]
-       (if (<= new_length (count buf))
-         buf
-         (let [expanded_buf (byte-array (max new_length (* 2 (count buf))))]
-           (java.lang.System/arraycopy
-             buf
-             (int 0)
-             expanded_buf
-             (int 0)
-             (int ^java.lang.Number valid_bytes))
-           expanded_buf)))))
+  (defn expand-byte-array
+    ([buf valid_bytes new_length]
+      (if (<= new_length (count buf))
+        buf
+        (let [expanded_buf (byte-array (max new_length (* 2 (count buf))))]
+          (java.lang.System/arraycopy
+            buf
+            (int 0)
+            expanded_buf
+            (int 0)
+            (int ^java.lang.Number valid_bytes))
+          expanded_buf))))
   (reset-meta!
     #'expand-byte-array
     (assoc
@@ -198,15 +195,14 @@
       'expand-byte-array
       :ns
       *ns*))
-  (def fill-array
-   (fn fill_array
-     ([is ba]
-       (let [len (alength ^bytes ba)]
-         (loop [n 0]
-           (when-not (= n len)
-             (let [r (.read ^java.io.InputStream is ^bytes ba (int n) (int (- len n)))]
-               (when (= -1 r) (throw (java.lang.Exception. "Premature EOS")))
-               (recur (+ n r)))))))))
+  (defn fill-array
+    ([is ba]
+      (let [len (alength ^bytes ba)]
+        (loop [n 0]
+          (when-not (= n len)
+            (let [r (.read ^java.io.InputStream is ^bytes ba (int n) (int (- len n)))]
+              (when (= -1 r) (throw (java.lang.Exception. "Premature EOS")))
+              (recur (+ n r))))))))
   (reset-meta!
     #'fill-array
     (assoc
@@ -228,16 +224,15 @@
           (jio/make-input-stream
             (org.fressian.impl.ByteBufferInputStream. ^java.nio.ByteBuffer x)
             opts)))))
-  (def fill-buffer
-   (fn fill_buffer
-     ([is bb]
-       (loop [more (.hasRemaining ^java.nio.Buffer bb)]
-         (when more
-           (let [n (.read ^java.io.InputStream is)]
-             (when (= -1 n) (throw (java.lang.Exception. "Premature EOS")))
-             (.put ^java.nio.ByteBuffer bb (unchecked-byte n))
-             (recur (.hasRemaining ^java.nio.Buffer bb)))))
-       (.flip ^java.nio.ByteBuffer bb))))
+  (defn fill-buffer
+    ([is bb]
+      (loop [more (.hasRemaining ^java.nio.Buffer bb)]
+        (when more
+          (let [n (.read ^java.io.InputStream is)]
+            (when (= -1 n) (throw (java.lang.Exception. "Premature EOS")))
+            (.put ^java.nio.ByteBuffer bb (unchecked-byte n))
+            (recur (.hasRemaining ^java.nio.Buffer bb)))))
+      (.flip ^java.nio.ByteBuffer bb)))
   (reset-meta!
     #'fill-buffer
     (assoc
@@ -349,8 +344,7 @@
           (.internalBuffer ^org.fressian.impl.BytesOutputStream stream)
           (int 0)
           (int (.length ^org.fressian.impl.BytesOutputStream stream))))))
-  (def limit
-   (fn limit ([buf ^long limit] (.limit (.duplicate ^java.nio.ByteBuffer buf) (int limit)))))
+  (defn limit ([buf ^long limit] (.limit (.duplicate ^java.nio.ByteBuffer buf) (int limit))))
   (reset-meta!
     #'limit
     (assoc
@@ -364,7 +358,7 @@
       'limit
       :ns
       *ns*))
-  (def remaining (fn remaining (^long [bb] (.remaining ^java.nio.Buffer bb))))
+  (defn remaining (^long [bb] (.remaining ^java.nio.Buffer bb)))
   (reset-meta!
     #'remaining
     (assoc
@@ -374,7 +368,7 @@
       'remaining
       :ns
       *ns*))
-  (def position (fn position (^long [bb] (.position ^java.nio.Buffer bb))))
+  (defn position (^long [bb] (.position ^java.nio.Buffer bb)))
   (reset-meta!
     #'position
     (assoc
@@ -384,11 +378,10 @@
       'position
       :ns
       *ns*))
-  (def seek
-   (fn seek
-     ([buf ^long n]
-       (let [pos (.position ^java.nio.Buffer buf)]
-         (.position (.duplicate ^java.nio.ByteBuffer buf) (int (+ n pos)))))))
+  (defn seek
+    ([buf ^long n]
+      (let [pos (.position ^java.nio.Buffer buf)]
+        (.position (.duplicate ^java.nio.ByteBuffer buf) (int (+ n pos))))))
   (reset-meta!
     #'seek
     (assoc
@@ -402,29 +395,26 @@
       'seek
       :ns
       *ns*))
-  (def chunk
-   (fn chunk
-     ([buf chunk_size]
-       (when-not (integer? chunk_size)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'integer? 'chunk-size))))))
-       (when-not (clojure.lang.Numbers/isPos chunk_size)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list 'pos? 'chunk-size))))))
-       (loop [buf (.duplicate ^java.nio.ByteBuffer buf) chunks []]
-         (cond
-           (= (.remaining ^java.nio.Buffer buf) 0) chunks
-           (< (.remaining ^java.nio.Buffer buf) chunk_size) (conj chunks buf)
-           :default (do
-                      (recur
-                        (seek buf (long ^java.lang.Number chunk_size))
-                        (conj
-                          chunks
-                          (limit
-                            buf
-                            (long (+ (.position ^java.nio.Buffer buf) chunk_size)))))))))))
+  (defn chunk
+    ([buf chunk_size]
+      (when-not (integer? chunk_size)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'integer? 'chunk-size))))))
+      (when-not (clojure.lang.Numbers/isPos chunk_size)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list 'pos? 'chunk-size))))))
+      (loop [buf (.duplicate ^java.nio.ByteBuffer buf) chunks []]
+        (cond
+          (= (.remaining ^java.nio.Buffer buf) 0) chunks
+          (< (.remaining ^java.nio.Buffer buf) chunk_size) (conj chunks buf)
+          :default (do
+                     (recur
+                       (seek buf (long ^java.lang.Number chunk_size))
+                       (conj
+                         chunks
+                         (limit buf (long (+ (.position ^java.nio.Buffer buf) chunk_size))))))))))
   (reset-meta!
     #'chunk
     (assoc
@@ -440,38 +430,37 @@
       'chunk
       :ns
       *ns*))
-  (def unchunk
-   (fn unchunk
-     ([bbufs]
-       (let [result (ByteBuffer/allocate
-                      (int
-                        (apply
-                          +
-                          (map
-                            (fn fn__9518
-                              ([p1__9517#]
-                                (java.lang.Integer/valueOf
-                                  (int (.remaining ^java.nio.Buffer p1__9517#)))))
-                            bbufs))))]
-         (loop [seq_9520 (seq bbufs) chunk_9521 nil count_9522 0 i_9523 0]
-           (if (< i_9523 count_9522)
-             (let [bbuf (.nth ^clojure.lang.Indexed chunk_9521 (int i_9523))]
-               (.put ^java.nio.ByteBuffer result (.duplicate ^java.nio.ByteBuffer bbuf))
-               (recur seq_9520 chunk_9521 count_9522 (inc i_9523)))
-             (let [temp__5825__auto__ (seq seq_9520)]
-               (when temp__5825__auto__
-                 (let [seq_9520 temp__5825__auto__]
-                   (if (chunked-seq? seq_9520)
-                     (let [c__6090__auto__ (chunk-first seq_9520)]
-                       (recur
-                         (chunk-rest seq_9520)
-                         c__6090__auto__
-                         (int (count c__6090__auto__))
-                         (int 0)))
-                     (let [bbuf (first seq_9520)]
-                       (.put ^java.nio.ByteBuffer result (.duplicate ^java.nio.ByteBuffer bbuf))
-                       (recur (next seq_9520) nil 0 0))))))))
-         (.flip ^java.nio.ByteBuffer result)))))
+  (defn unchunk
+    ([bbufs]
+      (let [result (ByteBuffer/allocate
+                     (int
+                       (apply
+                         +
+                         (map
+                           (fn fn__9518
+                             ([p1__9517#]
+                               (java.lang.Integer/valueOf
+                                 (int (.remaining ^java.nio.Buffer p1__9517#)))))
+                           bbufs))))]
+        (loop [seq_9520 (seq bbufs) chunk_9521 nil count_9522 0 i_9523 0]
+          (if (< i_9523 count_9522)
+            (let [bbuf (.nth ^clojure.lang.Indexed chunk_9521 (int i_9523))]
+              (.put ^java.nio.ByteBuffer result (.duplicate ^java.nio.ByteBuffer bbuf))
+              (recur seq_9520 chunk_9521 count_9522 (inc i_9523)))
+            (let [temp__5825__auto__ (seq seq_9520)]
+              (when temp__5825__auto__
+                (let [seq_9520 temp__5825__auto__]
+                  (if (chunked-seq? seq_9520)
+                    (let [c__6090__auto__ (chunk-first seq_9520)]
+                      (recur
+                        (chunk-rest seq_9520)
+                        c__6090__auto__
+                        (int (count c__6090__auto__))
+                        (int 0)))
+                    (let [bbuf (first seq_9520)]
+                      (.put ^java.nio.ByteBuffer result (.duplicate ^java.nio.ByteBuffer bbuf))
+                      (recur (next seq_9520) nil 0 0))))))))
+        (.flip ^java.nio.ByteBuffer result))))
   (reset-meta!
     #'unchunk
     (assoc
@@ -536,15 +525,14 @@
                           (.write ^java.io.ByteArrayOutputStream os ^bytes bytes (int 0) (int n))
                           (recur))))
                     (bytestream->buf os))))))))))
-  (def byte-buffer-seq
-   (fn byte_buffer_seq
-     ([bb]
-       (lazy-seq
-         (when (.hasRemaining ^java.nio.Buffer bb)
-           (let [next_slice (.slice ^java.nio.ByteBuffer bb)]
-             (cons
-               (java.lang.Byte/valueOf (byte (.get ^java.nio.ByteBuffer next_slice)))
-               (byte-buffer-seq next_slice))))))))
+  (defn byte-buffer-seq
+    ([bb]
+      (lazy-seq
+        (when (.hasRemaining ^java.nio.Buffer bb)
+          (let [next_slice (.slice ^java.nio.ByteBuffer bb)]
+            (cons
+              (java.lang.Byte/valueOf (byte (.get ^java.nio.ByteBuffer next_slice)))
+              (byte-buffer-seq next_slice)))))))
   (reset-meta!
     #'byte-buffer-seq
     (assoc
@@ -586,10 +574,9 @@
   (reset-meta!
     #'bbuf->clj
     (assoc {:arglists (clojure.core/list ['bbuf]), :column (int 1)} :name 'bbuf->clj :ns *ns*))
-  (def valid-buf-limit?
-   (fn valid_buf_limit_QMARK_
-     ([bbuf limit]
-       (<= 0 limit (java.lang.Integer/valueOf (int (.capacity ^java.nio.Buffer bbuf)))))))
+  (defn valid-buf-limit?
+    ([bbuf limit]
+      (<= 0 limit (java.lang.Integer/valueOf (int (.capacity ^java.nio.Buffer bbuf))))))
   (reset-meta!
     #'valid-buf-limit?
     (assoc
@@ -598,7 +585,7 @@
       'valid-buf-limit?
       :ns
       *ns*))
-  (def encode-base128 (fn encode_base128 ([raw] (JavaByteUtil/to7Bit ^bytes raw))))
+  (defn encode-base128 ([raw] (JavaByteUtil/to7Bit ^bytes raw)))
   (reset-meta!
     #'encode-base128
     (assoc
@@ -620,11 +607,10 @@
   (reset-meta!
     #'bbuf->base128
     (assoc {:arglists (clojure.core/list ['bbuf]), :column (int 1)} :name 'bbuf->base128 :ns *ns*))
-  (def base128->bbuf
-   (fn base128__GT_bbuf
-     ([s]
-       (let [bytes (decode-base128 (.getBytes ^java.lang.String s "UTF-8"))]
-         (ByteBuffer/wrap ^bytes bytes)))))
+  (defn base128->bbuf
+    ([s]
+      (let [bytes (decode-base128 (.getBytes ^java.lang.String s "UTF-8"))]
+        (ByteBuffer/wrap ^bytes bytes))))
   (reset-meta!
     #'base128->bbuf
     (assoc
@@ -633,15 +619,14 @@
       'base128->bbuf
       :ns
       *ns*))
-  (def read-all
-   (fn read_all
-     ([src]
-       (with-open [src src]
-         (let [reader (java.io.PushbackReader. ^java.io.Reader src)]
-           (binding [*read-eval* false]
-             (loop [tv (transient [])]
-               (let [form (read reader false tv)]
-                 (if (identical? tv form) (persistent! tv) (recur (conj! tv form)))))))))))
+  (defn read-all
+    ([src]
+      (with-open [src src]
+        (let [reader (java.io.PushbackReader. ^java.io.Reader src)]
+          (binding [*read-eval* false]
+            (loop [tv (transient [])]
+              (let [form (read reader false tv)]
+                (if (identical? tv form) (persistent! tv) (recur (conj! tv form))))))))))
   (reset-meta!
     #'read-all
     (assoc
@@ -657,18 +642,17 @@
   (reset-meta!
     #'context-resource
     (assoc {:arglists (clojure.core/list ['r]), :column (int 1)} :name 'context-resource :ns *ns*))
-  (def read-into-buffer
-   (fn read_into_buffer
-     ([bb n rc]
-       (.limit (.clear ^java.nio.ByteBuffer bb) (int n))
-       (loop [more (.hasRemaining ^java.nio.Buffer bb)]
-         (when more
-           (let [n (.read ^java.nio.channels.ReadableByteChannel rc ^java.nio.ByteBuffer bb)
-                 more (.hasRemaining ^java.nio.Buffer bb)]
-             (when (and more (= -1 (long n)))
-               (throw (java.io.IOException. "Premature EOS, presumed disconnect")))
-             (recur more))))
-       (.flip ^java.nio.ByteBuffer bb))))
+  (defn read-into-buffer
+    ([bb n rc]
+      (.limit (.clear ^java.nio.ByteBuffer bb) (int n))
+      (loop [more (.hasRemaining ^java.nio.Buffer bb)]
+        (when more
+          (let [n (.read ^java.nio.channels.ReadableByteChannel rc ^java.nio.ByteBuffer bb)
+                more (.hasRemaining ^java.nio.Buffer bb)]
+            (when (and more (= -1 (long n)))
+              (throw (java.io.IOException. "Premature EOS, presumed disconnect")))
+            (recur more))))
+      (.flip ^java.nio.ByteBuffer bb)))
   (reset-meta!
     #'read-into-buffer
     (assoc
@@ -700,13 +684,12 @@
       ([n rc]
         (let [bb (ByteBuffer/allocateDirect (int ^java.lang.Number n))]
           (read-into-buffer bb n rc)))))
-  (def write-buffer
-   (fn write_buffer
-     ([bb wc]
-       (loop [more (.hasRemaining ^java.nio.Buffer bb)]
-         (when more
-           (.write ^java.nio.channels.WritableByteChannel wc ^java.nio.ByteBuffer bb)
-           (recur (.hasRemaining ^java.nio.Buffer bb)))))))
+  (defn write-buffer
+    ([bb wc]
+      (loop [more (.hasRemaining ^java.nio.Buffer bb)]
+        (when more
+          (.write ^java.nio.channels.WritableByteChannel wc ^java.nio.ByteBuffer bb)
+          (recur (.hasRemaining ^java.nio.Buffer bb))))))
   (reset-meta!
     #'write-buffer
     (assoc
@@ -737,12 +720,11 @@
   (reset-meta!
     #'crc32
     (assoc {:arglists (clojure.core/list ['bbuf]), :column (int 1)} :name 'crc32 :ns *ns*))
-  (def describe-bbuf
-   (fn describe_bbuf
-     ([bbuf]
-       (when (instance? java.nio.ByteBuffer bbuf)
-         {:crc32 (crc32 bbuf),
-          :size (java.lang.Integer/valueOf (int (.remaining ^java.nio.Buffer bbuf)))}))))
+  (defn describe-bbuf
+    ([bbuf]
+      (when (instance? java.nio.ByteBuffer bbuf)
+        {:crc32 (crc32 bbuf),
+         :size (java.lang.Integer/valueOf (int (.remaining ^java.nio.Buffer bbuf)))})))
   (reset-meta!
     #'describe-bbuf
     (assoc

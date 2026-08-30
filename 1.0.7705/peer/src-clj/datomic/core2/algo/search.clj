@@ -12,23 +12,22 @@
         (clojure.core/refer 'clojure.core)
         (clojure.core/import 'java.util.Collections)
         (clojure.core/import 'java.util.Comparator))))
-  (def fn-comparator
-   (fn fn_comparator
-     ([f comp]
-       (reify
-         java.util.Comparator
-         (^int compare
-           [this o1 o2]
-           (.compare
-             ^java.util.Comparator comp
-             (^clojure.lang.IFn f o1)
-             (^clojure.lang.IFn f o2)))))
-     ([f]
-       (reify
-         java.util.Comparator
-         (^int compare
-           [this o1 o2]
-           (.compareTo (^clojure.lang.IFn f o1) (^clojure.lang.IFn f o2)))))))
+  (defn fn-comparator
+    ([f comp]
+      (reify
+        java.util.Comparator
+        (^int compare
+          [this o1 o2]
+          (.compare
+            ^java.util.Comparator comp
+            (^clojure.lang.IFn f o1)
+            (^clojure.lang.IFn f o2)))))
+    ([f]
+      (reify
+        java.util.Comparator
+        (^int compare
+          [this o1 o2]
+          (.compareTo (^clojure.lang.IFn f o1) (^clojure.lang.IFn f o2))))))
   (reset-meta!
     #'fn-comparator
     (assoc

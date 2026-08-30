@@ -22,29 +22,28 @@
           ['datomic.common :as 'common]
           ['clojure.edn :as 'edn]
           ['clojure.set :as 'set]))))
-  (def mapq->listq
-   (fn mapq__GT_listq
-     ([p__19471]
-       (let [map__19472 p__19471
-             map__19472 (if (seq? map__19472)
-                          (if (next map__19472)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__19472))
-                            (if (seq map__19472) (first map__19472) {}))
-                          map__19472)
-             find (get map__19472 :find)
-             with (get map__19472 :with)
-             in (get map__19472 :in)
-             where (get map__19472 :where)
-             timeout (get map__19472 :timeout)
-             G__19473 []
-             G__19473 (if find (into (conj G__19473 :find) find) G__19473)
-             G__19473 (if with (into (conj G__19473 :with) with) G__19473)
-             G__19473 (if in (into (conj G__19473 :in) in) G__19473)]
-         (cond->
-           (if where (into (conj G__19473 :where) where) G__19473)
-           timeout
-           (conj :timeout (first timeout)))))))
+  (defn mapq->listq
+    ([p__19471]
+      (let [map__19472 p__19471
+            map__19472 (if (seq? map__19472)
+                         (if (next map__19472)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__19472))
+                           (if (seq map__19472) (first map__19472) {}))
+                         map__19472)
+            find (get map__19472 :find)
+            with (get map__19472 :with)
+            in (get map__19472 :in)
+            where (get map__19472 :where)
+            timeout (get map__19472 :timeout)
+            G__19473 []
+            G__19473 (if find (into (conj G__19473 :find) find) G__19473)
+            G__19473 (if with (into (conj G__19473 :with) with) G__19473)
+            G__19473 (if in (into (conj G__19473 :in) in) G__19473)]
+        (cond->
+          (if where (into (conj G__19473 :where) where) G__19473)
+          timeout
+          (conj :timeout (first timeout))))))
   (reset-meta!
     #'mapq->listq
     (assoc
@@ -75,21 +74,20 @@
   (reset-meta!
     #'cbinds
     (assoc {:arglists (clojure.core/list ['c]), :column (int 1)} :name 'cbinds :ns *ns*))
-  (def partial-query
-   (fn partial_query
-     ([qmap preds clauses clause rclauses allow_cross]
-       (let [bindings (into #{} (mapcat cbinds clauses))
-             fxp? (fn fxp_QMARK_ ([p1__19477#] (instance? java.util.List (first p1__19477#))))]
-         (when (if (^clojure.lang.IFn fxp? clause)
-                 (every? bindings (cvars clause))
-                 (or allow_cross (some bindings (cvars clause))))
-           (let [bindings (into bindings (cbinds clause))
-                 remvars (into (set (:find qmap)) (mapcat cvars rclauses))
-                 next_find (vec (set/intersection bindings remvars))
-                 next_preds (filter
-                              (fn fn__19481 ([p1__19478#] (every? bindings (cvars p1__19478#))))
-                              preds)]
-             {:find next_find, :in (:in qmap), :where (concat clauses [clause] next_preds)}))))))
+  (defn partial-query
+    ([qmap preds clauses clause rclauses allow_cross]
+      (let [bindings (into #{} (mapcat cbinds clauses))
+            fxp? (fn fxp_QMARK_ ([p1__19477#] (instance? java.util.List (first p1__19477#))))]
+        (when (if (^clojure.lang.IFn fxp? clause)
+                (every? bindings (cvars clause))
+                (or allow_cross (some bindings (cvars clause))))
+          (let [bindings (into bindings (cbinds clause))
+                remvars (into (set (:find qmap)) (mapcat cvars rclauses))
+                next_find (vec (set/intersection bindings remvars))
+                next_preds (filter
+                             (fn fn__19481 ([p1__19478#] (every? bindings (cvars p1__19478#))))
+                             preds)]
+            {:find next_find, :in (:in qmap), :where (concat clauses [clause] next_preds)})))))
   (reset-meta!
     #'partial-query
     (assoc
@@ -99,22 +97,21 @@
       'partial-query
       :ns
       *ns*))
-  (def partial-queries
-   (fn partial_queries
-     ([query preds clauses rclauses allow_cross]
-       (reduce
-         (fn fn__19485
-           ([m c]
-             (let [temp__5802__auto__ (partial-query
-                                        query
-                                        preds
-                                        clauses
-                                        c
-                                        (disj rclauses c)
-                                        allow_cross)]
-               (if temp__5802__auto__ (let [q temp__5802__auto__] (assoc m c q)) m))))
-         {}
-         rclauses))))
+  (defn partial-queries
+    ([query preds clauses rclauses allow_cross]
+      (reduce
+        (fn fn__19485
+          ([m c]
+            (let [temp__5802__auto__ (partial-query
+                                       query
+                                       preds
+                                       clauses
+                                       c
+                                       (disj rclauses c)
+                                       allow_cross)]
+              (if temp__5802__auto__ (let [q temp__5802__auto__] (assoc m c q)) m))))
+        {}
+        rclauses)))
   (reset-meta!
     #'partial-queries
     (assoc

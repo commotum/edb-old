@@ -24,12 +24,12 @@
         (clojure.core/import 'java.util.concurrent.atomic.LongAccumulator)
         (clojure.core/import 'java.util.concurrent.atomic.LongAdder))))
   (set! *warn-on-reflection* true)
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Metrics (metrics [_] "Return a map of metrics information about an object."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.monitor" "Metrics")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Metrics :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Metrics :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'metrics {:arglists (clojure.core/list ['_])}),
@@ -37,12 +37,12 @@
                                       :doc "Return a map of metrics information about an object."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.monitor" "Metrics"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.monitor" "metrics")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*))))
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend
     java.lang.Runtime
     Metrics
@@ -210,20 +210,19 @@
       'snapshot-statistics
       :ns
       *ns*))
-  (def load-callback
-   (fn load_callback
-     ([prop_name]
-       (let [temp__5804__auto__ (some->
-                                  (java.lang.System/getProperty ^java.lang.String prop_name)
-                                  (edn/read-string))]
-         (when temp__5804__auto__
-           (let [s temp__5804__auto__]
-             (when (symbol? s)
-               (let [temp__5804__auto__ (namespace s)]
-                 (when temp__5804__auto__
-                   (let [ns temp__5804__auto__]
-                     (clojure.core/require (symbol ns))
-                     (deref (resolve s))))))))))))
+  (defn load-callback
+    ([prop_name]
+      (let [temp__5804__auto__ (some->
+                                 (java.lang.System/getProperty ^java.lang.String prop_name)
+                                 (edn/read-string))]
+        (when temp__5804__auto__
+          (let [s temp__5804__auto__]
+            (when (symbol? s)
+              (let [temp__5804__auto__ (namespace s)]
+                (when temp__5804__auto__
+                  (let [ns temp__5804__auto__]
+                    (clojure.core/require (symbol ns))
+                    (deref (resolve s)))))))))))
   (reset-meta!
     #'load-callback
     (assoc
@@ -245,7 +244,7 @@
   (reset-meta!
     #'add-stat
     (assoc {:arglists (clojure.core/list ['k 'val]), :column (int 1)} :name 'add-stat :ns *ns*))
-  (def ns->ms (fn ns__GT_ms (^double [^long nanos] (/ (quot nanos 10000) 100.0))))
+  (defn ns->ms (^double [^long nanos] (/ (quot nanos 10000) 100.0)))
   (reset-meta!
     #'ns->ms
     (assoc

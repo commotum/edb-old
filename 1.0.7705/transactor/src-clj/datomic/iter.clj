@@ -38,7 +38,7 @@
   (reset-meta!
     #'->Iterator
     (assoc {:arglists (clojure.core/list ['iter]), :column (int 1)} :name '->Iterator :ns *ns*))
-  (def iterator (fn iterator ([iter] (datomic.iter.Iterator. iter))))
+  (defn iterator ([iter] (datomic.iter.Iterator. iter)))
   (reset-meta!
     #'iterator
     (assoc
@@ -48,12 +48,11 @@
       'iterator
       :ns
       *ns*))
-  (def iterable
-   (fn iterable
-     ([iter_fn]
-       (reify
-         java.lang.Iterable
-         (^java.util.Iterator iterator [this] (iterator (^clojure.lang.IFn iter_fn)))))))
+  (defn iterable
+    ([iter_fn]
+      (reify
+        java.lang.Iterable
+        (^java.util.Iterator iterator [this] (iterator (^clojure.lang.IFn iter_fn))))))
   (reset-meta!
     #'iterable
     (assoc
@@ -81,12 +80,11 @@
   (reset-meta!
     #'map
     (assoc {:arglists (clojure.core/list ['f 'iter]), :column (int 1)} :name 'map :ns *ns*))
-  (def iter-seq
-   (fn iter_seq
-     ([iter]
-       (lazy-seq
-         (when iter
-           (cons (.get ^datomic.iter.Iter iter) (iter-seq (.next ^datomic.iter.Iter iter))))))))
+  (defn iter-seq
+    ([iter]
+      (lazy-seq
+        (when iter
+          (cons (.get ^datomic.iter.Iter iter) (iter-seq (.next ^datomic.iter.Iter iter)))))))
   (reset-meta!
     #'iter-seq
     (assoc
@@ -95,12 +93,11 @@
       'iter-seq
       :ns
       *ns*))
-  (def iter-rseq
-   (fn iter_rseq
-     ([iter]
-       (lazy-seq
-         (when iter
-           (cons (.get ^datomic.iter.Iter iter) (iter-rseq (.prev ^datomic.iter.Iter iter))))))))
+  (defn iter-rseq
+    ([iter]
+      (lazy-seq
+        (when iter
+          (cons (.get ^datomic.iter.Iter iter) (iter-rseq (.prev ^datomic.iter.Iter iter)))))))
   (reset-meta!
     #'iter-rseq
     (assoc
@@ -109,15 +106,14 @@
       'iter-rseq
       :ns
       *ns*))
-  (def reduce
-   (fn reduce
-     ([f init iter]
-       (loop [ret init iter iter]
-         (if iter
-           (recur
-             (^clojure.lang.IFn f ret (.get ^datomic.iter.Iter iter))
-             (.next ^datomic.iter.Iter iter))
-           ret)))))
+  (defn reduce
+    ([f init iter]
+      (loop [ret init iter iter]
+        (if iter
+          (recur
+            (^clojure.lang.IFn f ret (.get ^datomic.iter.Iter iter))
+            (.next ^datomic.iter.Iter iter))
+          ret))))
   (reset-meta!
     #'reduce
     (assoc
@@ -165,29 +161,28 @@
   (reset-meta!
     #'concat
     (assoc {:arglists (clojure.core/list ['iters]), :column (int 1)} :name 'concat :ns *ns*))
-  (def filter
-   (fn filter
-     ([p iter]
-       (let [advance (fn advance
-                       ([iter]
-                         (loop [iter iter]
-                           (when iter
-                             (if (^clojure.lang.IFn p (.get ^datomic.iter.Iter iter))
-                               iter
-                               (recur (.next ^datomic.iter.Iter iter)))))))
-             temp__5825__auto__ (^clojure.lang.IFn advance iter)]
-         (when temp__5825__auto__
-           (let [iter temp__5825__auto__]
-             (reify
-               datomic.iter.Iter
-               (next
-                 [this]
-                 (let [temp__5825__auto__ (^clojure.lang.IFn advance
-                                            (.next ^datomic.iter.Iter iter))]
-                   (when temp__5825__auto__
-                     (let [inext temp__5825__auto__]
-                       (if (identical? inext iter) this (filter p inext))))))
-               (get [this] (.get ^datomic.iter.Iter iter)))))))))
+  (defn filter
+    ([p iter]
+      (let [advance (fn advance
+                      ([iter]
+                        (loop [iter iter]
+                          (when iter
+                            (if (^clojure.lang.IFn p (.get ^datomic.iter.Iter iter))
+                              iter
+                              (recur (.next ^datomic.iter.Iter iter)))))))
+            temp__5825__auto__ (^clojure.lang.IFn advance iter)]
+        (when temp__5825__auto__
+          (let [iter temp__5825__auto__]
+            (reify
+              datomic.iter.Iter
+              (next
+                [this]
+                (let [temp__5825__auto__ (^clojure.lang.IFn advance
+                                           (.next ^datomic.iter.Iter iter))]
+                  (when temp__5825__auto__
+                    (let [inext temp__5825__auto__]
+                      (if (identical? inext iter) this (filter p inext))))))
+              (get [this] (.get ^datomic.iter.Iter iter))))))))
   (reset-meta!
     #'filter
     (assoc
@@ -226,12 +221,11 @@
             (if (^clojure.lang.IFn p (.get ^datomic.iter.Iter iter))
               (recur (.next ^datomic.iter.Iter iter))
               iter))))))
-  (def least-index
-   (fn least_index
-     (^long [cmp values]
-       (let [v1 (aget ^"[Ljava.lang.Object;" values (int 0))
-             v2 (aget ^"[Ljava.lang.Object;" values (int 1))]
-         (if (< (.compare ^java.util.Comparator cmp v1 v2) 0) 0 1)))))
+  (defn least-index
+    (^long [cmp values]
+      (let [v1 (aget ^"[Ljava.lang.Object;" values (int 0))
+            v2 (aget ^"[Ljava.lang.Object;" values (int 1))]
+        (if (< (.compare ^java.util.Comparator cmp v1 v2) 0) 0 1))))
   (reset-meta!
     #'least-index
     (assoc
@@ -323,7 +317,7 @@
             (aset ^"[Ljava.lang.Object;" values (int 1) (.get ^datomic.iter.Iter iter2))
             (datomic.iter.MergeIter. cmp arr values (long (least-index cmp values))))
           (or iter1 iter2)))))
-  (def iget (fn iget ([iter] (and iter (.get ^datomic.iter.Iter iter)))))
+  (defn iget ([iter] (and iter (.get ^datomic.iter.Iter iter))))
   (reset-meta!
     #'iget
     (assoc

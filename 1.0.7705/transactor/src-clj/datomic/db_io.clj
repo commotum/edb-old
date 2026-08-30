@@ -44,22 +44,21 @@
       'storage-resources
       :ns
       *ns*))
-  (def index-db
-   (fn index_db
-     ([p__18513]
-       (let [map__18514 p__18513
-             map__18514 (if (seq? map__18514)
-                          (if (next map__18514)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__18514))
-                            (if (seq map__18514) (first map__18514) {}))
-                          map__18514)
-             cluster (get map__18514 :cluster)
-             olookup (get map__18514 :olookup)
-             resolved_conf (get map__18514 :resolved-conf)
-             db_id (:db-id resolved_conf)
-             idxroot (:key (deref (cluster/get-ref cluster (index/index-ref-key-name cluster))))]
-         (db/db db_id (index/load-index olookup idxroot))))))
+  (defn index-db
+    ([p__18513]
+      (let [map__18514 p__18513
+            map__18514 (if (seq? map__18514)
+                         (if (next map__18514)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__18514))
+                           (if (seq map__18514) (first map__18514) {}))
+                         map__18514)
+            cluster (get map__18514 :cluster)
+            olookup (get map__18514 :olookup)
+            resolved_conf (get map__18514 :resolved-conf)
+            db_id (:db-id resolved_conf)
+            idxroot (:key (deref (cluster/get-ref cluster (index/index-ref-key-name cluster))))]
+        (db/db db_id (index/load-index olookup idxroot)))))
   (reset-meta!
     #'index-db
     (assoc
@@ -68,19 +67,18 @@
       'index-db
       :ns
       *ns*))
-  (def log
-   (fn log
-     ([p__18516]
-       (let [map__18517 p__18516
-             map__18517 (if (seq? map__18517)
-                          (if (next map__18517)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__18517))
-                            (if (seq map__18517) (first map__18517) {}))
-                          map__18517)
-             cluster (get map__18517 :cluster)
-             olookup (get map__18517 :olookup)]
-         (log/find-log cluster olookup)))))
+  (defn log
+    ([p__18516]
+      (let [map__18517 p__18516
+            map__18517 (if (seq? map__18517)
+                         (if (next map__18517)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__18517))
+                           (if (seq map__18517) (first map__18517) {}))
+                         map__18517)
+            cluster (get map__18517 :cluster)
+            olookup (get map__18517 :olookup)]
+        (log/find-log cluster olookup))))
   (reset-meta!
     #'log
     (assoc
@@ -94,19 +92,18 @@
   (reset-meta!
     #'db-resources
     (assoc {:arglists (clojure.core/list ['cr]), :column (int 1)} :name 'db-resources :ns *ns*))
-  (def index-includes-some-log-tail?
-   (fn index_includes_some_log_tail_QMARK_
-     ([p__18520]
-       (let [map__18521 p__18520
-             map__18521 (if (seq? map__18521)
-                          (if (next map__18521)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__18521))
-                            (if (seq map__18521) (first map__18521) {}))
-                          map__18521)
-             db (get map__18521 :db)
-             log (get map__18521 :log)]
-         (> (:indexBasisT db) (:t (log/last-tree-tx log)))))))
+  (defn index-includes-some-log-tail?
+    ([p__18520]
+      (let [map__18521 p__18520
+            map__18521 (if (seq? map__18521)
+                         (if (next map__18521)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__18521))
+                           (if (seq map__18521) (first map__18521) {}))
+                         map__18521)
+            db (get map__18521 :db)
+            log (get map__18521 :log)]
+        (> (:indexBasisT db) (:t (log/last-tree-tx log))))))
   (reset-meta!
     #'index-includes-some-log-tail?
     (assoc
@@ -132,20 +129,19 @@
       'most-current-db
       :ns
       *ns*))
-  (def load-db-from-basis
-   (fn load_db_from_basis
-     ([cluster_db_conn olookup db_id & p__18528]
-       (let [vec__18529 p__18528
-             basis_db (nth vec__18529 (int 0) nil)
-             return_log? (nth vec__18529 (int 1) nil)
-             idxroot (index/find-index-root-id cluster_db_conn)
-             log (log/find-log cluster_db_conn olookup)
-             db (db/db db_id (index/load-index olookup idxroot))
-             db (most-current-db basis_db db)
-             db (:db (log/catchup db log true))]
-         (if return_log?
-           {:db db, :log (log/->LogValue db olookup (log/get-root-id log) (:memlog db))}
-           db)))))
+  (defn load-db-from-basis
+    ([cluster_db_conn olookup db_id & p__18528]
+      (let [vec__18529 p__18528
+            basis_db (nth vec__18529 (int 0) nil)
+            return_log? (nth vec__18529 (int 1) nil)
+            idxroot (index/find-index-root-id cluster_db_conn)
+            log (log/find-log cluster_db_conn olookup)
+            db (db/db db_id (index/load-index olookup idxroot))
+            db (most-current-db basis_db db)
+            db (:db (log/catchup db log true))]
+        (if return_log?
+          {:db db, :log (log/->LogValue db olookup (log/get-root-id log) (:memlog db))}
+          db))))
   (reset-meta!
     #'load-db-from-basis
     (assoc

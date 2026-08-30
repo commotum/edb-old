@@ -46,16 +46,15 @@
   (reset-meta!
     #'make-file
     (assoc {:arglists (clojure.core/list ['name 'bs]), :column (int 1)} :name 'make-file :ns *ns*))
-  (def read-segment
-   (fn read_segment
-     ([uri val_key fname]
-       (let [cr (tools/connection-resources uri)
-             cluster (:cluster cr)
-             value (deref (cluster/get-val cluster val_key))]
-         (when (:buf value)
-           (if fname
-             (make-file fname (.array (:buf value)))
-             ((fressian/val->obj fressian/clojure-read-handlers) (:buf value))))))))
+  (defn read-segment
+    ([uri val_key fname]
+      (let [cr (tools/connection-resources uri)
+            cluster (:cluster cr)
+            value (deref (cluster/get-val cluster val_key))]
+        (when (:buf value)
+          (if fname
+            (make-file fname (.array (:buf value)))
+            ((fressian/val->obj fressian/clojure-read-handlers) (:buf value)))))))
   (reset-meta!
     #'read-segment
     (assoc

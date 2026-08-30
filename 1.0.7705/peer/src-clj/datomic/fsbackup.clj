@@ -167,12 +167,11 @@
       'file-system-storage
       :ns
       *ns*))
-  (def storage-from-uri
-   (fn storage_from_uri
-     ([uri]
-       (if (.getHost ^java.net.URI uri)
-         (error/arg :db.error/invalid-backup-uri "Storage file URI can not include host")
-         (file-system-storage (.getPath (jio/as-url uri)))))))
+  (defn storage-from-uri
+    ([uri]
+      (if (.getHost ^java.net.URI uri)
+        (error/arg :db.error/invalid-backup-uri "Storage file URI can not include host")
+        (file-system-storage (.getPath (jio/as-url uri))))))
   (reset-meta!
     #'storage-from-uri
     (assoc

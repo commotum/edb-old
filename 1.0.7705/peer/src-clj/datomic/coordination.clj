@@ -75,19 +75,18 @@
       (error/arg
         :db.error/unsupported-protocol
         (str "Unsupported protocol " (:protocol cluster_conf)))))
-  (def create-db-cluster
-   (fn create_db_cluster
-     ([cluster_conf]
-       (when-not (:db-id cluster_conf)
-         (throw
-           (java.lang.AssertionError.
-             (str "Assert failed: " (pr-str (clojure.core/list :db-id 'cluster-conf))))))
-       (let [cluster (create-cluster cluster_conf)
-             temp__5802__auto__ (deref cluster-stack/kv-cache-ref)]
-         (if temp__5802__auto__
-           (let [kv_cache temp__5802__auto__]
-             (cluster-stack/cluster-with-cache cluster kv_cache {:get-fallback-msec 5}))
-           cluster)))))
+  (defn create-db-cluster
+    ([cluster_conf]
+      (when-not (:db-id cluster_conf)
+        (throw
+          (java.lang.AssertionError.
+            (str "Assert failed: " (pr-str (clojure.core/list :db-id 'cluster-conf))))))
+      (let [cluster (create-cluster cluster_conf)
+            temp__5802__auto__ (deref cluster-stack/kv-cache-ref)]
+        (if temp__5802__auto__
+          (let [kv_cache temp__5802__auto__]
+            (cluster-stack/cluster-with-cache cluster kv_cache {:get-fallback-msec 5}))
+          cluster))))
   (reset-meta!
     #'create-db-cluster
     (assoc
@@ -96,8 +95,7 @@
       'create-db-cluster
       :ns
       *ns*))
-  (def create-system-cluster
-   (fn create_system_cluster ([cluster_conf] (create-cluster (dissoc cluster_conf :db-id)))))
+  (defn create-system-cluster ([cluster_conf] (create-cluster (dissoc cluster_conf :db-id))))
   (reset-meta!
     #'create-system-cluster
     (assoc
@@ -118,25 +116,24 @@
     {:active pod-key, :standby standby-key})
   (def PEER_VERSION 2)
   (reset-meta! #'PEER_VERSION (assoc {:const true, :column (int 1)} :name 'PEER_VERSION :ns *ns*))
-  (def create-heartbeat
-   (fn create_heartbeat
-     ([p__17151]
-       (let [map__17152 p__17151
-             map__17152 (if (seq? map__17152)
-                          (if (next map__17152)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__17152))
-                            (if (seq map__17152) (first map__17152) {}))
-                          map__17152)
-             host (get map__17152 :host)
-             alt_host (get map__17152 :alt-host)
-             port (get map__17152 :port)
-             username (get map__17152 :username)
-             password (get map__17152 :password)
-             version (get map__17152 :version)
-             encrypt_channel (get map__17152 :encrypt-channel)
-             timestamp (get map__17152 :timestamp)]
-         [host alt_host port username password timestamp version encrypt_channel 2]))))
+  (defn create-heartbeat
+    ([p__17151]
+      (let [map__17152 p__17151
+            map__17152 (if (seq? map__17152)
+                         (if (next map__17152)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__17152))
+                           (if (seq map__17152) (first map__17152) {}))
+                         map__17152)
+            host (get map__17152 :host)
+            alt_host (get map__17152 :alt-host)
+            port (get map__17152 :port)
+            username (get map__17152 :username)
+            password (get map__17152 :password)
+            version (get map__17152 :version)
+            encrypt_channel (get map__17152 :encrypt-channel)
+            timestamp (get map__17152 :timestamp)]
+        [host alt_host port username password timestamp version encrypt_channel 2])))
   (reset-meta!
     #'create-heartbeat
     (assoc
@@ -149,28 +146,27 @@
       'create-heartbeat
       :ns
       *ns*))
-  (def heartbeat->endpoint
-   (fn heartbeat__GT_endpoint
-     ([p__17154]
-       (let [vec__17155 p__17154
-             host (nth vec__17155 (int 0) nil)
-             alt_host (nth vec__17155 (int 1) nil)
-             port (nth vec__17155 (int 2) nil)
-             username (nth vec__17155 (int 3) nil)
-             password (nth vec__17155 (int 4) nil)
-             timestamp (nth vec__17155 (int 5) nil)
-             version (nth vec__17155 (int 6) nil)
-             encrypt_channel (nth vec__17155 (int 7) nil)
-             peer_version (nth vec__17155 (int 8) nil)]
-         {:alt-host alt_host,
-          :peer-version (or peer_version 1),
-          :password password,
-          :username username,
-          :port port,
-          :host host,
-          :version version,
-          :timestamp timestamp,
-          :encrypt-channel (if (nil? version) true encrypt_channel)}))))
+  (defn heartbeat->endpoint
+    ([p__17154]
+      (let [vec__17155 p__17154
+            host (nth vec__17155 (int 0) nil)
+            alt_host (nth vec__17155 (int 1) nil)
+            port (nth vec__17155 (int 2) nil)
+            username (nth vec__17155 (int 3) nil)
+            password (nth vec__17155 (int 4) nil)
+            timestamp (nth vec__17155 (int 5) nil)
+            version (nth vec__17155 (int 6) nil)
+            encrypt_channel (nth vec__17155 (int 7) nil)
+            peer_version (nth vec__17155 (int 8) nil)]
+        {:alt-host alt_host,
+         :peer-version (or peer_version 1),
+         :password password,
+         :username username,
+         :port port,
+         :host host,
+         :version version,
+         :timestamp timestamp,
+         :encrypt-channel (if (nil? version) true encrypt_channel)})))
   (reset-meta!
     #'heartbeat->endpoint
     (assoc
@@ -241,14 +237,13 @@
       'lookup-transactor-endpoint
       :ns
       *ns*))
-  (def vc-password
-   (fn vc_password
-     ([peer_password]
-       (codec/bytes->string
-         (codec/encode-64
-           (.digest
-             (java.security.MessageDigest/getInstance "MD5")
-             (.getBytes ^java.lang.String peer_password)))))))
+  (defn vc-password
+    ([peer_password]
+      (codec/bytes->string
+        (codec/encode-64
+          (.digest
+            (java.security.MessageDigest/getInstance "MD5")
+            (.getBytes ^java.lang.String peer_password))))))
   (reset-meta!
     #'vc-password
     (assoc
@@ -276,15 +271,14 @@
       'endpoint->server-spec
       :ns
       *ns*))
-  (def allowed-valcache-client?
-   (fn allowed_valcache_client_QMARK_
-     ([server_specs client]
-       (or
-         (= client "127.0.0.1")
-         (boolean
-           (some
-             (fn fn__17176 ([p1__17175#] (contains? (:allowed-clients p1__17175#) client)))
-             server_specs))))))
+  (defn allowed-valcache-client?
+    ([server_specs client]
+      (or
+        (= client "127.0.0.1")
+        (boolean
+          (some
+            (fn fn__17176 ([p1__17175#] (contains? (:allowed-clients p1__17175#) client)))
+            server_specs)))))
   (reset-meta!
     #'allowed-valcache-client?
     (assoc
@@ -329,15 +323,14 @@
       'lookup-compatible-transactor-endpoint
       :ns
       *ns*))
-  (def cluster-conf->resolved-conf
-   (fn cluster_conf__GT_resolved_conf
-     ([cluster_conf]
-       (let [temp__5804__auto__ (catalog/parse-db-conf
-                                  (get
-                                    (catalog/get-catalog (create-system-cluster cluster_conf))
-                                    (:db-name cluster_conf)))]
-         (when temp__5804__auto__
-           (let [db_specific temp__5804__auto__] (merge cluster_conf db_specific)))))))
+  (defn cluster-conf->resolved-conf
+    ([cluster_conf]
+      (let [temp__5804__auto__ (catalog/parse-db-conf
+                                 (get
+                                   (catalog/get-catalog (create-system-cluster cluster_conf))
+                                   (:db-name cluster_conf)))]
+        (when temp__5804__auto__
+          (let [db_specific temp__5804__auto__] (merge cluster_conf db_specific))))))
   (reset-meta!
     #'cluster-conf->resolved-conf
     (assoc
@@ -352,7 +345,7 @@
     (cache/lookup-cache
       (cache/fn->lookup cluster-conf->resolved-conf)
       (cache/create-write-limited 100 1)))
-  (def resolve-db-name (fn resolve_db_name ([cluster_conf] (get db-cache cluster_conf))))
+  (defn resolve-db-name ([cluster_conf] (get db-cache cluster_conf)))
   (reset-meta!
     #'resolve-db-name
     (assoc

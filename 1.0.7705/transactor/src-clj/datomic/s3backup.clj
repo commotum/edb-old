@@ -119,25 +119,24 @@
       'map->S3Storage
       :ns
       *ns*))
-  (def s3-storage
-   (fn s3_storage
-     ([& p__28387]
-       (let [map__28388 p__28387
-             map__28388 (if (seq? map__28388)
-                          (if (next map__28388)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__28388))
-                            (if (seq map__28388) (first map__28388) {}))
-                          map__28388)
-             s3 (get map__28388 :s3)
-             bucket (get map__28388 :bucket)
-             base (get map__28388 :base)
-             sse? (get map__28388 :sse?)]
-         (when-not (and s3 bucket base)
-           (throw
-             (java.lang.AssertionError.
-               (str "Assert failed: " (pr-str (clojure.core/list 'and 's3 'bucket 'base))))))
-         (datomic.s3backup.S3Storage. s3 bucket base sse?)))))
+  (defn s3-storage
+    ([& p__28387]
+      (let [map__28388 p__28387
+            map__28388 (if (seq? map__28388)
+                         (if (next map__28388)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__28388))
+                           (if (seq map__28388) (first map__28388) {}))
+                         map__28388)
+            s3 (get map__28388 :s3)
+            bucket (get map__28388 :bucket)
+            base (get map__28388 :base)
+            sse? (get map__28388 :sse?)]
+        (when-not (and s3 bucket base)
+          (throw
+            (java.lang.AssertionError.
+              (str "Assert failed: " (pr-str (clojure.core/list 'and 's3 'bucket 'base))))))
+        (datomic.s3backup.S3Storage. s3 bucket base sse?))))
   (reset-meta!
     #'s3-storage
     (assoc
@@ -146,12 +145,11 @@
       's3-storage
       :ns
       *ns*))
-  (def validate-s3-uri
-   (fn validate_s3_uri
-     ([uri]
-       (let [G__28392 nil
-             G__28392 (if (empty? (.getHost ^java.net.URI uri)) (cons :bucket G__28392) G__28392)]
-         (if (empty? (.getPath ^java.net.URI uri)) (cons :prefix G__28392) G__28392)))))
+  (defn validate-s3-uri
+    ([uri]
+      (let [G__28392 nil
+            G__28392 (if (empty? (.getHost ^java.net.URI uri)) (cons :bucket G__28392) G__28392)]
+        (if (empty? (.getPath ^java.net.URI uri)) (cons :prefix G__28392) G__28392))))
   (reset-meta!
     #'validate-s3-uri
     (assoc
@@ -160,38 +158,37 @@
       'validate-s3-uri
       :ns
       *ns*))
-  (def storage-from-uri
-   (fn storage_from_uri
-     ([uri sse?]
-       (let [temp__5825__auto__ (validate-s3-uri uri)]
-         (when temp__5825__auto__
-           (let [missing temp__5825__auto__]
-             (throw
-               (java.lang.IllegalArgumentException.
-                 (str "S3 URI is incomplete, missing " missing)))))
-         nil)
-       (let [bucket (.getHost ^java.net.URI uri)
-             base (subs (.getPath ^java.net.URI uri) 1)
-             map__28394 (uri/parse-query-string (.getQuery ^java.net.URI uri))
-             map__28394 (if (seq? map__28394)
-                          (if (next map__28394)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__28394))
-                            (if (seq map__28394) (first map__28394) {}))
-                          map__28394)
-             aws_access_key_id (get map__28394 "aws_access_key_id")
-             aws_secret_key (get map__28394 "aws_secret_key")
-             creds (when (and aws_access_key_id aws_secret_key)
-                     (let [params {:aws-access-key-id aws_access_key_id,
-                                   :aws-secret-key aws_secret_key}]
-                       (uri/warn-creds params)
-                       params))
-             s3 (if creds
-                  (s3/s3-service
-                    (aws-helpers/static-credentials-provider creds)
-                    {:maxConnections (long (* 64 1024)), :maxAttempts 11})
-                  (s3/s3-service {:maxConnections (long (* 64 1024)), :maxAttempts 11}))]
-         (s3-storage :s3 s3 :bucket bucket :base base :sse? sse?)))))
+  (defn storage-from-uri
+    ([uri sse?]
+      (let [temp__5825__auto__ (validate-s3-uri uri)]
+        (when temp__5825__auto__
+          (let [missing temp__5825__auto__]
+            (throw
+              (java.lang.IllegalArgumentException.
+                (str "S3 URI is incomplete, missing " missing)))))
+        nil)
+      (let [bucket (.getHost ^java.net.URI uri)
+            base (subs (.getPath ^java.net.URI uri) 1)
+            map__28394 (uri/parse-query-string (.getQuery ^java.net.URI uri))
+            map__28394 (if (seq? map__28394)
+                         (if (next map__28394)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__28394))
+                           (if (seq map__28394) (first map__28394) {}))
+                         map__28394)
+            aws_access_key_id (get map__28394 "aws_access_key_id")
+            aws_secret_key (get map__28394 "aws_secret_key")
+            creds (when (and aws_access_key_id aws_secret_key)
+                    (let [params {:aws-access-key-id aws_access_key_id,
+                                  :aws-secret-key aws_secret_key}]
+                      (uri/warn-creds params)
+                      params))
+            s3 (if creds
+                 (s3/s3-service
+                   (aws-helpers/static-credentials-provider creds)
+                   {:maxConnections (long (* 64 1024)), :maxAttempts 11})
+                 (s3/s3-service {:maxConnections (long (* 64 1024)), :maxAttempts 11}))]
+        (s3-storage :s3 s3 :bucket bucket :base base :sse? sse?))))
   (reset-meta!
     #'storage-from-uri
     (assoc

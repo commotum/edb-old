@@ -73,7 +73,7 @@
   (reset-meta!
     #'ddb?
     (assoc {:arglists (clojure.core/list ['props]), :column (int 1)} :name 'ddb? :ns *ns*))
-  (def comment? (fn comment_QMARK_ ([prop_line] (= (first prop_line) \#))))
+  (defn comment? ([prop_line] (= (first prop_line) \#)))
   (reset-meta!
     #'comment?
     (assoc {:arglists (clojure.core/list ['prop-line]), :column (int 1)} :name 'comment? :ns *ns*))
@@ -81,14 +81,13 @@
   (reset-meta!
     #'trailing-slash?
     (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'trailing-slash? :ns *ns*))
-  (def prop-line-seq
-   (fn prop_line_seq
-     ([rdr]
-       (loop [line (.readLine ^java.io.BufferedReader rdr)]
-         (when line
-           (if (trailing-slash? line)
-             (recur (str line "\n" (.readLine ^java.io.BufferedReader rdr)))
-             (cons line (lazy-seq (prop-line-seq rdr)))))))))
+  (defn prop-line-seq
+    ([rdr]
+      (loop [line (.readLine ^java.io.BufferedReader rdr)]
+        (when line
+          (if (trailing-slash? line)
+            (recur (str line "\n" (.readLine ^java.io.BufferedReader rdr)))
+            (cons line (lazy-seq (prop-line-seq rdr))))))))
   (reset-meta!
     #'prop-line-seq
     (assoc
@@ -98,19 +97,18 @@
       'prop-line-seq
       :ns
       *ns*))
-  (def read-prop-line
-   (fn read_prop_line
-     ([prop_line]
-       (if (or (comment? prop_line) (empty? prop_line))
-         [prop_line]
-         (let [temp__5823__auto__ (re-matches #"^([^=]+)=(.*)" prop_line)]
-           (if temp__5823__auto__
-             (let [vec__32107 temp__5823__auto__
-                   _ (nth vec__32107 (int 0) nil)
-                   k (nth vec__32107 (int 1) nil)
-                   v (nth vec__32107 (int 2) nil)]
-               [k (re-find #"^[\S].*" v)])
-             [prop_line]))))))
+  (defn read-prop-line
+    ([prop_line]
+      (if (or (comment? prop_line) (empty? prop_line))
+        [prop_line]
+        (let [temp__5823__auto__ (re-matches #"^([^=]+)=(.*)" prop_line)]
+          (if temp__5823__auto__
+            (let [vec__32107 temp__5823__auto__
+                  _ (nth vec__32107 (int 0) nil)
+                  k (nth vec__32107 (int 1) nil)
+                  v (nth vec__32107 (int 2) nil)]
+              [k (re-find #"^[\S].*" v)])
+            [prop_line])))))
   (reset-meta!
     #'read-prop-line
     (assoc
@@ -119,9 +117,8 @@
       'read-prop-line
       :ns
       *ns*))
-  (def load-properties
-   (fn load_properties
-     ([prop_file] (let [lines (prop-line-seq (io/reader prop_file))] (map read-prop-line lines)))))
+  (defn load-properties
+    ([prop_file] (let [lines (prop-line-seq (io/reader prop_file))] (map read-prop-line lines))))
   (reset-meta!
     #'load-properties
     (assoc
@@ -130,12 +127,9 @@
       'load-properties
       :ns
       *ns*))
-  (def extract-prop-map
-   (fn extract_prop_map
-     ([prop_lines]
-       (into
-         {}
-         (filter (fn fn__32115 ([p1__32114#] (= (long (count p1__32114#)) 2))) prop_lines)))))
+  (defn extract-prop-map
+    ([prop_lines]
+      (into {} (filter (fn fn__32115 ([p1__32114#] (= (long (count p1__32114#)) 2))) prop_lines))))
   (reset-meta!
     #'extract-prop-map
     (assoc
@@ -144,22 +138,21 @@
       'extract-prop-map
       :ns
       *ns*))
-  (def merge-prop-line
-   (fn merge_prop_line
-     ([prop_line props_map]
-       (let [pred__32118 = expr__32119 (count prop_line)]
-         (if (^clojure.lang.IFn pred__32118 1 (java.lang.Integer/valueOf (int expr__32119)))
-           (first prop_line)
-           (if (^clojure.lang.IFn pred__32118 2 (java.lang.Integer/valueOf (int expr__32119)))
-             (let [vec__32120 prop_line
-                   k (nth vec__32120 (int 0) nil)
-                   v (nth vec__32120 (int 1) nil)]
-               (str k "=" (get props_map k)))
-             (do
-               (throw
-                 (java.lang.IllegalArgumentException.
-                   (str "No matching clause: " (java.lang.Integer/valueOf (int expr__32119)))))
-               nil)))))))
+  (defn merge-prop-line
+    ([prop_line props_map]
+      (let [pred__32118 = expr__32119 (count prop_line)]
+        (if (^clojure.lang.IFn pred__32118 1 (java.lang.Integer/valueOf (int expr__32119)))
+          (first prop_line)
+          (if (^clojure.lang.IFn pred__32118 2 (java.lang.Integer/valueOf (int expr__32119)))
+            (let [vec__32120 prop_line
+                  k (nth vec__32120 (int 0) nil)
+                  v (nth vec__32120 (int 1) nil)]
+              (str k "=" (get props_map k)))
+            (do
+              (throw
+                (java.lang.IllegalArgumentException.
+                  (str "No matching clause: " (java.lang.Integer/valueOf (int expr__32119)))))
+              nil))))))
   (reset-meta!
     #'merge-prop-line
     (assoc
@@ -168,12 +161,11 @@
       'merge-prop-line
       :ns
       *ns*))
-  (def merge-prop-lines
-   (fn merge_prop_lines
-     ([prop_lines prop_map new_keys]
-       (concat
-         (map (fn fn__32125 ([p1__32124#] (merge-prop-line p1__32124# prop_map))) prop_lines)
-         (map (fn fn__32127 ([k] (str k "=" (get prop_map k)))) new_keys)))))
+  (defn merge-prop-lines
+    ([prop_lines prop_map new_keys]
+      (concat
+        (map (fn fn__32125 ([p1__32124#] (merge-prop-line p1__32124# prop_map))) prop_lines)
+        (map (fn fn__32127 ([k] (str k "=" (get prop_map k)))) new_keys))))
   (reset-meta!
     #'merge-prop-lines
     (assoc
@@ -182,29 +174,28 @@
       'merge-prop-lines
       :ns
       *ns*))
-  (def save-properties
-   (fn save_properties
-     ([prop_file prop_lines]
-       (with-open [wrtr (io/writer prop_file)]
-         (binding [*out* wrtr]
-           (loop [seq_32260 (seq prop_lines) chunk_32261 nil count_32262 0 i_32263 0]
-             (if (< i_32263 count_32262)
-               (let [line (.nth ^clojure.lang.Indexed chunk_32261 (int i_32263))]
-                 (println line)
-                 (recur seq_32260 chunk_32261 count_32262 (inc i_32263)))
-               (let [temp__5825__auto__ (seq seq_32260)]
-                 (when temp__5825__auto__
-                   (let [seq_32260 temp__5825__auto__]
-                     (if (chunked-seq? seq_32260)
-                       (let [c__6090__auto__ (chunk-first seq_32260)]
-                         (recur
-                           (chunk-rest seq_32260)
-                           c__6090__auto__
-                           (int (count c__6090__auto__))
-                           (int 0)))
-                       (let [line (first seq_32260)]
-                         (println line)
-                         (recur (next seq_32260) nil 0 0)))))))))))))
+  (defn save-properties
+    ([prop_file prop_lines]
+      (with-open [wrtr (io/writer prop_file)]
+        (binding [*out* wrtr]
+          (loop [seq_32260 (seq prop_lines) chunk_32261 nil count_32262 0 i_32263 0]
+            (if (< i_32263 count_32262)
+              (let [line (.nth ^clojure.lang.Indexed chunk_32261 (int i_32263))]
+                (println line)
+                (recur seq_32260 chunk_32261 count_32262 (inc i_32263)))
+              (let [temp__5825__auto__ (seq seq_32260)]
+                (when temp__5825__auto__
+                  (let [seq_32260 temp__5825__auto__]
+                    (if (chunked-seq? seq_32260)
+                      (let [c__6090__auto__ (chunk-first seq_32260)]
+                        (recur
+                          (chunk-rest seq_32260)
+                          c__6090__auto__
+                          (int (count c__6090__auto__))
+                          (int 0)))
+                      (let [line (first seq_32260)]
+                        (println line)
+                        (recur (next seq_32260) nil 0 0))))))))))))
   (reset-meta!
     #'save-properties
     (assoc
@@ -295,25 +286,24 @@
       'ensure-required-props
       :ns
       *ns*))
-  (def check-existing-table-schema
-   (fn check_existing_table_schema
-     ([props client table_name]
-       (let [desc (aws/invoke client {:op :DescribeTable, :req {:TableName table_name}})
-             attribute_definition (get-in desc [:Table :AttributeDefinitions 0])
-             map__32148 attribute_definition
-             map__32148 (if (seq? map__32148)
-                          (if (next map__32148)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__32148))
-                            (if (seq map__32148) (first map__32148) {}))
-                          map__32148)
-             AttributeName (get map__32148 :AttributeName)
-             AttributeType (get map__32148 :AttributeType)]
-         (if (and (= AttributeName "id") (= AttributeType "S"))
-           props
-           (add-errors
-             props
-             (str "Invalid attribute definition: " AttributeName ", " AttributeType)))))))
+  (defn check-existing-table-schema
+    ([props client table_name]
+      (let [desc (aws/invoke client {:op :DescribeTable, :req {:TableName table_name}})
+            attribute_definition (get-in desc [:Table :AttributeDefinitions 0])
+            map__32148 attribute_definition
+            map__32148 (if (seq? map__32148)
+                         (if (next map__32148)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__32148))
+                           (if (seq map__32148) (first map__32148) {}))
+                         map__32148)
+            AttributeName (get map__32148 :AttributeName)
+            AttributeType (get map__32148 :AttributeType)]
+        (if (and (= AttributeName "id") (= AttributeType "S"))
+          props
+          (add-errors
+            props
+            (str "Invalid attribute definition: " AttributeName ", " AttributeType))))))
   (reset-meta!
     #'check-existing-table-schema
     (assoc
@@ -322,18 +312,17 @@
       'check-existing-table-schema
       :ns
       *ns*))
-  (def create-cluster-table
-   (fn create_cluster_table
-     ([ddb_client table_name read_units write_units]
-       (aws/invoke
-         ddb_client
-         {:op :CreateTable,
-          :req
-          {:TableName table_name,
-           :ProvisionedThroughput {:ReadCapacityUnits read_units, :WriteCapacityUnits write_units},
-           :KeySchema [{:AttributeName "id", :KeyType "HASH"}],
-           :AttributeDefinitions [{:AttributeType "S", :AttributeName "id"}]}}))
-     ([ddb_client table_name] (create-cluster-table ddb_client table_name 100 50))))
+  (defn create-cluster-table
+    ([ddb_client table_name read_units write_units]
+      (aws/invoke
+        ddb_client
+        {:op :CreateTable,
+         :req
+         {:TableName table_name,
+          :ProvisionedThroughput {:ReadCapacityUnits read_units, :WriteCapacityUnits write_units},
+          :KeySchema [{:AttributeName "id", :KeyType "HASH"}],
+          :AttributeDefinitions [{:AttributeType "S", :AttributeName "id"}]}}))
+    ([ddb_client table_name] (create-cluster-table ddb_client table_name 100 50)))
   (reset-meta!
     #'create-cluster-table
     (assoc
@@ -401,36 +390,35 @@
       'ensure-ddb-table-name
       :ns
       *ns*))
-  (def create-system-command
-   (fn create_system_command
-     ([p__32159]
-       (let [map__32160 p__32159
-             map__32160 (if (seq? map__32160)
-                          (if (next map__32160)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__32160))
-                            (if (seq map__32160) (first map__32160) {}))
-                          map__32160)
-             region (get map__32160 :region)
-             override_endpoint (get map__32160 :override-endpoint)
-             table_name (get map__32160 :table-name)
-             read_capacity (get map__32160 :read-capacity)
-             write_capacity (get map__32160 :write-capacity)
-             s__6444__auto__ (java.io.StringWriter.)]
-         (binding [*out* s__6444__auto__]
-           (do
-             (pprint/pprint
-               (create-cluster-table
-                 (ddb/client
-                   nil
-                   {:region region,
-                    :override-endpoint
-                    (let [G__32161 override_endpoint]
-                      (when-not (nil? G__32161) (str "http://" G__32161)))})
-                 table_name
-                 read_capacity
-                 write_capacity))
-             (str s__6444__auto__)))))))
+  (defn create-system-command
+    ([p__32159]
+      (let [map__32160 p__32159
+            map__32160 (if (seq? map__32160)
+                         (if (next map__32160)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__32160))
+                           (if (seq map__32160) (first map__32160) {}))
+                         map__32160)
+            region (get map__32160 :region)
+            override_endpoint (get map__32160 :override-endpoint)
+            table_name (get map__32160 :table-name)
+            read_capacity (get map__32160 :read-capacity)
+            write_capacity (get map__32160 :write-capacity)
+            s__6444__auto__ (java.io.StringWriter.)]
+        (binding [*out* s__6444__auto__]
+          (do
+            (pprint/pprint
+              (create-cluster-table
+                (ddb/client
+                  nil
+                  {:region region,
+                   :override-endpoint
+                   (let [G__32161 override_endpoint]
+                     (when-not (nil? G__32161) (str "http://" G__32161)))})
+                table_name
+                read_capacity
+                write_capacity))
+            (str s__6444__auto__))))))
   (reset-meta!
     #'create-system-command
     (assoc
@@ -474,15 +462,14 @@
       'user-prop-names
       :ns
       *ns*))
-  (def ensure-unique-user
-   (fn ensure_unique_user
-     ([user_name]
-       (let [client (iam/client)
-             user_names (map :UserName (:Users (aws/invoke client {:op :ListUsers})))]
-         (loop [i 1 gen_user_name user_name]
-           (if (some #{gen_user_name} user_names)
-             (recur (inc i) (str user_name "-" (long i)))
-             gen_user_name))))))
+  (defn ensure-unique-user
+    ([user_name]
+      (let [client (iam/client)
+            user_names (map :UserName (:Users (aws/invoke client {:op :ListUsers})))]
+        (loop [i 1 gen_user_name user_name]
+          (if (some #{gen_user_name} user_names)
+            (recur (inc i) (str user_name "-" (long i)))
+            gen_user_name)))))
   (reset-meta!
     #'ensure-unique-user
     (assoc
@@ -491,16 +478,15 @@
       'ensure-unique-user
       :ns
       *ns*))
-  (def ensure-unique-role
-   (fn ensure_unique_role
-     ([role_name]
-       (let [client (iam/client)
-             res (aws/invoke client {:op :ListRoles})
-             role_names (map :roleName (:roles res))]
-         (loop [i 1 gen_role_name role_name]
-           (if (some #{gen_role_name} role_names)
-             (recur (inc i) (str role_name "-" (long i)))
-             gen_role_name))))))
+  (defn ensure-unique-role
+    ([role_name]
+      (let [client (iam/client)
+            res (aws/invoke client {:op :ListRoles})
+            role_names (map :roleName (:roles res))]
+        (loop [i 1 gen_role_name role_name]
+          (if (some #{gen_role_name} role_names)
+            (recur (inc i) (str role_name "-" (long i)))
+            gen_role_name)))))
   (reset-meta!
     #'ensure-unique-role
     (assoc
@@ -518,77 +504,76 @@
       'add-user
       :ns
       *ns*))
-  (def ensure-new-user
-   (fn ensure_new_user
-     ([props user_name prefix]
-       (let [client (iam/client)
-             vec__32173 (user-prop-names prefix)
-             user (nth vec__32173 (int 0) nil)
-             access (nth vec__32173 (int 1) nil)
-             secret (nth vec__32173 (int 2) nil)
-             account_id (iam/get-account-id client)
-             user_creds (get-in props [:users user_name])]
-         (if user_creds
-           (assoc
-             props
-             user
-             user_name
-             access
-             (:aws-access-key-id user_creds)
-             secret
-             (:aws-secret-access-key user_creds))
-           (do
-             (try
-               (aws/invoke client {:op :CreateUser, :req {:UserName user_name}})
-               (catch
-                 java.lang.Exception
-                 ex
-                 (when-not (canom/conflict? (ex-data ex)) (throw ^java.lang.Throwable ex) nil)))
-             (try
-               (let [map__32178 (:AccessKey
-                                  (aws/invoke
-                                    client
-                                    {:op :CreateAccessKey, :req {:UserName user_name}}))
-                     map__32178 (if (seq? map__32178)
-                                  (if (next map__32178)
-                                    (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                                      (to-array map__32178))
-                                    (if (seq map__32178) (first map__32178) {}))
-                                  map__32178)
-                     AccessKeyId (get map__32178 :AccessKeyId)
-                     SecretAccessKey (get map__32178 :SecretAccessKey)]
-                 (assoc
-                   (add-user
-                     props
-                     {user_name
-                      {:aws-access-key-id AccessKeyId, :aws-secret-access-key SecretAccessKey}})
-                   user
-                   user_name
-                   access
-                   AccessKeyId
-                   secret
-                   SecretAccessKey))
-               (catch
-                 java.lang.Exception
-                 ex
-                 (if (canom/conflict? (ex-data ex))
-                   (add-errors
-                     props
-                     (let [s__6444__auto__ (java.io.StringWriter.)]
-                       (binding [*out* s__6444__auto__]
-                         (do
-                           (println "**ERROR**")
-                           (println "Cannot create additional access keys for user ${USERNAME}.")
-                           (println
-                             "Either delete one of the existing access keys, or use an existing access-key-id/secret-key pair.")
-                           (println
-                             "Go to the the IAM tab of your AWS Console: https://console.aws.amazon.com/iam/home#s=Users")
-                           (println "and follow the path below to delete an access key:")
-                           (println
-                             "Iam Home > Users > ${USERNAME} > Security Credentials > Manage Access Keys")
-                           (println "****")
-                           (str s__6444__auto__)))))
-                   (do (throw ^java.lang.Throwable ex) nil))))))))))
+  (defn ensure-new-user
+    ([props user_name prefix]
+      (let [client (iam/client)
+            vec__32173 (user-prop-names prefix)
+            user (nth vec__32173 (int 0) nil)
+            access (nth vec__32173 (int 1) nil)
+            secret (nth vec__32173 (int 2) nil)
+            account_id (iam/get-account-id client)
+            user_creds (get-in props [:users user_name])]
+        (if user_creds
+          (assoc
+            props
+            user
+            user_name
+            access
+            (:aws-access-key-id user_creds)
+            secret
+            (:aws-secret-access-key user_creds))
+          (do
+            (try
+              (aws/invoke client {:op :CreateUser, :req {:UserName user_name}})
+              (catch
+                java.lang.Exception
+                ex
+                (when-not (canom/conflict? (ex-data ex)) (throw ^java.lang.Throwable ex) nil)))
+            (try
+              (let [map__32178 (:AccessKey
+                                 (aws/invoke
+                                   client
+                                   {:op :CreateAccessKey, :req {:UserName user_name}}))
+                    map__32178 (if (seq? map__32178)
+                                 (if (next map__32178)
+                                   (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                                     (to-array map__32178))
+                                   (if (seq map__32178) (first map__32178) {}))
+                                 map__32178)
+                    AccessKeyId (get map__32178 :AccessKeyId)
+                    SecretAccessKey (get map__32178 :SecretAccessKey)]
+                (assoc
+                  (add-user
+                    props
+                    {user_name
+                     {:aws-access-key-id AccessKeyId, :aws-secret-access-key SecretAccessKey}})
+                  user
+                  user_name
+                  access
+                  AccessKeyId
+                  secret
+                  SecretAccessKey))
+              (catch
+                java.lang.Exception
+                ex
+                (if (canom/conflict? (ex-data ex))
+                  (add-errors
+                    props
+                    (let [s__6444__auto__ (java.io.StringWriter.)]
+                      (binding [*out* s__6444__auto__]
+                        (do
+                          (println "**ERROR**")
+                          (println "Cannot create additional access keys for user ${USERNAME}.")
+                          (println
+                            "Either delete one of the existing access keys, or use an existing access-key-id/secret-key pair.")
+                          (println
+                            "Go to the the IAM tab of your AWS Console: https://console.aws.amazon.com/iam/home#s=Users")
+                          (println "and follow the path below to delete an access key:")
+                          (println
+                            "Iam Home > Users > ${USERNAME} > Security Credentials > Manage Access Keys")
+                          (println "****")
+                          (str s__6444__auto__)))))
+                  (do (throw ^java.lang.Throwable ex) nil)))))))))
   (reset-meta!
     #'ensure-new-user
     (assoc
@@ -597,12 +582,11 @@
       'ensure-new-user
       :ns
       *ns*))
-  (def ensure-existing-user
-   (fn ensure_existing_user
-     ([props user_name]
-       (let [client (iam/client)]
-         (aws/invoke client {:op :GetUser, :req {:UserName user_name}})
-         props))))
+  (defn ensure-existing-user
+    ([props user_name]
+      (let [client (iam/client)]
+        (aws/invoke client {:op :GetUser, :req {:UserName user_name}})
+        props)))
   (reset-meta!
     #'ensure-existing-user
     (assoc
@@ -1078,9 +1062,8 @@
       'print-errors
       :ns
       *ns*))
-  (def new-keys
-   (fn new_keys
-     ([ensured_map orig_map] (filter string? (keys (apply dissoc ensured_map (keys orig_map)))))))
+  (defn new-keys
+    ([ensured_map orig_map] (filter string? (keys (apply dissoc ensured_map (keys orig_map))))))
   (reset-meta!
     #'new-keys
     (assoc
@@ -1089,34 +1072,33 @@
       'new-keys
       :ns
       *ns*))
-  (def ensure-transactor
-   (fn ensure_transactor
-     ([p__32256]
-       (let [map__32257 p__32256
-             map__32257 (if (seq? map__32257)
-                          (if (next map__32257)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__32257))
-                            (if (seq map__32257) (first map__32257) {}))
-                          map__32257)
-             input_file (get map__32257 :input-file)
-             output_file (get map__32257 :output-file)
-             lines (load-properties input_file)
-             props (extract-prop-map lines)]
-         (try
-           (let [new_props (ensure-transactor* props)
-                 errors (:errors new_props)
-                 new_lines (merge-prop-lines lines new_props (new-keys new_props props))]
-             (save-properties output_file new_lines)
-             (print-errors errors *err*)
-             (if (seq errors)
-               {:failed
-                (cli/fail (str (java.lang.Integer/valueOf (int (count errors))) " errors."))}
-               {:success output_file}))
-           (catch
-             clojure.lang.ExceptionInfo
-             ei
-             {:failed (cli/fail (.getMessage ^java.lang.Throwable ei))}))))))
+  (defn ensure-transactor
+    ([p__32256]
+      (let [map__32257 p__32256
+            map__32257 (if (seq? map__32257)
+                         (if (next map__32257)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__32257))
+                           (if (seq map__32257) (first map__32257) {}))
+                         map__32257)
+            input_file (get map__32257 :input-file)
+            output_file (get map__32257 :output-file)
+            lines (load-properties input_file)
+            props (extract-prop-map lines)]
+        (try
+          (let [new_props (ensure-transactor* props)
+                errors (:errors new_props)
+                new_lines (merge-prop-lines lines new_props (new-keys new_props props))]
+            (save-properties output_file new_lines)
+            (print-errors errors *err*)
+            (if (seq errors)
+              {:failed
+               (cli/fail (str (java.lang.Integer/valueOf (int (count errors))) " errors."))}
+              {:success output_file}))
+          (catch
+            clojure.lang.ExceptionInfo
+            ei
+            {:failed (cli/fail (.getMessage ^java.lang.Throwable ei))})))))
   (reset-meta!
     #'ensure-transactor
     (assoc
@@ -1125,10 +1107,9 @@
       'ensure-transactor
       :ns
       *ns*))
-  (def to-json
-   (fn to_json
-     ([x template_file]
-       (with-open [wrtr (io/writer template_file)] (binding [*out* wrtr] (json/pprint x))))))
+  (defn to-json
+    ([x template_file]
+      (with-open [wrtr (io/writer template_file)] (binding [*out* wrtr] (json/pprint x)))))
   (reset-meta!
     #'to-json
     (assoc
@@ -1137,29 +1118,28 @@
       'to-json
       :ns
       *ns*))
-  (def save-properties
-   (fn save_properties
-     ([prop_file prop_lines]
-       (with-open [wrtr (io/writer prop_file)]
-         (binding [*out* wrtr]
-           (loop [seq_32260 (seq prop_lines) chunk_32261 nil count_32262 0 i_32263 0]
-             (if (< i_32263 count_32262)
-               (let [line (.nth ^clojure.lang.Indexed chunk_32261 (int i_32263))]
-                 (println line)
-                 (recur seq_32260 chunk_32261 count_32262 (inc i_32263)))
-               (let [temp__5825__auto__ (seq seq_32260)]
-                 (when temp__5825__auto__
-                   (let [seq_32260 temp__5825__auto__]
-                     (if (chunked-seq? seq_32260)
-                       (let [c__6090__auto__ (chunk-first seq_32260)]
-                         (recur
-                           (chunk-rest seq_32260)
-                           c__6090__auto__
-                           (int (count c__6090__auto__))
-                           (int 0)))
-                       (let [line (first seq_32260)]
-                         (println line)
-                         (recur (next seq_32260) nil 0 0)))))))))))))
+  (defn save-properties
+    ([prop_file prop_lines]
+      (with-open [wrtr (io/writer prop_file)]
+        (binding [*out* wrtr]
+          (loop [seq_32260 (seq prop_lines) chunk_32261 nil count_32262 0 i_32263 0]
+            (if (< i_32263 count_32262)
+              (let [line (.nth ^clojure.lang.Indexed chunk_32261 (int i_32263))]
+                (println line)
+                (recur seq_32260 chunk_32261 count_32262 (inc i_32263)))
+              (let [temp__5825__auto__ (seq seq_32260)]
+                (when temp__5825__auto__
+                  (let [seq_32260 temp__5825__auto__]
+                    (if (chunked-seq? seq_32260)
+                      (let [c__6090__auto__ (chunk-first seq_32260)]
+                        (recur
+                          (chunk-rest seq_32260)
+                          c__6090__auto__
+                          (int (count c__6090__auto__))
+                          (int 0)))
+                      (let [line (first seq_32260)]
+                        (println line)
+                        (recur (next seq_32260) nil 0 0))))))))))))
   (reset-meta!
     #'save-properties
     (assoc
@@ -1586,39 +1566,38 @@
   (reset-meta!
     #'symbolize-keys
     (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'symbolize-keys :ns *ns*))
-  (def cf-user-data
-   (fn cf_user_data
-     ([ddb_properties cf_properties]
-       {"Fn::Base64"
-        {"Fn::Join"
-         ["\n"
-          ["exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1"
-           {"Fn::Join" ["=" ["export XMX" {:Ref "Xmx"}]]}
-           {"Fn::Join" ["=" ["export JAVA_OPTS" {:Ref "JavaOpts"}]]}
-           {"Fn::Join" ["=" ["export DATOMIC_DEPLOY_BUCKET" {:Ref "DatomicDeployBucket"}]]}
-           {"Fn::Join" ["=" ["export DATOMIC_VERSION" {:Ref "DatomicVersion"}]]}
-           "cd /datomic"
-           "cat <<EOF >aws.properties"
-           "host=`curl http://169.254.169.254/latest/meta-data/local-ipv4`"
-           "alt-host=`curl http://169.254.169.254/latest/meta-data/public-ipv4`"
-           (str/join
-             "\n"
-             (map
-               (fn fn__32292
-                 ([p__32291]
-                   (let [vec__32293 p__32291
-                         k (nth vec__32293 (int 0) nil)
-                         v (nth vec__32293 (int 1) nil)]
-                     (str (name k) "=" v))))
-               (dissoc ddb_properties :host :alt-host)))
-           "EOF"
-           "chmod 744 aws.properties"
-           (str
-             "AWS_ACCESS_KEY_ID=\"${DATOMIC_READ_DEPLOY_ACCESS_KEY_ID}\""
-             " AWS_SECRET_ACCESS_KEY=\"${DATOMIC_READ_DEPLOY_AWS_SECRET_KEY}\""
-             " aws s3 cp \"s3://${DATOMIC_DEPLOY_BUCKET}/${DATOMIC_VERSION}/startup.sh\" startup.sh")
-           "chmod 500 startup.sh"
-           "./startup.sh"]]}})))
+  (defn cf-user-data
+    ([ddb_properties cf_properties]
+      {"Fn::Base64"
+       {"Fn::Join"
+        ["\n"
+         ["exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1"
+          {"Fn::Join" ["=" ["export XMX" {:Ref "Xmx"}]]}
+          {"Fn::Join" ["=" ["export JAVA_OPTS" {:Ref "JavaOpts"}]]}
+          {"Fn::Join" ["=" ["export DATOMIC_DEPLOY_BUCKET" {:Ref "DatomicDeployBucket"}]]}
+          {"Fn::Join" ["=" ["export DATOMIC_VERSION" {:Ref "DatomicVersion"}]]}
+          "cd /datomic"
+          "cat <<EOF >aws.properties"
+          "host=`curl http://169.254.169.254/latest/meta-data/local-ipv4`"
+          "alt-host=`curl http://169.254.169.254/latest/meta-data/public-ipv4`"
+          (str/join
+            "\n"
+            (map
+              (fn fn__32292
+                ([p__32291]
+                  (let [vec__32293 p__32291
+                        k (nth vec__32293 (int 0) nil)
+                        v (nth vec__32293 (int 1) nil)]
+                    (str (name k) "=" v))))
+              (dissoc ddb_properties :host :alt-host)))
+          "EOF"
+          "chmod 744 aws.properties"
+          (str
+            "AWS_ACCESS_KEY_ID=\"${DATOMIC_READ_DEPLOY_ACCESS_KEY_ID}\""
+            " AWS_SECRET_ACCESS_KEY=\"${DATOMIC_READ_DEPLOY_AWS_SECRET_KEY}\""
+            " aws s3 cp \"s3://${DATOMIC_DEPLOY_BUCKET}/${DATOMIC_VERSION}/startup.sh\" startup.sh")
+          "chmod 500 startup.sh"
+          "./startup.sh"]]}}))
   (reset-meta!
     #'cf-user-data
     (assoc
@@ -1627,26 +1606,25 @@
       'cf-user-data
       :ns
       *ns*))
-  (def cf-template-args
-   (fn cf_template_args
-     ([ddb_properties cf_properties]
-       (let [account_id (iam/get-account-id (iam/client))
-             type (common/getx cf_properties :aws-instance-type)
-             xmx (common/getx cf_properties :java-xmx)
-             java_opts (get cf_properties :java-opts "")
-             user_data (cf-user-data ddb_properties cf_properties)
-             transactor_role (get ddb_properties :aws-transactor-role)]
-         (symbolize-keys
-           (assoc
-             cf_properties
-             :xmx
-             xmx
-             :user-data
-             user_data
-             :java-opts
-             java_opts
-             :transactor-role
-             transactor_role))))))
+  (defn cf-template-args
+    ([ddb_properties cf_properties]
+      (let [account_id (iam/get-account-id (iam/client))
+            type (common/getx cf_properties :aws-instance-type)
+            xmx (common/getx cf_properties :java-xmx)
+            java_opts (get cf_properties :java-opts "")
+            user_data (cf-user-data ddb_properties cf_properties)
+            transactor_role (get ddb_properties :aws-transactor-role)]
+        (symbolize-keys
+          (assoc
+            cf_properties
+            :xmx
+            xmx
+            :user-data
+            user_data
+            :java-opts
+            java_opts
+            :transactor-role
+            transactor_role)))))
   (reset-meta!
     #'cf-template-args
     (assoc
@@ -1655,14 +1633,13 @@
       'cf-template-args
       :ns
       *ns*))
-  (def create-cf-template*
-   (fn create_cf_template_STAR_
-     ([ddb_properties cf_properties]
-       (let [args (cf-template-args ddb_properties cf_properties)
-             template (if (not (^clojure.lang.IFn args 'transactor-role))
-                        cf-template-template
-                        (deep-merge cf-template-template cf-role-template-template))]
-         (eval-with template args)))))
+  (defn create-cf-template*
+    ([ddb_properties cf_properties]
+      (let [args (cf-template-args ddb_properties cf_properties)
+            template (if (not (^clojure.lang.IFn args 'transactor-role))
+                       cf-template-template
+                       (deep-merge cf-template-template cf-role-template-template))]
+        (eval-with template args))))
   (reset-meta!
     #'create-cf-template*
     (assoc
@@ -1686,22 +1663,21 @@
   (reset-meta!
     #'propmap
     (assoc {:arglists (clojure.core/list ['filename]), :column (int 1)} :name 'propmap :ns *ns*))
-  (def create-cf-template
-   (fn create_cf_template
-     ([p__32307]
-       (let [map__32308 p__32307
-             map__32308 (if (seq? map__32308)
-                          (if (next map__32308)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__32308))
-                            (if (seq map__32308) (first map__32308) {}))
-                          map__32308)
-             ddb_properties (get map__32308 :ddb-properties)
-             cf_properties (get map__32308 :cf-properties)
-             json_template (get map__32308 :json-template)
-             ddb_props (propmap ddb_properties)
-             cf_props (propmap cf_properties)]
-         (to-json (create-cf-template* ddb_props cf_props) json_template)))))
+  (defn create-cf-template
+    ([p__32307]
+      (let [map__32308 p__32307
+            map__32308 (if (seq? map__32308)
+                         (if (next map__32308)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__32308))
+                           (if (seq map__32308) (first map__32308) {}))
+                         map__32308)
+            ddb_properties (get map__32308 :ddb-properties)
+            cf_properties (get map__32308 :cf-properties)
+            json_template (get map__32308 :json-template)
+            ddb_props (propmap ddb_properties)
+            cf_props (propmap cf_properties)]
+        (to-json (create-cf-template* ddb_props cf_props) json_template))))
   (reset-meta!
     #'create-cf-template
     (assoc

@@ -18,6 +18,12 @@ strict runs. `datomic.index` required a manual reconstruction of the small
 official Peer method exactly; only erased local variable spellings remain
 inferred.
 
+The decompiler restored 1,904 ordinary named functions as `defn` using the
+artifact's persisted names and arities. Ambiguous macro-generated roots remain
+in explicit `def`/`fn` form. Namespace loaders, exact metadata resets, protocol
+scaffolding, and compiler temporaries also remain, so this is easier-to-read
+initializer source rather than an original-like source tree.
+
 The 1.0.7705 Java surface adds the current tuple-discontinuation query,
 reverse-seek database operation, and backup-listing API to the historical
 source. Its 43 renderings are identical to the Transactor's shared Java files,

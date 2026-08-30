@@ -99,13 +99,12 @@
   (reset-meta!
     #'warn-creds
     (assoc {:arglists (clojure.core/list ['params]), :column (int 1)} :name 'warn-creds :ns *ns*))
-  (def extract-query-string
-   (fn extract_query_string
-     ([uri]
-       (if uri
-         (let [idx (.indexOf ^java.lang.String uri "?")]
-           (if (>= idx 0) (subs uri (long (inc idx))) ""))
-         ""))))
+  (defn extract-query-string
+    ([uri]
+      (if uri
+        (let [idx (.indexOf ^java.lang.String uri "?")]
+          (if (>= idx 0) (subs uri (long (inc idx))) ""))
+        "")))
   (reset-meta!
     #'extract-query-string
     (assoc
@@ -114,9 +113,8 @@
       'extract-query-string
       :ns
       *ns*))
-  (def sub-uri
-   (fn sub_uri
-     ([uri] (java.net.URI. (.getSchemeSpecificPart (java.net.URI. ^java.lang.String uri))))))
+  (defn sub-uri
+    ([uri] (java.net.URI. (.getSchemeSpecificPart (java.net.URI. ^java.lang.String uri)))))
   (reset-meta!
     #'sub-uri
     (assoc
@@ -509,13 +507,12 @@
       'remove-query-string
       :ns
       *ns*))
-  (def loggable-cluster-conf
-   (fn loggable_cluster_conf
-     ([cluster_conf]
-       (let [m (select-keys
-                 cluster_conf
-                 [:protocol :db-name :system-root :host :port :bucket :db-id])]
-         (cond-> m (:system-root m) (update :system-root remove-query-string))))))
+  (defn loggable-cluster-conf
+    ([cluster_conf]
+      (let [m (select-keys
+                cluster_conf
+                [:protocol :db-name :system-root :host :port :bucket :db-id])]
+        (cond-> m (:system-root m) (update :system-root remove-query-string)))))
   (reset-meta!
     #'loggable-cluster-conf
     (assoc
@@ -837,21 +834,20 @@
       'map->query-string
       :ns
       *ns*))
-  (def create-h2
-   (fn create_h2
-     ([cluster_conf]
-       (let [system_root (str/trim (common/getx cluster_conf :system-root))]
-         (when-not (or (.startsWith ^java.lang.String system_root ":") (= system_root ""))
-           (str
-             "datomic:"
-             (name (:protocol cluster_conf))
-             "://"
-             system_root
-             (let [temp__5825__auto__ (:db-name cluster_conf)]
-               (when temp__5825__auto__ (let [db_name temp__5825__auto__] (str "/" db_name))))
-             (if (not (= {:h2-port 4335} (select-keys cluster_conf [:h2-port])))
-               (str "?" (map->query-string (select-keys cluster_conf [:h2-port :read-only])))
-               (str "?" (map->query-string (select-keys cluster_conf [:read-only]))))))))))
+  (defn create-h2
+    ([cluster_conf]
+      (let [system_root (str/trim (common/getx cluster_conf :system-root))]
+        (when-not (or (.startsWith ^java.lang.String system_root ":") (= system_root ""))
+          (str
+            "datomic:"
+            (name (:protocol cluster_conf))
+            "://"
+            system_root
+            (let [temp__5825__auto__ (:db-name cluster_conf)]
+              (when temp__5825__auto__ (let [db_name temp__5825__auto__] (str "/" db_name))))
+            (if (not (= {:h2-port 4335} (select-keys cluster_conf [:h2-port])))
+              (str "?" (map->query-string (select-keys cluster_conf [:h2-port :read-only])))
+              (str "?" (map->query-string (select-keys cluster_conf [:read-only])))))))))
   (reset-meta!
     #'create-h2
     (assoc
@@ -896,7 +892,7 @@
         (let [temp__5825__auto__ (:read-only cluster_conf)]
           (when temp__5825__auto__
             (let [read_only temp__5825__auto__] (str "?read-only=" read_only)))))))
-  (def db-uri (fn db_uri ([uri db_name] (create (assoc (parse uri) :db-name db_name)))))
+  (defn db-uri ([uri db_name] (create (assoc (parse uri) :db-name db_name))))
   (reset-meta!
     #'db-uri
     (assoc

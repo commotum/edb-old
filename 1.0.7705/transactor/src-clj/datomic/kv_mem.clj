@@ -76,10 +76,9 @@
   (reset-meta!
     #'->KVMem
     (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name '->KVMem :ns *ns*))
-  (def kv-mem
-   (fn kv_mem
-     ([m] (datomic.kv_mem.KVMem. m))
-     ([] (kv-mem (java.util.concurrent.ConcurrentHashMap.)))))
+  (defn kv-mem
+    ([m] (datomic.kv_mem.KVMem. m))
+    ([] (kv-mem (java.util.concurrent.ConcurrentHashMap.))))
   (reset-meta!
     #'kv-mem
     (assoc {:arglists (clojure.core/list [] ['m]), :column (int 1)} :name 'kv-mem :ns *ns*)))

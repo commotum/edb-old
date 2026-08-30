@@ -28,10 +28,9 @@
     :cognitect.anomalies/conflict
     "ResourceNotFoundException"
     :cognitect.anomalies/not-found)
-  (def client
-   (fn client
-     ([creds opts] (aws-helpers/sync-client (DynamoDbClient/builder) creds opts))
-     ([opts] (aws-helpers/sync-client (DynamoDbClient/builder) opts))))
+  (defn client
+    ([creds opts] (aws-helpers/sync-client (DynamoDbClient/builder) creds opts))
+    ([opts] (aws-helpers/sync-client (DynamoDbClient/builder) opts)))
   (reset-meta!
     #'client
     (assoc

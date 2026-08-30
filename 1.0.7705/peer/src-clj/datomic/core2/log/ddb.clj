@@ -46,20 +46,19 @@
       'append-request
       :ns
       *ns*))
-  (def ddb-item->log-item
-   (fn ddb_item__GT_log_item
-     ([ddb_item]
-       (let [map__21496 (ddb/de-item-map ddb_item)
-             map__21496 (if (seq? map__21496)
-                          (if (next map__21496)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21496))
-                            (if (seq map__21496) (first map__21496) {}))
-                          map__21496)
-             r (get map__21496 :r)
-             header (get map__21496 :header)
-             body (get map__21496 :body)]
-         (cond-> {:header (assoc (edn/read-string header) :t r)} body (assoc :body body))))))
+  (defn ddb-item->log-item
+    ([ddb_item]
+      (let [map__21496 (ddb/de-item-map ddb_item)
+            map__21496 (if (seq? map__21496)
+                         (if (next map__21496)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21496))
+                           (if (seq map__21496) (first map__21496) {}))
+                         map__21496)
+            r (get map__21496 :r)
+            header (get map__21496 :header)
+            body (get map__21496 :body)]
+        (cond-> {:header (assoc (edn/read-string header) :t r)} body (assoc :body body)))))
   (reset-meta!
     #'ddb-item->log-item
     (assoc
@@ -1671,9 +1670,7 @@
     (-item-header [this item] (:header item))
     (-append [this header body] (aws/invoke-async client (append-request table p header body))))
   (clojure.core/import 'datomic.core2.log.ddb.Log)
-  (def ->Log
-   (fn __GT_Log
-     ([client table p chunk_size] (datomic.core2.log.ddb.Log. client table p chunk_size))))
+  (defn ->Log ([client table p chunk_size] (datomic.core2.log.ddb.Log. client table p chunk_size)))
   (reset-meta!
     #'->Log
     (assoc
@@ -1682,21 +1679,20 @@
       '->Log
       :ns
       *ns*))
-  (def create
-   (fn create
-     ([p__21718]
-       (let [map__21719 p__21718
-             map__21719 (if (seq? map__21719)
-                          (if (next map__21719)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__21719))
-                            (if (seq map__21719) (first map__21719) {}))
-                          map__21719)
-             client (get map__21719 :client)
-             table (get map__21719 :table)
-             p (get map__21719 :p)
-             chunk_size (get map__21719 :chunk-size)]
-         (->Log client table p chunk_size)))))
+  (defn create
+    ([p__21718]
+      (let [map__21719 p__21718
+            map__21719 (if (seq? map__21719)
+                         (if (next map__21719)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__21719))
+                           (if (seq map__21719) (first map__21719) {}))
+                         map__21719)
+            client (get map__21719 :client)
+            table (get map__21719 :table)
+            p (get map__21719 :p)
+            chunk_size (get map__21719 :chunk-size)]
+        (->Log client table p chunk_size))))
   (reset-meta!
     #'create
     (assoc

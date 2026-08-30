@@ -78,9 +78,8 @@
   (reset-meta!
     #'as-lookup
     (assoc {:arglists (clojure.core/list ['o]), :column (int 1)} :name 'as-lookup :ns *ns*))
-  (def write-handler-lookup
-   (fn write_handler_lookup
-     ([custom_lookup] (WriteHandlerLookup/createLookupChain (as-lookup custom_lookup)))))
+  (defn write-handler-lookup
+    ([custom_lookup] (WriteHandlerLookup/createLookupChain (as-lookup custom_lookup))))
   (reset-meta!
     #'write-handler-lookup
     (assoc
@@ -114,8 +113,7 @@
           (boolean (.booleanValue ^java.lang.Boolean validate_checksum))))
       ([in lookup] (create-reader in lookup true))
       ([in] (create-reader in nil))))
-  (def begin-open-list
-   (fn begin_open_list ([writer] (.beginOpenList ^org.fressian.StreamingWriter writer))))
+  (defn begin-open-list ([writer] (.beginOpenList ^org.fressian.StreamingWriter writer)))
   (reset-meta!
     #'begin-open-list
     (assoc
@@ -125,8 +123,7 @@
       'begin-open-list
       :ns
       *ns*))
-  (def begin-closed-list
-   (fn begin_closed_list ([writer] (.beginClosedList ^org.fressian.StreamingWriter writer))))
+  (defn begin-closed-list ([writer] (.beginClosedList ^org.fressian.StreamingWriter writer)))
   (reset-meta!
     #'begin-closed-list
     (assoc
@@ -136,7 +133,7 @@
       'begin-closed-list
       :ns
       *ns*))
-  (def end-list (fn end_list ([writer] (.endList ^org.fressian.StreamingWriter writer))))
+  (defn end-list ([writer] (.endList ^org.fressian.StreamingWriter writer)))
   (reset-meta!
     #'end-list
     (assoc
@@ -146,22 +143,21 @@
       'end-list
       :ns
       *ns*))
-  (def fressian
-   (fn fressian
-     ([out obj & p__11472]
-       (let [map__11473 p__11472
-             map__11473 (if (seq? map__11473)
-                          (if (next map__11473)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11473))
-                            (if (seq map__11473) (first map__11473) {}))
-                          map__11473)
-             handlers (get map__11473 :handlers)
-             footer (get map__11473 :footer)]
-         (with-open [os (jio/output-stream out)]
-           (let [writer (create-writer os handlers)]
-             (.writeObject ^org.fressian.Writer writer obj)
-             (when footer (.writeFooter ^org.fressian.Writer writer))))))))
+  (defn fressian
+    ([out obj & p__11472]
+      (let [map__11473 p__11472
+            map__11473 (if (seq? map__11473)
+                         (if (next map__11473)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11473))
+                           (if (seq map__11473) (first map__11473) {}))
+                         map__11473)
+            handlers (get map__11473 :handlers)
+            footer (get map__11473 :footer)]
+        (with-open [os (jio/output-stream out)]
+          (let [writer (create-writer os handlers)]
+            (.writeObject ^org.fressian.Writer writer obj)
+            (when footer (.writeFooter ^org.fressian.Writer writer)))))))
   (reset-meta!
     #'fressian
     (assoc
@@ -170,22 +166,21 @@
       'fressian
       :ns
       *ns*))
-  (def defressian
-   (fn defressian
-     ([in & p__11475]
-       (let [map__11476 p__11475
-             map__11476 (if (seq? map__11476)
-                          (if (next map__11476)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11476))
-                            (if (seq map__11476) (first map__11476) {}))
-                          map__11476)
-             handlers (get map__11476 :handlers)
-             footer (get map__11476 :footer)
-             fin (create-reader in handlers (boolean footer))
-             result (.readObject ^org.fressian.Reader fin)]
-         (when footer (.validateFooter ^org.fressian.Reader fin))
-         result))))
+  (defn defressian
+    ([in & p__11475]
+      (let [map__11476 p__11475
+            map__11476 (if (seq? map__11476)
+                         (if (next map__11476)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11476))
+                           (if (seq map__11476) (first map__11476) {}))
+                         map__11476)
+            handlers (get map__11476 :handlers)
+            footer (get map__11476 :footer)
+            fin (create-reader in handlers (boolean footer))
+            result (.readObject ^org.fressian.Reader fin)]
+        (when footer (.validateFooter ^org.fressian.Reader fin))
+        result)))
   (reset-meta!
     #'defressian
     (assoc
@@ -218,15 +213,14 @@
     org.fressian.FressianReader
     queue/BlockingConsumer
     {:take (fn fn__11480 ([reader] (.readObject ^org.fressian.FressianReader reader)))})
-  (def read-batch
-   (fn read_batch
-     ([fin]
-       (let [sentinel (java.lang.Object.)]
-         (loop [objects []]
-           (let [obj (try
-                       (.readObject ^org.fressian.Reader fin)
-                       (catch java.io.EOFException e sentinel))]
-             (if (= obj sentinel) objects (recur (conj objects obj)))))))))
+  (defn read-batch
+    ([fin]
+      (let [sentinel (java.lang.Object.)]
+        (loop [objects []]
+          (let [obj (try
+                      (.readObject ^org.fressian.Reader fin)
+                      (catch java.io.EOFException e sentinel))]
+            (if (= obj sentinel) objects (recur (conj objects obj))))))))
   (reset-meta!
     #'read-batch
     (assoc
@@ -235,36 +229,35 @@
       'read-batch
       :ns
       *ns*))
-  (def read-seq
-   (fn read_seq
-     ([readable handler_lookup]
-       (let [map__11485 (queue/queue-seq 100)
-             map__11485 (if (seq? map__11485)
-                          (if (next map__11485)
-                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                              (to-array map__11485))
-                            (if (seq map__11485) (first map__11485) {}))
-                          map__11485)
-             fill (get map__11485 :fill)
-             done (get map__11485 :done)
-             drain (get map__11485 :drain)]
-         (future-call
-           (fn fn__11486
-             ([]
-               (try
-                 (with-open [s (jio/input-stream readable)]
-                   (do
-                     (let [f (create-reader s handler_lookup)]
-                       (loop []
-                         (if (= (.available ^java.io.InputStream s) 0)
-                           (^clojure.lang.IFn done)
-                           (do
-                             (^clojure.lang.IFn fill (.readObject ^org.fressian.Reader f))
-                             (recur)))))
-                     nil))
-                 (catch java.lang.Throwable t (^clojure.lang.IFn fill t))))))
-         (^clojure.lang.IFn drain)))
-     ([readable] (read-seq readable nil))))
+  (defn read-seq
+    ([readable handler_lookup]
+      (let [map__11485 (queue/queue-seq 100)
+            map__11485 (if (seq? map__11485)
+                         (if (next map__11485)
+                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
+                             (to-array map__11485))
+                           (if (seq map__11485) (first map__11485) {}))
+                         map__11485)
+            fill (get map__11485 :fill)
+            done (get map__11485 :done)
+            drain (get map__11485 :drain)]
+        (future-call
+          (fn fn__11486
+            ([]
+              (try
+                (with-open [s (jio/input-stream readable)]
+                  (do
+                    (let [f (create-reader s handler_lookup)]
+                      (loop []
+                        (if (= (.available ^java.io.InputStream s) 0)
+                          (^clojure.lang.IFn done)
+                          (do
+                            (^clojure.lang.IFn fill (.readObject ^org.fressian.Reader f))
+                            (recur)))))
+                    nil))
+                (catch java.lang.Throwable t (^clojure.lang.IFn fill t))))))
+        (^clojure.lang.IFn drain)))
+    ([readable] (read-seq readable nil)))
   (reset-meta!
     #'read-seq
     (assoc
@@ -273,12 +266,11 @@
       'read-seq
       :ns
       *ns*))
-  (def write-named
-   (fn write_named
-     ([tag w s]
-       (.writeTag ^org.fressian.Writer w tag (int 2))
-       (.writeObject ^org.fressian.Writer w (namespace s) (boolean (.booleanValue true)))
-       (.writeObject ^org.fressian.Writer w (name s) (boolean (.booleanValue true))))))
+  (defn write-named
+    ([tag w s]
+      (.writeTag ^org.fressian.Writer w tag (int 2))
+      (.writeObject ^org.fressian.Writer w (namespace s) (boolean (.booleanValue true)))
+      (.writeObject ^org.fressian.Writer w (name s) (boolean (.booleanValue true)))))
   (reset-meta!
     #'write-named
     (assoc
@@ -380,28 +372,27 @@
       'record-latencies
       :ns
       *ns*))
-  (def val->obj
-   (fn val__GT_obj
-     ([read_lookup]
-       (fn fn__11507
-         ([val]
-           (let [start__8781__auto__ (java.lang.System/nanoTime)
-                 result__8782__auto__ (try
-                                        (with-open [is (org.fressian.impl.ByteBufferInputStream.
-                                                         ^java.nio.ByteBuffer val)]
-                                          (with-open [gz (java.util.zip.GZIPInputStream.
-                                                           ^java.io.InputStream is
-                                                           (int 4096))]
-                                            (with-open [bs (stream/buffered-input-stream gz)]
-                                              (let [fr (create-reader bs read_lookup false)
-                                                    obj (.readObject ^org.fressian.Reader fr)]
-                                                (.readAllBytes ^java.io.InputStream gz)
-                                                obj))))
-                                        (catch java.lang.Throwable e e))]
-             (record-latencies
-               (long (- (java.lang.System/nanoTime) start__8781__auto__))
-               result__8782__auto__)
-             (common/return-or-throw result__8782__auto__)))))))
+  (defn val->obj
+    ([read_lookup]
+      (fn fn__11507
+        ([val]
+          (let [start__8781__auto__ (java.lang.System/nanoTime)
+                result__8782__auto__ (try
+                                       (with-open [is (org.fressian.impl.ByteBufferInputStream.
+                                                        ^java.nio.ByteBuffer val)]
+                                         (with-open [gz (java.util.zip.GZIPInputStream.
+                                                          ^java.io.InputStream is
+                                                          (int 4096))]
+                                           (with-open [bs (stream/buffered-input-stream gz)]
+                                             (let [fr (create-reader bs read_lookup false)
+                                                   obj (.readObject ^org.fressian.Reader fr)]
+                                               (.readAllBytes ^java.io.InputStream gz)
+                                               obj))))
+                                       (catch java.lang.Throwable e e))]
+            (record-latencies
+              (long (- (java.lang.System/nanoTime) start__8781__auto__))
+              result__8782__auto__)
+            (common/return-or-throw result__8782__auto__))))))
   (reset-meta!
     #'val->obj
     (assoc
@@ -440,11 +431,10 @@
       'reader-iter
       :ns
       *ns*))
-  (def fressianable?
-   (fn fressianable_QMARK_
-     ([val handlers]
-       (boolean (try (fressian-val val handlers) (catch java.lang.Throwable _ false))))
-     ([val] (fressianable? val clojure-write-handlers))))
+  (defn fressianable?
+    ([val handlers]
+      (boolean (try (fressian-val val handlers) (catch java.lang.Throwable _ false))))
+    ([val] (fressianable? val clojure-write-handlers)))
   (reset-meta!
     #'fressianable?
     (assoc

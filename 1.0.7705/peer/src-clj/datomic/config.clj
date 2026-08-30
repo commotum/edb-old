@@ -30,12 +30,12 @@
       'protocol-supports-ha?
       :ns
       *ns*))
-  (let [protocol_metadata__7431 {:column (int 1)}]
+  (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol Symbolish (sym-name [s]) (sym-namespace [s]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.config" "Symbolish")
-      (assoc (assoc protocol_metadata__7431 :doc nil) :name 'Symbolish :ns *ns*))
-    (let [protocol_signature__7432 (assoc
+      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Symbolish :ns *ns*))
+    (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'sym-name {:arglists (clojure.core/list ['s])}),
@@ -43,13 +43,13 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.config" "Symbolish"))
-          protocol_method_name__7433 (with-meta
-                                       (:name protocol_signature__7432)
-                                       protocol_signature__7432)]
+          protocol_method_name__7465 (with-meta
+                                       (:name protocol_signature__7464)
+                                       protocol_signature__7464)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.config" "sym-name")
-        (assoc protocol_signature__7432 :name protocol_method_name__7433 :ns *ns*)))
-    (let [protocol_signature__7434 (assoc
+        (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*)))
+    (let [protocol_signature__7466 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta
@@ -59,12 +59,12 @@
                                       :doc nil}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.config" "Symbolish"))
-          protocol_method_name__7435 (with-meta
-                                       (:name protocol_signature__7434)
-                                       protocol_signature__7434)]
+          protocol_method_name__7467 (with-meta
+                                       (:name protocol_signature__7466)
+                                       protocol_signature__7466)]
       (reset-meta!
         (clojure.lang.RT/var "datomic.config" "sym-namespace")
-        (assoc protocol_signature__7434 :name protocol_method_name__7435 :ns *ns*))))
+        (assoc protocol_signature__7466 :name protocol_method_name__7467 :ns *ns*))))
   (extend nil Symbolish {:sym-name (fn fn__8974 ([_] nil))})
   (extend java.lang.Object Symbolish {:sym-name (fn fn__8976 ([_] nil))})
   (extend
@@ -522,8 +522,7 @@
   (reset-meta!
     #'memcached-args
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'memcached-args :ns *ns*))
-  (def max-gb->eviction-threshold-mb
-   (fn max_gb__GT_eviction_threshold_mb ([max_gb] (- (* max_gb 900) 500))))
+  (defn max-gb->eviction-threshold-mb ([max_gb] (- (* max_gb 900) 500)))
   (reset-meta!
     #'max-gb->eviction-threshold-mb
     (assoc
@@ -564,18 +563,17 @@
       'ddb-client-args
       :ns
       *ns*))
-  (def s3-client-args
-   (fn s3_client_args
-     ([args]
-       (merge
-         (property-map
-           {:clientExecutionTimeout "datomic.s3ClientExecutionTimeout",
-            :connectionTimeout "datomic.s3ConnectionTimeout",
-            :requestTimeout "datomic.s3RequestTimeout",
-            :socketTimeout "datomic.s3SocketTimeout"})
-         {:maxConnections (long (* 64 1024))}
-         args))
-     ([] (s3-client-args nil))))
+  (defn s3-client-args
+    ([args]
+      (merge
+        (property-map
+          {:clientExecutionTimeout "datomic.s3ClientExecutionTimeout",
+           :connectionTimeout "datomic.s3ConnectionTimeout",
+           :requestTimeout "datomic.s3RequestTimeout",
+           :socketTimeout "datomic.s3SocketTimeout"})
+        {:maxConnections (long (* 64 1024))}
+        args))
+    ([] (s3-client-args nil)))
   (reset-meta!
     #'s3-client-args
     (assoc
