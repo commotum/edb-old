@@ -191,9 +191,7 @@ scheduler proof remain explicitly `NOT_RUN`.
 
 ## Stage 3 — Establish operational coherence
 
-**Status:** In progress — configuration/startup/readiness,
-shutdown/restart/recovery, monitoring/process-event, and cache slices complete;
-bounded maintenance is next
+**Status:** Complete at the bounded PostgreSQL operational boundary
 
 **Outcome:** The recovered Peer/Transactor system behaves as one repeatable
 operational unit beyond a single transaction demonstration.
@@ -260,9 +258,10 @@ signals. Custom/per-stat callbacks, CloudWatch, ping, and S3 log rotation remain
 unexercised. Recovered redaction is targeted rather than universal, so the
 partition gate's generic evidence redaction and final literal-secret scan are
 part of the supported evidence contract. The separate synchronous
-`datomic.process.events` garbage-mark bus is source-mapped but has no direct
-retained delivery signal; it remains coherent but unexercised until bounded
-maintenance supplies an externally meaningful effect.
+`datomic.process.events` garbage-mark bus has no direct retained delivery
+signal. The completed bounded-maintenance slice maps its externally meaningful
+completion boundary and confirms that no direct retained effect exists, so the
+bus remains coherent but unexercised rather than implicitly pending.
 
 The cache slice also required no new service run. Mutable coordination,
 catalog, log-tail, and index-root references bypass every cache and remain
@@ -283,11 +282,28 @@ unexercised optional value accelerators; the alternate Folsom client and
 universal optional-cache outage behavior remain partial/outside the supported
 core.
 
+The bounded-maintenance slice closes without a fresh process run. The already
+retained index-v5 gate is the outcome-bearing maintenance proof: recovered
+`request-index` returned queue acceptance at requested basis 1066, `sync-index`
+observed completion at 1066, PostgreSQL grew from 42 rows/18,993 value bytes to
+86/34,597, and a third fresh Transactor loaded `tail-t = index-t = 1066` with
+zero replay and the identical Peer snapshot. Its `PASS` status and all 113
+manifest entries were reverified; the manifest-file SHA-256 remains
+`c23915e1406f1fac4046643683d93dc9cf06fee187657761e8f96fa1313b4238`.
+Source mapping now separates request queue acknowledgement from root-CAS/
+Peer-adoption completion, the synchronous Peer-local object-cache release from
+durable maintenance, and fire-and-forget `gc-storage` from actual asynchronous
+deletion. No cache-clear-only run was added because the dispatcher is thin and
+its clear/refetch mechanics are already validated. No garbage run was added
+because a material proof requires more than 1,000 exactly accounted retired
+IDs plus destructive asynchronous deletion/live-root assertions; a small
+zero-count run would not test reclamation. Explicit index maintenance is
+validated; cache-release dispatch and durable garbage marking are coherent but
+directly unexercised; active-database garbage collection remains partial.
+
 ## Stage 4 — Build the architectural reconstruction
 
-**Status:** In progress — HA, configuration/startup/readiness,
-shutdown/restart/recovery, monitoring/process-event, and cache narratives are
-banked with their evidence
+**Status:** Complete at the recovered PostgreSQL teaching boundary
 
 **Outcome:** A reader can understand the recovered Datomic system from both its
 architecture and its source.
@@ -327,10 +343,32 @@ and binds real hit/miss metrics plus fresh-process reconstruction to retained
 evidence. It also explains why optional raw-value caches cannot become HA or
 log authority and classifies their unexercised implementations without making
 them release obligations.
+The maintenance section now distinguishes three completion contracts: local
+cache release, queued explicit indexing followed by `sync-index`, and
+fire-and-forget garbage collection. It traces index semaphore/log segmentation,
+immutable index construction, root CAS, adoption, garbage publication, the
+in-memory mark threshold, the separate durable garbage-root tree, strict
+cutoff deletion, and asynchronous failure alarms. Retained index-v5 evidence
+closes the supported maintenance behavior while the destructive and optional
+facilities remain bounded explicitly.
+The central teaching spine now starts from PostgreSQL's immutable-value/
+revisioned-selector model and follows `transact-async` through Peer correlation
+and backpressure, non-durable Artemis admission, the single Transactor
+processor's novelty/order decision, speculative local apply, parallel log and
+result encoding, immutable tail creation, the authoritative
+`pod-log-tail/<db-id>` CAS, post-CAS notification, Peer basis advance,
+reconnect/unknown-outcome semantics, persistent indexing, restart catchup, and
+both HA descriptor schedules. It explicitly distinguishes transport ACK,
+descriptor publication, result delivery, and persistent-index publication.
+Ten retained teaching-spine manifests were reverified in full, and the two
+acknowledgement crash cuts explain why unavailable means outcome unknown rather
+than absent. This satisfies the Stage 4 traceability signal without asserting
+automatic resubmission or universal Future survival.
 
 ## Stage 5 — Bound the remainder and release the study system
 
-**Status:** Rolling scope ledger active; final release signoff pending
+**Status:** Complete at the supported PostgreSQL educational release boundary
+(2026-08-29)
 
 **Outcome:** The recovered core has a defensible completion boundary, while
 optional systems and residual uncertainty are represented honestly.
@@ -355,16 +393,60 @@ mechanics and their PostgreSQL-path semantics are also validated; exact
 capacity, eviction timing, and performance equivalence are not claimed. In-JVM
 orderly drain and PID-file lifecycle are partial.
 Ping/S3 log rotation, memcached/valcache, and REST are coherent but unexercised.
-The internal `datomic.process.events` garbage-mark bus is also coherent but
-unexercised pending the maintenance slice.
+The internal `datomic.process.events` garbage-mark bus and durable garbage tree
+are coherent but unexercised; their greater-than-1,000 batching threshold and
+separate root CAS are now source-mapped. Peer `release-object-cache` dispatch
+is coherent but directly unexercised, although the underlying clear/refetch
+mechanics are validated. Explicit `request-index` maintenance is validated.
+Active-database `gc-storage` is partial because its client call has no
+completion future and exact retired-ID deletion/live-root preservation is
+`NOT_RUN`. The recovered backup engine has isolated Peer-lane evidence, but
+recovered-pair production backup/restore remains partial: all 118 entries of
+`/tmp/datomic-stage2-adversarial-final-v2` reverify at manifest SHA-256
+`25e5f821a84bbde27cb85a985a2728cffbe73509dfd2f7b70c115ed6ca2cf721`,
+but that lane used a test-only `stage2-file:` adapter and an isolated licensed
+Transactor fixture, with no original classes on the candidate classpath.
+Full-text indexing/search/reclamation and excision are coherent but
+unexercised and outside the core release claim. Deleted-database garbage
+collection is partial: its catalog marking and batched log/index/ref teardown
+are source-coherent, but exact deletion, restored-ID preservation,
+interruption/retry, and catalog cleanup are `NOT_RUN`.
 External monitoring callbacks/CloudWatch, cloud credential redaction, and
 transport TLS are partial; alternate Folsom cache behavior is also partial and
 outside the supported core. Their source paths exist, but external delivery,
 universal log sanitization, encrypted candidate transport, and universal
 optional-cache outage behavior are `NOT_RUN`.
+Recovered Peer Server and the recovered `datomic.peer-client` in-process
+adapter are coherent but unexercised. The former connects Peer-backed catalog,
+Client SPI, authentication, Transit, bounded Nano HTTPS, and health surfaces;
+the latter adapts `datomic.client.api` protocols directly to embedded recovered
+Peer operations. Neither has retained behavioral evidence. The actual network
+thin Client remains in hash-pinned ordinary `client*.jar` dependencies and is
+out of the recovered PostgreSQL scope. REST is source-coherent but its optional
+startup branch is unexercised. The licensed-original optional Presto and
+Console JARs are inventory evidence only and remain out of scope.
 DynamoDB/S3 storage, Cassandra, Couchbase, Infinispan, and dev/H2 stores are out
 of the PostgreSQL-backed Goal 4 scope. These labels are recorded in the
 architecture report and create no automatic implementation obligation.
+
+**Final release signoff:** The supported release is the recovered Peer plus the
+complete recovered Transactor over PostgreSQL and plaintext Artemis. It covers
+the important configuration/readiness, transaction rejection/order,
+publication/acknowledgement, log/index, Peer reconnect and unknown-outcome,
+restart/recovery, monitoring, cache, explicit-index maintenance, and
+credential-scoped HA paths explained in the architecture report. The ten
+teaching-spine manifests reverify in full. Partition-v6 remains the accepted HA
+gate with `PASS` summary/run status, 126/126 verified entries, empty forbidden
+runtime-hash and literal-secret findings, no original implementation origins,
+one authoritative lineage, zero final owned SQL sessions, and stopped
+services; v4 remains an immutable failed diagnostic. The current runner,
+partition probe, and shared Peer workload hashes still equal the accepted v6
+input ledger. The runner help entry point, shell syntax for the runner and
+documented build/validation scripts, local links in the three handoff
+documents, and whitespace integrity pass. Only this plan and the architectural
+teaching report differ in the final working tree, so no ceremony-only process
+rerun was warranted. No known retained evidence contradicts the bounded
+PostgreSQL claim.
 
 ## Goal completion
 
@@ -375,18 +457,15 @@ remaining uncertainty is explicitly bounded; and no known evidence contradicts
 the recovered architecture. Universal equivalence of all dormant overlap code
 is not required.
 
+**Completion status:** Achieved on 2026-08-29 at the supported boundary above.
+The architectural reconstruction is the source-mapped handoff, the recovered-
+pair runner is the executable handoff, and the rolling ledger is the honest
+limit on optional and residual claims.
+
 ## Next direct action
 
-Take the final interleaved Stage 3/4 operational slice: bounded maintenance.
-Start with the already retained index-v5 `request-index` publication/adoption
-result, then trace the Peer `release-object-cache`, `gc-storage`, internal
-garbage-mark bus, and PostgreSQL garbage metadata paths to distinguish safe
-administration from durable-authority changes. Select at most one fresh focused
-maintenance execution, and only if it can materially test a local supported
-contract not already closed by retained evidence. The preferred bounded target
-is same-Peer semantic equality across `release-object-cache`, combined with the
-already exercised index request; add garbage collection only if its fresh-
-catalog cutoff/effect can be asserted without converting the slice into a
-backup/excision/retention campaign. Immediately record source transitions,
-cited evidence, and classifications; keep backup/restore, fulltext, excision,
-and optional storage maintenance bounded unless a contradiction surfaces.
+No further Goal 4 implementation is required. On the next recovered source,
+runner, or probe change, compare its hash with the accepted input ledger and
+rerun only the smallest affected focused gate, then update the cited retained
+manifest and this plan. Do not reopen an optional facility unless an explicit
+need or concrete contradiction brings it into scope.

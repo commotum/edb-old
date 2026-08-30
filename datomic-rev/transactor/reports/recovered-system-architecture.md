@@ -28,6 +28,276 @@ application
   -> persistent index roots and restart catchup
 ```
 
+## Core state model and transaction spine
+
+### Immutable content behind mutable selectors
+
+The supported backend uses one deliberately small PostgreSQL relation:
+
+```sql
+CREATE TABLE datomic_kvs (
+  id text PRIMARY KEY,
+  rev integer,
+  map text,
+  val bytea
+)
+```
+
+The executing gate creates that exact shape
+([runner](../scripts/validate-postgresql-vertical-slice.sh#L2670)). Its apparent
+simplicity hides a crucial distinction:
+
+| Stored role | Mutation rule | What it can decide |
+|---|---|---|
+| UUID-addressed value | create once, then read by ID | immutable log, index, directory, segment, or metadata content |
+| revisioned reference/pod | update only at the expected old revision | which immutable content is authoritative now |
+| `pod-coord` | expected-revision CAS | active transport endpoint |
+| `pod-log-tail/<db-id>` | expected-revision CAS plus prior-tail etag | authoritative transaction lineage |
+| `ref-index-root/<db-id>` | expected-revision CAS | persistent index root; it may lag the log |
+
+The SQL layer makes the selector rule literal: reference updates are
+`UPDATE datomic_kvs ... WHERE id=? AND rev=?`
+([`datomic.sql/update`](../src-clj/datomic/sql.clj#L136)). A one-row update wins;
+a zero-row update conflicts. UUID values can be physically durable without any
+winning selector pointing to them. Such a value is storage, but it is not
+database history.
+
+Peer `Database` objects follow the same split. Each is an immutable value with
+a transaction `basisT`, a possibly older persistent `indexBasisT`, and the
+memory-log delta needed to answer reads through `basisT`. Replacing a Peer
+database reference does not mutate an old database value. Persistent indexing
+can therefore lag ordinary transactions without changing which transactions
+are durable, and cache eviction can discard representations without changing
+any selector.
+
+### Submission and transport admission
+
+One transaction starts as follows:
+
+```text
+application
+  -> d/transact-async
+  -> Peer UUID correlation + pending Future
+  -> 128-slot local outgoing queue
+  -> Fressian message to <db-id>.tx-submit
+  -> Transactor five-slot unprocessed queue
+  -> single per-database processor
+```
+
+`d/transact-async` delegates to the connection
+([API](../../src-clj/datomic/api.clj#L102)). The Peer creates only a UUID,
+transaction data, and optional options at this stage
+([`create-procargs`](../../src-clj/datomic/transaction.clj#L271)); semantic
+transaction validation is not performed eagerly. The connection creates a
+settable Future, records it in the UUID-keyed response map, and puts the request
+on its outgoing queue
+([`Connection.transactAsync`](../../src-clj/datomic/peer.clj#L522)). The queue
+has 128 slots and the response map expires unanswered correlations after 60
+minutes ([connection construction](../../src-clj/datomic/peer.clj#L899)).
+Because the recovered `queue/put` is blocking, the word "async" describes the
+returned Future, not an unconditional guarantee that the API call itself can
+never backpressure at a full queue.
+
+The connector Fressian-encodes the procargs and sends them to the database
+submission address
+([`start-updater`](../../src-clj/datomic/connector.clj#L517)). A local encoding
+error is delivered to the matching Future; a send/session failure enters the
+connection-failure path. The Peer has no durable request ledger behind this
+queue.
+
+The active database Master creates a temporary Artemis consumer on the same
+address. Its reader decodes a message, attaches optional prefetch state, puts a
+transaction into the bounded FIFO, and only then acknowledges the Artemis
+message ([`reader`](../src-clj/datomic/update.clj#L549)). There are five slots
+and one transaction processor for this database
+([database construction](../src-clj/datomic/update.clj#L2754)). Artemis
+persistence is disabled on the recovered server
+([source](../src-clj/datomic/artemis_server.clj#L97)). This acknowledgement
+therefore means only "admitted to this Transactor's memory." It precedes
+transaction validation, log encoding, PostgreSQL publication, and client
+acknowledgement.
+
+### Novelty, ordering, and speculative local state
+
+The single processor prefers internal priority work and otherwise takes the
+next submitted transaction. `process-transaction` applies `db/with-tx` to the
+current database reference
+([processor](../src-clj/datomic/update.clj#L1090)). `db/with-tx` expands entity
+maps, list forms, and transaction functions; resolves tempids; validates the
+result; applies cardinality, uniqueness, CAS, and attribute predicates; and
+returns the actual added/retracted datoms plus the next immutable database
+value ([source](../src-clj/datomic/db.clj#L7813)). The returned datoms are the
+novel effect, not merely a copy of the submitted forms.
+
+The processor installs `:db-after` in its local atom before durable logging.
+That makes dequeue/current-database order the Transactor's speculative order,
+but not yet PostgreSQL truth. An accepted item carries its UUID, datoms, `t`,
+tempids, I/O statistics, and a new unresolved `:logged` promise. A rejected
+item carries a serialized error and a pre-realized `:logged` promise because
+there is deliberately no log append. Rejection leaves the published descriptor
+and visible basis unchanged, although transaction-number allocation is only
+monotonic: rejected attempts can leave gaps.
+
+Installing local state before storage is safe only because log failure is
+process-fatal. The writer raises `UnableToWriteLog`, realizes the shared
+critical-failure state, closes serving transport through its registered
+handler, and exits rather than continuing from an in-memory database that
+PostgreSQL did not publish
+([writer failure](../src-clj/datomic/update.clj#L1699)). Restart reconstructs
+from the descriptor-referenced lineage, never from that dead process's atom.
+
+### Publication and acknowledgement ordering
+
+Accepted processing forks into two preparation lanes joined by the same
+`:logged` promise:
+
+```text
+                         +-> encode transaction log -> writer batch --+
+accepted processor item |                                          |
+                         +-> encode Peer result ----------------+    |
+                                                                |    v
+UUID immutable tail candidate -> pod-log-tail expected-rev CAS -+-> logged!
+                                                                     |
+                                                                     v
+                                                        send Peer result
+```
+
+The log `fressianer` encodes accepted datoms and queues them to the writer
+([source](../src-clj/datomic/update.clj#L1346)). In parallel, the notification
+fressianer can encode the result, but it preserves the unresolved promise
+([source](../src-clj/datomic/update.clj#L1473)). The writer may batch adjacent
+accepted transactions in FIFO order and calls `LogImpl.append`
+([source](../src-clj/datomic/update.clj#L1645)).
+
+`LogImpl.append` extends only its candidate tail, increments the descriptor
+revision, and calls `write-tail-descriptor`; a conflict throws instead of
+returning a new log
+([append](../src-clj/datomic/log.clj#L1183)). The storage adapter first creates
+a random immutable tail node whose metadata links to the prior etag, then tries
+the revision-guarded pod update
+([candidate](../src-clj/datomic/kv_cluster.clj#L246),
+[`pod update`](../src-clj/datomic/kv_cluster.clj#L320)). PostgreSQL performs the
+UUID insert and the selector update through the recovered SQL layer. On an
+ambiguous write, read-back accepts only the exact attempted revision and tail;
+anything else is a conflict
+([reconciliation](../src-clj/datomic/kv_cluster.clj#L409)).
+
+The successful expected-revision CAS of `pod-log-tail/<db-id>` is the
+authoritative transaction publication boundary. It is the first state from
+which a fresh process can recover the transaction. An immutable tail node
+inserted before a losing or interrupted CAS is an unreachable candidate, not a
+transaction that a standby can discover and adopt.
+
+Only after `log/append` returns does the writer realize each transaction's
+`:logged` promise. `block-notifier` waits up to 60 seconds for that promise
+before sending the already encoded result to `<db-id>.tx-result`
+([notification gate](../src-clj/datomic/update.clj#L1775)). Normal success is
+therefore ordered after publication. Log treeification happens later: it moves
+older tail content into immutable leaf/directory/root values and adopts the new
+root with another descriptor CAS while retaining newer tail entries. That is
+representation compaction, not a second transaction commit.
+
+The acknowledgement edge is best read as a cut table:
+
+| Fault cut | Durable state | Honest client interpretation |
+|---|---|---|
+| before descriptor CAS | an immutable candidate may exist, but the old descriptor remains authoritative | no success; after failure the original Future may be unavailable and recovery should find the effect absent |
+| after descriptor CAS, before result delivery | the transaction is in the authoritative lineage | the outcome may be a report or unavailable; unavailable does not mean absent |
+| after Peer receives the result | the transaction is durable and this Peer has advanced its database value before completing the Future | the returned report contains matching `db-before`, `db-after`, datoms, and tempids |
+| competing/stale writer loses descriptor CAS | its candidate is not authoritative | writer failure triggers process self-fencing; it must not notify success |
+
+### Peer visibility, reconnect, and retry responsibility
+
+The Peer notifier dispatches result types by their decoded transaction message
+shape ([dispatch](../../src-clj/datomic/connector.clj#L283)). For a successful
+transaction, `notify-data` removes the UUID correlation, applies only the
+previously unseen suffix of datoms to the connection's database atom, builds
+the report, completes the originating Future, optionally enqueues the report,
+and releases `basisT` waiters
+([notification](../../src-clj/datomic/peer.clj#L414),
+[`accept-new-data`](../../src-clj/datomic/peer.clj#L239)). Repeated or
+overlapping notifications can therefore advance local state idempotently. An
+error removes the same pending correlation and delivers the deserialized
+exception without advancing the database
+([source](../../src-clj/datomic/peer.clj#L400)).
+
+Connection failure has intentionally conservative semantics. Every reconnect
+attempt clears unsent requests and completes all still-pending transaction
+Futures with `:cognitect.anomalies/unavailable`, then rereads coordination and
+rebuilds transport/database state
+([`fail-pending-txes`](../../src-clj/datomic/peer.clj#L277),
+[`create-connection`](../../src-clj/datomic/peer.clj#L899)). The recovered Peer
+does not automatically resubmit. An application that receives unavailable
+must sync or read current durable state and use its own logical identity,
+precondition, or idempotency rule to decide whether anything remains to be
+submitted. Blind retry of an arbitrary non-idempotent transaction is not an
+exactly-once guarantee.
+
+`sync(conn,t)` waits locally for `basisT >= t`; `sync-index(conn,t)` waits for
+`indexBasisT >= t`. Zero-argument `sync` is different: it sends a UUID-tagged
+sync message and is the documented boundary for transactions already complete
+when the call was made. It is not a promise to wait for an arbitrary in-flight
+transaction or persistent-index construction
+([watchers](../../src-clj/datomic/peer.clj#L214),
+[`Connection.sync`](../../src-clj/datomic/peer.clj#L559)).
+
+### Indexing, restart, and HA composition
+
+Transaction publication, persistent indexing, and serving authority are three
+ordered but separate selectors:
+
+```text
+pod-log-tail CAS       -> transaction is durable and recoverable
+ref-index-root CAS     -> a persistent index covers a later basis
+pod-coord CAS          -> a process endpoint may serve
+```
+
+A Peer answers through its persistent root plus the memory-log delta. Explicit
+indexing later writes EAVT, AVET, AEVT, and reverse-reference structures and
+publishes the new root by CAS; Peer adoption releases `indexBasisT` waiters.
+On restart, a fresh Transactor loads the current index selector, reads the
+current log descriptor, and replays only descriptor-referenced transactions
+after the index basis. Neither restart nor a promoted standby scans for
+unreferenced immutable candidates.
+
+HA adds a coordination CAS without weakening the log rule. `pod-coord` selects
+the endpoint, but a newly active B must also claim the database log descriptor
+and catch up its referenced lineage. If A already won a transaction descriptor
+CAS, B catches up that transaction. If A only created an immutable candidate
+and B claims the unchanged descriptor first, the candidate remains absent.
+When a healed stale A next loses either authority assumption, its heartbeat or
+log CAS enters critical failure and self-fences. The fuller lifecycle source
+map is in [Authority and HA](#authority-failover-and-fencing).
+
+### Retained evidence for the spine
+
+All ten manifests below were reverified from their run roots during this
+reconstruction. Every run records `status=passed`, `last.step=complete`, and
+`services.running=false`.
+
+| Boundary | Retained run and manifest-file SHA-256 | Exact contribution |
+|---|---|---|
+| normal log/restart | `/tmp/datomic-recovered-pair-live-v3` (108 entries), `100245c7dbb8639ea4bbc8ad46594818bfb9909e6aae75a3b79c1b26263d24bf` | basis 1001/1066 commits, positive 37,372/64,032-byte catchup, equal fresh-process snapshots |
+| rejection and order | `/tmp/datomic-recovered-pair-transaction-boundaries-v5` (91), `8efea20819c62f167d774d29d7a330f6ef1e018884c50f16a533376d667a3bdd` | stale-CAS/uniqueness rejection without root change, two one-winner CAS rounds, four accepted transactions in one report/basis/root order |
+| prepublication crash | `/tmp/datomic-recovered-pair-ack-crash-v2` (110), `6f3a5ab8d6c877d7a9f2f8e2e23c4670b9a2228995dd290f854426a5a20fd0c5` | immutable append candidate exists while descriptor CAS is blocked; kill/rollback leaves the descriptor and semantic database unchanged |
+| postpublication/pre-result crash | `/tmp/datomic-recovered-pair-ack-postpublication-v4` (106), `d8ac5e5314603c1bca54aa8a773d60a7eec136e29066b4d220d110e1591374bf` | descriptor advances before result; restart preserves exactly one effect and this deliberately buffered original Future later returns its report |
+| same-Peer reconnect | `/tmp/datomic-recovered-pair-transport-v2` (123), `87eaf2e129aa5d3ec12b4e84a9c3143e623b21767a00ee0c3916ea3c037383f6` | unavailable during a bounded pause, same-connection recovery/write at basis 1099, fresh-Peer agreement |
+| in-flight HA | `/tmp/datomic-recovered-pair-ha-inflight-v8` (101), `5243885f1c0c85dbe2967171856258ad7f7665fd38391bd72444b4c72c1a2887` | A publishes first; B catches that referenced transaction; original Future is unavailable; same/fresh Peers agree and stale A fences |
+| concurrent HA, A wins | `/tmp/datomic-recovered-pair-ha-concurrent-v6` (101), `773dd1f4c7e6c78f1a55d4f2742f6b4852008c8f2236da2ce2aa31ea27948d47` | four published effects found, zero resubmitted, one order through basis 1009; all original Futures unavailable |
+| concurrent HA, B wins | `/tmp/datomic-recovered-pair-ha-concurrent-v7` (102), `e3866a7611b8ac8a6132f8be12d0a5cc4f4391226911684b98bb6d432f4e4798` | A's candidate is unreachable; the external probe finds zero effects and explicitly resubmits four logical intents, ending in the same order |
+| credential-scoped partition/heal | `/tmp/datomic-recovered-pair-ha-partition-v6` (126), `4e0a4ca8c8c58863712f8252dd66e320756dd70a02a38288f320ecf924299272` | B promotes while A is live/storage-incapable; heal produces stale-A conflict/fence; same/fresh Peers and one log lineage agree |
+| persistent index | `/tmp/datomic-recovered-pair-index-v5` (113), `c23915e1406f1fac4046643683d93dc9cf06fee187657761e8f96fa1313b4238` | queued request plus `sync-index`, SQL growth, root adoption, zero-replay fresh restart at index/log basis 1066 |
+
+The postpublication cut demonstrates one schedule in which a buffered original
+Future survives; the in-flight/concurrent HA cuts demonstrate schedules in
+which original Futures become unavailable. Neither outcome is universal. The
+supported invariant is the descriptor-referenced transaction order, not
+transparent Future survival. Likewise, concurrent v7's explicit
+identifier-based probe performs the resubmission; Peer internals do not. The
+accepted partition result is v6. Partition v4 remains an immutable failed
+diagnostic because its evidence-secret gate failed even though its behavioral
+observations were green.
+
 ## Configuration, startup, and readiness
 
 ### Configuration contract
@@ -615,6 +885,143 @@ enabled, read-ahead enabled, process replacement, and Peer agreement. Exact
 capacity/eviction timing, query-plan hit rate, the admin clear dispatcher, and
 optional raw-cache behavior are not silently promoted to validated claims.
 
+## Bounded maintenance and reclamation
+
+### Three different completion contracts
+
+The public maintenance surfaces do not share one meaning of "done." Keeping
+their acknowledgement boundaries distinct prevents a queue reply or a local
+cache operation from being mistaken for durable PostgreSQL maintenance.
+
+| Operation | Immediate result | Actual completion boundary | Authority effect |
+|---|---|---|---|
+| `Peer.administerSystem {:action :release-object-cache}` | synchronous `:completed` | the process-global object cache has been cleared | none; no Transactor RPC or PostgreSQL reference write |
+| `Connection.requestIndex` | `true` after a synchronous admin RPC replies that the request was queued | `sync-index` reaches the requested basis after root publication and Peer adoption | expected-revision CAS of the database's index-root reference |
+| `Connection.gcStorage` | `nil` after a synchronous queue-ack RPC when a connector is present | no client completion future; later garbage logs/SQL effects must be observed independently | deletion of previously marked immutable values older than the supplied cutoff |
+
+The first operation is wholly local. The recovered
+[`administer-system`](../../src-clj/datomic/peer.clj#L1341) validates the action,
+clears `domain/system-cache`, and returns `:completed`. It does not clear query
+plans, connection state, the Peer memory index, or any PostgreSQL reference.
+The cache-overlap gate validates the underlying clear and miss/repopulation
+mechanics, while the PostgreSQL cache evidence above validates the ordinary
+refetch path. The thin public dispatcher itself is source-coherent but was not
+given a fresh end-to-end run.
+
+Index maintenance has a two-phase client contract:
+
+```text
+request-index
+  -> Peer admin RPC
+  -> Transactor replies {:queued db-id}
+  -> priority queue records the requested basis
+  -> one index semaphore prepares the memory index
+  -> segment the current log tree
+  -> write a new immutable four-family index
+  -> expected-revision CAS publishes the new index root
+  -> Transactor adopts it and notifies Peers
+  -> sync-index completes after this Peer observes indexBasisT >= requested t
+```
+
+The Peer sends the request and returns `true` only after the admin reply
+([`requestIndex`](../../src-clj/datomic/peer.clj#L576)); the Master reply is
+still only `{:queued ...}` ([`run-admin-command`](../src-clj/datomic/update.clj#L3199)).
+The processing state machine records the target, serializes indexing, ensures
+the log tree, and starts the immutable build
+([`process-request-index`](../src-clj/datomic/update.clj#L791)). Publication is
+the index-reference CAS; only after it succeeds does the publisher report
+superseded keys to the garbage bus
+([`merge-db`](../src-clj/datomic/index.clj#L5980)). The Transactor then completes
+local adoption and notifies the Peer
+([`process-new-index`](../src-clj/datomic/update.clj#L685)). Thus a queued
+request can be lost by a crash before publication, while an already published
+root remains durable; callers that need completion re-request safely and wait
+with `sync-index`.
+
+This path is directly retained at `/tmp/datomic-recovered-pair-index-v5`.
+The recovered Peer records request acceptance at basis 1066 and waits until
+`sync-index` reports 1066. PostgreSQL grows from 42 rows/18,993 value bytes
+before publication to 86 rows/34,597 bytes afterward. A third fresh
+Transactor then loads `tail-t = index-t = 1066` with zero replay and produces
+the same Peer snapshot fingerprint. The run is `PASS`; all 113 manifest
+entries reverify, and the manifest-file SHA-256 is
+`c23915e1406f1fac4046643683d93dc9cf06fee187657761e8f96fa1313b4238`.
+This validates explicit index maintenance, including its durable completion
+boundary, without claiming automatic threshold scheduling or interrupted-build
+recovery.
+
+### Garbage marking and collection
+
+Garbage collection is deliberately separated from live-root selection:
+
+```text
+successful log/index replacement identifies superseded immutable UUIDs
+  -> synchronous datomic.process.events publication
+  -> startup-installed handler queues timestamped marks on garbage-agent
+  -> more than 1,000 pending keys (or an explicit tool flush)
+       writes immutable leaf/directory/root nodes
+       and CAS-publishes ref-gc-root/<db-id>
+  -> gc-storage queues collection-agent with an operator cutoff
+  -> delete only marked batches whose timestamp is strictly before the cutoff
+  -> log collected count / GarbageDeletedCount, or alarm StorageGCFailed
+```
+
+`run*` installs the keyed subscriber before storage startup
+([source](../src-clj/datomic/transactor.clj#L723)). Log and index publication
+emit `:datomic.garbage/mark`; the in-process bus invokes subscribers
+synchronously, but the installed handler hands the work to an agent
+([bus](../src-clj/datomic/process/events.clj#L13),
+[`handler`](../src-clj/datomic/garbage.clj#L370)). The default marker persists a
+leaf only when its accumulated size becomes strictly greater than 1,000; the
+explicit `flush-garbage` path is used by repair/rebuild tools, not by the normal
+Transactor shutdown path
+([marking](../src-clj/datomic/garbage.clj#L242),
+[`flush`](../src-clj/datomic/garbage.clj#L398)). Small pending batches can
+therefore remain process-local, and a mark-write failure can leak unreachable
+storage without making a retired value live again.
+
+The durable ledger is itself an immutable tree selected by the separate
+`ref-gc-root/<db-id>` CAS
+([`ensure-root-ref`](../src-clj/datomic/garbage.clj#L104),
+[`append-leaf`](../src-clj/datomic/garbage.clj#L148)). Collection traverses
+only that ledger and deletes entries with `mark timestamp < older-than`; it
+does not derive reachability by walking live roots
+([`gc-leaf`](../src-clj/datomic/garbage.clj#L472),
+[`gc`](../src-clj/datomic/garbage.clj#L550)). The public Peer call is
+fire-and-forget and even becomes a silent no-op if no connector is present
+([`gcStorage`](../../src-clj/datomic/peer.clj#L504)). The Master acknowledges
+queueing, while the process-global collection agent converts later failures
+into an alarm and log record rather than a client exception
+([admin](../src-clj/datomic/update.clj#L3216),
+[`queue-gc`](../src-clj/datomic/garbage.clj#L610)). A successful API return is
+therefore not proof of reclamation.
+
+Backup/restore has a separate, narrower evidence boundary. The isolated
+recovered-Peer gate at `/tmp/datomic-stage2-adversarial-final-v2` validates
+full and incremental backup, failed-root retry, missing/corrupt rejection,
+interrupted-restore retry, exact `t1`/`t2`/`t3` state, and writable restored
+databases. All 118 manifest entries reverify at manifest SHA-256
+`25e5f821a84bbde27cb85a985a2728cffbe73509dfd2f7b70c115ed6ca2cf721`.
+That lane used a test-only `stage2-file:` adapter and a licensed Transactor as
+an isolated external fixture; its candidate classpath records no original Peer,
+core2, or Transactor classes. It validates the recovered backup engine under
+that fixture, not production file/S3 adapters or backup/restore of the complete
+recovered Peer/Transactor pair.
+
+No fresh maintenance process was started for this slice. A cache-clear-only
+run would exercise a thin dispatcher whose clear/refetch mechanics are already
+validated, while a meaningful garbage run would need to create and account
+for more than 1,000 exact retired IDs, wait for asynchronous marking and
+collection, and prove live-root preservation around destructive deletes. A
+small-catalog zero-count run can even create an empty garbage root and would
+not validate reclamation. That machinery would turn a bounded operational
+slice into a retention campaign. The honest boundary is: explicit persistent
+index maintenance is validated; local cache-release dispatch and garbage-tree
+construction are coherent but directly unexercised; public asynchronous
+garbage collection is partial. Deleted-database collection, excision,
+full-text reclamation, and recovered-pair backup/restore are not implied by
+this result.
+
 ## Authority, failover, and fencing
 
 Coordination ownership and per-database log ownership are distinct CAS layers.
@@ -641,13 +1048,72 @@ surface being present is not itself an implementation obligation.
 | HA heartbeat interval and endpoint publication | validated | Normal, standby, promotion, conflict, and credential-partition paths are retained at the exercised 5000/8000-ms values; invalid-bound combinatorics remain unexercised. |
 | Local metrics and process-event wiring | validated | Immediate and 60-second interval reports, default identity callback invocation, lifecycle/catchup/index events, and the conflict-to-final-metrics self-fence chain are retained. |
 | External monitoring callbacks and CloudWatch | partial | Callback construction and failure accounting are source-mapped; custom, per-stat, and CloudWatch delivery are `NOT_RUN`. |
-| Internal `datomic.process.events` garbage-mark bus | coherent but unexercised | Synchronous keyed publish/subscribe and its log/index garbage publishers are source-mapped; direct delivery/effects await bounded maintenance. |
+| Internal `datomic.process.events` garbage-mark bus and durable mark tree | coherent but unexercised | Synchronous keyed publication, async marking, the greater-than-1,000 persistence threshold, and the `ref-gc-root/<db-id>` CAS tree are source-mapped; no retained run directly proves durable mark delivery. |
 | Ping endpoint and S3 log rotation | coherent but unexercised | Conditional startup, health-path construction, five-minute directory watch, and critical-failure upload hooks are source-visible; no endpoint or bucket is exercised. |
 | Local object, index-array, query-plan, and correlation caches | validated | Current-source cache mechanics, real PostgreSQL-path hits/misses, fresh-process reconstruction, and unchanged Peer semantics are retained; performance/capacity equivalence is not claimed. |
-| Peer `release-object-cache` administration | coherent but unexercised | The action clears only the process-global immutable-object cache and cannot mutate PostgreSQL refs; direct dispatch is reserved for bounded maintenance. |
+| Peer `release-object-cache` administration | coherent but unexercised | Underlying clear/miss/repopulation mechanics are validated; the thin synchronous action clears only the process-global immutable-object cache and cannot mutate PostgreSQL refs, but direct public dispatch is `NOT_RUN`. |
+| Explicit `request-index` maintenance | validated | Queue acknowledgement is distinguished from completion; retained `sync-index`, PostgreSQL growth, root publication/adoption, zero-replay fresh-process loading, and equal Peer state close the exercised path. |
+| Active-database `gc-storage` | partial | Mark/cutoff/delete and alarm paths are source-coherent, but the API has no completion future, sub-threshold marks may remain in memory, and no destructive retained run proves exact retired-ID deletion with live-root preservation. |
+| Backup engine and recovered-pair production adapters | partial | The recovered [`datomic.backup`](../../src-clj/datomic/backup.clj#L1444) engine is validated in an isolated recovered-Peer lane, but that lane used a test-only `stage2-file:` adapter and a licensed Transactor fixture. The recovered [filesystem](../src-clj/datomic/fsbackup.clj#L96), [S3](../src-clj/datomic/s3backup.clj#L50), and [CLI](../src-clj/datomic/backup_cli.clj#L59) surfaces are source-coherent; production-adapter and complete recovered-pair backup/restore behavior is `NOT_RUN`. |
+| Full-text indexing, search, and reclamation | coherent but unexercised | Active/history construction, Lucene mutation, publication, and garbage-key wiring are source-connected through [`datomic.fulltext`](../src-clj/datomic/fulltext.clj#L580) and the [persistent merge](../src-clj/datomic/index.clj#L4956), but index-v5 used no nonempty full-text attribute workload. |
+| Excision | coherent but unexercised | Target expansion, time bounds, reference traversal, removal predicates, and persistent-merge integration are source-visible in [`datomic.excise`](../src-clj/datomic/excise.clj#L37); no retained recovered-pair run submits `:db/excise`. |
+| Deleted-database garbage collection | partial | Catalog marking and batched log/index/ref teardown are source-coherent in [`gc-deleted-db`](../src-clj/datomic/garbage.clj#L672), but exact deletion, restored-ID preservation, interruption/retry, and catalog cleanup are `NOT_RUN`. |
 | Transport encryption/TLS | partial | Normalization/defaulting exists, but accepted gates force `encrypt-channel=false`; candidate TLS identity/trust provisioning and encrypted transport are `NOT_RUN`. |
 | Spy memcached and direct valcache | coherent but unexercised | Optional immutable raw-value near stores, far-store fallback/repair, bounded values/queues, metrics, and cleanup hooks are mapped; accepted PostgreSQL runs configure neither. |
 | Alternate Folsom cache and universal optional-cache outage behavior | partial | Dynamic dispatch and fallback boundaries are visible, but no implementation-wide startup/outage/shutdown guarantee is made. |
-| REST startup | coherent but unexercised | Optional `rest-port` branch is not part of the supported PostgreSQL core. |
+| Recovered Peer Server | coherent but unexercised | Connection/catalog caches, Client SPI delegation, HMAC authentication, Transit codecs, bounded Nano HTTPS serving, and `/health` are source-connected ([server construction](../src-clj/datomic/peer_server.clj#L417)); no retained request, authentication, TLS, failure, or shutdown run exists. |
+| Recovered `datomic.peer-client` adapter | coherent but unexercised | This is an in-process `datomic.client.api` adapter over recovered embedded Peer operations ([client/connection adapters](../src-clj/datomic/peer_client.clj#L161)), not evidence for a network thin Client; it has no retained behavioral gate. |
+| Network thin Client | out of scope | Its implementation remains in hash-pinned ordinary `client*.jar` dependencies ([dependency ledger](stage-1-candidate-dependencies.tsv#L377)); it was neither reconstructed nor exercised end to end with Peer Server. |
+| REST startup | coherent but unexercised | Transactions, queries, reads, events, middleware, routes, and Jetty startup are source-connected in [`datomic.rest`](../src-clj/datomic/rest.clj#L966), but the optional [`rest-port`/`rest-alias` branch](../src-clj/datomic/transactor.clj#L973) is not exercised or included in the supported PostgreSQL core. |
+| Presto integration | out of scope | The repository inventories only the hash-bound licensed-original optional Presto JAR; no candidate source, launcher, or retained run joins the recovered runtime ([frozen boundary](stage-0-boundary.md#L111)). |
+| Console | out of scope | The repository inventories only the hash-bound licensed-original optional Console JAR; no Console implementation or startup path was recovered or exercised ([frozen boundary](stage-0-boundary.md#L111)). |
 | DynamoDB/S3, Cassandra, Couchbase, Infinispan, dev/H2 stores | out of scope | Configuration dispatch is recovered, but Goal 4's authoritative backend is PostgreSQL. |
 | Cloud credentials/configuration | partial | Relevant configuration and targeted redaction paths exist, but they are not a universal log sanitizer and no cloud service claim is made. |
+
+## Supported Goal 4 release boundary
+
+As of 2026-08-29, the released study boundary is the recovered Peer plus the
+complete recovered Transactor over PostgreSQL, using plaintext Artemis
+transport. It includes configuration and readiness, transaction rejection and
+ordering, log publication, acknowledgement fault cuts, Peer visibility and
+unknown-outcome recovery, persistent-index publication/adoption, bounded
+shutdown/restart, local monitoring and process events, cache semantics,
+explicit index maintenance, and credential-scoped active/standby HA. It does
+not include universal scheduler/topology equivalence or any facility marked
+partial, coherent but unexercised, or out of scope above.
+
+The runnable entry point remains:
+
+```bash
+transactor/scripts/validate-postgresql-vertical-slice.sh --help
+```
+
+The runner rebuilds and seals both recovered candidate sides before any
+service starts; its focused modes make the smallest implicated boundary
+repeatable. The accepted asymmetric HA result is
+`/tmp/datomic-recovered-pair-ha-partition-v6`: `summary.properties` and
+`run-status.properties` both pass, all 126 evidence entries verify, both
+forbidden-runtime and forbidden-secret result files are empty, all three SQL
+role session counts are zero after stop, and the final service-stop assertion
+passes. Its candidate-origin probes report no original Peer, core2,
+Transactor, Nano, key, or trust implementation artifacts. Partition v4 remains
+an immutable failed diagnostic and is not promoted by this signoff.
+
+The ten manifest-verified transaction-spine runs above remain the behavioral
+release evidence. Current runner and root HA-probe inputs still match the
+accepted v6 ledger at SHA-256
+`3ea5147924ce78a067e9254c4723ba9b97ac55521cdb12f2ccf4d31f1577680c`,
+`6bcdad60cb30aaa14c793273819cff2d190bfbfe087b01e67dc075bea4fc9867`,
+and `23dbc79c8e0e416fa141188bb718def9d0b49ff825199f3bca10a13bc7e17b36`
+for the runner, HA probe, and shared Peer workload respectively. Final
+proportional checks exercised the runner's help entry point, shell syntax for
+the runner and documented build/validation scripts, all local Markdown link
+targets in the three handoff documents, evidence-manifest integrity/status,
+and whitespace integrity. No service rerun was added: the working change is
+explanatory only, the accepted executable inputs are unchanged, and the scope
+reconciliation surfaced no contradiction in the supported PostgreSQL core.
+
+This is a strongly coherent educational reconstruction, not a claim of
+universal Datomic Pro equivalence or a redistributable replacement. Optional
+extensions begin only from an explicit need or a concrete contradiction; their
+mere source presence does not reopen this release boundary.
