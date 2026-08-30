@@ -107,16 +107,16 @@ PostgreSQL core and architectural narrative are coherent.
 - The accepted credential-scoped asymmetric storage-reachability result is now
   retained at `/tmp/datomic-recovered-pair-ha-partition-v6`. Broader packet
   loss/reordering and arbitrary multi-node topologies remain unproved by design.
-  The recovered architecture still needs a consolidated source map and teaching
-  narrative.
+  The recovered architecture report now consolidates its source map, state
+  transitions, retained evidence, and bounded teaching narrative.
 - The credential-scoped asymmetric PostgreSQL partition/heal v4 execution is
   behaviorally green but is **not accepted evidence**. It demonstrated B's
   promotion while A remained live and storage-incapable, healed stale-A CAS
   conflict/self-fencing, and same-/fresh-Peer agreement, but
   `run-status.properties` is failed: its evidence-secret gate found the node
   SQL password text in `config.properties`, the negative-login diagnostic, and
-  the PostgreSQL server log. v4 remains an immutable failed diagnostic; only a
-  fresh versioned run with generic evidence redaction may close the boundary.
+  the PostgreSQL server log. v4 remains an immutable failed diagnostic; the
+  fresh, generically redacted v6 run—not a relabeling of v4—closes the boundary.
 
 ## Stage 1 — Rebaseline around strong coherence
 
@@ -376,7 +376,7 @@ optional systems and residual uncertainty are represented honestly.
 **Focus:** Classify important maintenance and optional components—such as
 backup/restore, full text, excision, garbage collection, Peer Server/thin
 Client, REST, Presto, Console, and alternative stores—as validated, coherent but
-unexercised, partially recovered, or out of scope. Execute additional work only
+unexercised, partial, or out of scope. Execute additional work only
 when it materially improves the educational system or resolves a surfaced
 contradiction.
 
@@ -416,13 +416,15 @@ transport TLS are partial; alternate Folsom cache behavior is also partial and
 outside the supported core. Their source paths exist, but external delivery,
 universal log sanitization, encrypted candidate transport, and universal
 optional-cache outage behavior are `NOT_RUN`.
-Recovered Peer Server and the recovered `datomic.peer-client` in-process
-adapter are coherent but unexercised. The former connects Peer-backed catalog,
-Client SPI, authentication, Transit, bounded Nano HTTPS, and health surfaces;
-the latter adapts `datomic.client.api` protocols directly to embedded recovered
-Peer operations. Neither has retained behavioral evidence. The actual network
-thin Client remains in hash-pinned ordinary `client*.jar` dependencies and is
-out of the recovered PostgreSQL scope. REST is source-coherent but its optional
+Recovered Peer Server is partial: its Peer-backed catalog, Client SPI,
+authentication, Transit, bounded Nano HTTPS, and health surfaces are
+source-coherent, but startup requires a packaged JKS and candidate resources
+deliberately include neither the licensed key nor a generated replacement. The
+recovered `datomic.peer-client` in-process adapter is coherent but unexercised;
+it adapts `datomic.client.api` protocols directly to embedded recovered Peer
+operations but has no retained behavioral evidence. The actual network thin
+Client remains in hash-pinned ordinary `client*.jar` dependencies and is out of
+the recovered PostgreSQL scope. REST is source-coherent but its optional
 startup branch is unexercised. The licensed-original optional Presto and
 Console JARs are inventory evidence only and remain out of scope.
 DynamoDB/S3 storage, Cassandra, Couchbase, Infinispan, and dev/H2 stores are out
