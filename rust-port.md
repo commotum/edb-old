@@ -155,7 +155,7 @@ Datomic is supposed to work.
 #### What we have
 
 We have a complete recovered Peer/Transactor pair running over PostgreSQL, plus
-focused probes for transactions, query behavior, storage compare-and-set,
+focused probes for transactions, query behavior, storage compare-and-swap,
 publication failures, acknowledgement failures, restart, index adoption,
 transport recovery, and high availability.
 
@@ -237,7 +237,7 @@ spine, including:
 - novelty checking and transaction ordering;
 - speculative application before publication;
 - immutable log-tail creation;
-- authoritative descriptor compare-and-set;
+- authoritative descriptor compare-and-swap;
 - result delivery and unknown outcomes;
 - Peer basis advancement;
 - persistent-index publication and adoption;
@@ -251,9 +251,12 @@ response to the original request. **Speculative** means work is prepared before
 it becomes authoritative and may need to be discarded if publication loses a
 race.
 
-A **compare-and-set**, abbreviated CAS, changes a value only if its current
+A **compare-and-swap**, abbreviated CAS, changes a value only if its current
 revision still equals an expected revision. It is the basic mechanism used to
-ensure that stale writers cannot silently overwrite newer authority.
+ensure that stale writers cannot silently overwrite newer authority. Clojure's
+atomic-reference API names the equivalent primitive `compare-and-set!`, and
+Java names its method `compareAndSet`, but Datomic's public transaction and
+storage terminology is compare-and-swap.
 
 #### What is still missing for Rust
 
