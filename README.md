@@ -1,27 +1,28 @@
 # Atomic
 
-Atomic is now a source-study and Rust-port project. The bytecode-recovery
-campaign is finished; its plans, evidence reports, one-off runners, generated
-views, packaged resources, and build products have been removed from the active
-tree.
+Atomic is a source-study and Rust-port project. Its retained Datomic Pro
+reference corpora are organized by release. Historical plans, one-off runners,
+generated reports, packaged resources, and build products have been removed
+from the active tree.
 
-The current job is to learn the system embodied by the recovered Datomic Pro
-1.0.7277 Peer and Transactor, express its durable ideas as language-neutral
+The current job is to learn the system embodied by recovered Datomic Pro Peer
+and Transactor releases, express its durable ideas as language-neutral
 contracts, and implement those contracts in Rust.
 
 ## Start here
 
 - [`rust-port.md`](rust-port.md) explains what the recovered code can teach us,
   what is still implicit, and a practical order for the port.
-- [`peer/`](peer/) contains the recovered application-facing Peer reference
-  source.
-- [`transactor/`](transactor/) contains the recovered write-service reference
-  source.
+- [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and
+  Transactor reference corpus.
+- [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference
+  corpus recovered from the matched 1.0.7705 distribution.
 - [`tools/`](tools/) contains the repaired decompiler and the small set of
   reusable JVM inspection tools retained after the clean.
 
-`peer/` and `transactor/` are sibling artifact-provenance boundaries. Neither
-is structurally subordinate to the other.
+Within each release, `peer/` and `transactor/` are sibling
+artifact-provenance boundaries. Neither is structurally subordinate to the
+other.
 
 The active tree deliberately does **not** contain a runnable recovered Datomic
 distribution or a conformance suite. Those should be rebuilt in small,

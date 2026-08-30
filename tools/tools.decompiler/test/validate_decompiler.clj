@@ -405,8 +405,7 @@
   (assert (= "fn" (name (first (nth incongruent-definition 2)))))
   (assert (= "def" (name (first malformed-definition))))
   (assert (= "fn" (name (first (nth malformed-definition 2)))))
-  (assert (= "def" (name (first typed-order-definition))))
-  (assert (= "fn" (name (first (nth typed-order-definition 2)))))
+  (assert (= "defn" (name (first typed-order-definition))))
   (assert (= "def" (name (first same-arity-metadata-definition))))
   (assert (= "fn"
              (name (first (nth same-arity-metadata-definition 2)))))
@@ -457,6 +456,45 @@
     (finally
       (remove-ns fixture-ns)))
   (println "decompiler setMeta-guided defn/def+fn metadata fixture passed"))
+
+(let [source
+      '(do
+         (.setMeta (var wrapped-return-root)
+                   {:arglists
+                    (clojure.core/list
+                      (.withMeta ['value] {:tag 'long}))})
+         (.bindRoot (var wrapped-return-root)
+                    (clojure.core/fn wrapped-return-root
+                      (^long [value] (long value))))
+         (.setMeta (var munged-parameters-root)
+                   {:arglists
+                    (clojure.core/list ['bean-class 'ready?])})
+         (.bindRoot (var munged-parameters-root)
+                    (clojure.core/fn munged-parameters-root
+                      ([bean_class ready_QMARK_]
+                       [bean_class ready_QMARK_])))
+         (.setMeta (var destructured-parameter-root)
+                   {:arglists
+                    (clojure.core/list [['left 'right]])})
+         (.bindRoot (var destructured-parameter-root)
+                    (clojure.core/fn destructured-parameter-root
+                      ([p__12345]
+                       (let [vec__12346 p__12345
+                             left (nth vec__12346 0 nil)
+                             right (nth vec__12346 1 nil)]
+                         [left right])))))
+      recovered (compact/macrocompact source)
+      definitions
+      (->> (tree-seq coll? seq recovered)
+           (filter #(and (seq? %)
+                         (symbol? (first %))
+                         (= "defn" (name (first %)))))
+           (map (juxt second identity))
+           (into {}))]
+  (assert (contains? definitions 'wrapped-return-root))
+  (assert (contains? definitions 'munged-parameters-root))
+  (assert (contains? definitions 'destructured-parameter-root))
+  (println "decompiler Clojure 1.11/1.12 arglist metadata defn recovery passed"))
 
 (let [source
       '(do
@@ -2423,6 +2461,22 @@
   (println "decompiler dynamic metadata-aware marker nested location metadata passed"))
 
 (def exact-protocol-events (atom []))
+
+(let [declaration
+      (compact/protocol-method-declaration
+        [:as-uri
+         {:tag nil
+          :name 'as-uri
+          :arglists
+          '(clojure.core/list
+             (.withMeta [(quote x)] {:tag (quote URI)}))
+          :doc "Coerce argument to a URI"}])
+      persisted (read-string (decompiler.pprint/pprint declaration))]
+  (assert (= 'as-uri (first persisted)))
+  (assert (= '[x] (second persisted)))
+  (assert (= 'URI (:tag (meta (second persisted)))))
+  (assert (= "Coerce argument to a URI" (nth persisted 2)))
+  (println "decompiler protocol arglist-vector return tag passed"))
 
 (let [fixture-ns (symbol (str "macrocompact.exact.protocol." (gensym)))
       protocol (symbol (str fixture-ns) "Metrics")

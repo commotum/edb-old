@@ -9,7 +9,7 @@
 (ns clojure.tools.decompiler.bc
   (:require [clojure.string :as s])
   (:import (org.apache.bcel.classfile ClassParser JavaClass Field AccessFlags Method
-                                      ConstantPool ConstantObject ConstantCP ConstantNameAndType
+                                      ConstantPool ConstantObject ConstantCP ConstantInvokeDynamic ConstantNameAndType
                                       Utility LocalVariable)
            (org.apache.bcel.generic Instruction InstructionList BranchInstruction CPInstruction ConstantPushInstruction MethodGen
                                     ConstantPoolGen LocalVariableInstruction TypedInstruction IndexedInstruction CodeExceptionGen NEWARRAY Select)
@@ -91,9 +91,24 @@
   (let [idx (.getIndex insn)
         pool (.getConstantPool klass)
         constant (.getConstant pool idx)]
-    (if (instance? ConstantObject constant)
+    (cond
+      (instance? ConstantObject constant)
       {:insn/target-value (.getConstantValue ^ConstantObject constant pool)
        :insn/target-type (type-from-pool-gen klass insn)}
+
+      (instance? ConstantInvokeDynamic constant)
+      (let [^ConstantInvokeDynamic constant constant
+            ^ConstantNameAndType name-and-type
+            (.getConstant pool (.getNameAndTypeIndex constant))
+            signature (.getSignature name-and-type pool)]
+        {:insn/target-name (.getName name-and-type pool)
+         :insn/target-arg-types
+         (vec (Utility/methodSignatureArgumentTypes signature false))
+         :insn/target-ret-type
+         (Utility/methodSignatureReturnType signature false)
+         :insn/bootstrap-method-index (.getBootstrapMethodAttrIndex constant)})
+
+      (instance? ConstantCP constant)
       ;; methods + field refs
       (let [^ConstantCP constant constant
             ^ConstantNameAndType name-and-type (.getConstant pool (.getNameAndTypeIndex constant))
@@ -104,7 +119,14 @@
          (if (.startsWith signature "(")
            {:insn/target-arg-types (vec (Utility/methodSignatureArgumentTypes signature false))
             :insn/target-ret-type (Utility/methodSignatureReturnType signature false)}
-           {:insn/target-type (Utility/signatureToString signature false)}))))))
+           {:insn/target-type (Utility/signatureToString signature false)})))
+
+      :else
+      (throw (ex-info "unsupported constant-pool instruction"
+                      {:class (.getClassName klass)
+                       :instruction (.getName ^Instruction insn)
+                       :constant-index idx
+                       :constant-class (some-> constant class .getName)})))))
 
 (defmethod -parse-insn CPInstruction
   [^JavaClass klass ^CPInstruction insn]

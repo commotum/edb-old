@@ -9,6 +9,7 @@
 (ns clojure.tools.decompiler.compact
   (:require [clojure.core.match :as m]
             [clojure.core.match.protocols :as mp]
+            [clojure.repl :as repl]
             [clojure.set :as set]
             [clojure.string :as s]
             [clojure.walk :as w])
@@ -409,22 +410,41 @@
           current-ns
           forms))
 
+(defn literal-argument-vector [form]
+  (let [form (loop [form form]
+               (cond
+                 (and (seq? form)
+                      (= 'quote (first form))
+                      (= 2 (count form)))
+                 (recur (second form))
+
+                 ;; Clojure 1.11/1.12 retain return tags and pre/post maps by
+                 ;; wrapping the whole source argument vector in withMeta.
+                 ;; The wrapper is source metadata, not an extra argument.
+                 (and (seq? form)
+                      (= '.withMeta (first form))
+                      (= 3 (count form))
+                      (map? (nth form 2)))
+                 (recur (second form))
+
+                 :else
+                 form))]
+    (when (vector? form) form)))
+
 (defn literal-arglists [form]
   (let [form (loop [form form]
                (if (and (seq? form)
                         (contains? #{'quote '.withMeta} (first form)))
                  (recur (second form))
-                 form))]
-    (cond
-      (and (sequential? form) (every? vector? form))
-      (vec form)
-
-      (and (= 'clojure.core/list (first form))
-           (every? vector? (rest form)))
-      (vec (rest form))
-
-      :else
-      nil)))
+                 form))
+        candidates (cond
+                     (= 'clojure.core/list (first form)) (rest form)
+                     (sequential? form) form
+                     :else nil)
+        arglists (when candidates
+                   (mapv literal-argument-vector candidates))]
+    (when (and (seq arglists) (every? some? arglists))
+      arglists)))
 
 (defn parameter-arity-shape [parameters]
   (when (vector? parameters)
@@ -509,21 +529,84 @@
      :else
      [:value form (normalize-argument-metadata explicit-metadata)])))
 
+(defn source-argument-form [form]
+  (loop [form form]
+    (cond
+      (and (seq? form)
+           (= 'quote (first form))
+           (= 2 (count form)))
+      (recur (second form))
+
+      (and (seq? form)
+           (= '.withMeta (first form))
+           (= 3 (count form))
+           (map? (nth form 2)))
+      (recur (second form))
+
+      :else
+      form)))
+
+(defn compiler-destructure-parameter? [form]
+  (and (symbol? form)
+       (nil? (namespace form))
+       (boolean (re-matches #"p__[0-9]+" (name form)))))
+
+(defn compatible-function-parameter? [advertised implemented]
+  (let [advertised (source-argument-form advertised)
+        implemented (source-argument-form implemented)]
+    (cond
+      (= advertised implemented)
+      true
+
+      ;; JVM class/local names contain Clojure's deterministic munge spelling
+      ;; (`bean-class` becomes `bean_class`, `ready?` becomes `ready_QMARK_`).
+      ;; The Var's :arglists retain the source spelling.
+      (and (symbol? advertised)
+           (nil? (namespace advertised))
+           (symbol? implemented)
+           (nil? (namespace implemented)))
+      (= (name advertised) (repl/demunge (name implemented)))
+
+      ;; Destructured source parameters are compiled through a generated p__N
+      ;; local.  Requiring that exact compiler prefix prevents an arbitrary
+      ;; same-arity metadata vector from licensing defn reconstruction.
+      (and (or (vector? advertised) (map? advertised))
+           (compiler-destructure-parameter? implemented))
+      true
+
+      :else
+      false)))
+
+(defn compatible-function-parameters? [advertised implemented]
+  (and (= (count advertised) (count implemented))
+       (every? true?
+               (map compatible-function-parameter?
+                    advertised implemented))))
+
+(defn arglists-by-arity-shape [arglists]
+  (let [entries (mapv (juxt parameter-arity-shape identity) arglists)]
+    (when (and (every? (comp some? first) entries)
+               (= (count entries) (count (set (map first entries)))))
+      (into {} entries))))
+
 (defn matching-function-arglists? [metadata fn-body]
   (when (and (map? metadata) (contains? metadata :arglists))
     (let [advertised (literal-arglists (:arglists metadata))
           implemented (fn-parameter-vectors fn-body)
-          advertised-shapes (some->> advertised
-                                     (mapv parameter-arity-shape))
-          implemented-shapes (some->> implemented
-                                     (mapv parameter-arity-shape))]
+          advertised-by-shape (some-> advertised arglists-by-arity-shape)
+          implemented-by-shape (some-> implemented arglists-by-arity-shape)]
       (and (seq advertised)
            (seq implemented)
-           (every? some? advertised-shapes)
-           (every? some? implemented-shapes)
-           (= advertised-shapes implemented-shapes)
-           (= (mapv normalize-argument-form advertised)
-              (mapv normalize-argument-form implemented))))))
+           advertised-by-shape
+           implemented-by-shape
+           (= (set (keys advertised-by-shape))
+              (set (keys implemented-by-shape)))
+           (every?
+             (fn [[shape advertised-parameters]]
+               (compatible-function-parameters?
+                 advertised-parameters
+                 (get implemented-by-shape shape)))
+             advertised-by-shape)))))
 
 (declare pure-metadata-form?)
 
@@ -1187,16 +1270,56 @@
       (throw (ex-info "unsupported defprotocol argument form"
                       {:argument form})))))
 
+(defn protocol-argument-vector [form]
+  (cond
+    (vector? form)
+    form
+
+    (and (seq? form)
+         (= ".withMeta" (call-name form))
+         (= 3 (count form))
+         (map? (nth form 2)))
+    (let [metadata (nth form 2)]
+      (when-not (every? #{:tag} (keys metadata))
+        (throw (ex-info "unsupported defprotocol arglist metadata"
+                        {:argument-vector form :metadata metadata})))
+      (when-let [arguments (protocol-argument-vector (second form))]
+        (let [tag (protocol-tag-value (:tag metadata))]
+          (cond-> arguments
+            tag (with-meta {:tag tag})))))
+
+    :else
+    nil))
+
+(defn protocol-literal-arglists [form]
+  (let [form (loop [form form]
+               (if (and (seq? form)
+                        (contains? #{'quote '.withMeta} (first form)))
+                 (recur (second form))
+                 form))
+        candidates (cond
+                     (= 'clojure.core/list (first form)) (rest form)
+                     (sequential? form) form
+                     :else nil)
+        arglists (when candidates
+                   (mapv protocol-argument-vector candidates))]
+    (when (and (seq arglists) (every? some? arglists))
+      arglists)))
+
 (defn protocol-method-declaration [[method signature]]
   (when-not (and (keyword? method) (map? signature))
     (throw (ex-info "malformed defprotocol signature"
                     {:method method :signature signature})))
-  (let [arglists (literal-arglists (:arglists signature))
+  (let [arglists (protocol-literal-arglists (:arglists signature))
         tag (protocol-tag-value (:tag signature))
         method-name (cond-> (symbol (name method))
                       tag (with-meta {:tag tag}))
         parameters (when arglists
-                     (mapv #(mapv protocol-source-argument %) arglists))
+                     (mapv (fn [arglist]
+                             (with-meta
+                               (mapv protocol-source-argument arglist)
+                               (meta arglist)))
+                           arglists))
         doc (:doc signature)]
     (when-not (seq parameters)
       (throw (ex-info "defprotocol signature has no literal arglists"
