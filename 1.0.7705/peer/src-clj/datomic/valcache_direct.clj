@@ -124,7 +124,7 @@
                                                               java.lang.Throwable
                                                               t
                                                               (do
-                                                                (let 
+                                                                (let
                                                                   [logger
                                                                    (org.slf4j.LoggerFactory/getLogger
                                                                      "datomic.valcache-direct")

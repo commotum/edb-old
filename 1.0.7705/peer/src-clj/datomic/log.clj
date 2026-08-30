@@ -1008,23 +1008,23 @@
                                                          (nth
                                                            root_val
                                                            (int ^java.lang.Number ri))))
-                                                 iterys__6369__auto__ (fn 
+                                                 iterys__6369__auto__ (fn
                                                                         iter__16306
                                                                         ([s__16307]
                                                                           (lazy-seq
-                                                                            (let 
+                                                                            (let
                                                                               [s__16307 s__16307
                                                                                temp__5804__auto__
                                                                                (seq s__16307)]
                                                                               (when
                                                                                 temp__5804__auto__
-                                                                                (let 
+                                                                                (let
                                                                                   [s__16307
                                                                                    temp__5804__auto__]
                                                                                   (if
                                                                                     (chunked-seq?
                                                                                       s__16307)
-                                                                                    (let 
+                                                                                    (let
                                                                                       [c__6371__auto__
                                                                                        (chunk-first
                                                                                          s__16307)
@@ -1038,14 +1038,14 @@
                                                                                            (int
                                                                                              size__6372__auto__)))]
                                                                                       (if
-                                                                                        (loop 
+                                                                                        (loop
                                                                                           [i__16308
                                                                                            (int 0)]
                                                                                           (if
                                                                                             (<
                                                                                               i__16308
                                                                                               size__6372__auto__)
-                                                                                            (let 
+                                                                                            (let
                                                                                               [di
                                                                                                (.nth
                                                                                                  ^clojure.lang.Indexed c__6371__auto__
@@ -1074,7 +1074,7 @@
                                                                                           (chunk
                                                                                             b__16309)
                                                                                           nil)))
-                                                                                    (let 
+                                                                                    (let
                                                                                       [di
                                                                                        (first
                                                                                          s__16307)]

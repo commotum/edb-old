@@ -34,7 +34,7 @@
   (.setMeta
     (clojure.lang.RT/var "datomic.api" "connect")
     {:tag datomic.Connection, :arglists (clojure.core/list ['uri]), :column (int 1)})
-  (.bindRoot (clojure.lang.RT/var "datomic.api" "connect") (fn 
+  (.bindRoot (clojure.lang.RT/var "datomic.api" "connect") (fn
                                                              connect
                                                              ([uri] (Peer/connect uri))))
   (defn create-database ([uri] (Peer/createDatabase uri)))

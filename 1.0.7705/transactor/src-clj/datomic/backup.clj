@@ -654,7 +654,7 @@
                                                                map__22330)
                                                   buf (get map__22330 :buf)
                                                   result (retry
-                                                           (fn 
+                                                           (fn
                                                              fn__22331
                                                              ([]
                                                                (store
@@ -893,7 +893,7 @@
                 result__8600__auto__ (try
                                        {:returned
                                         (let [temp__5823__auto__ (retry
-                                                                   (fn 
+                                                                   (fn
                                                                      fn__22413
                                                                      ([]
                                                                        (retrieve
@@ -1772,7 +1772,7 @@
                                                              (run!
                                                                fill
                                                                (filter
-                                                                 (fn 
+                                                                 (fn
                                                                    fn__22572
                                                                    ([p1__22560#]
                                                                      (contains?

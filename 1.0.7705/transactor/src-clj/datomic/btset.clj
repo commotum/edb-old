@@ -294,7 +294,7 @@
           (cond
             (or
               (= (long i) (long cnt))
-              (<= (.compare this k (aget ^"[Ljava.lang.Object;" ks (int i))) 0)) (let 
+              (<= (.compare this k (aget ^"[Ljava.lang.Object;" ks (int i))) 0)) (let
                                                                                    [ret
                                                                                     (datomic.btset.BTSetIter.
                                                                                       path
@@ -329,7 +329,7 @@
                                                                                        cmp
                                                                                        (object-array
                                                                                          [k])))
-                                                                                   (let 
+                                                                                   (let
                                                                                      [new_ks
                                                                                       (object-array
                                                                                         (long
@@ -367,7 +367,7 @@
                                                                                              cnt))
                                                                                          cmp
                                                                                          new_ks)
-                                                                                       (let 
+                                                                                       (let
                                                                                          [aks
                                                                                           (object-array
                                                                                             (long

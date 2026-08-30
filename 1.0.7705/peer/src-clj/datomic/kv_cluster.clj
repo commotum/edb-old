@@ -271,7 +271,7 @@
                                                             (:tail
                                                               (^clojure.lang.IFn retrying_read
                                                                 :linear
-                                                                (fn 
+                                                                (fn
                                                                   fn__10530
                                                                   ([]
                                                                     (kv/get kvs pod_key true))))))]
@@ -312,16 +312,16 @@
                                                         (future-call
                                                           (fn fn__10536
                                                             ([]
-                                                              (let 
+                                                              (let
                                                                 [tail_keys_ref
                                                                  (delay
-                                                                   (loop 
+                                                                   (loop
                                                                      [ks [oldtail]]
-                                                                     (let 
+                                                                     (let
                                                                        [map__10538
                                                                         (^clojure.lang.IFn retrying_read
                                                                           :exponential
-                                                                          (fn 
+                                                                          (fn
                                                                             fn__10539
                                                                             ([]
                                                                               (kv/get
@@ -354,7 +354,7 @@
                                                       {:rev rev, :etag tailid, :buf buf})
                                                     (let [temp__5802__auto__ (^clojure.lang.IFn retrying_read
                                                                                :linear
-                                                                               (fn 
+                                                                               (fn
                                                                                  fn__10543
                                                                                  ([]
                                                                                    (kv/get
@@ -379,7 +379,7 @@
                                                               ntail (get map__10545 :tail)]
                                                           (if (and (= rev nrev) (= tailid ntail))
                                                             (do
-                                                              (let 
+                                                              (let
                                                                 [logger
                                                                  (org.slf4j.LoggerFactory/getLogger
                                                                    "datomic.kv-cluster")]
@@ -439,7 +439,7 @@
                                          {:returned
                                           (let [temp__5804__auto__ (^clojure.lang.IFn retrying_read
                                                                      :linear
-                                                                     (fn 
+                                                                     (fn
                                                                        fn__10507
                                                                        ([]
                                                                          (kv/get
@@ -463,11 +463,11 @@
                                                     rev (get map__10509 :rev)
                                                     tail (get map__10509 :tail)
                                                     bufs (loop [tail tail ret nil]
-                                                           (let 
+                                                           (let
                                                              [map__10511
                                                               (^clojure.lang.IFn retrying_read
                                                                 :linear
-                                                                (fn 
+                                                                (fn
                                                                   fn__10512
                                                                   ([] (kv/get kvs tail false))))
                                                               map__10511
@@ -501,7 +501,7 @@
                                                     len (reduce
                                                           +
                                                           (map
-                                                            (fn 
+                                                            (fn
                                                               fn__10515
                                                               ([p1__10405#]
                                                                 (java.lang.Integer/valueOf

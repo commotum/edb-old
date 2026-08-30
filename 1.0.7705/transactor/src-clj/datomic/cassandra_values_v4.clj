@@ -149,7 +149,7 @@
                                          result__8600__auto__ (try
                                                                 {:returned
                                                                  (*retry*
-                                                                   (fn 
+                                                                   (fn
                                                                      fn__27226
                                                                      ([]
                                                                        (cass/cql-insert
@@ -287,7 +287,7 @@
                                       (let [m_27248 {:event :cassandra-values/get-value-chunk,
                                                      :id id,
                                                      :n p1__27240#}
-                                            ___8598__auto__ (let 
+                                            ___8598__auto__ (let
                                                               [logger
                                                                (org.slf4j.LoggerFactory/getLogger
                                                                  "datomic.cassandra-values-v4")]
@@ -306,7 +306,7 @@
                                             result__8600__auto__ (try
                                                                    {:returned
                                                                     (*retry*
-                                                                      (fn 
+                                                                      (fn
                                                                         fn__27252
                                                                         ([]
                                                                           (cass/cql-select
@@ -373,13 +373,13 @@
             start__8599__auto__ (java.lang.System/nanoTime)
             result__8600__auto__ (try
                                    {:returned
-                                    (let [temp__5825__auto__ (let 
+                                    (let [temp__5825__auto__ (let
                                                                [m_27273
                                                                 {:event
                                                                  :cassandra-values/get-value,
                                                                  :id id}
                                                                 ___8598__auto__
-                                                                (let 
+                                                                (let
                                                                   [logger
                                                                    (org.slf4j.LoggerFactory/getLogger
                                                                      "datomic.cassandra-values-v4")]
@@ -416,7 +416,7 @@
                                                                 msec_27275
                                                                 (logger/format-as-msec
                                                                   (long elapsed_27274))]
-                                                               (let 
+                                                               (let
                                                                  [endmsg__8602__auto__
                                                                   (merge
                                                                     (assoc
@@ -472,7 +472,7 @@
                                                                  :cassandra-values/delete-value-chunk,
                                                                  :id id,
                                                                  :n p1__27268#}
-                                                        ___8598__auto__ (let 
+                                                        ___8598__auto__ (let
                                                                           [logger
                                                                            (org.slf4j.LoggerFactory/getLogger
                                                                              "datomic.cassandra-values-v4")]

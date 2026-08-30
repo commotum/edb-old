@@ -612,12 +612,12 @@
                                                                    (conj path :subspec)
                                                                    dec)
                                                                  (conj recursed e)]
-                                                                [(let 
+                                                                [(let
                                                                    [temp__5802__auto__
                                                                     (get spec :dbid)]
                                                                    (if
                                                                      temp__5802__auto__
-                                                                     (let 
+                                                                     (let
                                                                        [idc temp__5802__auto__]
                                                                        {:dbid idc})
                                                                      {}))
@@ -625,12 +625,12 @@
                                            (= '... subspec) (if
                                                               (not (^clojure.lang.IFn recursed e))
                                                               [spec (conj recursed e)]
-                                                              [(let 
+                                                              [(let
                                                                  [temp__5802__auto__
                                                                   (get spec :dbid)]
                                                                  (if
                                                                    temp__5802__auto__
-                                                                   (let 
+                                                                   (let
                                                                      [idc temp__5802__auto__]
                                                                      {:dbid idc})
                                                                    {}))

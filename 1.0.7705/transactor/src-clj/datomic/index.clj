@@ -489,7 +489,7 @@
                                                                        (set! didx (int (inc didx)))
                                                                        (when
                                                                          (= (rem didx 2) 0)
-                                                                         (loop 
+                                                                         (loop
                                                                            [dir dir
                                                                             i 0
                                                                             didx (+ 4 didx)]
@@ -501,7 +501,7 @@
                                                                                  (count
                                                                                    (.-segids
                                                                                      ^datomic.index.DirNode dir))))
-                                                                             (let 
+                                                                             (let
                                                                                [k
                                                                                 (aget
                                                                                   (.-segids
@@ -578,24 +578,24 @@
                                                      ri
                                                      lookup
                                                      false)
-                                                 iterys__6394__auto__ (fn 
+                                                 iterys__6394__auto__ (fn
                                                                         iter__14293
                                                                         ([s__14294]
                                                                           (lazy-seq
-                                                                            (loop 
+                                                                            (loop
                                                                               [s__14294 s__14294]
-                                                                              (let 
+                                                                              (let
                                                                                 [temp__5825__auto__
                                                                                  (seq s__14294)]
                                                                                 (when
                                                                                   temp__5825__auto__
-                                                                                  (let 
+                                                                                  (let
                                                                                     [s__14294
                                                                                      temp__5825__auto__]
                                                                                     (if
                                                                                       (chunked-seq?
                                                                                         s__14294)
-                                                                                      (let 
+                                                                                      (let
                                                                                         [c__6396__auto__
                                                                                          (chunk-first
                                                                                            s__14294)
@@ -608,14 +608,14 @@
                                                                                              (int
                                                                                                size__6397__auto__)))]
                                                                                         (if
-                                                                                          (loop 
+                                                                                          (loop
                                                                                             [i__14295
                                                                                              0]
                                                                                             (if
                                                                                               (<
                                                                                                 i__14295
                                                                                                 size__6397__auto__)
-                                                                                              (let 
+                                                                                              (let
                                                                                                 [di
                                                                                                  (.nth
                                                                                                    ^clojure.lang.Indexed c__6396__auto__
@@ -675,7 +675,7 @@
                                                                                             (chunk
                                                                                               b__14296)
                                                                                             nil)))
-                                                                                      (let 
+                                                                                      (let
                                                                                         [di
                                                                                          (first
                                                                                            s__14294)]
@@ -752,24 +752,24 @@
                                                      ri
                                                      lookup
                                                      false)
-                                                 iterys__6394__auto__ (fn 
+                                                 iterys__6394__auto__ (fn
                                                                         iter__14268
                                                                         ([s__14269]
                                                                           (lazy-seq
-                                                                            (loop 
+                                                                            (loop
                                                                               [s__14269 s__14269]
-                                                                              (let 
+                                                                              (let
                                                                                 [temp__5825__auto__
                                                                                  (seq s__14269)]
                                                                                 (when
                                                                                   temp__5825__auto__
-                                                                                  (let 
+                                                                                  (let
                                                                                     [s__14269
                                                                                      temp__5825__auto__]
                                                                                     (if
                                                                                       (chunked-seq?
                                                                                         s__14269)
-                                                                                      (let 
+                                                                                      (let
                                                                                         [c__6396__auto__
                                                                                          (chunk-first
                                                                                            s__14269)
@@ -782,14 +782,14 @@
                                                                                              (int
                                                                                                size__6397__auto__)))]
                                                                                         (if
-                                                                                          (loop 
+                                                                                          (loop
                                                                                             [i__14270
                                                                                              0]
                                                                                             (if
                                                                                               (<
                                                                                                 i__14270
                                                                                                 size__6397__auto__)
-                                                                                              (let 
+                                                                                              (let
                                                                                                 [di
                                                                                                  (.nth
                                                                                                    ^clojure.lang.Indexed c__6396__auto__
@@ -808,7 +808,7 @@
                                                                                                   (do
                                                                                                     (chunk-append
                                                                                                       b__14271
-                                                                                                      (let 
+                                                                                                      (let
                                                                                                         [s
                                                                                                          (common/getx
                                                                                                            lookup
@@ -839,7 +839,7 @@
                                                                                             (chunk
                                                                                               b__14271)
                                                                                             nil)))
-                                                                                      (let 
+                                                                                      (let
                                                                                         [di
                                                                                          (first
                                                                                            s__14269)]
@@ -854,7 +854,7 @@
                                                                                               di
                                                                                               didx))
                                                                                           (cons
-                                                                                            (let 
+                                                                                            (let
                                                                                               [s
                                                                                                (common/getx
                                                                                                  lookup
@@ -908,24 +908,24 @@
                                                                 lookup
                                                                 false)
                                                               iterys__6394__auto__
-                                                              (fn 
+                                                              (fn
                                                                 iter__14239
                                                                 ([s__14240]
                                                                   (lazy-seq
-                                                                    (loop 
+                                                                    (loop
                                                                       [s__14240 s__14240]
-                                                                      (let 
+                                                                      (let
                                                                         [temp__5825__auto__
                                                                          (seq s__14240)]
                                                                         (when
                                                                           temp__5825__auto__
-                                                                          (let 
+                                                                          (let
                                                                             [s__14240
                                                                              temp__5825__auto__]
                                                                             (if
                                                                               (chunked-seq?
                                                                                 s__14240)
-                                                                              (let 
+                                                                              (let
                                                                                 [c__6396__auto__
                                                                                  (chunk-first
                                                                                    s__14240)
@@ -938,13 +938,13 @@
                                                                                      (int
                                                                                        size__6397__auto__)))]
                                                                                 (if
-                                                                                  (loop 
+                                                                                  (loop
                                                                                     [i__14241 0]
                                                                                     (if
                                                                                       (<
                                                                                         i__14241
                                                                                         size__6397__auto__)
-                                                                                      (let 
+                                                                                      (let
                                                                                         [di
                                                                                          (.nth
                                                                                            ^clojure.lang.Indexed c__6396__auto__
@@ -985,7 +985,7 @@
                                                                                     (chunk
                                                                                       b__14242)
                                                                                     nil)))
-                                                                              (let 
+                                                                              (let
                                                                                 [di
                                                                                  (first s__14240)]
                                                                                 (if
@@ -1463,23 +1463,23 @@
                                                        ri
                                                        lookup
                                                        false)
-                                                   iterys__6394__auto__ (fn 
+                                                   iterys__6394__auto__ (fn
                                                                           iter__14344
                                                                           ([s__14345]
                                                                             (lazy-seq
-                                                                              (let 
+                                                                              (let
                                                                                 [s__14345 s__14345
                                                                                  temp__5825__auto__
                                                                                  (seq s__14345)]
                                                                                 (when
                                                                                   temp__5825__auto__
-                                                                                  (let 
+                                                                                  (let
                                                                                     [s__14345
                                                                                      temp__5825__auto__]
                                                                                     (if
                                                                                       (chunked-seq?
                                                                                         s__14345)
-                                                                                      (let 
+                                                                                      (let
                                                                                         [c__6396__auto__
                                                                                          (chunk-first
                                                                                            s__14345)
@@ -1492,14 +1492,14 @@
                                                                                              (int
                                                                                                size__6397__auto__)))]
                                                                                         (if
-                                                                                          (loop 
+                                                                                          (loop
                                                                                             [i__14346
                                                                                              0]
                                                                                             (if
                                                                                               (<
                                                                                                 i__14346
                                                                                                 size__6397__auto__)
-                                                                                              (let 
+                                                                                              (let
                                                                                                 [di
                                                                                                  (.nth
                                                                                                    ^clojure.lang.Indexed c__6396__auto__
@@ -1541,7 +1541,7 @@
                                                                                             (chunk
                                                                                               b__14347)
                                                                                             nil)))
-                                                                                      (let 
+                                                                                      (let
                                                                                         [di
                                                                                          (first
                                                                                            s__14345)]
@@ -2335,15 +2335,15 @@
                                                                           i
                                                                           true
                                                                           prev)
-                                                                        (let 
+                                                                        (let
                                                                           [f__14449__auto__
-                                                                           (fn 
+                                                                           (fn
                                                                              f__14449__auto__
                                                                              ([data cnt i]
                                                                                (if
                                                                                  (and
                                                                                    data
-                                                                                   (let 
+                                                                                   (let
                                                                                      [d
                                                                                       (first data)]
                                                                                      (and
@@ -2380,7 +2380,7 @@
                                                                             cnt
                                                                             i)))
                                                           :else (do
-                                                                  (let 
+                                                                  (let
                                                                     [d (first data)]
                                                                     (^clojure.lang.IFn proc d)
                                                                     (recur
@@ -3517,7 +3517,7 @@
                                                                     segid))]
                                                             (if
                                                               (seq pd)
-                                                              (let 
+                                                              (let
                                                                 [ret
                                                                  (into
                                                                    ret
@@ -3571,7 +3571,7 @@
                                                   ([es garbage retractions des data erq]
                                                     (cond
                                                       (nil? (seq data)) (do
-                                                                          (let 
+                                                                          (let
                                                                             [logger
                                                                              (org.slf4j.LoggerFactory/getLogger
                                                                                "datomic.index")]
@@ -3586,7 +3586,7 @@
                                                                                    :stage
                                                                                    :nil-data})))
                                                                             nil)
-                                                                          (let 
+                                                                          (let
                                                                             [vec__14655
                                                                              (^clojure.lang.IFn drainq
                                                                                es
@@ -3611,7 +3611,7 @@
                                                                              garbage
                                                                              retractions]))
                                                       (nil? (seq des)) (do
-                                                                         (let 
+                                                                         (let
                                                                            [logger
                                                                             (org.slf4j.LoggerFactory/getLogger
                                                                               "datomic.index")]
@@ -3626,7 +3626,7 @@
                                                                                   :stage
                                                                                   :nil-des})))
                                                                            nil)
-                                                                         (let 
+                                                                         (let
                                                                            [vec__14658
                                                                             (^clojure.lang.IFn drainq
                                                                               es
@@ -3679,7 +3679,7 @@
                                                                     (:key (fnext des))
                                                                     (first data)))
                                                                 (do
-                                                                  (let 
+                                                                  (let
                                                                     [logger
                                                                      (org.slf4j.LoggerFactory/getLogger
                                                                        "datomic.index")]
@@ -3693,7 +3693,7 @@
                                                                            'index/merge-one-index,
                                                                            :stage :skip})))
                                                                     nil)
-                                                                  (let 
+                                                                  (let
                                                                     [d (first data)
                                                                      vec__14664
                                                                      (^clojure.lang.IFn drainq
@@ -3716,9 +3716,9 @@
                                                                        (unchecked-int 2)
                                                                        nil)
                                                                      vec__14667
-                                                                     (let 
+                                                                     (let
                                                                        [f__14449__auto__
-                                                                        (fn 
+                                                                        (fn
                                                                           f__14449__auto__
                                                                           ([es des]
                                                                             (if
@@ -3755,7 +3755,7 @@
                                                                       data
                                                                       erq)))
                                                                 (do
-                                                                  (let 
+                                                                  (let
                                                                     [logger
                                                                      (org.slf4j.LoggerFactory/getLogger
                                                                        "datomic.index")]
@@ -3769,7 +3769,7 @@
                                                                            'index/merge-one-index,
                                                                            :stage :merge})))
                                                                     nil)
-                                                                  (let 
+                                                                  (let
                                                                     [tailp (promise)
                                                                      insert_data
                                                                      (seq
@@ -3777,7 +3777,7 @@
                                                                          (next des)
                                                                          (datomic.index/fully-take-while-delivering-tail
                                                                            tailp
-                                                                           (fn 
+                                                                           (fn
                                                                              fn__14676
                                                                              ([p1__14626#]
                                                                                (^clojure.lang.IFn lt
@@ -3790,7 +3790,7 @@
                                                                      (and des (:segid (first des)))
                                                                      seg_data*
                                                                      (future-call
-                                                                       (fn 
+                                                                       (fn
                                                                          fn__14678
                                                                          ([]
                                                                            (and
@@ -3800,7 +3800,7 @@
                                                                                  olookup
                                                                                  segid))))))
                                                                      _
-                                                                     (let 
+                                                                     (let
                                                                        [lookahead 10000]
                                                                        (when
                                                                          (=
@@ -3810,7 +3810,7 @@
                                                                            (long lookahead))
                                                                          nil))
                                                                      _
-                                                                     (let 
+                                                                     (let
                                                                        [logger
                                                                         (org.slf4j.LoggerFactory/getLogger
                                                                           "datomic.index")]
@@ -3830,7 +3830,7 @@
                                                                          (deref
                                                                            datomic.index/index-parallelism)
                                                                          (count erq))
-                                                                       (let 
+                                                                       (let
                                                                          [vec__14681
                                                                           (deref (peek erq))
                                                                           nes
@@ -3866,11 +3866,11 @@
                                                                      (conj
                                                                        erq
                                                                        (future-call
-                                                                         (fn 
+                                                                         (fn
                                                                            fn__14684
                                                                            ([]
                                                                              (try
-                                                                               (let 
+                                                                               (let
                                                                                  [seg_data
                                                                                   (deref seg_data*)
                                                                                   mdata
@@ -4185,7 +4185,7 @@
                                                             {:returned
                                                              (datomic.index/avet-sort-and-process-datoms
                                                                aevt_datoms
-                                                               (fn 
+                                                               (fn
                                                                  fn__14754
                                                                  ([avet_sorted_datoms]
                                                                    (datomic.index/merge-one-index
@@ -4196,7 +4196,7 @@
                                                                      (iter/iter-seq
                                                                        avet_sorted_datoms)
                                                                      garbage
-                                                                     (fn 
+                                                                     (fn
                                                                        fn__14755
                                                                        ([p1__14739#]
                                                                          (java.lang.Integer/valueOf
@@ -4922,7 +4922,7 @@
                                           ([db idxsort]
                                             (let [m_14889 {:event :index/repair-disjoined-index,
                                                            :index idxsort}
-                                                  ___8598__auto__ (let 
+                                                  ___8598__auto__ (let
                                                                     [logger
                                                                      (org.slf4j.LoggerFactory/getLogger
                                                                        "datomic.index")]
@@ -4940,7 +4940,7 @@
                                                   start__8599__auto__ (java.lang.System/nanoTime)
                                                   result__8600__auto__ (try
                                                                          {:returned
-                                                                          (let 
+                                                                          (let
                                                                             [mids
                                                                              (datomic.index/disjoined-datoms
                                                                                db
@@ -4961,17 +4961,17 @@
                                                                                  (vals hists)))]
                                                                             (if
                                                                               (seq datoms)
-                                                                              (let 
+                                                                              (let
                                                                                 [counts
-                                                                                 (fn 
+                                                                                 (fn
                                                                                    counts
                                                                                    ([p1__14882#]
                                                                                      (reduce
-                                                                                       (fn 
+                                                                                       (fn
                                                                                          fn__14895
                                                                                          ([m
                                                                                            p__14894]
-                                                                                           (let 
+                                                                                           (let
                                                                                              [vec__14896
                                                                                               p__14894
                                                                                               k
@@ -4995,7 +4995,7 @@
                                                                                                      v)))))))
                                                                                        {}
                                                                                        p1__14882#)))]
-                                                                                (let 
+                                                                                (let
                                                                                   [logger
                                                                                    (org.slf4j.LoggerFactory/getLogger
                                                                                      "datomic.index")]
@@ -5020,7 +5020,7 @@
                                                                                   db
                                                                                   [:indexing
                                                                                    idxsort]
-                                                                                  (fn 
+                                                                                  (fn
                                                                                     fn__14901
                                                                                     ([p1__14883#]
                                                                                       (into
@@ -5211,7 +5211,7 @@
                                          lt (datomic.index/make-sparse-lt cmp)
                                          N (let [m_14954 {:event :index/mem-index-bytes,
                                                           :index idx_name}
-                                                 ___8598__auto__ (let 
+                                                 ___8598__auto__ (let
                                                                    [logger
                                                                     (org.slf4j.LoggerFactory/getLogger
                                                                       "datomic.index")]
@@ -5286,7 +5286,7 @@
                                                       :as-of-t as_of_t,
                                                       :N N,
                                                       :M M}
-                                             ___8598__auto__ (let 
+                                             ___8598__auto__ (let
                                                                [logger
                                                                 (org.slf4j.LoggerFactory/getLogger
                                                                   "datomic.index")]
@@ -5304,7 +5304,7 @@
                                              start__8599__auto__ (java.lang.System/nanoTime)
                                              result__8600__auto__ (try
                                                                     {:returned
-                                                                     (let 
+                                                                     (let
                                                                        [vec__14963
                                                                         (^clojure.lang.IFn build_index
                                                                           maink
@@ -5371,7 +5371,7 @@
                                                                         (datomic.index/aggregate-metrics
                                                                           main_metrics
                                                                           hist_metrics)]
-                                                                       (let 
+                                                                       (let
                                                                          [logger
                                                                           (org.slf4j.LoggerFactory/getLogger
                                                                             "datomic.index")]
@@ -5460,7 +5460,7 @@
                                                           :S S,
                                                           :N N,
                                                           :as-of-t as_of_t}
-                                                 ___8598__auto__ (let 
+                                                 ___8598__auto__ (let
                                                                    [logger
                                                                     (org.slf4j.LoggerFactory/getLogger
                                                                       "datomic.index")]
@@ -5478,7 +5478,7 @@
                                                  start__8599__auto__ (java.lang.System/nanoTime)
                                                  result__8600__auto__ (try
                                                                         {:returned
-                                                                         (let 
+                                                                         (let
                                                                            [vec__14978
                                                                             (^clojure.lang.IFn build_index
                                                                               midk
@@ -5577,7 +5577,7 @@
                                                                               mid_metrics
                                                                               main_metrics
                                                                               hist_metrics)]
-                                                                           (let 
+                                                                           (let
                                                                              [logger
                                                                               (org.slf4j.LoggerFactory/getLogger
                                                                                 "datomic.index")]
@@ -5650,13 +5650,13 @@
                                                              (math/round
                                                                (/ (double num) denom)
                                                                2))))
-                                                 vec__14988 (let 
+                                                 vec__14988 (let
                                                               [m_14993
                                                                {:event :event/least-pop-slice,
                                                                 :index idx_name,
                                                                 :n-segs (long n_segs)}
                                                                ___8598__auto__
-                                                               (let 
+                                                               (let
                                                                  [logger
                                                                   (org.slf4j.LoggerFactory/getLogger
                                                                     "datomic.index")]
@@ -5697,7 +5697,7 @@
                                                                msec_14995
                                                                (logger/format-as-msec
                                                                  (long elapsed_14994))]
-                                                              (let 
+                                                              (let
                                                                 [endmsg__8602__auto__
                                                                  (merge
                                                                    (assoc
@@ -5767,7 +5767,7 @@
                                                           :S S,
                                                           :N N,
                                                           :as-of-t as_of_t}
-                                                 ___8598__auto__ (let 
+                                                 ___8598__auto__ (let
                                                                    [logger
                                                                     (org.slf4j.LoggerFactory/getLogger
                                                                       "datomic.index")]
@@ -5785,19 +5785,19 @@
                                                  start__8599__auto__ (java.lang.System/nanoTime)
                                                  result__8600__auto__ (try
                                                                         {:returned
-                                                                         (let 
+                                                                         (let
                                                                            [main_ret
-                                                                            (let 
+                                                                            (let
                                                                               [f__14917__auto__
-                                                                               (fn 
+                                                                               (fn
                                                                                  f__14917__auto__
                                                                                  ([]
-                                                                                   (let 
+                                                                                   (let
                                                                                      [vec__15009
                                                                                       (^clojure.lang.IFn build_index
                                                                                         maink
                                                                                         (mapcat
-                                                                                          (fn 
+                                                                                          (fn
                                                                                             fn__15015
                                                                                             ([p1__14919#]
                                                                                               (cache/getx-uncached
@@ -5832,7 +5832,7 @@
                                                                                           3)
                                                                                         nil)
                                                                                       _
-                                                                                      (let 
+                                                                                      (let
                                                                                         [logger
                                                                                          (org.slf4j.LoggerFactory/getLogger
                                                                                            "datomic.index")]
@@ -5890,7 +5890,7 @@
                                                                                           3)
                                                                                         nil)
                                                                                       _
-                                                                                      (let 
+                                                                                      (let
                                                                                         [logger
                                                                                          (org.slf4j.LoggerFactory/getLogger
                                                                                            "datomic.index")]
@@ -5986,7 +5986,7 @@
                                                                               main_metrics
                                                                               hist_metrics
                                                                               mid_metrics)]
-                                                                           (let 
+                                                                           (let
                                                                              [logger
                                                                               (org.slf4j.LoggerFactory/getLogger
                                                                                 "datomic.index")]
@@ -6357,13 +6357,13 @@
                                            (datomic.index/load-index
                                              olookup
                                              storage_index_root_id)}
-                                          (binding [datomic.index/*pace-index-fn* (let 
+                                          (binding [datomic.index/*pace-index-fn* (let
                                                                                     [temp__5825__auto__
                                                                                      (config/property
                                                                                        "datomic.indexSegsPerSecond")]
                                                                                     (when
                                                                                       temp__5825__auto__
-                                                                                      (let 
+                                                                                      (let
                                                                                         [sps
                                                                                          temp__5825__auto__
                                                                                          calc
@@ -6372,16 +6372,16 @@
                                                                                              sps
                                                                                              10)
                                                                                            100)]
-                                                                                        (fn 
+                                                                                        (fn
                                                                                           fn__15070
                                                                                           ([segs]
-                                                                                            (let 
+                                                                                            (let
                                                                                               [temp__5825__auto__
                                                                                                (^clojure.lang.IFn calc
                                                                                                  segs)]
                                                                                               (when
                                                                                                 temp__5825__auto__
-                                                                                                (let 
+                                                                                                (let
                                                                                                   [msec
                                                                                                    temp__5825__auto__]
                                                                                                   (monitor/add-stat

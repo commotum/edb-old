@@ -566,23 +566,23 @@
                                                            {:returned
                                                             (try
                                                               (try
-                                                                (loop 
+                                                                (loop
                                                                   [msges
                                                                    (queue/take hornet_consumer)]
                                                                   (when
                                                                     (and
                                                                       msges
                                                                       (not (realized? done_ref)))
-                                                                    (let 
+                                                                    (let
                                                                       [temp__5825__auto__
                                                                        (.get
                                                                          ^java.lang.ref.Reference push_handler_ref)]
                                                                       (when
                                                                         temp__5825__auto__
-                                                                        (let 
+                                                                        (let
                                                                           [push_handler
                                                                            temp__5825__auto__]
-                                                                          (loop 
+                                                                          (loop
                                                                             [seq_19050
                                                                              (seq
                                                                                (aclient/read-batch
@@ -595,7 +595,7 @@
                                                                               (<
                                                                                 i_19053
                                                                                 count_19052)
-                                                                              (let 
+                                                                              (let
                                                                                 [msg
                                                                                  (.nth
                                                                                    ^clojure.lang.Indexed chunk_19051
@@ -608,18 +608,18 @@
                                                                                   chunk_19051
                                                                                   count_19052
                                                                                   (inc i_19053)))
-                                                                              (let 
+                                                                              (let
                                                                                 [temp__5825__auto__
                                                                                  (seq seq_19050)]
                                                                                 (when
                                                                                   temp__5825__auto__
-                                                                                  (let 
+                                                                                  (let
                                                                                     [seq_19050
                                                                                      temp__5825__auto__]
                                                                                     (if
                                                                                       (chunked-seq?
                                                                                         seq_19050)
-                                                                                      (let 
+                                                                                      (let
                                                                                         [c__6090__auto__
                                                                                          (chunk-first
                                                                                            seq_19050)]
@@ -631,7 +631,7 @@
                                                                                             (count
                                                                                               c__6090__auto__))
                                                                                           (int 0)))
-                                                                                      (let 
+                                                                                      (let
                                                                                         [msg
                                                                                          (first
                                                                                            seq_19050)]

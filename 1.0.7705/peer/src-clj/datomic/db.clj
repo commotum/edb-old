@@ -1260,7 +1260,7 @@
             (and
               (some (fn fn__11485 ([p1__11481#] (= :db.type/ref p1__11481#))) (:tupleTypes attr))
               (= (long (count (:tupleTypes attr))) (long (count tup)))) (mapv
-                                                                          (fn 
+                                                                          (fn
                                                                             fn__11487
                                                                             ([type v]
                                                                               (if
@@ -2777,7 +2777,7 @@
                                                           (when (and
                                                                   attrs
                                                                   (not-every?
-                                                                    (fn 
+                                                                    (fn
                                                                       fn__11935
                                                                       ([p1__11931#]
                                                                         (datomic.db/tuple-attr-value-type
@@ -2788,7 +2788,7 @@
                                                                  :db.error/invalid-tuple-attrs,
                                                                  :tupleAttrs
                                                                  (mapv
-                                                                   (fn 
+                                                                   (fn
                                                                      fn__11937
                                                                      ([p1__11932#]
                                                                        (datomic.db/entity-error-desc
@@ -3773,11 +3773,11 @@
                                       (str "Data function failed to compile" t))))))))]
         (cond
           (= lang (datomic.db/resolve-id db :db.lang/clojure)) (^clojure.lang.IFn try_compile
-                                                                 (fn 
+                                                                 (fn
                                                                    fn__12119
                                                                    ([] (eval (read-string code)))))
           (= lang (datomic.db/resolve-id db :db.lang/java)) (^clojure.lang.IFn try_compile
-                                                              (fn 
+                                                              (fn
                                                                 fn__12121
                                                                 ([] (janino/java-data-fn code))))
           :else (do
@@ -5611,7 +5611,7 @@
                                                                 (datomic.db/dget iter)]
                                                             (if
                                                               temp__5802__auto__
-                                                              (let 
+                                                              (let
                                                                 [d temp__5802__auto__]
                                                                 (recur
                                                                   (if
@@ -6356,7 +6356,7 @@
                                                               (.id ^datomic.db.Attribute attr)
                                                               (:fressian-tag vt)
                                                               v)))
-          (= (.-vtypeid ^datomic.db.Attribute attr) (datomic.db/system-eid db :db.type/tuple)) (let 
+          (= (.-vtypeid ^datomic.db.Attribute attr) (datomic.db/system-eid db :db.type/tuple)) (let
                                                                                                  [temp__5802__auto__
                                                                                                   (datomic.db/validated-tuple
                                                                                                     db
@@ -6367,7 +6367,7 @@
                                                                                                     v)]
                                                                                                  (if
                                                                                                    temp__5802__auto__
-                                                                                                   (let 
+                                                                                                   (let
                                                                                                      [tup
                                                                                                       temp__5802__auto__]
                                                                                                      tup)
@@ -6593,7 +6593,7 @@
                                                                 (.-unique
                                                                   ^datomic.db.Attribute attr)
                                                                 38)
-                                                            (let 
+                                                            (let
                                                               [temp__5802__auto__
                                                                (datomic.db/dget
                                                                  (datomic.db/find-avet
@@ -6603,7 +6603,7 @@
                                                                    v))]
                                                               (if
                                                                 temp__5802__auto__
-                                                                (let 
+                                                                (let
                                                                   [it temp__5802__auto__]
                                                                   [(assoc
                                                                      m
@@ -6615,7 +6615,7 @@
                                                                    t
                                                                    u
                                                                    z])
-                                                                (let 
+                                                                (let
                                                                   [temp__5802__auto__
                                                                    (get-in
                                                                      u
@@ -6624,14 +6624,14 @@
                                                                       v])]
                                                                   (if
                                                                     temp__5802__auto__
-                                                                    (let 
+                                                                    (let
                                                                       [ue temp__5802__auto__]
                                                                       [(assoc m (long e) ue)
                                                                        p
                                                                        t
                                                                        u
                                                                        z])
-                                                                    (let 
+                                                                    (let
                                                                       [vec__12763
                                                                        (^clojure.lang.IFn genid
                                                                          (long e)
@@ -7663,7 +7663,7 @@
                                                                (some-> attr (:attrPred) (deref))]
                                                            (when
                                                              temp__5804__auto__
-                                                             (let 
+                                                             (let
                                                                [pred temp__5804__auto__]
                                                                (^clojure.lang.IFn pred
                                                                  (long
@@ -7688,7 +7688,7 @@
                                                                (.getV ^datomic.impl.db.IDatum d)
                                                                idmap)
                       (.isAssertion ^datomic.impl.db.IDatum d) (do
-                                                                 (let 
+                                                                 (let
                                                                    [attr
                                                                     (.elementAt
                                                                       ^datomic.db.IDbImpl db_before
@@ -7703,7 +7703,7 @@
                                                                       (deref))]
                                                                    (when
                                                                      temp__5804__auto__
-                                                                     (let 
+                                                                     (let
                                                                        [pred temp__5804__auto__]
                                                                        (^clojure.lang.IFn pred
                                                                          (long

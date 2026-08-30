@@ -88,24 +88,24 @@
                                              (when temp__5825__auto__
                                                (let [xs__6385__auto__ temp__5825__auto__
                                                      index (first xs__6385__auto__)
-                                                     iterys__6394__auto__ (fn 
+                                                     iterys__6394__auto__ (fn
                                                                             iter__28321
                                                                             ([s__28322]
                                                                               (lazy-seq
-                                                                                (let 
+                                                                                (let
                                                                                   [s__28322
                                                                                    s__28322
                                                                                    temp__5825__auto__
                                                                                    (seq s__28322)]
                                                                                   (when
                                                                                     temp__5825__auto__
-                                                                                    (let 
+                                                                                    (let
                                                                                       [s__28322
                                                                                        temp__5825__auto__]
                                                                                       (if
                                                                                         (chunked-seq?
                                                                                           s__28322)
-                                                                                        (let 
+                                                                                        (let
                                                                                           [c__6396__auto__
                                                                                            (chunk-first
                                                                                              s__28322)
@@ -119,7 +119,7 @@
                                                                                                (int
                                                                                                  size__6397__auto__)))]
                                                                                           (if
-                                                                                            (loop 
+                                                                                            (loop
                                                                                               [i__28323
                                                                                                (int
                                                                                                  0)]
@@ -127,7 +127,7 @@
                                                                                                 (<
                                                                                                   i__28323
                                                                                                   size__6397__auto__)
-                                                                                                (let 
+                                                                                                (let
                                                                                                   [tier
                                                                                                    (.nth
                                                                                                      ^clojure.lang.Indexed c__6396__auto__
@@ -137,7 +137,7 @@
                                                                                                     b__28324
                                                                                                     [[index
                                                                                                       tier]
-                                                                                                     (let 
+                                                                                                     (let
                                                                                                        [leaves
                                                                                                         (^clojure.lang.IFn index
                                                                                                           (^clojure.lang.IFn tier
@@ -146,7 +146,7 @@
                                                                                                         (into
                                                                                                           {}
                                                                                                           (map
-                                                                                                            (fn 
+                                                                                                            (fn
                                                                                                               fn__28330
                                                                                                               ([a_leaves]
                                                                                                                 [(get-a
@@ -171,14 +171,14 @@
                                                                                               (chunk
                                                                                                 b__28324)
                                                                                               nil)))
-                                                                                        (let 
+                                                                                        (let
                                                                                           [tier
                                                                                            (first
                                                                                              s__28322)]
                                                                                           (cons
                                                                                             [[index
                                                                                               tier]
-                                                                                             (let 
+                                                                                             (let
                                                                                                [leaves
                                                                                                 (^clojure.lang.IFn index
                                                                                                   (^clojure.lang.IFn tier
@@ -187,7 +187,7 @@
                                                                                                 (into
                                                                                                   {}
                                                                                                   (map
-                                                                                                    (fn 
+                                                                                                    (fn
                                                                                                       fn__28333
                                                                                                       ([a_leaves]
                                                                                                         [(get-a

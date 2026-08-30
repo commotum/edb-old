@@ -182,7 +182,7 @@
                                          result__8600__auto__ (try
                                                                 {:returned
                                                                  (*retry*
-                                                                   (fn 
+                                                                   (fn
                                                                      fn__20482
                                                                      ([]
                                                                        (aws/invoke
@@ -349,7 +349,7 @@
                                      (let [m_20514 {:event :ddb-values/get-value-chunk,
                                                     :id id,
                                                     :n p1__20502#}
-                                           ___8598__auto__ (let 
+                                           ___8598__auto__ (let
                                                              [logger
                                                               (org.slf4j.LoggerFactory/getLogger
                                                                 "datomic.ddb-values")]
@@ -365,7 +365,7 @@
                                            result__8600__auto__ (try
                                                                   {:returned
                                                                    (*retry*
-                                                                     (fn 
+                                                                     (fn
                                                                        fn__20518
                                                                        ([]
                                                                          (get-deitem
@@ -451,7 +451,7 @@
                                                                  :ddb-values/delete-value-chunk,
                                                                  :id id,
                                                                  :n p1__20533#}
-                                                        ___8598__auto__ (let 
+                                                        ___8598__auto__ (let
                                                                           [logger
                                                                            (org.slf4j.LoggerFactory/getLogger
                                                                              "datomic.ddb-values")]

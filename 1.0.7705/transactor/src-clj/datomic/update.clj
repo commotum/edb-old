@@ -422,19 +422,19 @@
                                                            (when
                                                              (not (realized? tx_promise))
                                                              (run!
-                                                               (fn 
+                                                               (fn
                                                                  fn__30812
                                                                  ([k]
                                                                    (a/offer!
                                                                      segments_channel
-                                                                     (fn 
+                                                                     (fn
                                                                        fn__30813
                                                                        ([]
                                                                          (when-not
                                                                            (realized? tx_promise)
                                                                            (with-bindings*
                                                                              prefetch_io_stats_bindings
-                                                                             (fn 
+                                                                             (fn
                                                                                fn__30814
                                                                                ([]
                                                                                  (prefetch-segment
@@ -585,9 +585,9 @@
                                           (if (process/failing? process/instance)
                                             :process-failed
                                             (let [result (try
-                                                           (let 
+                                                           (let
                                                              [qmsg (queue/take consumer)]
-                                                             (let 
+                                                             (let
                                                                [msg
                                                                 (tx/read-message
                                                                   (aclient/input-stream qmsg))
@@ -605,7 +605,7 @@
                                                                     :tx-promise
                                                                     txprom))]
                                                                (queue/put
-                                                                 (let 
+                                                                 (let
                                                                    [G__30848 type]
                                                                    (case
                                                                      G__30848
@@ -848,7 +848,7 @@
                                             (let [m_30884 {:event :update/create-index,
                                                            :next-t nextT,
                                                            :id (:id db)}
-                                                  ___8598__auto__ (let 
+                                                  ___8598__auto__ (let
                                                                     [logger
                                                                      (org.slf4j.LoggerFactory/getLogger
                                                                        "datomic.update")]
@@ -866,7 +866,7 @@
                                                   start__8599__auto__ (java.lang.System/nanoTime)
                                                   result__8600__auto__ (try
                                                                          {:returned
-                                                                          (let 
+                                                                          (let
                                                                             [map__30888
                                                                              (index/merge-db
                                                                                cluster
@@ -898,7 +898,7 @@
                                                                                :xpreds)]
                                                                             (when
                                                                               xpreds
-                                                                              (let 
+                                                                              (let
                                                                                 [log
                                                                                  (log/find-log
                                                                                    cluster
@@ -927,7 +927,7 @@
                                                                                   (throw
                                                                                     (java.lang.Error.
                                                                                       "Timed out waiting on log excision.")))))
-                                                                            (let 
+                                                                            (let
                                                                               [logger
                                                                                (org.slf4j.LoggerFactory/getLogger
                                                                                  "datomic.update")]
@@ -1231,23 +1231,23 @@
                                           (if (process/failing? process/instance)
                                             :process-failed
                                             (let [result (try
-                                                           (let 
+                                                           (let
                                                              [procargs
-                                                              (loop 
+                                                              (loop
                                                                 []
                                                                 (if
                                                                   (indexer/memidx-limit-exceeded?
                                                                     indexer)
                                                                   (do
                                                                     (monitor/alarm :BackPressure)
-                                                                    (let 
+                                                                    (let
                                                                       [nxt
                                                                        (queue/poll
                                                                          priority_updates_queue
                                                                          nil
                                                                          60000)]
                                                                       (if nxt nxt (recur))))
-                                                                  (let 
+                                                                  (let
                                                                     [nxt
                                                                      (or
                                                                        (queue/poll
@@ -1358,13 +1358,13 @@
                                           (if (process/failing? process/instance)
                                             :process-failed
                                             (let [result (try
-                                                           (let 
+                                                           (let
                                                              [tx
                                                               (queue/take processed_updates_queue)
                                                               temp__5823__auto__ (get tx :id)]
                                                              (if
                                                                temp__5823__auto__
-                                                               (let 
+                                                               (let
                                                                  [id temp__5823__auto__]
                                                                  (indexer/notify-txdata
                                                                    indexer
@@ -1481,7 +1481,7 @@
                                           (if (process/failing? process/instance)
                                             :process-failed
                                             (let [result (try
-                                                           (let 
+                                                           (let
                                                              [tx
                                                               (queue/take
                                                                 fressian_for_notify_queue)
@@ -1785,7 +1785,7 @@
                                           (if (process/failing? process/instance)
                                             :process-failed
                                             (let [result (try
-                                                           (let 
+                                                           (let
                                                              [block (queue/take block_notify_queue)
                                                               msg
                                                               (aclient/create-message
@@ -2116,9 +2116,9 @@
                                           :process-failed
                                           (let [result (try
                                                          (do
-                                                           (let 
+                                                           (let
                                                              [last_new_tail_msg (volatile! nil)]
-                                                             (loop 
+                                                             (loop
                                                                [msg (queue/take log_tree_queue)
                                                                 ct
                                                                 (.size
@@ -2132,12 +2132,12 @@
                                                                      context))
                                                                  (if
                                                                    (= ct 0)
-                                                                   (let 
+                                                                   (let
                                                                      [temp__5825__auto__
                                                                       (deref last_new_tail_msg)]
                                                                      (when
                                                                        temp__5825__auto__
-                                                                       (let 
+                                                                       (let
                                                                          [msg temp__5825__auto__]
                                                                          (vreset!
                                                                            last_new_tail_msg

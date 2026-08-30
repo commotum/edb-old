@@ -178,24 +178,24 @@
                                              (when temp__5804__auto__
                                                (let [xs__6360__auto__ temp__5804__auto__
                                                      index (first xs__6360__auto__)
-                                                     iterys__6369__auto__ (fn 
+                                                     iterys__6369__auto__ (fn
                                                                             iter__17644
                                                                             ([s__17645]
                                                                               (lazy-seq
-                                                                                (let 
+                                                                                (let
                                                                                   [s__17645
                                                                                    s__17645
                                                                                    temp__5804__auto__
                                                                                    (seq s__17645)]
                                                                                   (when
                                                                                     temp__5804__auto__
-                                                                                    (let 
+                                                                                    (let
                                                                                       [s__17645
                                                                                        temp__5804__auto__]
                                                                                       (if
                                                                                         (chunked-seq?
                                                                                           s__17645)
-                                                                                        (let 
+                                                                                        (let
                                                                                           [c__6371__auto__
                                                                                            (chunk-first
                                                                                              s__17645)
@@ -209,7 +209,7 @@
                                                                                                (int
                                                                                                  size__6372__auto__)))]
                                                                                           (if
-                                                                                            (loop 
+                                                                                            (loop
                                                                                               [i__17646
                                                                                                (int
                                                                                                  0)]
@@ -217,7 +217,7 @@
                                                                                                 (<
                                                                                                   i__17646
                                                                                                   size__6372__auto__)
-                                                                                                (let 
+                                                                                                (let
                                                                                                   [tier
                                                                                                    (.nth
                                                                                                      ^clojure.lang.Indexed c__6371__auto__
@@ -241,7 +241,7 @@
                                                                                               (chunk
                                                                                                 b__17647)
                                                                                               nil)))
-                                                                                        (let 
+                                                                                        (let
                                                                                           [tier
                                                                                            (first
                                                                                              s__17645)]

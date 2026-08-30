@@ -56,6 +56,11 @@
           (java.nio.file.Files/deleteIfExists path)))))
   (println "decompiler invokedynamic constant-pool parsing passed"))
 
+(let [deep-form (nth (iterate #(list 'let ['x 1] %) 'x) 40)
+      printed (decompiler.pprint/pprint deep-form)]
+  (assert (not (re-find #"(?m)[ \t]+$" printed)))
+  (println "decompiler generated-source trailing whitespace cleanup passed"))
+
 (let [namespace-init-name "fixture.protocol__init"
       eager-class-name "fixture.protocol.EagerType"
       later-eager-class-name "fixture.protocol.LaterType"

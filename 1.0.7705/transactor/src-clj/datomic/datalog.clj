@@ -764,7 +764,7 @@
                                 2305843009213693951))))))
                vec__15497 (if (aget ^"[Ljava.lang.Object;" bound 1)
                             (cond
-                              (aget ^"[Ljava.lang.Object;" bound 0) [(fn 
+                              (aget ^"[Ljava.lang.Object;" bound 0) [(fn
                                                                        fn__15514
                                                                        ([d]
                                                                          (db/asserting-datum
@@ -780,12 +780,12 @@
                                                                                ^datomic.impl.db.IDatum d)
                                                                              startv (do startv))
                                                                            2305843009213693951)))
-                                                                     (fn 
+                                                                     (fn
                                                                        fn__15516
                                                                        ([d]
                                                                          (db/windowed
                                                                            db
-                                                                           (fn 
+                                                                           (fn
                                                                              fn__15517
                                                                              ([p1__15481#]
                                                                                (and
@@ -825,7 +825,7 @@
                                                                            (.seekAEVT
                                                                              ^datomic.db.IDb db
                                                                              ^datomic.impl.db.IDatum d))))]
-                              (aget ^"[Ljava.lang.Object;" bound 2) [(fn 
+                              (aget ^"[Ljava.lang.Object;" bound 2) [(fn
                                                                        fn__15524
                                                                        ([d]
                                                                          (db/asserting-datum
@@ -835,10 +835,10 @@
                                                                            (.getV
                                                                              ^datomic.impl.db.IDatum d)
                                                                            2305843009213693951)))
-                                                                     (fn 
+                                                                     (fn
                                                                        fn__15526
                                                                        ([d]
-                                                                         (let 
+                                                                         (let
                                                                            [attr
                                                                             (.elementAt
                                                                               ^datomic.db.IDbImpl db
@@ -855,7 +855,7 @@
                                                                                  ^datomic.db.Attribute attr)
                                                                                (db/windowed
                                                                                  db
-                                                                                 (fn 
+                                                                                 (fn
                                                                                    fn__15527
                                                                                    ([p1__15482#]
                                                                                      (and
@@ -880,7 +880,7 @@
                                                                                    ^datomic.db.Attribute attr))
                                                                                (db/windowed
                                                                                  db
-                                                                                 (fn 
+                                                                                 (fn
                                                                                    fn__15530
                                                                                    ([p1__15483#]
                                                                                      (and
@@ -902,7 +902,7 @@
                                                                                :else
                                                                                (do
                                                                                  (iter/filter
-                                                                                   (fn 
+                                                                                   (fn
                                                                                      fn__15533
                                                                                      ([p1__15484#]
                                                                                        (=
@@ -912,7 +912,7 @@
                                                                                            ^datomic.impl.db.IDatum p1__15484#))))
                                                                                    (db/windowed
                                                                                      db
-                                                                                     (fn 
+                                                                                     (fn
                                                                                        fn__15535
                                                                                        ([p1__15485#]
                                                                                          (=
@@ -978,7 +978,7 @@
                                             (.seekAEVT
                                               ^datomic.db.IDb db
                                               ^datomic.impl.db.IDatum d))))]
-                              (and whilev const_attr (.hasAVET ^datomic.db.Attribute const_attr)) [(fn 
+                              (and whilev const_attr (.hasAVET ^datomic.db.Attribute const_attr)) [(fn
                                                                                                      fn__15554
                                                                                                      ([d]
                                                                                                        (db/asserting-datum
@@ -987,12 +987,12 @@
                                                                                                            ^datomic.impl.db.IDatum d)
                                                                                                          nil
                                                                                                          2305843009213693951)))
-                                                                                                   (fn 
+                                                                                                   (fn
                                                                                                      fn__15556
                                                                                                      ([d]
                                                                                                        (db/windowed
                                                                                                          db
-                                                                                                         (fn 
+                                                                                                         (fn
                                                                                                            fn__15557
                                                                                                            ([p1__15488#]
                                                                                                              (and
@@ -1756,7 +1756,7 @@
                                   args (^clojure.lang.IFn cargs clause)]
                               (cond
                                 (or (not-join-clause? clause) (map? clause)) (some
-                                                                               (fn 
+                                                                               (fn
                                                                                  fn__15787
                                                                                  ([p1__15713#]
                                                                                    (and
@@ -1768,7 +1768,7 @@
                                                                                          p1__15713#)))))
                                                                                args)
                                 (contains? prog (first clause)) (or
-                                                                  (let 
+                                                                  (let
                                                                     [rcnt
                                                                      (^clojure.lang.IFn reqcnt
                                                                        clause)]
@@ -1776,7 +1776,7 @@
                                                                       rcnt
                                                                       (not
                                                                         (every?
-                                                                          (fn 
+                                                                          (fn
                                                                             fn__15790
                                                                             ([p1__15714#]
                                                                               (contains?
@@ -1787,7 +1787,7 @@
                                                                     (= hpred (first clause))
                                                                     (not
                                                                       (some
-                                                                        (fn 
+                                                                        (fn
                                                                           fn__15792
                                                                           ([p1__15715#]
                                                                             (contains?
@@ -2053,23 +2053,23 @@
                                                         (clojure.core/list
                                                           'clojure.core/object-array)
                                                         (clojure.core/list (long retlen)))))))))
-                                          (let [iter__6398__auto__ (fn 
+                                          (let [iter__6398__auto__ (fn
                                                                      iter__15883
                                                                      ([s__15884]
                                                                        (lazy-seq
-                                                                         (let 
+                                                                         (let
                                                                            [s__15884 s__15884
                                                                             temp__5825__auto__
                                                                             (seq s__15884)]
                                                                            (when
                                                                              temp__5825__auto__
-                                                                             (let 
+                                                                             (let
                                                                                [s__15884
                                                                                 temp__5825__auto__]
                                                                                (if
                                                                                  (chunked-seq?
                                                                                    s__15884)
-                                                                                 (let 
+                                                                                 (let
                                                                                    [c__6396__auto__
                                                                                     (chunk-first
                                                                                       s__15884)
@@ -2082,13 +2082,13 @@
                                                                                         (int
                                                                                           size__6397__auto__)))]
                                                                                    (if
-                                                                                     (loop 
+                                                                                     (loop
                                                                                        [i__15885 0]
                                                                                        (if
                                                                                          (<
                                                                                            i__15885
                                                                                            size__6397__auto__)
-                                                                                         (let 
+                                                                                         (let
                                                                                            [i
                                                                                             (.nth
                                                                                               ^clojure.lang.Indexed c__6396__auto__
@@ -2123,7 +2123,7 @@
                                                                                        (chunk
                                                                                          b__15886)
                                                                                        nil)))
-                                                                                 (let 
+                                                                                 (let
                                                                                    [i
                                                                                     (first
                                                                                       s__15884)]
@@ -2350,7 +2350,7 @@
                                                                 nil)]
                                                           (if (variable-or-blank? arg)
                                                             [m (conj args arg)]
-                                                            (let 
+                                                            (let
                                                               [garg (gensym "?c__")]
                                                               [(assoc m garg arg)
                                                                (conj args garg)])))))

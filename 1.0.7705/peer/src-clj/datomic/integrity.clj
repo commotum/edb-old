@@ -346,22 +346,22 @@
                                                       (let [xs__6360__auto__ temp__5804__auto__
                                                             tier (first xs__6360__auto__)
                                                             iterys__6369__auto__
-                                                            (fn 
+                                                            (fn
                                                               iter__22051
                                                               ([s__22052]
                                                                 (lazy-seq
-                                                                  (let 
+                                                                  (let
                                                                     [s__22052 s__22052
                                                                      temp__5804__auto__
                                                                      (seq s__22052)]
                                                                     (when
                                                                       temp__5804__auto__
-                                                                      (let 
+                                                                      (let
                                                                         [s__22052
                                                                          temp__5804__auto__]
                                                                         (if
                                                                           (chunked-seq? s__22052)
-                                                                          (let 
+                                                                          (let
                                                                             [c__6371__auto__
                                                                              (chunk-first s__22052)
                                                                              size__6372__auto__
@@ -374,13 +374,13 @@
                                                                                  (int
                                                                                    size__6372__auto__)))]
                                                                             (if
-                                                                              (loop 
+                                                                              (loop
                                                                                 [i__22053 (int 0)]
                                                                                 (if
                                                                                   (<
                                                                                     i__22053
                                                                                     size__6372__auto__)
-                                                                                  (let 
+                                                                                  (let
                                                                                     [sort
                                                                                      (.nth
                                                                                        ^clojure.lang.Indexed c__6371__auto__
@@ -401,7 +401,7 @@
                                                                               (chunk-cons
                                                                                 (chunk b__22054)
                                                                                 nil)))
-                                                                          (let 
+                                                                          (let
                                                                             [sort (first s__22052)]
                                                                             (cons
                                                                               [tier sort]
@@ -2057,7 +2057,7 @@
                                                        map__22264)
                                           cluster (get map__22264 :cluster)
                                           olookup (get map__22264 :olookup)
-                                          temp__5802__auto__ (let 
+                                          temp__5802__auto__ (let
                                                                [G__22265 log_fn]
                                                                (case
                                                                  G__22265
@@ -2181,7 +2181,7 @@
                                                       (^clojure.lang.IFn progress adir))
                                                     (let [bad_dirs (seq
                                                                      (remove
-                                                                       (fn 
+                                                                       (fn
                                                                          fn__22293
                                                                          ([p1__22281#]
                                                                            (=
@@ -2245,11 +2245,11 @@
                                                             (when
                                                               progress
                                                               (^clojure.lang.IFn progress adir))
-                                                            (let 
+                                                            (let
                                                               [bad_dirs
                                                                (seq
                                                                  (remove
-                                                                   (fn 
+                                                                   (fn
                                                                      fn__22295
                                                                      ([p1__22281#]
                                                                        (=
@@ -2260,7 +2260,7 @@
                                                                      olookup)))]
                                                               (when-not
                                                                 (not bad_dirs)
-                                                                (let 
+                                                                (let
                                                                   [form__21885__auto__
                                                                    (clojure.core/list
                                                                      'not
@@ -3120,10 +3120,10 @@
                                    seg (get map__22515 :seg)]
                                (cond
                                  (instance? datomic.fulltext.Root seg) (map
-                                                                         (fn 
+                                                                         (fn
                                                                            fn__22516
                                                                            ([p1__22506#]
-                                                                             (let 
+                                                                             (let
                                                                                [uuid
                                                                                 (str p1__22506#)]
                                                                                {:type :clusterfs,
@@ -3135,7 +3135,7 @@
                                                                          (vals (:attrmap seg)))
                                  (instance? datomic.clusterfs.ClusterFS seg) (do
                                                                                (map
-                                                                                 (fn 
+                                                                                 (fn
                                                                                    fn__22518
                                                                                    ([k]
                                                                                      {:type :chunk,
@@ -3252,7 +3252,7 @@
                                seg (get map__22542 :seg)]
                            (cond
                              (instance? datomic.index.RootNode seg) (map
-                                                                      (fn 
+                                                                      (fn
                                                                         fn__22543
                                                                         ([id]
                                                                           {:type :branch,
@@ -3265,7 +3265,7 @@
                                                                         ^datomic.index.RootNode seg))
                              (instance? datomic.index.DirNode seg) (do
                                                                      (map
-                                                                       (fn 
+                                                                       (fn
                                                                          fn__22545
                                                                          ([id]
                                                                            {:type :leaf,

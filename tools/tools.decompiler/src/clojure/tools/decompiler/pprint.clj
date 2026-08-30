@@ -25,10 +25,14 @@
     (pp/code-dispatch object)))
 
 (defn ->pprint-str [source]
-  (with-out-str
-    (binding [pp/*print-right-margin* 100
-              *print-meta* true]
-      (pp/write source :dispatch metadata-preserving-code-dispatch))))
+  (-> (with-out-str
+        (binding [pp/*print-right-margin* 100
+                  *print-meta* true]
+          (pp/write source :dispatch metadata-preserving-code-dispatch)))
+      ;; clojure.pprint can leave a space after a collection head when a very
+      ;; deeply nested form wraps immediately after it. Keep generated source
+      ;; clean and deterministic without changing any printed value.
+      (clojure.string/replace #"(?m)[ \t]+$" "")))
 
 (defn elide-ns [source]
   (let [!aliases (atom {})

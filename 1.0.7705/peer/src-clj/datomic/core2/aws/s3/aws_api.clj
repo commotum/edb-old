@@ -137,11 +137,11 @@
                                                                                 (clojure.core.async.impl.ioc-macros/aget-object
                                                                                   state_21334
                                                                                   3))
-                                                                              (loop 
+                                                                              (loop
                                                                                 []
-                                                                                (let 
+                                                                                (let
                                                                                   [result__10111__auto__
-                                                                                   (let 
+                                                                                   (let
                                                                                      [G__21349
                                                                                       (int
                                                                                         (clojure.core.async.impl.ioc-macros/aget-object
@@ -150,7 +150,7 @@
                                                                                      (case
                                                                                        G__21349
                                                                                        1
-                                                                                       (let 
+                                                                                       (let
                                                                                          [inst_21323
                                                                                           (clojure.core.async.impl.ioc-macros/aget-object
                                                                                             state_21334
@@ -230,7 +230,7 @@
                                                                                                :key
                                                                                                key}))
                                                                                           state_21334
-                                                                                          (let 
+                                                                                          (let
                                                                                             [statearr_21350
                                                                                              state_21334]
                                                                                             (clojure.core.async.impl.ioc-macros/aset-object
@@ -259,7 +259,7 @@
                                                                                            2
                                                                                            inst_21326))
                                                                                        2
-                                                                                       (let 
+                                                                                       (let
                                                                                          [inst_21323
                                                                                           (clojure.core.async.impl.ioc-macros/aget-object
                                                                                             state_21334
@@ -321,12 +321,12 @@
                                                                                           (or
                                                                                             (canom/anom
                                                                                               result)
-                                                                                            (with-open 
+                                                                                            (with-open
                                                                                               [is
                                                                                                (:Body
                                                                                                  result)]
                                                                                               (try
-                                                                                                (let 
+                                                                                                (let
                                                                                                   [ba
                                                                                                    (byte-array
                                                                                                      (:ContentLength
@@ -354,7 +354,7 @@
                                                                               java.lang.Throwable
                                                                               ex__10112__auto__
                                                                               (do
-                                                                                (let 
+                                                                                (let
                                                                                   [statearr_21353
                                                                                    state_21334]
                                                                                   (clojure.core.async.impl.ioc-macros/aset-object
@@ -366,7 +366,7 @@
                                                                                     (clojure.core.async.impl.ioc-macros/aget-object
                                                                                       state_21334
                                                                                       4))
-                                                                                  (let 
+                                                                                  (let
                                                                                     [statearr_21354
                                                                                      state_21334]
                                                                                     (clojure.core.async.impl.ioc-macros/aset-object

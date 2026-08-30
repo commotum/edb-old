@@ -366,7 +366,7 @@
           (locking lck
            (cond
              (and db (<= t (^clojure.lang.IFn f db))) (promise/delivered db)
-             (and db (<= t (:basisT db))) (let [temp__5823__auto__ (let 
+             (and db (<= t (:basisT db))) (let [temp__5823__auto__ (let
                                                                      [G__19311
                                                                       (db/ts-needing-index
                                                                         db
@@ -871,10 +871,10 @@
                                                         (let [conn temp__5825__auto__]
                                                           (recon/reconnect conn)))))
                                             failure_handler (error/runonce
-                                                              (fn 
+                                                              (fn
                                                                 fn__19364
                                                                 ([ex]
-                                                                  (let 
+                                                                  (let
                                                                     [logger
                                                                      (org.slf4j.LoggerFactory/getLogger
                                                                        "datomic.peer")
@@ -938,7 +938,7 @@
                                                       this
                                                       (^clojure.lang.IFn load_db db))
                                                   cleanup (error/runonce
-                                                            (fn 
+                                                            (fn
                                                               fn__19376
                                                               ([]
                                                                 (try
@@ -956,7 +956,7 @@
                                                                 this
                                                                 failure_handler)
                                                       cleanup (error/runonce
-                                                                (fn 
+                                                                (fn
                                                                   fn__19380
                                                                   ([]
                                                                     (try

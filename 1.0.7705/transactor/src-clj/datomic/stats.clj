@@ -486,23 +486,23 @@
                                          (when temp__5825__auto__
                                            (let [xs__6385__auto__ temp__5825__auto__
                                                  index (first xs__6385__auto__)
-                                                 iterys__6394__auto__ (fn 
+                                                 iterys__6394__auto__ (fn
                                                                         iter__15217
                                                                         ([s__15218]
                                                                           (lazy-seq
-                                                                            (let 
+                                                                            (let
                                                                               [s__15218 s__15218
                                                                                temp__5825__auto__
                                                                                (seq s__15218)]
                                                                               (when
                                                                                 temp__5825__auto__
-                                                                                (let 
+                                                                                (let
                                                                                   [s__15218
                                                                                    temp__5825__auto__]
                                                                                   (if
                                                                                     (chunked-seq?
                                                                                       s__15218)
-                                                                                    (let 
+                                                                                    (let
                                                                                       [c__6396__auto__
                                                                                        (chunk-first
                                                                                          s__15218)
@@ -516,14 +516,14 @@
                                                                                            (int
                                                                                              size__6397__auto__)))]
                                                                                       (if
-                                                                                        (loop 
+                                                                                        (loop
                                                                                           [i__15219
                                                                                            (int 0)]
                                                                                           (if
                                                                                             (<
                                                                                               i__15219
                                                                                               size__6397__auto__)
-                                                                                            (let 
+                                                                                            (let
                                                                                               [tier
                                                                                                (.nth
                                                                                                  ^clojure.lang.Indexed c__6396__auto__
@@ -531,7 +531,7 @@
                                                                                                    i__15219))]
                                                                                               (chunk-append
                                                                                                 b__15220
-                                                                                                (let 
+                                                                                                (let
                                                                                                   [ks
                                                                                                    (when
                                                                                                      (and
@@ -578,12 +578,12 @@
                                                                                           (chunk
                                                                                             b__15220)
                                                                                           nil)))
-                                                                                    (let 
+                                                                                    (let
                                                                                       [tier
                                                                                        (first
                                                                                          s__15218)]
                                                                                       (cons
-                                                                                        (let 
+                                                                                        (let
                                                                                           [ks
                                                                                            (when
                                                                                              (and

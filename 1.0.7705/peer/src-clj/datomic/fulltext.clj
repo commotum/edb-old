@@ -849,7 +849,7 @@
                                                                 (db/scan-aevt aevt attrid)]
                                                             (if
                                                               temp__5802__auto__
-                                                              (let 
+                                                              (let
                                                                 [iter temp__5802__auto__]
                                                                 (assoc m attrid iter))
                                                               m))))
@@ -896,7 +896,7 @@
                                                                more seq__13352]
                                                            (if
                                                              attrid
-                                                             (let 
+                                                             (let
                                                                [vec__13357
                                                                 (datomic.fulltext/separate-history
                                                                   db
