@@ -1,0 +1,91 @@
+url,title,path
+https://docs.datomic.com/datomic-overview.html,Introduction,00_start_here/00_introduction.md
+https://docs.datomic.com/releases-pro.html,Datomic Pro Releases,00_start_here/01_datomic_pro_releases.md
+https://docs.datomic.com/changes/pro.html,Datomic Pro Change Log,00_start_here/02_datomic_pro_change_log.md
+https://docs.datomic.com/release-notices.html,Release Notices,00_start_here/03_release_notices.md
+https://docs.datomic.com/setup/pro-setup.html,Pro Setup,00_start_here/04_pro_setup.md
+https://docs.datomic.com/accessing/integrating-peer-lib.html,Accessing the Peer Library,00_start_here/05_accessing_the_peer_library.md
+https://docs.datomic.com/operation/languages.html,Peer Language Support,00_start_here/06_peer_language_support.md
+https://docs.datomic.com/operation/peer-getting-started.html,Peer Mem DB Getting Started,01_tutorials/00_peer_mem_db_getting_started.md
+https://docs.datomic.com/peer-tutorial/peer-tutorial.html,Peer Tutorial,01_tutorials/01_peer_tutorial.md
+https://docs.datomic.com/peer-tutorial/transactor.html,Run a Transactor,01_tutorials/02_run_a_transactor.md
+https://docs.datomic.com/peer-tutorial/connect-to-a-database.html,Connect to a Database,01_tutorials/03_connect_to_a_database.md
+https://docs.datomic.com/peer-tutorial/transact-schema.html,Transact Schema,01_tutorials/04_transact_schema.md
+https://docs.datomic.com/peer-tutorial/transact-data.html,Transact Data,01_tutorials/05_transact_data.md
+https://docs.datomic.com/peer-tutorial/query-the-data.html,Query the Data,01_tutorials/06_query_the_data.md
+https://docs.datomic.com/peer-tutorial/see-historic-data.html,See Historic Data,01_tutorials/07_see_historic_data.md
+https://docs.datomic.com/data-model.html,Datomic Data Model,02_core_concepts/00_datomic_data_model.md
+https://docs.datomic.com/reference/edn.html,Programming with Data and EDN,02_core_concepts/01_programming_with_data_and_edn.md
+https://docs.datomic.com/reference/filters.html,Database Filters,02_core_concepts/02_database_filters.md
+https://docs.datomic.com/reference/entities.html,Entities,02_core_concepts/03_entities.md
+https://docs.datomic.com/reference/best.html,Best Practices,02_core_concepts/04_best_practices.md
+https://docs.datomic.com/glossary.html,Glossary,02_core_concepts/05_glossary.md
+https://docs.datomic.com/schema/schema-reference.html,Schema Data Reference,03_schema/00_schema_data_reference.md
+https://docs.datomic.com/schema/schema-change.html,Changing Schema,03_schema/01_changing_schema.md
+https://docs.datomic.com/schema/schema-modeling.html,Data Modeling,03_schema/02_data_modeling.md
+https://docs.datomic.com/schema/identity.html,Identity and Uniqueness,03_schema/03_identity_and_uniqueness.md
+https://docs.datomic.com/transactions/transactions.html,Transactions,04_transactions/00_transactions.md
+https://docs.datomic.com/transactions/model.html,Transaction Model,04_transactions/01_transaction_model.md
+https://docs.datomic.com/transactions/transaction-data-reference.html,Transaction Data,04_transactions/02_transaction_data.md
+https://docs.datomic.com/transactions/transaction-processing.html,Processing Transactions,04_transactions/03_processing_transactions.md
+https://docs.datomic.com/transactions/transaction-functions.html,Transaction Functions,04_transactions/04_transaction_functions.md
+https://docs.datomic.com/transactions/acid.html,ACID,04_transactions/05_acid.md
+https://docs.datomic.com/transactions/client-synchronization.html,Synchronization,04_transactions/06_client_synchronization.md
+https://docs.datomic.com/transactions/partitions.html,Partitions,04_transactions/07_partitions.md
+https://docs.datomic.com/reference/hints.html,Reducing Latency with Transaction Hints,04_transactions/08_transaction_hints.md
+https://docs.datomic.com/query/query.html,Query,05_query_and_pull/00_query.md
+https://docs.datomic.com/query/query-executing.html,Executing Queries,05_query_and_pull/01_executing_queries.md
+https://docs.datomic.com/query/query-data-reference.html,Query Reference,05_query_and_pull/02_query_reference.md
+https://docs.datomic.com/query/query-pull.html,Pull,05_query_and_pull/03_pull.md
+https://docs.datomic.com/indexes/indexes.html,Indexes,06_indexes/00_indexes.md
+https://docs.datomic.com/indexes/index-model.html,Index Model,06_indexes/01_index_model.md
+https://docs.datomic.com/indexes/background-indexing.html,Background Indexing,06_indexes/02_background_indexing.md
+https://docs.datomic.com/indexes/index-pull.html,Index-Pull,06_indexes/03_index_pull.md
+https://docs.datomic.com/indexes/index-apis.html,Index APIs,06_indexes/04_index_apis.md
+https://docs.datomic.com/indexes/rseek-datoms.html,(r)seek-datoms,06_indexes/05_rseek_datoms.md
+https://docs.datomic.com/clojure/index.html,datomic.api - Clojure Peer API,07_peer_api/00_clojure/00_datomic_api.md
+https://docs.datomic.com/javadoc/datomic/package-summary.html,Package datomic - Java Peer API,07_peer_api/01_java/00_package_datomic.md
+https://docs.datomic.com/javadoc/datomic/Attribute.html,Java API: Attribute,07_peer_api/01_java/01_attribute.md
+https://docs.datomic.com/javadoc/datomic/Connection.html,Java API: Connection,07_peer_api/01_java/02_connection.md
+https://docs.datomic.com/javadoc/datomic/Database.html,Java API: Database,07_peer_api/01_java/03_database.md
+https://docs.datomic.com/javadoc/datomic/Database.Predicate.html,Java API: Database.Predicate,07_peer_api/01_java/04_database_predicate.md
+https://docs.datomic.com/javadoc/datomic/Datom.html,Java API: Datom,07_peer_api/01_java/05_datom.md
+https://docs.datomic.com/javadoc/datomic/Entity.html,Java API: Entity,07_peer_api/01_java/06_entity.md
+https://docs.datomic.com/javadoc/datomic/ListenableFuture.html,Java API: ListenableFuture,07_peer_api/01_java/07_listenable_future.md
+https://docs.datomic.com/javadoc/datomic/Log.html,Java API: Log,07_peer_api/01_java/08_log.md
+https://docs.datomic.com/javadoc/datomic/Peer.html,Java API: Peer,07_peer_api/01_java/09_peer.md
+https://docs.datomic.com/javadoc/datomic/QueryRequest.html,Java API: QueryRequest,07_peer_api/01_java/10_query_request.md
+https://docs.datomic.com/javadoc/datomic/Util.html,Java API: Util,07_peer_api/01_java/11_util.md
+https://docs.datomic.com/reference/log.html,Log API,07_peer_api/02_shared_reference/00_log_api.md
+https://docs.datomic.com/api/error-handling.html,Error Handling,07_peer_api/02_shared_reference/01_error_handling.md
+https://docs.datomic.com/reference/io-stats.html,I/O Stats,07_peer_api/02_shared_reference/02_io_stats.md
+https://docs.datomic.com/reference/query-stats.html,Query Stats,07_peer_api/02_shared_reference/03_query_stats.md
+https://docs.datomic.com/reference/tx-stats.html,Transaction Stats,07_peer_api/02_shared_reference/04_transaction_stats.md
+https://docs.datomic.com/operation/storage.html,Setting Up Storage Services,08_operations/00_architecture_and_storage/00_storage_services.md
+https://docs.datomic.com/operation/transactor.html,Transactor Reference,08_operations/00_architecture_and_storage/01_transactor_reference.md
+https://docs.datomic.com/operation/deployment.html,Datomic Deployment,08_operations/00_architecture_and_storage/02_datomic_deployment.md
+https://docs.datomic.com/operation/capacity.html,Capacity Planning,08_operations/01_capacity_and_reliability/00_capacity_planning.md
+https://docs.datomic.com/operation/ha.html,High Availability,08_operations/01_capacity_and_reliability/01_high_availability.md
+https://docs.datomic.com/operation/backup.html,Backup and Restore,08_operations/01_capacity_and_reliability/02_backup_and_restore.md
+https://docs.datomic.com/operation/monitoring.html,Monitoring and Performance,08_operations/02_observability_and_tuning/00_monitoring_and_performance.md
+https://docs.datomic.com/operation/caching.html,Memory and Caching,08_operations/02_observability_and_tuning/01_memory_and_caching.md
+https://docs.datomic.com/operation/configuring-logging.html,Configuring Logging,08_operations/02_observability_and_tuning/02_configuring_logging.md
+https://docs.datomic.com/operation/system-properties.html,System Properties,08_operations/02_observability_and_tuning/03_system_properties.md
+https://docs.datomic.com/accessing/integrating-client-lib.html,Accessing the Client Library,09_optional/00_pro_client/00_accessing_the_client_library.md
+https://docs.datomic.com/operation/peer-server.html,Peer Server,09_optional/00_pro_client/01_peer_server.md
+https://docs.datomic.com/operation/client-getting-started.html,Client Getting Started,09_optional/00_pro_client/02_client_getting_started.md
+https://docs.datomic.com/reference/client-reference.html,Client Library Reference,09_optional/00_pro_client/03_client_library_reference.md
+https://docs.datomic.com/client-api/datomic.client.api.html,datomic.client.api - Synchronous Client API,09_optional/00_pro_client/04_client_api_sync.md
+https://docs.datomic.com/client-api/datomic.client.api.async.html,datomic.client.api.async - Asynchronous Client API,09_optional/00_pro_client/05_client_api_async.md
+https://docs.datomic.com/operation/aws.html,Running on AWS,09_optional/01_aws/00_running_on_aws.md
+https://docs.datomic.com/operation/aws-access-control.html,AWS Access Control,09_optional/01_aws/01_aws_access_control.md
+https://docs.datomic.com/operation/read-only.html,Read Only Connections,09_optional/02_specialized_operations/00_read_only_connections.md
+https://docs.datomic.com/operation/valcache.html,Valcache,09_optional/02_specialized_operations/01_valcache.md
+https://docs.datomic.com/operation/excision.html,Excision,09_optional/02_specialized_operations/02_excision.md
+https://docs.datomic.com/tech-notes/comparison-with-updating-transactions.html,Comparison with Updating Transactions,09_optional/03_technical_notes/00_comparison_with_updating_transactions.md
+https://docs.datomic.com/tech-notes/composing-transactions-by-example.html,"Composing Transactions, by Example",09_optional/03_technical_notes/01_composing_transactions_by_example.md
+https://docs.datomic.com/tech-notes/hosting-private-maven.html,Hosting a Private Maven Repository,09_optional/03_technical_notes/02_hosting_a_private_maven_repository.md
+https://docs.datomic.com/tech-notes/querying-byte-array.html,Querying on Byte Array Attributes,09_optional/03_technical_notes/03_querying_byte_array_attributes.md
+https://docs.datomic.com/tech-notes/outer-joins.html,Outer Joins,09_optional/03_technical_notes/04_outer_joins.md
+https://docs.datomic.com/resources/console.html,Datomic Pro Console,09_optional/04_tools_and_support/00_datomic_pro_console.md
+https://docs.datomic.com/tech-notes/writing-a-problem-report.html,Writing a Problem Report,09_optional/04_tools_and_support/01_writing_a_problem_report.md

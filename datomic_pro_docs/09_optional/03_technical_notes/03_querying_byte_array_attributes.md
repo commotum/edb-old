@@ -1,0 +1,77 @@
+---
+title: "Querying on Byte Array Attributes"
+site: "Datomic"
+source: "https://docs.datomic.com/tech-notes/querying-byte-array.html"
+description: "Learn how to efficiently query byte array attributes on Datomic."
+word_count: 213
+---
+
+The equality semantics of byte arrays in Java are those of identity, not value, equality. This can be confusing when using byte arrays in datalog queries since datalog queries match using value equality semantics. Consider the following example.
+
+- First, we do some setup, creating a simple schema with just one-byte array attribute:
+
+```
+(require '[datomic.api :as d :refer [db q]])
+
+(def uri "datomic:mem://bytes")
+(d/create-database uri)
+(def conn (d/connect uri))
+
+;; Load simple schema
+@(d/transact conn [{:db/id                 #db/id[:db.part/db]
+                    :db/ident              :some-bytes
+                    :db/valueType          :db.type/bytes
+                    :db/cardinality        :db.cardinality/one
+                    :db.install/_attribute :db.part/db}])
+```
+
+- Next, a few entities with two-byte arrays with different object identities but equivalent values:
+
+```
+(def bytes-1 (byte-array (map byte [1 2 3])))
+(def bytes-2 (byte-array (map byte [1 2 3])))
+
+@(d/transact conn [{:db/id      (d/tempid :db.part/user)
+                    :some-bytes bytes-1}
+                   {:db/id      (d/tempid :db.part/user)
+                    :some-bytes bytes-2}])
+```
+
+- Clojure's clojure{(=)} function called with these two-byte arrays as arguments returns false:
+
+```
+(= bytes-1 bytes-2)
+```
+
+```
+=> false
+```
+
+- Therefore running the following query returns the empty set:
+
+```
+(q '[:find ?e
+     :in $ ?bytes
+     :where [?e :some-bytes ?bytes]]
+   (db conn)
+   (byte-array (map byte [1 2 3])))
+```
+
+```
+=> #{}
+```
+
+- Using java.util.Arrays/equals to test for equality, instead of datalog's built-in matching returns the expected result:
+
+```
+(q '[:find ?e
+     :in $ ?bytes
+     :where [?e :some-bytes ?sbytes]
+     [(java.util.Arrays/equals ^bytes ?sbytes ^bytes ?bytes)]]
+   (db conn)
+   (byte-array (map byte [1 2 3])))
+```
+
+```
+=> #{[17592186045418] [17592186045419]}
+```

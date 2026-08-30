@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xl="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/" viewBox="42.5 386.5 873.0901 729" width="873.0901" height="729">
+  <defs>
+    <marker orient="auto" overflow="visible" markerUnits="strokeWidth" id="FilledArrow_Marker" stroke-linejoin="miter" stroke-miterlimit="10" viewBox="-1 -4 10 8" markerWidth="10" markerHeight="8" color="black">
+      <g>
+        <path d="M 8 0 L 0 -3 L 0 3 Z" fill="currentColor" stroke="currentColor" stroke-width="1"/>
+      </g>
+    </marker>
+  </defs>
+  <g id="transactor-memory" fill="none" fill-opacity="1" stroke-dasharray="none" stroke="none" stroke-opacity="1">
+    <title>transactor-memory</title>
+    <rect fill="white" x="42.5" y="386.5" width="873.0901" height="729"/>
+    <g id="transactor-memory_Layer_1">
+      <title>Layer 1</title>
+      <g id="Graphic_86">
+        <path d="M 67 511 L 234.5 511 C 239.47056 511 243.5 515.02944 243.5 520 L 243.5 784.88 C 243.5 789.8506 239.47056 793.88 234.5 793.88 L 67 793.88 C 62.02944 793.88 58 789.8506 58 784.88 L 58 520 C 58 515.02944 62.02944 511 67 511 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_194">
+        <rect x="58" y="649.88" width="185.5" height="127" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_180">
+        <path d="M 67 511 L 234.5 511 C 239.47056 511 243.5 515.02944 243.5 520 L 243.5 540.5 C 243.5 545.47056 239.47056 549.5 234.5 549.5 L 67 549.5 C 62.02944 549.5 58 545.47056 58 540.5 L 58 520 C 58 515.02944 62.02944 511 67 511 Z" fill="#cdecff"/>
+        <path d="M 67 511 L 234.5 511 C 239.47056 511 243.5 515.02944 243.5 520 L 243.5 540.5 C 243.5 545.47056 239.47056 549.5 234.5 549.5 L 67 549.5 C 62.02944 549.5 58 545.47056 58 540.5 L 58 520 C 58 515.02944 62.02944 511 67 511 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(63 521.25)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="54.81665" y="15">Peer 7GB</tspan>
+        </text>
+      </g>
+      <g id="Graphic_181">
+        <path d="M 67 755.38 L 234.5 755.38 C 239.47056 755.38 243.5 759.4094 243.5 764.38 L 243.5 784.88 C 243.5 789.8506 239.47056 793.88 234.5 793.88 L 67 793.88 C 62.02944 793.88 58 789.8506 58 784.88 L 58 764.38 C 58 759.4094 62.02944 755.38 67 755.38 Z" fill="#ffd280"/>
+        <path d="M 67 755.38 L 234.5 755.38 C 239.47056 755.38 243.5 759.4094 243.5 764.38 L 243.5 784.88 C 243.5 789.8506 239.47056 793.88 234.5 793.88 L 67 793.88 C 62.02944 793.88 58 789.8506 58 784.88 L 58 764.38 C 58 759.4094 62.02944 755.38 67 755.38 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(63 765.63)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="40.23413" y="15">Memory Index</tspan>
+        </text>
+      </g>
+      <g id="Graphic_195">
+        <text transform="translate(101.702 600.88)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="682121e-18" y="15">Object Cache</tspan>
+        </text>
+      </g>
+      <g id="Graphic_196">
+        <text transform="translate(85.414 692.88)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="0" y="15">Application Usage</tspan>
+        </text>
+      </g>
+      <g id="Graphic_202">
+        <path d="M 480 511 L 647.5 511 C 652.4706 511 656.5 515.02944 656.5 520 L 656.5 784.88 C 656.5 789.8506 652.4706 793.88 647.5 793.88 L 480 793.88 C 475.02944 793.88 471 789.8506 471 784.88 L 471 520 C 471 515.02944 475.02944 511 480 511 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_201">
+        <rect x="471" y="649.88" width="185.5" height="127" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_200">
+        <path d="M 480 511 L 647.5 511 C 652.4706 511 656.5 515.02944 656.5 520 L 656.5 540.5 C 656.5 545.47056 652.4706 549.5 647.5 549.5 L 480 549.5 C 475.02944 549.5 471 545.47056 471 540.5 L 471 520 C 471 515.02944 475.02944 511 480 511 Z" fill="#cdecff"/>
+        <path d="M 480 511 L 647.5 511 C 652.4706 511 656.5 515.02944 656.5 520 L 656.5 540.5 C 656.5 545.47056 652.4706 549.5 647.5 549.5 L 480 549.5 C 475.02944 549.5 471 545.47056 471 540.5 L 471 520 C 471 515.02944 475.02944 511 480 511 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(476 521.25)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="35.088867" y="15">Transactor 7GB</tspan>
+        </text>
+      </g>
+      <g id="Graphic_199">
+        <path d="M 480 755.38 L 647.5 755.38 C 652.4706 755.38 656.5 759.4094 656.5 764.38 L 656.5 784.88 C 656.5 789.8506 652.4706 793.88 647.5 793.88 L 480 793.88 C 475.02944 793.88 471 789.8506 471 784.88 L 471 764.38 C 471 759.4094 475.02944 755.38 480 755.38 Z" fill="#ffd280"/>
+        <path d="M 480 755.38 L 647.5 755.38 C 652.4706 755.38 656.5 759.4094 656.5 764.38 L 656.5 784.88 C 656.5 789.8506 652.4706 793.88 647.5 793.88 L 480 793.88 C 475.02944 793.88 471 789.8506 471 784.88 L 471 764.38 C 471 759.4094 475.02944 755.38 480 755.38 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(476 765.63)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="40.23413" y="15">Memory Index</tspan>
+        </text>
+      </g>
+      <g id="Graphic_198">
+        <text transform="translate(514.702 600.88)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="682121e-18" y="15">Object Cache</tspan>
+        </text>
+      </g>
+      <g id="Graphic_197">
+        <text transform="translate(498.414 692.88)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="0" y="15">Application Usage</tspan>
+        </text>
+      </g>
+      <g id="Graphic_203">
+        <path d="M 302.84005 402 L 489.84005 402 C 494.8106 402 498.84005 406.02944 498.84005 411 L 498.84005 431.5 C 498.84005 436.47056 494.8106 440.5 489.84005 440.5 L 302.84005 440.5 C 297.8695 440.5 293.84005 436.47056 293.84005 431.5 L 293.84005 411 C 293.84005 406.02944 297.8695 402 302.84005 402 Z" fill="#c0ffc0"/>
+        <path d="M 302.84005 402 L 489.84005 402 C 494.8106 402 498.84005 406.02944 498.84005 411 L 498.84005 431.5 C 498.84005 436.47056 494.8106 440.5 489.84005 440.5 L 302.84005 440.5 C 297.8695 440.5 293.84005 436.47056 293.84005 431.5 L 293.84005 411 C 293.84005 406.02944 297.8695 402 302.84005 402 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(298.84005 412.25)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="8.704834" y="15">datomic.objectCacheBytes</tspan>
+        </text>
+      </g>
+      <g id="Line_204">
+        <line x1="375.89103" y1="440.5" x2="250.7085" y2="558.3425" marker-end="url(#FilledArrow_Marker)" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_206">
+        <rect x="269.1768" y="459.2211" width="104.24" height="65.343994" fill="white"/>
+        <text transform="translate(274.1768 464.2211)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="22.224" y="15">3.5 GB</tspan>
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="1.48" y="33.448">(default 50%</tspan>
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="7958079e-19" y="51.895996">of JVM RAM)</tspan>
+        </text>
+      </g>
+      <g id="Line_207">
+        <line x1="471" y1="774.63" x2="253.4" y2="774.63" marker-end="url(#FilledArrow_Marker)" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_209">
+        <rect x="293.84005" y="741.958" width="148.976" height="65.343994" fill="white"/>
+        <text transform="translate(298.84005 746.958)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="18.656" y="15">memory index</tspan>
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="20.888" y="33.448">dictated to all</tspan>
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="0" y="51.895996">peers by transactor</tspan>
+        </text>
+      </g>
+      <g id="Graphic_212">
+        <path d="M 704.09005 402 L 891.09 402 C 896.0606 402 900.09 406.02944 900.09 411 L 900.09 431.5 C 900.09 436.47056 896.0606 440.5 891.09 440.5 L 704.09005 440.5 C 699.1195 440.5 695.09005 436.47056 695.09005 431.5 L 695.09005 411 C 695.09005 406.02944 699.1195 402 704.09005 402 Z" fill="#c0ffc0"/>
+        <path d="M 704.09005 402 L 891.09 402 C 896.0606 402 900.09 406.02944 900.09 411 L 900.09 431.5 C 900.09 436.47056 896.0606 440.5 891.09 440.5 L 704.09005 440.5 C 699.1195 440.5 695.09005 436.47056 695.09005 431.5 L 695.09005 411 C 695.09005 406.02944 699.1195 402 704.09005 402 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(700.09005 412.25)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="34.552" y="15">object-cache-bytes</tspan>
+        </text>
+      </g>
+      <g id="Line_211">
+        <line x1="778.1194" y1="440.5" x2="663.5401" y2="553.78076" marker-end="url(#FilledArrow_Marker)" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_210">
+        <rect x="675.8471" y="457.41195" width="104.24" height="65.343994" fill="white"/>
+        <text transform="translate(680.8471 462.41195)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="22.224" y="15">3.5 GB</tspan>
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="1.48" y="33.448">(default 50%</tspan>
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="7958079e-19" y="51.895996">of JVM RAM)</tspan>
+        </text>
+      </g>
+      <g id="Graphic_213">
+        <path d="M 704.09005 639 L 891.09 639 C 896.0606 639 900.09 643.0294 900.09 648 L 900.09 668.5 C 900.09 673.4706 896.0606 677.5 891.09 677.5 L 704.09005 677.5 C 699.1195 677.5 695.09005 673.4706 695.09005 668.5 L 695.09005 648 C 695.09005 643.0294 699.1195 639 704.09005 639 Z" fill="#ffffc0"/>
+        <path d="M 704.09005 639 L 891.09 639 C 896.0606 639 900.09 643.0294 900.09 648 L 900.09 668.5 C 900.09 673.4706 896.0606 677.5 891.09 677.5 L 704.09005 677.5 C 699.1195 677.5 695.09005 673.4706 695.09005 668.5 L 695.09005 648 C 695.09005 643.0294 699.1195 639 704.09005 639 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(700.09005 649.25)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="33.321533" y="15">memory-index-max</tspan>
+        </text>
+      </g>
+      <g id="Line_214">
+        <line x1="768.9622" y1="677.5" x2="659.8582" y2="750.8639" marker-end="url(#FilledArrow_Marker)" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_215">
+        <path d="M 704.09005 855 L 891.09 855 C 896.0606 855 900.09 859.0294 900.09 864 L 900.09 884.5 C 900.09 889.4706 896.0606 893.5 891.09 893.5 L 704.09005 893.5 C 699.1195 893.5 695.09005 889.4706 695.09005 884.5 L 695.09005 864 C 695.09005 859.0294 699.1195 855 704.09005 855 Z" fill="#ffffc0"/>
+        <path d="M 704.09005 855 L 891.09 855 C 896.0606 855 900.09 859.0294 900.09 864 L 900.09 884.5 C 900.09 889.4706 896.0606 893.5 891.09 893.5 L 704.09005 893.5 C 699.1195 893.5 695.09005 889.4706 695.09005 884.5 L 695.09005 864 C 695.09005 859.0294 699.1195 855 704.09005 855 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+        <text transform="translate(700.09005 865.25)" fill="black">
+          <tspan font-family="Helvetica" font-size="15" fill="black" x="16.636963" y="15">memory-index-threshold</tspan>
+        </text>
+      </g>
+      <g id="Line_216">
+        <line x1="763.0662" y1="855" x2="660.2895" y2="797.6932" marker-end="url(#FilledArrow_Marker)" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+      </g>
+      <g id="Graphic_217">
+        <rect x="681.82505" y="699.6682" width="66.032" height="28.447998" fill="white"/>
+        <text transform="translate(686.82505 704.6682)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="0" y="15">256 MB</tspan>
+        </text>
+      </g>
+      <g id="Graphic_218">
+        <rect x="677.2668" y="808.8646" width="57.136" height="28.447998" fill="white"/>
+        <text transform="translate(682.2668 813.8646)" fill="black">
+          <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="0" y="15">32 MB</tspan>
+        </text>
+      </g>
+      <g id="Group_229">
+        <g id="Graphic_220">
+          <path d="M 679.1801 978.6772 L 866.1801 978.6772 C 871.1507 978.6772 875.1801 982.7066 875.1801 987.6772 L 875.1801 1008.1772 C 875.1801 1013.1477 871.1507 1017.1772 866.1801 1017.1772 L 679.1801 1017.1772 C 674.20954 1017.1772 670.1801 1013.1477 670.1801 1008.1772 L 670.1801 987.6772 C 670.1801 982.7066 674.20954 978.6772 679.1801 978.6772 Z" fill="#c0ffc0"/>
+          <path d="M 679.1801 978.6772 L 866.1801 978.6772 C 871.1507 978.6772 875.1801 982.7066 875.1801 987.6772 L 875.1801 1008.1772 C 875.1801 1013.1477 871.1507 1017.1772 866.1801 1017.1772 L 679.1801 1017.1772 C 674.20954 1017.1772 670.1801 1013.1477 670.1801 1008.1772 L 670.1801 987.6772 C 670.1801 982.7066 674.20954 978.6772 679.1801 978.6772 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+          <text transform="translate(675.1801 988.9272)" fill="black">
+            <tspan font-family="Helvetica" font-size="15" fill="black" x="28.718262" y="15">per process property</tspan>
+          </text>
+        </g>
+        <g id="Graphic_219">
+          <path d="M 679.1801 1031.6772 L 866.1801 1031.6772 C 871.1507 1031.6772 875.1801 1035.7066 875.1801 1040.6772 L 875.1801 1067.6772 C 875.1801 1072.6477 871.1507 1076.6772 866.1801 1076.6772 L 679.1801 1076.6772 C 674.20954 1076.6772 670.1801 1072.6477 670.1801 1067.6772 L 670.1801 1040.6772 C 670.1801 1035.7066 674.20954 1031.6772 679.1801 1031.6772 Z" fill="#ffffc0"/>
+          <path d="M 679.1801 1031.6772 L 866.1801 1031.6772 C 871.1507 1031.6772 875.1801 1035.7066 875.1801 1040.6772 L 875.1801 1067.6772 C 875.1801 1072.6477 871.1507 1076.6772 866.1801 1076.6772 L 679.1801 1076.6772 C 674.20954 1076.6772 670.1801 1072.6477 670.1801 1067.6772 L 670.1801 1040.6772 C 670.1801 1035.7066 674.20954 1031.6772 679.1801 1031.6772 Z" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+          <text transform="translate(675.1801 1036.1772)" fill="black">
+            <tspan font-family="Helvetica" font-size="15" fill="black" x="56.239014" y="15">system wide</tspan>
+            <tspan font-family="Helvetica" font-size="15" fill="black" x="34.555664" y="33">transactor property</tspan>
+          </text>
+        </g>
+        <g id="Graphic_228">
+          <rect x="624.1801" y="950" width="275.90995" height="150" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="1"/>
+          <text transform="translate(629.1801 955)" fill="black">
+            <tspan font-family="Helvetica Neue" font-size="16" fill="black" x="0" y="15">Key</tspan>
+          </text>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

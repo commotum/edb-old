@@ -1,0 +1,542 @@
+---
+title: "datomic.client.api documentation"
+source: "https://docs.datomic.com/client-api/datomic.client.api.html"
+word_count: 2001
+---
+
+## datomic.client.api
+
+```
+Synchronous client library for interacting with Datomic.
+
+This namespace is a wrapper for datomic.client.api.async.
+
+Functions in this namespace that communicate with a separate
+process take an arg-map with the following optional keys:
+
+  :timeout   Timeout in msec.
+
+Functions that support offset and limit take the following
+additional optional keys:
+
+  :offset    Number of results to omit from the beginning
+             of the returned data.
+  :limit     Maximum total number of results to return.
+             Specify -1 for no limit. Defaults to -1 for q
+             and to 1000 for all other APIs.
+
+Functions that return datoms return values of a type that supports
+indexed (count/nth) access of [e a v t added] as well as
+lookup (keyword) access via :e :a :v :t :added.
+
+All errors are reported via ex-info exceptions, with map contents
+as specified by cognitect.anomalies.
+See https://github.com/cognitect-labs/anomalies.
+```
+
+### administer-system
+
+`(administer-system client arg-map)`
+
+```
+Run :action on system.
+
+Currently the only supported action is:
+
+:upgrade-schema        upgrade an existing database to use the latest base schema
+
+:upgrade-schema takes the following map
+
+:db-name               database name
+
+Returns a diganostic value on success, throws on failure.
+```
+
+### as-of
+
+`(as-of db time-point)`
+
+```
+Returns the value of the database as of some time-point.
+
+See https://docs.datomic.com/cloud/time/filters.html.
+```
+
+### client
+
+`(client arg-map)`
+
+```
+Create a client for a Datomic system. This function does not
+communicate with a server and returns immediately.
+
+For a cloud system, arg-map requires:
+
+  :server-type   - :cloud
+  :region        - AWS region, e.g. "us-east-1"
+  :system        - your system name
+  :endpoint      - IP address of your system or query group
+
+Optionally, a cloud system arg-map accepts:
+
+  :creds-provider  - instance of com.amazonaws.auth.AWSCredentialsProvider. Defaults to DefaultAWSCredentialsProviderChain
+  :creds-profile   - name of an AWS Named Profile. See http://docs.aws.amazon.com/cli/latest/userguide/cli-multiple-profiles.html
+
+  Note: :creds-provider and :creds-profile are mutually exclusive, providing both will result in an error.
+
+For a datomic-local system, arg-map comprises:
+
+  :server-type   - :datomic-local (required)
+  :system        - a system name (required)
+  :storage-dir   - optional, overrides :storage-dir in ~/.datomic/datomic-local.edn
+
+datomic-local stores databases under ${storage-dir}/${system}/${db-name}.
+
+For a peer-server system, arg-map requires:
+
+  :server-type   - :peer-server
+  :access-key    - access-key from peer server launch
+  :secret        - secret from peer server launch
+  :endpoint      - peer server host:port
+  :validate-hostnames  - false
+
+Returns a client object.
+```
+
+### connect
+
+`(connect client arg-map)`
+
+```
+Connects to a database. Takes a client object and an arg-map with keys:
+
+:db-name               database name
+
+Returns a connection. See namespace doc for error and timeout
+handling.
+
+Returned connection supports ILookup for key-based access. Supported
+keys are:
+
+:db-name               database name
+```
+
+### create-database
+
+`(create-database client arg-map)`
+
+```
+Creates a database specified by arg-map with key:
+
+:db-name    The database name.
+
+Returns true. See namespace doc for error and timeout handling.
+NOTE: create-database is not available with peer-server.
+Use a Datomic Peer to create databases with Datomic On-Prem.
+```
+
+### datoms
+
+`(datoms db arg-map)`
+
+```
+Returns an Iterable of datoms from an index as specified by arg-map:
+
+ :index       One of :eavt, :aevt, :avet, or :vaet.
+ :components  Optional vector in the same order as the index
+              containing one or more values to further narrow the
+              result
+
+Datoms are associative and indexed:
+
+Key     Index        Value
+--------------------------
+:e      0            entity id
+:a      1            attribute id
+:v      2            value
+:tx     3            transaction id
+:added  4            boolean add/retract
+
+For a description of Datomic indexes, see
+https://docs.datomic.com/cloud/query/raw-index-access.html.
+
+See namespace doc for timeout, offset/limit, and error handling.
+```
+
+### db
+
+`(db conn)`
+
+```
+Returns the current database value for a connection.
+
+Supports ILookup interface for key-based access. Supported keys are:
+
+:db-name               database name
+:t                     basis t for the database
+:as-of                 a point in time
+:since                 a point in time
+:history               true for history databases
+```
+
+### db-stats
+
+`(db-stats db)`
+
+```
+Queries for database stats. Returns a map including at least:
+
+ :datoms      total count of datoms in the (history) database
+
+See namespace doc for timeout and error handling.
+```
+
+### delete-database
+
+`(delete-database client arg-map)`
+
+```
+Deletes a database specified by arg-map with keys:
+
+ :db-name    The database name.
+
+Returns true. See namespace doc for error and timeout handling.
+NOTE: delete-database is not available with peer-server.
+Use a Datomic Peer to delete databases with Datomic On-Prem.
+```
+
+### history
+
+`(history db)`
+
+```
+Returns a database value containing all assertions and
+retractions across time. A history database can be passed to 'datoms',
+'index-range', and 'q', but not to 'with' or 'pull'. Note
+that queries against a history database will include retractions
+as well as assertions. Retractions can be identified by the fifth
+datom field ':added', which is true for asserts and false for
+retracts.
+
+See https://docs.datomic.com/cloud/time/filters.html.
+```
+
+### index-pull
+
+`(index-pull db arg-map)`
+
+```
+Walks an index, pulling entities using the selector, returning a lazy
+seq on the results.
+​
+    :index     :avet or :aevt. Entities are pulled from the third 
+               component (E for :avet, or V for :aevt).
+    :selector  A pull selector (see 'pull').
+    :start     A vector in the same order as the index indicating
+               the initial position. At least :a must be specified.
+               Iteration is limited to datoms matching :a.
+    :reverse   Optional, when true iterate the index in reverse
+               order.
+​
+When pulling Vs, the attribute specified in :start must be :db.type/ref.
+​
+If the relationship between E and V is many-to-many, you must specify 
+the second component under :start to prevent returning duplicates.
+Datomic will enforce this requirement when possible, i.e. for :avet.
+​
+See namespace doc for timeout, offset/limit, and error handling.
+```
+
+### index-range
+
+`(index-range db arg-map)`
+
+```
+Returns datoms from the AVET index as specified by arg-map:
+
+ :attrid  An attribute entity identifier.
+ :start   Optional. The start value, inclusive, of the requested
+          range, defaulting to the beginning of the index.
+ :end     Optional. The end value, exclusive, of the requested
+          range, defaultin to the end of the index.
+
+For a description of Datomic indexes, see
+https://docs.datomic.com/cloud/query/raw-index-access.html.
+
+Returns an Iterable of datoms. See namespace doc for
+offset/limit, timeout, and error handling.
+```
+
+### list-databases
+
+`(list-databases client arg-map)`
+
+```
+Lists all databases. arg-map requires no keys but can contain any of
+the optional keys listed in the namespace doc.
+
+Returns collection of database names.
+```
+
+### pull
+
+`(pull db arg-map)` `(pull db selector eid)`
+
+```
+Returns a hierarchical selection described by selector and eid.
+
+ :selector   the selector expression
+ :eid        entity id
+
+For a complete description of the selector syntax, see
+https://docs.datomic.com/cloud/query/query-pull.html.
+
+Returns a map.
+
+The arity-2 version takes :selector and :eid in arg-map, which
+also supports :timeout. See namespace doc.
+
+You can get information about the I/O reads performed by a
+pull with io-stats. To request io-stats, add :io-context
+(a qualified keyword) to the arg-map you use to call pull. The return
+value will be a map with
+
+ :ret                the result of the pull
+ :io-stats           io-stats for the pull
+
+The io-stats map includes:
+
+ :io-context         the io-context passed in
+ :api                :tx-with
+ :api-ms             msec to peform the API call
+ :reads              breakout of reads by cache tier and index sort
+ :nested             breakout iff nested queries set :io-context
+
+See https://docs.datomic.com/cloud/api/io-stats.html.
+```
+
+### q
+
+`(q arg-map)` `(q query & args)`
+
+```
+Performs the query described by query and args:
+
+  :query  The query to perform: a map, list, or string (see below).
+  :args   Data sources for the query, e.g. database values
+          retrieved from a call to db, and/or rules.
+
+  The query list form is [:find ?var1 ?var2 ...
+                          :with ?var3 ...
+                          :in $src1 $src2 ...
+                          :where clause1 clause2 ...]
+
+  :find  specifies the tuples to be returned
+  :with  is optional, and names vars to be kept in the aggrgation set
+         but not returned
+  :in    is optional. Omitting ':in ...' is the same as specifying
+         ':in $'
+  :where limits the result returned
+
+For a complete description of the query syntax, see
+https://docs.datomic.com/cloud/query/query-data-reference.html.
+
+Returns a collection of tuples.
+
+The arity-1 version takes :query and :args in arg-map, which
+allows additional options for :offset, :limit, and :timeout. See
+namespace doc.
+
+You can get information about the I/O reads performed by a query
+with io-stats. To request io-stats, add :io-context (a qualified
+keyword) to the arg-map you use to call query. Query will return a map
+with
+
+ :ret                the result of the query
+ :io-stats           io-stats for the query
+
+The io-stats map includes:
+
+ :io-context         the io-context passed in
+ :api                :tx-with
+ :api-ms             msec to peform the API call
+ :reads              breakout of reads by cache tier and index sort
+ :nested             breakout iff nested queries set :io-context
+
+See https://docs.datomic.com/cloud/api/io-stats.html.
+
+You can request query-stats by adding :query-stats true to the map you
+use to call query. Query will return a map with
+
+ :ret                   the result of the query
+ :query-stats           query-stats for the query
+
+See https://docs.datomic.com/cloud/api/query-stats.html.
+```
+
+### qseq
+
+`(qseq arg-map)` `(qseq query & args)`
+
+```
+Performs the query described by query and args (as per 'q'),
+  returning a lazy seq on the results.  Item transformations such as
+  'pull' are deferred until the seq is consumed. For queries with
+  pull(s), this results in:
+​
+  * reduced memory use and the ability to execute larger queries
+  * lower latency before the first results are returned
+​
+  The returned seq object efficiently supports 'count'.
+```
+
+### rseek-datoms
+
+`(rseek-datoms db arg-map)`
+
+```
+Like seek-datoms, but iterates the index in reverse, beginning at
+or before the point where the given components would reside. Only
+terminates at the start of the index, thus callers must supply their
+own termination logic.
+
+arg-map has keys:
+
+ :index       One of :eavt, :aevt, :avet, or :vaet.
+ :components  Optional vector in the same order as the index
+              containing one or more values to further narrow the
+              initial seek position.
+
+See namespace doc for timeout, offset/limit, and error handling.
+```
+
+### seek-datoms
+
+`(seek-datoms db arg-map)`
+
+```
+Raw access to the index data, by index. Returns an Iterable of
+datoms starting at or after the point in the index where the
+components would reside, iterating forward to the end of the index.
+Callers must supply their own termination logic, as seek-datoms does
+not filter to the boundary of the supplied components.
+
+arg-map has keys:
+
+ :index       One of :eavt, :aevt, :avet, or :vaet.
+ :components  Optional vector in the same order as the index
+              containing one or more values to further narrow the
+              initial seek position.
+
+See namespace doc for timeout, offset/limit, and error handling.
+```
+
+### since
+
+`(since db t)`
+
+```
+Returns the value of the database since some time-point.
+
+See https://docs.datomic.com/cloud/time/filters.html.
+```
+
+### sync
+
+`(sync conn t)`
+
+```
+Used to coordinate with other clients. Returns a database
+value with basis :t >= t. Does *not* make a remote call.
+```
+
+### transact
+
+`(transact conn arg-map)`
+
+```
+Submits a transaction specified by arg-map:
+
+ :tx-data    a collection of list forms or map forms
+
+For a complete specification of the tx-data format, see
+https://docs.datomic.com/cloud/transactions/transaction-data-reference.html.
+
+Returns a map with the following keys:
+
+ :db-before  database value before the transaction
+ :db-after   database value after the transaction
+ :tx-data    collection of datoms produced by the transaction
+ :tempids    a map from tempids to their resolved entity IDs.
+
+You can get information about the I/O reads performed by a
+transaction with io-stats. To request io-stats, add :io-context
+(a qualified keyword) to the arg-map you use to call transact. The map returned
+by transact will include an additional :io-stats keyword whose
+value is a map with
+
+ :io-context         the io-context passed in
+ :api                :tx-with
+ :api-ms             msec to peform the API call
+ :reads              breakout of reads by cache tier and index sort
+ :nested             breakout iff nested queries set :io-context
+
+Note that :api-ms is just the time spent processing the
+transaction and does not include queue, storage, or network
+latency.
+
+Datomic logs the io-stats for every transaction. If you
+pass an :io-context to transact, you can use this context to
+correlate transactions with I/O costs after the fact.
+
+See https://docs.datomic.com/cloud/api/io-stats.html.
+
+See namespace doc for timeout and error handling.
+```
+
+### tx-range
+
+`(tx-range conn arg-map)`
+
+```
+Retrieve a range of transactions in the log as specified by
+arg-map:
+
+ :start   Optional. The start time-point or nil to start from the
+          beginning of the transaction log.
+ :end     Optional. The end time-point, exclusive, or nil to
+          run to the end of the transaction log.
+
+ Returns an Iterable of transactions.
+ Transactions have keys:
+
+ :t       the basis t of the transaction
+ :data    a collection of the datom in the transaction
+
+See datoms for a description of :data value.
+
+See namespace doc for offset/limit, timeout, and error handling.
+```
+
+### with
+
+`(with db arg-map)`
+
+```
+Applies tx-data to a database returned from 'with-db' or a
+ prior call to 'with'.  The result of calling 'with' is a
+ database value as-if the data was applied in a transaction, but
+ the durable database is unaffected.
+
+Takes and returns data in the same format expected by transact.
+
+See namespace doc for timeout and error handling.
+```
+
+### with-db
+
+`(with-db conn)`
+
+```
+Returns a with-db value suitable for passing to 'with'.
+```
