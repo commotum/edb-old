@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.coordination)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.coordination)
+    {:doc
+     "Coordinates database identity and process discovery through storage. Transactors publish versioned heartbeat endpoints; peers resolve compatible endpoints and validate protocol versions before connecting."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -71,17 +75,17 @@
     create-cluster
     :default
     fn__17146
-    ([cluster_conf]
+    ([cluster-conf]
       (error/arg
         :db.error/unsupported-protocol
-        (str "Unsupported protocol " (:protocol cluster_conf)))))
+        (str "Unsupported protocol " (:protocol cluster-conf)))))
   (defn create-db-cluster
-    ([cluster_conf]
-      (when-not (:db-id cluster_conf)
+    ([cluster-conf]
+      (when-not (:db-id cluster-conf)
         (throw
           (java.lang.AssertionError.
             (str "Assert failed: " (pr-str (clojure.core/list :db-id 'cluster-conf))))))
-      (let [cluster (create-cluster cluster_conf)
+      (let [cluster (create-cluster cluster-conf)
             temp__5802__auto__ (deref cluster-stack/kv-cache-ref)]
         (if temp__5802__auto__
           (let [kv_cache temp__5802__auto__]
@@ -95,7 +99,7 @@
       'create-db-cluster
       :ns
       *ns*))
-  (defn create-system-cluster ([cluster_conf] (create-cluster (dissoc cluster_conf :db-id))))
+  (defn create-system-cluster ([cluster-conf] (create-cluster (dissoc cluster-conf :db-id))))
   (reset-meta!
     #'create-system-cluster
     (assoc
@@ -116,6 +120,7 @@
     {:active pod-key, :standby standby-key})
   (def PEER_VERSION 2)
   (reset-meta! #'PEER_VERSION (assoc {:const true, :column (int 1)} :name 'PEER_VERSION :ns *ns*))
+  ;; Encodes the published transactor endpoint in a versioned storage representation.
   (defn create-heartbeat
     ([p__17151]
       (let [map__17152 p__17151
@@ -146,6 +151,7 @@
       'create-heartbeat
       :ns
       *ns*))
+  ;; Decodes current and legacy heartbeat representations into a connection endpoint.
   (defn heartbeat->endpoint
     ([p__17154]
       (let [vec__17155 p__17154
@@ -186,6 +192,7 @@
       'heartbeat->endpoint
       :ns
       *ns*))
+  ;; Reads a revisioned heartbeat from storage and returns its endpoint description.
   (defn lookup-endpoint
     ([cluster k]
       (let [m_17160 {:event :coord/lookup-endpoint, :k k}
@@ -238,12 +245,12 @@
       :ns
       *ns*))
   (defn vc-password
-    ([peer_password]
+    ([peer-password]
       (codec/bytes->string
         (codec/encode-64
           (.digest
             (java.security.MessageDigest/getInstance "MD5")
-            (.getBytes ^java.lang.String peer_password))))))
+            (.getBytes ^java.lang.String peer-password))))))
   (reset-meta!
     #'vc-password
     (assoc
@@ -272,13 +279,13 @@
       :ns
       *ns*))
   (defn allowed-valcache-client?
-    ([server_specs client]
+    ([server-specs client]
       (or
         (= client "127.0.0.1")
         (boolean
           (some
             (fn fn__17176 ([p1__17175#] (contains? (:allowed-clients p1__17175#) client)))
-            server_specs)))))
+            server-specs)))))
   (reset-meta!
     #'allowed-valcache-client?
     (assoc
@@ -287,6 +294,7 @@
       'allowed-valcache-client?
       :ns
       *ns*))
+  ;; Rejects endpoints whose published wire protocol cannot serve this Peer.
   (defn check-peer-version
     ([endpoint]
       (when-not (:peer-version endpoint)
@@ -310,6 +318,7 @@
       'check-peer-version
       :ns
       *ns*))
+  ;; Resolves the active transactor and validates compatibility before a connection is attempted.
   (defn lookup-compatible-transactor-endpoint
     ([cluster]
       (let [endpoint (lookup-transactor-endpoint cluster)]
@@ -324,13 +333,13 @@
       :ns
       *ns*))
   (defn cluster-conf->resolved-conf
-    ([cluster_conf]
+    ([cluster-conf]
       (let [temp__5804__auto__ (catalog/parse-db-conf
                                  (get
-                                   (catalog/get-catalog (create-system-cluster cluster_conf))
-                                   (:db-name cluster_conf)))]
+                                   (catalog/get-catalog (create-system-cluster cluster-conf))
+                                   (:db-name cluster-conf)))]
         (when temp__5804__auto__
-          (let [db_specific temp__5804__auto__] (merge cluster_conf db_specific))))))
+          (let [db-specific temp__5804__auto__] (merge cluster-conf db-specific))))))
   (reset-meta!
     #'cluster-conf->resolved-conf
     (assoc
@@ -345,7 +354,7 @@
     (cache/lookup-cache
       (cache/fn->lookup cluster-conf->resolved-conf)
       (cache/create-write-limited 100 1)))
-  (defn resolve-db-name ([cluster_conf] (get db-cache cluster_conf)))
+  (defn resolve-db-name ([cluster-conf] (get db-cache cluster-conf)))
   (reset-meta!
     #'resolve-db-name
     (assoc

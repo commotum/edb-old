@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.ddb-cluster)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.ddb-cluster)
+    {:doc
+     "Builds the Datomic clustered-store abstraction on DynamoDB. Selects region and endpoint configuration, uses explicit credentials when supplied or the AWS default provider chain, and applies Datomic timeout and concurrency policy."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -56,6 +60,7 @@
   (reset-meta!
     #'default-aws-region
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'default-aws-region :ns *ns*))
+  ;; Creates a table-scoped cluster using IAM/default credentials unless explicit DDB credentials are present.
   (defn create-connection
     ([p__27618]
       (let [map__27619 p__27618

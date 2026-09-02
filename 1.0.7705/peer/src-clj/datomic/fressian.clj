@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.fressian)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.fressian)
+    {:doc
+     "Fressian serialization for values stored in segments and caches or exchanged between Datomic processes. Supplies Datomic and Clojure handlers, optional checksum footers, gzip-compressed value buffers, streaming readers, and serialization capability checks."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['pr 'read])
@@ -79,7 +83,7 @@
     #'as-lookup
     (assoc {:arglists (clojure.core/list ['o]), :column (int 1)} :name 'as-lookup :ns *ns*))
   (defn write-handler-lookup
-    ([custom_lookup] (WriteHandlerLookup/createLookupChain (as-lookup custom_lookup))))
+    ([custom-lookup] (WriteHandlerLookup/createLookupChain (as-lookup custom-lookup))))
   (reset-meta!
     #'write-handler-lookup
     (assoc
@@ -92,6 +96,8 @@
     (clojure.lang.RT/var "datomic.fressian" "create-writer")
     {:tag org.fressian.Writer,
      :arglists (clojure.core/list ['out] ['out 'lookup]),
+     :doc
+     "Creates a Fressian writer for out. Lookup may be an ILookup implementation or a map of custom write handlers.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.fressian" "create-writer")
@@ -102,15 +108,17 @@
     (clojure.lang.RT/var "datomic.fressian" "create-reader")
     {:tag org.fressian.Reader,
      :arglists (clojure.core/list ['in] ['in 'lookup] ['in 'lookup 'validate-checksum]),
+     :doc
+     "Creates a Fressian reader for an InputStream or input source. Lookup may be an ILookup implementation or handler map. Checksum validation is enabled by default.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.fressian" "create-reader")
     (fn create_reader
-      ([in lookup validate_checksum]
+      ([in lookup validate-checksum]
         (org.fressian.FressianReader.
           (if (instance? java.io.InputStream in) in (jio/input-stream in))
           (as-lookup lookup)
-          (boolean (.booleanValue ^java.lang.Boolean validate_checksum))))
+          (boolean (.booleanValue ^java.lang.Boolean validate-checksum))))
       ([in lookup] (create-reader in lookup true))
       ([in] (create-reader in nil))))
   (defn begin-open-list ([writer] (.beginOpenList ^org.fressian.StreamingWriter writer)))
@@ -144,54 +152,45 @@
       :ns
       *ns*))
   (defn fressian
-    ([out obj & p__11039]
-      (let [map__11040 p__11039
-            map__11040 (if (seq? map__11040)
-                         (if (next map__11040)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__11040))
-                           (if (seq map__11040) (first map__11040) {}))
-                         map__11040)
-            handlers (get map__11040 :handlers)
-            footer (get map__11040 :footer)]
-        (with-open [os (jio/output-stream out)]
-          (let [writer (create-writer os handlers)]
-            (.writeObject ^org.fressian.Writer writer obj)
-            (when footer (.writeFooter ^org.fressian.Writer writer)))))))
+    ([out obj & {:keys [handlers footer]}]
+      (with-open [os (jio/output-stream out)]
+        (let [writer (create-writer os handlers)]
+          (.writeObject ^org.fressian.Writer writer obj)
+          (when footer (.writeFooter ^org.fressian.Writer writer))))))
   (reset-meta!
     #'fressian
     (assoc
-      {:arglists (clojure.core/list ['out 'obj '& {:keys ['handlers 'footer]}]), :column (int 1)}
+      {:arglists (clojure.core/list ['out 'obj '& {:keys ['handlers 'footer]}]),
+       :doc
+       "Writes one object to out and closes the resulting output stream. :handlers supplies custom write handlers; :footer writes a Fressian checksum footer.",
+       :column (int 1)}
       :name
       'fressian
       :ns
       *ns*))
   (defn defressian
-    ([in & p__11042]
-      (let [map__11043 p__11042
-            map__11043 (if (seq? map__11043)
-                         (if (next map__11043)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__11043))
-                           (if (seq map__11043) (first map__11043) {}))
-                         map__11043)
-            handlers (get map__11043 :handlers)
-            footer (get map__11043 :footer)
-            fin (create-reader in handlers (boolean footer))
+    ([in & {:keys [handlers footer]}]
+      (let [fin (create-reader in handlers (boolean footer))
             result (.readObject ^org.fressian.Reader fin)]
         (when footer (.validateFooter ^org.fressian.Reader fin))
         result)))
   (reset-meta!
     #'defressian
     (assoc
-      {:arglists (clojure.core/list ['in '& {:keys ['handlers 'footer]}]), :column (int 1)}
+      {:arglists (clojure.core/list ['in '& {:keys ['handlers 'footer]}]),
+       :doc
+       "Reads one object from in. :handlers supplies custom read handlers; :footer requires and validates the Fressian checksum footer.",
+       :column (int 1)}
       :name
       'defressian
       :ns
       *ns*))
   (.setMeta
     (clojure.lang.RT/var "datomic.fressian" "byte-buf")
-    {:tag java.nio.ByteBuffer, :arglists (clojure.core/list ['obj '& 'options]), :column (int 1)})
+    {:tag java.nio.ByteBuffer,
+     :arglists (clojure.core/list ['obj '& 'options]),
+     :doc "Serializes obj into a ByteBuffer using the options accepted by fressian.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.fressian" "byte-buf")
     (fn byte_buf
@@ -204,7 +203,10 @@
   (reset-meta!
     #'fressian-val
     (assoc
-      {:arglists (clojure.core/list ['val 'handlers]), :column (int 1)}
+      {:arglists (clojure.core/list ['val 'handlers]),
+       :doc
+       "Serializes val with the supplied handlers and checksum footer, then returns the gzip-compressed ByteBuffer used for durable and cached values.",
+       :column (int 1)}
       :name
       'fressian-val
       :ns
@@ -224,13 +226,15 @@
   (reset-meta!
     #'read-batch
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'fin {:tag 'Reader})]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'fin {:tag 'Reader})]),
+       :doc "Reads objects from a Fressian reader until EOF and returns them in encounter order.",
+       :column (int 1)}
       :name
       'read-batch
       :ns
       *ns*))
   (defn read-seq
-    ([readable handler_lookup]
+    ([readable handler-lookup]
       (let [map__11052 (queue/queue-seq 100)
             map__11052 (if (seq? map__11052)
                          (if (next map__11052)
@@ -247,7 +251,7 @@
               (try
                 (with-open [s (jio/input-stream readable)]
                   (do
-                    (let [f (create-reader s handler_lookup)]
+                    (let [f (create-reader s handler-lookup)]
                       (loop []
                         (if (= (.available ^java.io.InputStream s) 0)
                           (^clojure.lang.IFn done)
@@ -261,7 +265,10 @@
   (reset-meta!
     #'read-seq
     (assoc
-      {:arglists (clojure.core/list ['readable] ['readable 'handler-lookup]), :column (int 1)}
+      {:arglists (clojure.core/list ['readable] ['readable 'handler-lookup]),
+       :doc
+       "Returns a bounded, asynchronously populated sequence of objects decoded from readable. Decoding runs in a future; EOF closes the sequence and decoding failures are delivered through it.",
+       :column (int 1)}
       :name
       'read-seq
       :ns
@@ -279,7 +286,10 @@
       'write-named
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.fressian" "clojure-write-handlers") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.fressian" "clojure-write-handlers")
+    {:doc "Write handlers for Clojure keywords, symbols, and arbitrary-precision integers.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.fressian" "clojure-write-handlers")
     {clojure.lang.Keyword
@@ -305,7 +315,9 @@
       (reify
         org.fressian.handlers.WriteHandler
         (^void write [this ^org.fressian.Writer w s] (do (write-named "sym" w s) nil)))}})
-  (.setMeta (clojure.lang.RT/var "datomic.fressian" "clojure-read-handlers") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.fressian" "clojure-read-handlers")
+    {:doc "Read handlers for Clojure keywords, symbols, and maps.", :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.fressian" "clojure-read-handlers")
     {"key"
@@ -329,7 +341,11 @@
            (if (< (.size ^java.util.List kvs) 16)
              (clojure.lang.PersistentArrayMap. (.toArray ^java.util.List kvs))
              (clojure.lang.PersistentHashMap/create (seq kvs))))))})
-  (.setMeta (clojure.lang.RT/var "datomic.fressian" "user-write-handlers") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.fressian" "user-write-handlers")
+    {:doc
+     "Write-handler chain for user values, including Clojure values, Datomic transaction functions, and configured extensions.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.fressian" "user-write-handlers")
     (merge
@@ -347,7 +363,11 @@
                 (select-keys f [:lang :imports :requires :params :code]))
               nil)))}}
       (datomic.impl.Config/getWriteHandlers)))
-  (.setMeta (clojure.lang.RT/var "datomic.fressian" "user-read-handlers") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.fressian" "user-read-handlers")
+    {:doc
+     "Read-handler chain for user values, including Clojure values, Datomic transaction functions, and configured extensions.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.fressian" "user-read-handlers")
     (merge
@@ -373,7 +393,7 @@
       :ns
       *ns*))
   (defn val->obj
-    ([read_lookup]
+    ([read-lookup]
       (fn fn__11074
         ([val]
           (let [start__8814__auto__ (java.lang.System/nanoTime)
@@ -384,7 +404,7 @@
                                                           ^java.io.InputStream is
                                                           (int 4096))]
                                            (with-open [bs (stream/buffered-input-stream gz)]
-                                             (let [fr (create-reader bs read_lookup false)
+                                             (let [fr (create-reader bs read-lookup false)
                                                    obj (.readObject ^org.fressian.Reader fr)]
                                                (.readAllBytes ^java.io.InputStream gz)
                                                obj))))
@@ -396,7 +416,10 @@
   (reset-meta!
     #'val->obj
     (assoc
-      {:arglists (clojure.core/list ['read-lookup]), :column (int 1)}
+      {:arglists (clojure.core/list ['read-lookup]),
+       :doc
+       "Returns a decoder for gzip-compressed Fressian ByteBuffers. Each decode fully consumes the gzip member, records deserialization metrics, and propagates decoding failures.",
+       :column (int 1)}
       :name
       'val->obj
       :ns
@@ -426,7 +449,10 @@
   (reset-meta!
     #'reader-iter
     (assoc
-      {:arglists (clojure.core/list ['is 'handlers]), :column (int 1)}
+      {:arglists (clojure.core/list ['is 'handlers]),
+       :doc
+       "Returns an Iter positioned at the first object in a Fressian stream, or nil when the stream is empty. Successive Iter.next calls decode subsequent objects.",
+       :column (int 1)}
       :name
       'reader-iter
       :ns
@@ -438,7 +464,10 @@
   (reset-meta!
     #'fressianable?
     (assoc
-      {:arglists (clojure.core/list ['val] ['val 'handlers]), :column (int 1)}
+      {:arglists (clojure.core/list ['val] ['val 'handlers]),
+       :doc
+       "Returns true when val can be serialized with the supplied handlers. The one-argument form uses the standard Clojure handlers and all serialization failures yield false.",
+       :column (int 1)}
       :name
       'fressianable?
       :ns

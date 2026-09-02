@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.garbage)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.garbage)
+    {:doc
+     "Tracks immutable storage segments made unreachable by new log and index roots and reclaims segments older than a caller-supplied safety boundary. Collection is incremental, paced, and independent of live tree reads."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -101,6 +105,7 @@
       'leaf-seq
       :ns
       *ns*))
+  ;; Create the per-database garbage root reference on first use.
   (defn ensure-root-ref
     ([cluster forget_garbage]
       (let [temp__5804__auto__ (root-ref-key cluster)]
@@ -141,6 +146,8 @@
       'ensure-root
       :ns
       *ns*))
+  ;; Persist a full pending-garbage leaf, extend its directory and root, then
+  ;; publish the replacement root with a revision-checked reference update.
   (defn append-leaf
     ([cluster lookup leaf max_dir_size]
       (let [map__21089 (ensure-root-ref cluster)
@@ -308,6 +315,7 @@
       'do-mark-garbage
       :ns
       *ns*))
+  ;; Queue newly unreachable immutable values for persistent, batched recording.
   (defn mark-garbage
     ([cluster lookup ids max_leaf_size max_dir_size]
       (do
@@ -388,6 +396,7 @@
       'install-mark-handler
       :ns
       *ns*))
+  ;; Persist all pending marks for a database and wait for the marking agent.
   (defn flush-garbage
     ([cluster olookup]
       (send-off garbage-agent do-mark-garbage cluster olookup nil 0 800)
@@ -443,6 +452,7 @@
   (reset-meta!
     #'pace-gc
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'pace-gc :ns *ns*))
+  ;; Delete recorded immutable values at the configured storage pace and report the count.
   (defn gc-delete-vals
     ([cluster vs]
       (let [futs (mapv
@@ -540,6 +550,8 @@
       'gc-dir
       :ns
       *ns*))
+  ;; Reclaim recorded values strictly older than tstamp, pruning completed
+  ;; garbage leaves and directories as their contents are exhausted.
   (defn gc
     ([cluster tstamp progress]
       (let [root (gc-get-node cluster (cluster/val-key->uuid (:key (ensure-root-ref cluster))))
@@ -601,6 +613,7 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.garbage" "collection-agent") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.garbage" "collection-agent") (agent nil))
+  ;; Serialize a collection request on the process-wide collection agent.
   (defn queue-gc
     ([cluster older_than]
       (send-off
@@ -730,6 +743,8 @@
     #'gc-deleted-db
     (assoc
       {:arglists (clojure.core/list ['system-cluster 'db-cluster 'status-callback]),
+       :doc
+       "Deletes complete 1,000-segment batches from a deleted database's log and index traversals, then collects its recorded-garbage segments. Trailing traversal groups smaller than 1,000 remain in storage. Progress messages are sent to status-callback; the log and index references and deleted-catalog entry are removed before the function returns true.",
        :column (int 1)}
       :name
       'gc-deleted-db
@@ -904,7 +919,10 @@
   (reset-meta!
     #'gc-deleted-dbs
     (assoc
-      {:arglists (clojure.core/list [{:keys ['uri]}]), :column (int 1)}
+      {:arglists (clojure.core/list [{:keys ['uri]}]),
+       :doc
+       "Runs deleted-database storage collection for every id listed as deleted in the catalog addressed by uri. Restored database ids are removed from the deleted list without collection; remaining ids are traversed individually, and buffered catalog garbage is drained after the pass. Progress is printed and storage pacing follows datomic.gcStoragePaceMsec.",
+       :column (int 1)}
       :name
       'gc-deleted-dbs
       :ns

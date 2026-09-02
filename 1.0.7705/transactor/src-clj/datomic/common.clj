@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.common)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.common)
+    {:doc
+     "Shared runtime primitives used across Datomic components. Defines the total ordering used for indexed values and provides lifecycle, retry, scheduling, configuration, identifier, bounded-wait, and result-pagination utilities."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['compare 'qualified-symbol?])
@@ -72,7 +76,10 @@
   (reset-meta!
     #'compare-byte-arrays
     (assoc
-      {:arglists (clojure.core/list (.withMeta ['a 'b] {:tag 'long})), :column (int 1)}
+      {:arglists (clojure.core/list (.withMeta ['a 'b] {:tag 'long})),
+       :doc
+       "Compares byte arrays for index ordering. Arrays are ordered first by length and then lexicographically by signed byte value. Returns a negative number, zero, or a positive number. Java byte-array equality is identity based; query predicates that need content equality use java.util.Arrays/equals.",
+       :column (int 1)}
       :name
       'compare-byte-arrays
       :ns
@@ -106,6 +113,8 @@
       {:arglists
        (clojure.core/list
          (.withMeta [(.withMeta 'a {:tag 'Object}) (.withMeta 'b {:tag 'Object})] {:tag 'long})),
+       :doc
+       "Compares non-nil, non-numeric values in the Datomic total order. Lists compare positionally. Maps and sets compare by element count and then collection hash, with sorted entries or elements breaking equal-hash ties. Byte arrays use byte content; equal runtime classes use Comparable; remaining values are ordered by class name.",
        :column (int 1)}
       :name
       'compare-ex
@@ -138,6 +147,8 @@
       {:arglists
        (clojure.core/list
          (.withMeta [(.withMeta 'a {:tag 'Object}) (.withMeta 'b {:tag 'Object})] {:tag 'long})),
+       :doc
+       "Compares two values using Datomic's stable total ordering. Nil sorts first, numbers sort before non-numbers and compare across numeric types, strings use lexical order, and other supported values follow compare-ex. Returns a negative number, zero, or a positive number.",
        :column (int 1)}
       :name
       'compare
@@ -153,7 +164,10 @@
   (reset-meta!
     #'equals-with-strict-scale
     (assoc
-      {:arglists (clojure.core/list ['a 'b]), :column (int 1)}
+      {:arglists (clojure.core/list ['a 'b]),
+       :doc
+       "Returns true when values compare equal, with BigDecimal values additionally required to have the same scale. BigDecimal scale is treated as part of value equality.",
+       :column (int 1)}
       :name
       'equals-with-strict-scale
       :ns
@@ -277,7 +291,14 @@
           (do (throw (java.lang.Exception. (str "Key not found: " k))) nil)))))
   (reset-meta!
     #'getx
-    (assoc {:arglists (clojure.core/list ['m 'k]), :column (int 1)} :name 'getx :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['m 'k]),
+       :doc "Returns the value for k, including nil, and throws when m does not contain k.",
+       :column (int 1)}
+      :name
+      'getx
+      :ns
+      *ns*))
   (defn getx-in ([m ks] (reduce getx m ks)))
   (reset-meta!
     #'getx-in
@@ -296,7 +317,10 @@
   (reset-meta!
     #'require-keys
     (assoc
-      {:arglists (clojure.core/list ['m 'keyseq]), :column (int 1)}
+      {:arglists (clojure.core/list ['m 'keyseq]),
+       :doc
+       "Returns a map containing the requested keys. Throws ExceptionInfo with :missing set to every absent key when the input map is incomplete.",
+       :column (int 1)}
       :name
       'require-keys
       :ns
@@ -519,7 +543,10 @@
   (reset-meta!
     #'await-derefs
     (assoc
-      {:arglists (clojure.core/list ['coll] ['msec 'coll]), :column (int 1)}
+      {:arglists (clojure.core/list ['coll] ['msec 'coll]),
+       :doc
+       "Waits for every dereferenceable value in coll. The timed arity shares one millisecond deadline across the collection and returns false on timeout; the untimed arity waits indefinitely and returns true.",
+       :column (int 1)}
       :name
       'await-derefs
       :ns
@@ -585,7 +612,15 @@
           (long lsb)))))
   (reset-meta!
     #'squuid
-    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'squuid :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list []),
+       :doc
+       "Returns a semi-sequential UUID whose high 32 bits contain the current Unix time in seconds. Temporal locality reduces index scatter for UUID-valued attributes.",
+       :column (int 1)}
+      :name
+      'squuid
+      :ns
+      *ns*))
   (defn squuid-time-ms
     ([squuid]
       (long
@@ -597,7 +632,9 @@
   (reset-meta!
     #'squuid-time-ms
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'squuid {:tag 'java.util.UUID})]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'squuid {:tag 'java.util.UUID})]),
+       :doc "Returns the embedded creation time of a squuid in Unix epoch milliseconds.",
+       :column (int 1)}
       :name
       'squuid-time-ms
       :ns
@@ -926,6 +963,8 @@
     #'retry-fn
     (assoc
       {:arglists (clojure.core/list ['f '& {:keys ['pred 'backoff 'max-retries 'log-retry]}]),
+       :doc
+       "Calls f until pred rejects its return value or max-retries attempts have run. Throwables are supplied to pred as values; InterruptedException and InterruptedIOException always propagate immediately. Backoff is either a millisecond value or a function of the completed attempt count. The optional log-retry function receives result, delay, attempt count, and maximum attempts before each retry.",
        :column (int 1)}
       :name
       'retry-fn
@@ -1223,7 +1262,10 @@
   (reset-meta!
     #'bounded-deref
     (assoc
-      {:arglists (clojure.core/list ['ref 'timeout-ms]), :column (int 1)}
+      {:arglists (clojure.core/list ['ref 'timeout-ms]),
+       :doc
+       "Dereferences ref within timeout-ms milliseconds and returns its value. Throws TimeoutException when the deadline expires.",
+       :column (int 1)}
       :name
       'bounded-deref
       :ns
@@ -1331,7 +1373,10 @@
   (reset-meta!
     #'result-count
     (assoc
-      {:arglists (clojure.core/list ['offset 'limit 'coll]), :column (int 1)}
+      {:arglists (clojure.core/list ['offset 'limit 'coll]),
+       :doc
+       "Computes the count marker for a paged result by subtracting offset and capping it at a nonnegative limit. A value less than one tells counted-seq to return nil. Nil options are ignored and a negative limit means unbounded.",
+       :column (int 1)}
       :name
       'result-count
       :ns
@@ -1348,7 +1393,10 @@
   (reset-meta!
     #'result-xform
     (assoc
-      {:arglists (clojure.core/list ['offset 'limit 'f]), :column (int 1)}
+      {:arglists (clojure.core/list ['offset 'limit 'f]),
+       :doc
+       "Builds the result transformation used by query and index APIs: drop offset rows, optionally map f over each row, then take at most limit rows. Nil options are omitted and a negative limit is unbounded.",
+       :column (int 1)}
       :name
       'result-xform
       :ns

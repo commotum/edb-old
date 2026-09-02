@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.launcher)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.launcher)
+    {:doc
+     "Transactor command-line bootstrap. Loads the properties file, initializes Logback and process properties, and delegates validated startup to the transactor runtime."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -24,6 +28,7 @@
     :sql-user "datomic.sqlUser",
     :sql-password "datomic.sqlPassword"})
   (reset-meta! #'ambient-props-map (assoc {:column (int 1)} :name 'ambient-props-map :ns *ns*))
+  ;; Reconfigure Logback after exposing the selected directory as DATOMIC_LOG_DIR.
   (defn init-log-dir
     ([log_dir]
       (java.lang.System/setProperty "DATOMIC_LOG_DIR" ^java.lang.String log_dir)
@@ -43,6 +48,8 @@
       'init-log-dir
       :ns
       *ns*))
+  ;; Convert Java properties to keyword configuration, filling supported secrets
+  ;; from system properties when the file omits them, then start the runtime.
   (defn run-transactor
     ([props props_file]
       (java.lang.System/setProperty "datomic.cloudwatchName" "Transactor")
@@ -83,6 +90,7 @@
       'run-transactor
       :ns
       *ns*))
+  ;; Load a transactor properties file and run it as the command-line process.
   (defn -main
     ([props_file]
       (run-transactor

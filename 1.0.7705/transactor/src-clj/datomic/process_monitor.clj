@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.process-monitor)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.process-monitor)
+    {:doc
+     "Samples JVM memory, garbage collection, thread, executor, and process health information and records the corresponding operational metrics."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -55,6 +59,8 @@
       'convert-nanos-to-millis
       :ns
       *ns*))
+  ;; Returns one reporting snapshot. Each metric value is either a number or a statistics map
+  ;; containing :lo, :hi, :sum, and :count; callers must accept additional metric names and shapes.
   (defn snapshot-metrics
     ([]
       (let [status_map (mapv
@@ -65,6 +71,7 @@
   (reset-meta!
     #'snapshot-metrics
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'snapshot-metrics :ns *ns*))
+  ;; Resolves the configured one-argument Clojure function or public static Java method.
   (defn metrics-callback
     ([]
       (let [s (config/property "datomic.metricsCallback")
@@ -99,6 +106,7 @@
   (reset-meta!
     #'metrics-callback
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'metrics-callback :ns *ns*))
+  ;; Sends one snapshot to the callback and records success or failure without stopping reporting.
   (defn report-metrics
     ([callback]
       (let [m (snapshot-metrics)]
@@ -185,6 +193,7 @@
               "Datomic Metrics Reporter"
               (partial report-metrics callback)
               60000))))))
+  ;; Starts the process-wide reporter once; snapshots are delivered every sixty seconds.
   (defn start-metrics ([] (deref start-metrics-delay)))
   (reset-meta!
     #'start-metrics

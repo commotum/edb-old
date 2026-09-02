@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.builtins)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.builtins)
+    {:doc
+     "Built-in transaction functions. Expands entity retraction and compare-and-swap requests into ordinary transaction data evaluated against db-before."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -22,6 +26,7 @@
           ['datomic.query :as 'query]))))
   (set! *warn-on-reflection* true)
   (defn component-attr?
+    "Returns true when the attribute is a reference whose values are owned component entities."
     ([db a]
       (let [attr (.elementAt ^datomic.db.IDbImpl db a)]
         (and
@@ -30,13 +35,17 @@
   (reset-meta!
     #'component-attr?
     (assoc
-      {:arglists (clojure.core/list ['db 'a]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'a]),
+       :doc
+       "Returns true when the attribute is a reference whose values are owned component entities.",
+       :column (int 1)}
       :name
       'component-attr?
       :ns
       *ns*))
   (defn component-es-set
-    ([db e via_attrs]
+    "Returns the entity and every component entity reachable recursively from it. When via-attrs is supplied, the first traversal is limited to those component attributes."
+    ([db e via-attrs]
       (when e
         (let [es #{e}
               G__21713 [e]
@@ -46,7 +55,7 @@
               seq__21715 (next seq__21715)
               check first__21716
               more seq__21715
-              via via_attrs]
+              via via-attrs]
           (loop [es es G__21713 G__21713 via via]
             (let [es es
                   vec__21717 G__21713
@@ -81,12 +90,16 @@
   (reset-meta!
     #'component-es-set
     (assoc
-      {:arglists (clojure.core/list ['db 'e] ['db 'e 'via-attrs]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'e] ['db 'e 'via-attrs]),
+       :doc
+       "Returns the entity and every component entity reachable recursively from it. When via-attrs is supplied, the first traversal is limited to those component attributes.",
+       :column (int 1)}
       :name
       'component-es-set
       :ns
       *ns*))
   (defn build-retract-args
+    "Expands :db/retractEntity for an entity identifier. Returns retractions for the entity, its recursively owned components, and references from other entities to every retracted entity."
     ([db e]
       (let [temp__5825__auto__ (db/resolve-id db e)]
         (when temp__5825__auto__
@@ -137,34 +150,41 @@
   (reset-meta!
     #'build-retract-args
     (assoc
-      {:arglists (clojure.core/list ['db 'e]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'e]),
+       :doc
+       "Expands :db/retractEntity for an entity identifier. Returns retractions for the entity, its recursively owned components, and references from other entities to every retracted entity.",
+       :column (int 1)}
       :name
       'build-retract-args
       :ns
       *ns*))
   (defn compare-and-swap
-    ([db e a v_old v_new]
-      (when-not (and e a (not (nil? v_new)))
+    "Expands :db/cas for a cardinality-one attribute when its value in db-before equals v-old. A nil v-old requires the attribute to be absent. Throws a conflict when the observed value differs and rejects nil new values or cardinality-many attributes."
+    ([db e a v-old v-new]
+      (when-not (and e a (not (nil? v-new)))
         (error/arg
           :db.error/invalid-cas
           "entity, attribute, and new-value must be specified"
-          {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v-new v_new}))
+          {:datomic/cancelled true, :e e, :a a, :v-old v-old, :v-new v-new}))
       (when (= 36 (.-cardinality (db/attribute db (db/require-attrid db a))))
         (error/arg
           :db.error/invalid-cas-many
           "attribute must be cardinality-one"
-          {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v-new v_new}))
-      (let [v_cur (:v (first (db/datoms db :eavt [e a])))]
-        (if (= v_cur v_old)
-          [[:db/add e a v_new]]
+          {:datomic/cancelled true, :e e, :a a, :v-old v-old, :v-new v-new}))
+      (let [v-cur (:v (first (db/datoms db :eavt [e a])))]
+        (if (= v-cur v-old)
+          [[:db/add e a v-new]]
           (error/state
             :db.error/cas-failed
-            (str "Compare failed: " v_old " " v_cur)
-            {:datomic/cancelled true, :e e, :a a, :v-old v_old, :v v_cur})))))
+            (str "Compare failed: " v-old " " v-cur)
+            {:datomic/cancelled true, :e e, :a a, :v-old v-old, :v v-cur})))))
   (reset-meta!
     #'compare-and-swap
     (assoc
-      {:arglists (clojure.core/list ['db 'e 'a 'v-old 'v-new]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'e 'a 'v-old 'v-new]),
+       :doc
+       "Expands :db/cas for a cardinality-one attribute when its value in db-before equals v-old. A nil v-old requires the attribute to be absent. Throws a conflict when the observed value differs and rejects nil new values or cardinality-many attributes.",
+       :column (int 1)}
       :name
       'compare-and-swap
       :ns

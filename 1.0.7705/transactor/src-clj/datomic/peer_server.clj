@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.peer-server)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.peer-server)
+    {:doc
+     "Remote gateway for Datomic Client. Serves configured databases, authenticates access-key and secret pairs, executes reads and transactions with Peer semantics, retains iterative result state, and exposes an HTTPS health endpoint. Iterative requests must return to the server that owns their continuation state. Explicit database mode cannot create or delete databases; storage mode can administer databases in the configured system."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -837,6 +841,9 @@
       'add-admin-ops
       :ns
       *ns*))
+  ;; Creates the HTTPS Client gateway, operation SPI, authentication state, and health endpoint.
+  ;; Request concurrency is configurable; queued operations are bounded and each request is bounded
+  ;; to sixty seconds at the transport layer.
   (defn create
     ([p__26515]
       (let [map__26516 p__26515
@@ -901,9 +908,9 @@
   (defn cli-add-to-map
     ([m k p__26519]
       (let [vec__26520 p__26519
-            access_key (nth vec__26520 (int 0) nil)
+            access-key (nth vec__26520 (int 0) nil)
             secret (nth vec__26520 (int 1) nil)]
-        (update m k assoc access_key secret))))
+        (update m k assoc access-key secret))))
   (reset-meta!
     #'cli-add-to-map
     (assoc
@@ -989,6 +996,7 @@
       'print-summary
       :ns
       *ns*))
+  ;; Parses and validates launch options, then starts one server for the configured aliases or system.
   (defn -main*
     ([& args]
       (let [map__26538 (cli/parse-opts args cli-options :summary-fn summary-fn)

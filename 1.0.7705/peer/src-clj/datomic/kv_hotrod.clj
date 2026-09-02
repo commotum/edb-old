@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-hotrod)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-hotrod)
+    {:doc
+     "Infinispan Hot Rod KVStore adapter. Encodes Datomic value maps as binary entries and implements conditional revision writes through the remote cache."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['get])

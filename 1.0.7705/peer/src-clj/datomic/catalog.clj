@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.catalog)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.catalog)
+    {:doc
+     "Persistent catalog of database names, identities, lifecycle state, and storage roots for a Datomic system. Catalog updates use storage coordination so create, rename, delete, and restore preserve database identity."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -37,7 +41,7 @@
   (reset-meta!
     #'pod->catalog
     (assoc {:arglists (clojure.core/list ['pod]), :column (int 1)} :name 'pod->catalog :ns *ns*))
-  (defn valid-db-name? ([db_name] (not (re-find #"[\"*:=/?]" db_name))))
+  (defn valid-db-name? ([db-name] (not (re-find #"[\"*:=/?]" db-name))))
   (reset-meta!
     #'valid-db-name?
     (assoc
@@ -46,6 +50,7 @@
       'valid-db-name?
       :ns
       *ns*))
+  ;; Reads the system-scoped catalog pod and attaches its storage revision as :datomic/rev.
   (defn get-catalog
     ([cluster]
       (when-not (nil? (cluster/dbId cluster))
@@ -64,6 +69,7 @@
       'get-catalog
       :ns
       *ns*))
+  ;; Writes exactly the next catalog revision and returns {:failed :conflict} on a competing update.
   (defn put-catalog
     ([cluster catalog_map]
       (when-not (nil? (cluster/dbId cluster))
@@ -136,7 +142,7 @@
       'db-id->db-name
       :ns
       *ns*))
-  (defn db-name->db-id ([catalog db_name] (get-in catalog [db_name :db-id])))
+  (defn db-name->db-id ([catalog db-name] (get-in catalog [db-name :db-id])))
   (reset-meta!
     #'db-name->db-id
     (assoc
@@ -184,6 +190,7 @@
     #'with-retry
     (assoc {:arglists (clojure.core/list ['& 'body]), :column (int 1)} :name 'with-retry :ns *ns*))
   (.setMacro #'with-retry)
+  ;; Applies a conditional catalog transformation, retrying compare-and-swap conflicts up to ten times.
   (defn update-catalog
     ([cluster condition f]
       (common/retry-fn
@@ -258,6 +265,7 @@
       'add-database
       :ns
       *ns*))
+  ;; Allocates a stable database identity and records its name when neither name nor identity conflicts.
   (defn create-database*
     ([cluster p__16781]
       (let [map__16782 p__16781
@@ -288,7 +296,7 @@
       'create-database*
       :ns
       *ns*))
-  (defn create-database ([system_cluster desc] (create-database* system_cluster desc)))
+  (defn create-database ([system-cluster desc] (create-database* system-cluster desc)))
   (reset-meta!
     #'create-database
     (assoc
@@ -298,7 +306,7 @@
       :ns
       *ns*))
   (defn rename
-    ([catalog db_name new_name] (dissoc (assoc catalog new_name (get catalog db_name)) db_name)))
+    ([catalog db-name new-name] (dissoc (assoc catalog new-name (get catalog db-name)) db-name)))
   (reset-meta!
     #'rename
     (assoc
@@ -343,6 +351,7 @@
       'delete
       :ns
       *ns*))
+  ;; Removes the live name and retains the database identity in :datomic/deleted for later reclamation.
   (defn delete-database
     ([cluster db_name]
       (let [condition (fn condition
@@ -390,7 +399,7 @@
       'undelete-database
       :ns
       *ns*))
-  (defn remove-deleted ([catalog db_id] (update catalog :datomic/deleted (fnil disj #{}) db_id)))
+  (defn remove-deleted ([catalog db-id] (update catalog :datomic/deleted (fnil disj #{}) db-id)))
   (reset-meta!
     #'remove-deleted
     (assoc
@@ -450,7 +459,7 @@
       'deleted-database-id?
       :ns
       *ns*))
-  (defn parse-db-conf ([db_conf] db_conf))
+  (defn parse-db-conf ([db-conf] db-conf))
   (reset-meta!
     #'parse-db-conf
     (assoc

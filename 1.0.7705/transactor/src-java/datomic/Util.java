@@ -1,11 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.RT
- *  clojure.lang.Symbol
- *  clojure.lang.Var
- */
 package datomic;
 
 import clojure.lang.RT;
@@ -21,6 +13,10 @@ import java.util.Spliterators;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+/**
+ * Utilities for constructing immutable Java data structures, reading EDN,
+ * and adapting immutable iterables to streams.
+ */
 public final class Util {
     private static final Var REQUIRE = RT.var((String)"clojure.core", (String)"require");
     private static final Var NAME;
@@ -31,14 +27,32 @@ public final class Util {
     private Util() {
     }
 
+    /**
+     * Returns the unqualified name of a keyword or symbol.
+     *
+     * @param k keyword or symbol
+     * @return the unqualified name
+     */
     public static String name(Object k) {
         return (String)NAME.invoke(k);
     }
 
+    /**
+     * Returns the namespace of a keyword or symbol.
+     *
+     * @param k keyword or symbol
+     * @return namespace, or {@code null} for an unqualified value
+     */
     public static String namespace(Object k) {
         return (String)NAMESPACE.invoke(k);
     }
 
+    /**
+     * Creates an immutable list containing {@code items} in order.
+     *
+     * @param items list elements
+     * @return an immutable list containing {@code items}
+     */
     public static List list(Object ... items) {
         if (items == null) {
             return new ArrayList();
@@ -50,6 +64,13 @@ public final class Util {
         return Collections.unmodifiableList(list);
     }
 
+    /**
+     * Creates an immutable map from alternating keys and values.
+     *
+     * @param keyvals key, value, key, value, and so on
+     * @return an immutable map containing the supplied entries
+     * @throws IllegalArgumentException when an odd number of values is supplied
+     */
     public static Map map(Object ... keyvals) {
         if (keyvals == null) {
             return new HashMap();
@@ -64,19 +85,37 @@ public final class Util {
         return Collections.unmodifiableMap(m);
     }
 
+    /**
+     * Reads and returns one EDN value.
+     *
+     * @param source EDN source text
+     * @return the parsed EDN value
+     */
     public static Object read(String source) {
         return READ_STRING.invoke((Object)source);
     }
 
-    public static List readAll(Reader reader2) {
-        return (List)READ_ALL.invoke((Object)reader2);
+    /**
+     * Reads all EDN values from a reader and closes it.
+     *
+     * @param reader EDN input
+     * @return parsed values in source order
+     */
+    public static List readAll(Reader reader) {
+        return (List)READ_ALL.invoke((Object)reader);
     }
 
-    public static Stream streamOn(Iterable it) {
-        if (it == null) {
+    /**
+     * Creates a sequential stream over an immutable iterable.
+     *
+     * @param iterable values to stream
+     * @return an empty stream when {@code iterable} is {@code null}
+     */
+    public static Stream streamOn(Iterable iterable) {
+        if (iterable == null) {
             return Stream.empty();
         }
-        return StreamSupport.stream(Spliterators.spliteratorUnknownSize(it.iterator(), 1040), false);
+        return StreamSupport.stream(Spliterators.spliteratorUnknownSize(iterable.iterator(), 1040), false);
     }
 
     static {

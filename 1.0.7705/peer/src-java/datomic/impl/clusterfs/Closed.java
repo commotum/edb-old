@@ -1,15 +1,14 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.ILookup
- */
 package datomic.impl.clusterfs;
 
 import clojure.lang.ILookup;
 import datomic.impl.clusterfs.IClusterFS;
 import java.util.Collection;
 
+/**
+ * Singleton sentinel installed after a clustered file system is closed. Every
+ * operation fails immediately, preventing a closed full-text index reader from
+ * accessing immutable file chunks.
+ */
 public class Closed
 implements IClusterFS {
     public static final IClusterFS instance = new Closed();
@@ -41,4 +40,3 @@ implements IClusterFS {
         throw new IllegalStateException("IClusterFS is closed");
     }
 }
-

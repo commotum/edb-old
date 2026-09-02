@@ -3,7 +3,7 @@
   (.resetMeta
     (clojure.lang.Namespace/find 'datomic.index-direct-metrics)
     {:doc
-     "Generates statistics about datoms and segments by looking at root and dirs entries. Called at the end of indexing jobs. Reads fulltext cluster directly"})
+     "Computes datom and segment totals directly from durable index roots and directory nodes. Invoked after background indexing jobs to report the sizes of main, mid, history, and fulltext tiers without scanning every datom."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -267,4 +267,12 @@
          :IndexDatoms (long (aget ^longs totals (int 3)))})))
   (reset-meta!
     #'direct-metrics
-    (assoc {:arglists (clojure.core/list ['db]), :column (int 1)} :name 'direct-metrics :ns *ns*)))
+    (assoc
+      {:arglists (clojure.core/list ['db]),
+       :doc
+       "Returns durable index totals as :IndexSegments, :FulltextSegments, :Datoms, and :IndexDatoms. Counts include main, mid, and history tiers. AEVT counts for fulltext attribute ids are doubled when computing :IndexDatoms.",
+       :column (int 1)}
+      :name
+      'direct-metrics
+      :ns
+      *ns*)))

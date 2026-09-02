@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.garbage.fressian)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.garbage.fressian)
+    {:doc
+     "Fressian representations for persistent garbage trees. Root and directory nodes reference child values; leaf nodes contain immutable segment identifiers eligible for later reclamation."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

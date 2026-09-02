@@ -144,7 +144,11 @@
       'spec-validator
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.anomalizer" "throwable-categories") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.anomalizer" "throwable-categories")
+    {:doc
+     "Validated atom mapping throwable class symbols to anomaly categories. Category lookup walks superclasses, so entries apply to subclasses unless a more specific mapping is present.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.anomalizer" "throwable-categories")
     (atom
@@ -156,9 +160,9 @@
       :validator
       (spec-validator :datomic.anomalizer/throwable-categories)))
   (defn throwable-class-category
-    ([tc]
+    ([throwable-class]
       (let [cmap (deref throwable-categories)]
-        (loop [c tc]
+        (loop [c throwable-class]
           (let [temp__5802__auto__ (^clojure.lang.IFn cmap (symbol (.getName ^java.lang.Class c)))]
             (if temp__5802__auto__
               (let [cat temp__5802__auto__] cat)
@@ -169,12 +173,19 @@
   (reset-meta!
     #'throwable-class-category
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'tc {:tag 'Class})]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'throwable-class {:tag 'Class})]),
+       :doc
+       "Returns the configured anomaly category for throwable-class or its nearest configured superclass. Unclassified throwables use :cognitect.anomalies/fault.",
+       :column (int 1)}
       :name
       'throwable-class-category
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.anomalizer" "delegating-throwables") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.anomalizer" "delegating-throwables")
+    {:doc
+     "Validated atom of wrapper-exception class symbols whose anomaly category is determined from their cause.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.anomalizer" "delegating-throwables")
     (atom
@@ -182,17 +193,21 @@
       :validator
       (spec-validator :datomic.anomalizer/delegating-throwables)))
   (defn category-delegate
-    ([t]
+    ([throwable]
       (let [dset (deref delegating-throwables)]
-        (loop [c (.getClass t)]
+        (loop [c (.getClass throwable)]
           (if (^clojure.lang.IFn dset (symbol (.getName ^java.lang.Class c)))
-            (category-delegate (.getCause ^java.lang.Throwable t))
+            (category-delegate (.getCause ^java.lang.Throwable throwable))
             (let [temp__5802__auto__ (.getSuperclass ^java.lang.Class c)]
-              (if temp__5802__auto__ (let [super temp__5802__auto__] (recur super)) t)))))))
+              (if temp__5802__auto__
+                (let [super temp__5802__auto__] (recur super))
+                throwable)))))))
   (reset-meta!
     #'category-delegate
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 't {:tag 'Throwable})]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'throwable {:tag 'Throwable})]),
+       :doc "Unwraps configured wrapper exceptions until reaching the throwable that determines category.",
+       :column (int 1)}
       :name
       'category-delegate
       :ns
@@ -201,25 +216,29 @@
     java.lang.Throwable
     ThrowableAnomCat
     {:-throwable-anom-category (fn fn__3560 ([t] (throwable-class-category (class t))))})
-  (defn throwable-category ([t] (-throwable-anom-category (category-delegate t))))
+  (defn throwable-category
+    ([throwable] (-throwable-anom-category (category-delegate throwable))))
   (reset-meta!
     #'throwable-category
     (assoc
-      {:arglists (clojure.core/list ['t]), :column (int 1)}
+      {:arglists (clojure.core/list ['throwable]),
+       :doc
+       "Returns the Cognitect anomaly category for throwable after applying wrapper delegation and extensible category dispatch.",
+       :column (int 1)}
       :name
       'throwable-category
       :ns
       *ns*))
   (extend java.lang.Throwable ThrowableAnomData {:-throwable->anom-data (fn fn__3563 ([t] nil))})
   (defn throwable->anom
-    ([t return_throwable?]
+    ([t return-throwable?]
       (let [data (-throwable->anom-data t)
             ret (cond->
                   #:cognitect.anomalies{:message (.getMessage ^java.lang.Throwable t),
                                         :category (throwable-category t)}
                   data
                   (assoc :data data)
-                  return_throwable?
+                  return-throwable?
                   (assoc :throwable (Throwable->map t)))
             temp__5802__auto__ (.getCause ^java.lang.Throwable t)]
         (if temp__5802__auto__
@@ -230,6 +249,8 @@
     #'throwable->anom
     (assoc
       {:arglists (clojure.core/list ['t] [(.withMeta 't {:tag 'Throwable}) 'return-throwable?]),
+       :doc
+       "Converts a throwable into an anomaly map containing category and message, optional extension data, and a recursively converted cause. The one-argument form also includes Throwable->map output under :throwable; nested causes omit it.",
        :column (int 1)}
       :name
       'throwable->anom

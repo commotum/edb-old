@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.val-cluster)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.val-cluster)
+    {:doc
+     "Adapts an asynchronous value store to the ClusteredStore interface used by Datomic storage. Immutable values are represented as byte buffers; storage anomalies become exceptions at the cluster boundary, and missing values remain nil."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -51,6 +55,9 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.val-cluster" "-get")
         (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
+  ;; Bridge the value-store channel API to the future-returning cluster API.
+  ;; Value creation is conditional: a non-nil put result denotes :created,
+  ;; while an existing immutable value leaves the store unchanged.
   (deftype
     ValCluster
     [val_store]
@@ -200,6 +207,7 @@
       '->ValCluster
       :ns
       *ns*))
+  ;; Construct a clustered value store over the supplied asynchronous value store.
   (defn val-cluster ([val_store] (datomic.val_cluster.ValCluster. val_store)))
   (reset-meta!
     #'val-cluster

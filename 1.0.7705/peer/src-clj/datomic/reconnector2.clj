@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.reconnector2)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.reconnector2)
+    {:doc
+     "Maintains a reconnectable resource whose endpoint may change. Failed resources are closed, endpoint discovery is retried, and callers retain a stable reference while the active transactor changes."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

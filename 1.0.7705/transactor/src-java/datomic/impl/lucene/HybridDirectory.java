@@ -1,14 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.IFn
- *  com.datomic.lucene.store.Directory
- *  com.datomic.lucene.store.IndexInput
- *  com.datomic.lucene.store.IndexOutput
- *  org.slf4j.Logger
- *  org.slf4j.LoggerFactory
- */
 package datomic.impl.lucene;
 
 import clojure.lang.IFn;
@@ -22,6 +11,12 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Combines an immutable base directory with a writable local directory while
+ * constructing a full-text index. Reads prefer base files, new output is
+ * written locally, and deletion of a base file is delegated to the supplied
+ * handler for later cluster cleanup.
+ */
 public class HybridDirectory
 extends Directory {
     private Directory readDirectory;

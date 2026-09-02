@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.client-server.spi-support)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.client-server.spi-support)
+    {:doc
+     "Adapts Peer database values and operations to the Datomic Client server SPI. Applies basis, as-of, since, and history descriptors, enforces readiness, and implements query, pull, index, log, and transaction operations."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -84,6 +88,8 @@
       'effective-as-of-t
       :ns
       *ns*))
+  ;; Reconstructs a Client database value from its basis and time-filter descriptor.
+  ;; Requests beyond the local basis report a busy anomaly so the caller can retry after loading.
   (defn apply-filters
     ([db p__26213]
       (let [map__26214 p__26213
@@ -143,6 +149,7 @@
          (let [unfiltered_db (db/unfiltered db)
                filters (select-keys desc [:as-of :since :history])]
            (apply-filters unfiltered_db filters))))})
+  ;; Resolves a durable or speculative with-db value and applies its as-of, since, and history filters.
   (defn desc->db
     ([p__26222 db_id db_id_>db]
       (let [map__26223 p__26222
@@ -213,9 +220,11 @@
       'get-db
       :ns
       *ns*))
+  ;; Implements the server side of Client operations using Peer database values and connections.
+  ;; Streaming, chunking, offsets, limits, and transport timeouts are layered around this SPI.
   (deftype
     ClientServer
-    [id_>conn token_manager load_ch]
+    [id->conn token-manager load-ch]
     datomic.client_spi.server_spi.ServerSpi3
     (with-io-stats! [this f context] (io-stats/throw-if-ex! (io-stats/with-io-stats f context)))
     (transact
@@ -227,19 +236,19 @@
                              (to-array map__26250))
                            (if (seq map__26250) (first map__26250) {}))
                          map__26250)
-            database_id (get map__26250 :database-id)
-            tx_data (get map__26250 :tx-data)
-            io_context (get map__26250 :io-context)
-            conn (get id_>conn database_id)
+            database-id (get map__26250 :database-id)
+            tx-data (get map__26250 :tx-data)
+            io-context (get map__26250 :io-context)
+            conn (get id->conn database-id)
             result (deref
                      (.transactAsync
                        ^datomic.Connection conn
-                       ^java.util.List tx_data
-                       (when io_context {:io-context io_context})))]
+                       ^java.util.List tx-data
+                       (when io-context {:io-context io-context})))]
         (^clojure.lang.IFn complete result)))
-    (token-manager [this] token_manager)
-    (tx-range [this db_id db start end] (.txRange (.log (get id_>conn db_id)) start end))
-    (index-pull [this db arg_map] (pull/index-pull db arg_map))
+    (token-manager [this] token-manager)
+    (tx-range [this db-id db start end] (.txRange (.log (get id->conn db-id)) start end))
+    (index-pull [this db arg-map] (pull/index-pull db arg-map))
     (pull
       [this db request]
       (let [map__26249 request
@@ -318,16 +327,16 @@
             (map (fn fn__26239 ([p1__26232#] (delay (^clojure.lang.IFn pf p1__26232#)))) result)
             result))))
     (db-stats [this db] (stats/db-stats db))
-    (with [this db tx_data] (.with ^datomic.Database db ^java.util.List tx_data))
+    (with [this db tx-data] (.with ^datomic.Database db ^java.util.List tx-data))
     (db->desc [this db] (db->desc db))
     (desc->db
-      [this db_id desc]
-      (let [temp__5823__auto__ (get id_>conn db_id)]
+      [this db-id desc]
+      (let [temp__5823__auto__ (get id->conn db-id)]
         (if temp__5823__auto__
-          (let [conn temp__5823__auto__] (desc->db desc db_id (fn fn__26234 ([_] (get-db conn)))))
+          (let [conn temp__5823__auto__] (desc->db desc db-id (fn fn__26234 ([_] (get-db conn)))))
           (do
-            (when load_ch
-              (clojure.core.async/offer! load_ch {:db-id db_id})
+            (when load-ch
+              (clojure.core.async/offer! load-ch {:db-id db-id})
               (throw
                 (ex-info
                   "Loading database"
@@ -336,8 +345,8 @@
             nil)))))
   (clojure.core/import 'datomic.client_server.spi_support.ClientServer)
   (defn ->ClientServer
-    ([id_>conn token_manager load_ch]
-      (datomic.client_server.spi_support.ClientServer. id_>conn token_manager load_ch)))
+    ([id->conn token-manager load-ch]
+      (datomic.client_server.spi_support.ClientServer. id->conn token-manager load-ch)))
   (reset-meta!
     #'->ClientServer
     (assoc
@@ -346,10 +355,11 @@
       '->ClientServer
       :ns
       *ns*))
+  ;; Creates the operation adapter, optionally notifying a loader when a requested database is absent.
   (defn create-spi
-    ([id_>conn token_manager & p__26256]
-      (let [vec__26257 p__26256 load_ch (nth vec__26257 (int 0) nil)]
-        (->ClientServer id_>conn token_manager load_ch))))
+    ([id->conn token-manager & p__26256]
+      (let [vec__26257 p__26256 load-ch (nth vec__26257 (int 0) nil)]
+        (->ClientServer id->conn token-manager load-ch))))
   (reset-meta!
     #'create-spi
     (assoc

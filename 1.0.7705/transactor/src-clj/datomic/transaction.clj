@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.transaction)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.transaction)
+    {:doc
+     "Transaction transport and reporting support. Encodes transaction requests and results, assigns message identifiers, and records processing timings as transactions move through the serialized transactor pipeline."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['compare])
@@ -54,29 +58,42 @@
         (clojure.core/import 'datomic.impl.db.IDatum))))
   (set! *warn-on-reflection* true)
   (defn peer-message-type
+    "Classifies a message received by a peer as a transaction result, error, or index notification."
     ([msg] (or (:type msg) (if (:id msg) (if (:data msg) :tx :error) :index))))
   (reset-meta!
     #'peer-message-type
     (assoc
-      {:arglists (clojure.core/list ['msg]), :column (int 1)}
+      {:arglists (clojure.core/list ['msg]),
+       :doc
+       "Classifies a message received by a peer as a transaction result, error, or index notification.",
+       :column (int 1)}
       :name
       'peer-message-type
       :ns
       *ns*))
-  (defn submit-address ([db_name] (str db_name ".tx-submit")))
+  (defn submit-address
+    "Returns the transport address used to submit transactions for a database."
+    ([db-name] (str db-name ".tx-submit")))
   (reset-meta!
     #'submit-address
     (assoc
-      {:arglists (clojure.core/list ['db-name]), :column (int 1)}
+      {:arglists (clojure.core/list ['db-name]),
+       :doc "Returns the transport address used to submit transactions for a database.",
+       :column (int 1)}
       :name
       'submit-address
       :ns
       *ns*))
-  (defn push-address ([db_name] (str db_name ".tx-result")))
+  (defn push-address
+    "Returns the transport address on which transaction results are published for a database."
+    ([db-name] (str db-name ".tx-result")))
   (reset-meta!
     #'push-address
     (assoc
-      {:arglists (clojure.core/list ['db-name]), :column (int 1)}
+      {:arglists (clojure.core/list ['db-name]),
+       :doc
+       "Returns the transport address on which transaction results are published for a database.",
+       :column (int 1)}
       :name
       'push-address
       :ns
@@ -315,6 +332,7 @@
       :ns
       *ns*))
   (defn read-message
+    "Reads one Fressian transaction message and records when processing of its request began."
     ([is]
       (let [read_at (java.lang.System/nanoTime)
             fin (reader is)
@@ -323,13 +341,25 @@
         msg)))
   (reset-meta!
     #'read-message
-    (assoc {:arglists (clojure.core/list ['is]), :column (int 1)} :name 'read-message :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['is]),
+       :doc
+       "Reads one Fressian transaction message and records when processing of its request began.",
+       :column (int 1)}
+      :name
+      'read-message
+      :ns
+      *ns*))
   (defn create-procargs
+    "Builds a transaction request with a unique request id, transaction data, and optional processing options."
     ([tx options] (cond-> {:id (common/rand-uuid), :data tx} options (assoc :options options))))
   (reset-meta!
     #'create-procargs
     (assoc
-      {:arglists (clojure.core/list ['tx 'options]), :column (int 1)}
+      {:arglists (clojure.core/list ['tx 'options]),
+       :doc
+       "Builds a transaction request with a unique request id, transaction data, and optional processing options.",
+       :column (int 1)}
       :name
       'create-procargs
       :ns

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.io)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.io)
+    {:doc
+     "Binary and textual I/O primitives shared by storage and transport code. Provides non-consuming ByteBuffer coercion and slicing, exact channel reads and writes, chunking, gzip, EDN-to-buffer conversion, seven-bit packing for text storage, and CRC-32 descriptions."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'chunk))
@@ -131,28 +135,34 @@
     {:as-uri (fn fn__9610 ([s] (java.net.URI. ^java.lang.String s)))})
   (extend java.net.URI Coercions {:as-uri (fn fn__9612 ([s] s))})
   (extend java.net.URL Coercions {:as-uri (fn fn__9614 ([s] (.toURI ^java.net.URL s)))})
-  (defn byte-source->buffer ([b] (ByteBuffer/wrap (slurp-bytes b))))
+  (defn byte-source->buffer
+    ([byte-source] (ByteBuffer/wrap (slurp-bytes byte-source))))
   (reset-meta!
     #'byte-source->buffer
     (assoc
-      {:arglists (clojure.core/list ['b]), :column (int 1)}
+      {:arglists (clojure.core/list ['byte-source]),
+       :doc "Copies a ByteSource into a new heap ByteBuffer positioned at the first byte.",
+       :column (int 1)}
       :name
       'byte-source->buffer
       :ns
       *ns*))
   (defn alias-buf-bytes
-    ([buff]
+    ([buffer]
       (if (and
-            (.hasArray ^java.nio.ByteBuffer buff)
+            (.hasArray ^java.nio.ByteBuffer buffer)
             (=
-              (long (.remaining ^java.nio.Buffer buff))
-              (long (alength (.array ^java.nio.ByteBuffer buff)))))
-        (.array ^java.nio.ByteBuffer buff)
-        (slurp-bytes buff))))
+              (long (.remaining ^java.nio.Buffer buffer))
+              (long (alength (.array ^java.nio.ByteBuffer buffer)))))
+        (.array ^java.nio.ByteBuffer buffer)
+        (slurp-bytes buffer))))
   (reset-meta!
     #'alias-buf-bytes
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'buff {:tag 'ByteBuffer})]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'buffer {:tag 'ByteBuffer})]),
+       :doc
+       "Returns all remaining bytes in buffer. Reuses a complete accessible backing array when possible and otherwise returns a copy; buffer position is unchanged.",
+       :column (int 1)}
       :name
       'alias-buf-bytes
       :ns
@@ -176,21 +186,24 @@
       :ns
       *ns*))
   (defn expand-byte-array
-    ([buf valid_bytes new_length]
-      (if (<= new_length (count buf))
+    ([buf valid-bytes new-length]
+      (if (<= new-length (count buf))
         buf
-        (let [expanded_buf (byte-array (max new_length (* 2 (count buf))))]
+        (let [expanded-buf (byte-array (max new-length (* 2 (count buf))))]
           (java.lang.System/arraycopy
             buf
             (int 0)
-            expanded_buf
+            expanded-buf
             (int 0)
-            (int ^java.lang.Number valid_bytes))
-          expanded_buf))))
+            (int ^java.lang.Number valid-bytes))
+          expanded-buf))))
   (reset-meta!
     #'expand-byte-array
     (assoc
-      {:arglists (clojure.core/list ['buf 'valid-bytes 'new-length]), :column (int 1)}
+      {:arglists (clojure.core/list ['buf 'valid-bytes 'new-length]),
+       :doc
+       "Returns buf when it already has new-length capacity; otherwise allocates at least new-length bytes, copies valid-bytes from buf, and grows geometrically when possible.",
+       :column (int 1)}
       :name
       'expand-byte-array
       :ns
@@ -208,6 +221,8 @@
     (assoc
       {:arglists
        (clojure.core/list [(.withMeta 'is {:tag 'InputStream}) (.withMeta 'ba {:tag 'bytes})]),
+       :doc
+       "Reads exactly enough bytes to fill ba. Repeated short reads are allowed; premature end of stream throws.",
        :column (int 1)}
       :name
       'fill-array
@@ -239,6 +254,8 @@
       {:arglists
        (clojure.core/list
          [(.withMeta 'is {:tag 'InputStream}) (.withMeta 'bb {:tag 'ByteBuffer})]),
+       :doc
+       "Fills the remaining region of bb one byte at a time, flips it for reading, and throws on premature end of stream.",
        :column (int 1)}
       :name
       'fill-buffer
@@ -396,25 +413,25 @@
       :ns
       *ns*))
   (defn chunk
-    ([buf chunk_size]
-      (when-not (integer? chunk_size)
+    ([buf chunk-size]
+      (when-not (integer? chunk-size)
         (throw
           (java.lang.AssertionError.
             (str "Assert failed: " (pr-str (clojure.core/list 'integer? 'chunk-size))))))
-      (when-not (clojure.lang.Numbers/isPos chunk_size)
+      (when-not (clojure.lang.Numbers/isPos chunk-size)
         (throw
           (java.lang.AssertionError.
             (str "Assert failed: " (pr-str (clojure.core/list 'pos? 'chunk-size))))))
       (loop [buf (.duplicate ^java.nio.ByteBuffer buf) chunks []]
         (cond
           (= (.remaining ^java.nio.Buffer buf) 0) chunks
-          (< (.remaining ^java.nio.Buffer buf) chunk_size) (conj chunks buf)
+          (< (.remaining ^java.nio.Buffer buf) chunk-size) (conj chunks buf)
           :default (do
                      (recur
-                       (seek buf (long ^java.lang.Number chunk_size))
+                       (seek buf (long ^java.lang.Number chunk-size))
                        (conj
                          chunks
-                         (limit buf (long (+ (.position ^java.nio.Buffer buf) chunk_size))))))))))
+                         (limit buf (long (+ (.position ^java.nio.Buffer buf) chunk-size))))))))))
   (reset-meta!
     #'chunk
     (assoc
@@ -425,6 +442,8 @@
            {:pre
             [(.withMeta (clojure.core/list 'integer? 'chunk-size) {:column (int 10)})
              (.withMeta (clojure.core/list 'pos? 'chunk-size) {:column (int 33)})]})),
+       :doc
+       "Returns non-consuming ByteBuffer views that partition buf's remaining bytes into positive integer chunk-size pieces. The final piece may be shorter.",
        :column (int 1)}
       :name
       'chunk
@@ -465,6 +484,8 @@
     #'unchunk
     (assoc
       {:arglists (clojure.core/list (.withMeta ['bbufs] {:tag 'java.nio.ByteBuffer})),
+       :doc
+       "Copies the remaining bytes of each buffer into one heap ByteBuffer in encounter order without advancing the inputs.",
        :column (int 1)}
       :name
       'unchunk
@@ -474,6 +495,7 @@
     (clojure.lang.RT/var "datomic.io" "gzip-buffer")
     {:tag java.nio.ByteBuffer,
      :arglists (clojure.core/list [(.withMeta 'buff {:tag 'ByteBuffer})]),
+     :doc "Returns a gzip member containing buffer's remaining bytes without advancing buffer.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.io" "gzip-buffer")
@@ -503,6 +525,7 @@
     (clojure.lang.RT/var "datomic.io" "gunzip-buffer")
     {:tag java.nio.ByteBuffer,
      :arglists (clojure.core/list [(.withMeta 'buff {:tag 'ByteBuffer})]),
+     :doc "Inflates one gzip-compressed ByteBuffer and returns the uncompressed bytes in a heap buffer.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.io" "gunzip-buffer")
@@ -566,14 +589,30 @@
       :ns
       *ns*))
   (.setMacro #'with-serialization-print-settings)
-  (defn clj->bbuf ([s] (binding [*print-length* nil *print-level* nil] (string->bbuf (pr-str s)))))
+  (defn clj->bbuf
+    ([value]
+      (binding [*print-length* nil *print-level* nil] (string->bbuf (pr-str value)))))
   (reset-meta!
     #'clj->bbuf
-    (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'clj->bbuf :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['value]),
+       :doc "Prints value without collection or nesting limits and returns its UTF-8 EDN representation.",
+       :column (int 1)}
+      :name
+      'clj->bbuf
+      :ns
+      *ns*))
   (defn bbuf->clj ([bbuf] (edn/read-string (bbuf->string bbuf))))
   (reset-meta!
     #'bbuf->clj
-    (assoc {:arglists (clojure.core/list ['bbuf]), :column (int 1)} :name 'bbuf->clj :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['bbuf]),
+       :doc "Reads one EDN value from the UTF-8 bytes remaining in bbuf.",
+       :column (int 1)}
+      :name
+      'bbuf->clj
+      :ns
+      *ns*))
   (defn valid-buf-limit?
     ([bbuf limit]
       (<= 0 limit (java.lang.Integer/valueOf (int (.capacity ^java.nio.Buffer bbuf))))))
@@ -589,7 +628,10 @@
   (reset-meta!
     #'encode-base128
     (assoc
-      {:arglists (clojure.core/list (.withMeta ['raw] {:tag 'bytes})), :column (int 1)}
+      {:arglists (clojure.core/list (.withMeta ['raw] {:tag 'bytes})),
+       :doc
+       "Losslessly packs arbitrary bytes into a seven-bit byte sequence suitable for UTF-8 string storage.",
+       :column (int 1)}
       :name
       'encode-base128
       :ns
@@ -598,7 +640,9 @@
   (reset-meta!
     #'decode-base128
     (assoc
-      {:arglists (clojure.core/list ['coded]), :column (int 1)}
+      {:arglists (clojure.core/list ['coded]),
+       :doc "Decodes a seven-bit packed byte sequence produced by encode-base128.",
+       :column (int 1)}
       :name
       'decode-base128
       :ns
@@ -659,6 +703,8 @@
       {:arglists
        (clojure.core/list
          [(.withMeta 'bb {:tag 'ByteBuffer}) 'n (.withMeta 'rc {:tag 'ReadableByteChannel})]),
+       :doc
+       "Reads exactly n bytes from rc into bb, flips bb for reading, and throws IOException if the channel ends early.",
        :column (int 1)}
       :name
       'read-into-buffer
@@ -668,6 +714,7 @@
     (clojure.lang.RT/var "datomic.io" "read-n-bytes")
     {:tag java.nio.ByteBuffer,
      :arglists (clojure.core/list ['n (.withMeta 'rc {:tag 'ReadableByteChannel})]),
+     :doc "Reads exactly n bytes from rc into a heap ByteBuffer and throws IOException on premature end of stream.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.io" "read-n-bytes")
@@ -677,6 +724,7 @@
     (clojure.lang.RT/var "datomic.io" "read-n-direct-bytes")
     {:tag java.nio.ByteBuffer,
      :arglists (clojure.core/list ['n (.withMeta 'rc {:tag 'ReadableByteChannel})]),
+     :doc "Reads exactly n bytes from rc into a direct ByteBuffer and throws IOException on premature end of stream.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.io" "read-n-direct-bytes")
@@ -696,6 +744,7 @@
       {:arglists
        (clojure.core/list
          [(.withMeta 'bb {:tag 'ByteBuffer}) (.withMeta 'wc {:tag 'WritableByteChannel})]),
+       :doc "Writes every remaining byte of bb to wc, retrying short channel writes until the buffer is exhausted.",
        :column (int 1)}
       :name
       'write-buffer
@@ -719,7 +768,14 @@
             G__9670)))))
   (reset-meta!
     #'crc32
-    (assoc {:arglists (clojure.core/list ['bbuf]), :column (int 1)} :name 'crc32 :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['bbuf]),
+       :doc "Returns the unsigned CRC-32 value of bbuf's remaining bytes.",
+       :column (int 1)}
+      :name
+      'crc32
+      :ns
+      *ns*))
   (defn describe-bbuf
     ([bbuf]
       (when (instance? java.nio.ByteBuffer bbuf)

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.extension-resolver)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.extension-resolver)
+    {:doc
+     "Loads the classpath extension policy and resolves functions used by pull transforms. datomic/extensions.edn controls which qualified symbols may be loaded; entries may name individual Vars or use namespace/* to allow every symbol in a namespace. A small set of data-conversion transforms is always available."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['qualified-symbol?])
@@ -81,7 +85,11 @@
   (reset-meta!
     #'ensure-allow-list!
     (assoc
-      {:private true, :arglists (clojure.core/list ['allow-list]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['allow-list]),
+       :doc
+       "Validates an optional extension allowlist. A present value must be a collection; invalid configuration raises an :incorrect anomaly carrying the supplied value.",
+       :column (int 1)}
       :name
       'ensure-allow-list!
       :ns
@@ -133,7 +141,10 @@
   (reset-meta!
     #'load-extensions-config
     (assoc
-      {:arglists (clojure.core/list ['rsrc]), :column (int 1)}
+      {:arglists (clojure.core/list ['resource-name]),
+       :doc
+       "Reads and validates an EDN extension policy from a classpath resource. Raises a :not-found anomaly when the resource is absent.",
+       :column (int 1)}
       :name
       'load-extensions-config
       :ns
@@ -146,7 +157,11 @@
   (reset-meta!
     #'load-preds
     (assoc
-      {:private true, :arglists (clojure.core/list ['rsrc]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['resource-name]),
+       :doc
+       "Compiles each configured allowlist into a predicate that accepts explicitly named symbols and namespace wildcards.",
+       :column (int 1)}
       :name
       'load-preds
       :ns
@@ -207,7 +222,15 @@
                     (recur (next seq_15094) nil 0 0))))))))))
   (reset-meta!
     #'preload!
-    (assoc {:arglists (clojure.core/list ['path]), :column (int 1)} :name 'preload! :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['path]),
+       :doc
+       "Requires every namespace named by the extension policy so permitted transform Vars are available before use.",
+       :column (int 1)}
+      :name
+      'preload!
+      :ns
+      *ns*))
   (defn resolve!
     ([x context]
       (if (and (common/qualified-symbol? x) (allow? x context))
@@ -224,7 +247,10 @@
   (reset-meta!
     #'resolve!
     (assoc
-      {:arglists (clojure.core/list ['x 'context]), :column (int 1)}
+      {:arglists (clojure.core/list ['symbol 'policy-key]),
+       :doc
+       "Resolves an allowlisted qualified symbol, requiring its namespace on demand. Raises :forbidden when the symbol is outside policy and :not-found when an allowed symbol cannot be resolved.",
+       :column (int 1)}
       :name
       'resolve!
       :ns
@@ -236,7 +262,10 @@
   (reset-meta!
     #'resolve-built-in-xform
     (assoc
-      {:arglists (clojure.core/list ['sym]), :column (int 1)}
+      {:arglists (clojure.core/list ['symbol]),
+       :doc
+       "Resolves a built-in pull transform. The built-ins are str, name, namespace, keyword, symbol, and clojure.edn/read-string.",
+       :column (int 1)}
       :name
       'resolve-built-in-xform
       :ns
@@ -244,4 +273,12 @@
   (defn resolve-xform! ([sym] (or (resolve-built-in-xform sym) (resolve! sym :xforms))))
   (reset-meta!
     #'resolve-xform!
-    (assoc {:arglists (clojure.core/list ['sym]), :column (int 1)} :name 'resolve-xform! :ns *ns*)))
+    (assoc
+      {:arglists (clojure.core/list ['symbol]),
+       :doc
+       "Resolves a pull transform from the built-in set or from the :xforms allowlist in datomic/extensions.edn.",
+       :column (int 1)}
+      :name
+      'resolve-xform!
+      :ns
+      *ns*)))

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-cache)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-cache)
+    {:doc
+     "Builds the process-wide external cache stack from Valcache and Memcached configuration and owns its lifecycle. Either tier may be enabled independently."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -30,6 +34,7 @@
     (let [G__32085 (atom nil)]
       (add-watch G__32085 :datomic.kv-cache/closer common/closing-watch)
       G__32085))
+  ;; Remove and close the active external cache stack through the atom's closing watch.
   (defn shutdown ([] (reset! kv-cache-ref nil)))
   (reset-meta!
     #'shutdown
@@ -38,6 +43,9 @@
   (reset-meta!
     #'get-kv-cache-ref
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'get-kv-cache-ref :ns *ns*))
+  ;; Build the read-through hierarchy from enabled tiers. Reads check local
+  ;; Memcached, then Valcache, then shared Memcached; a lower-tier hit repairs
+  ;; every nearer tier traversed on the way back.
   (defn start-kv-cache
     ([]
       (let [record (fn record ([_] (monitor/add-stat :CacheStackRepair 1)))

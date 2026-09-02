@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.valcache-direct)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.valcache-direct)
+    {:doc
+     "Direct in-process Valcache lookup and write adapter. Values larger than one megabyte bypass this cache tier."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -66,6 +70,8 @@
       'fits-in-cache?
       :ns
       *ns*))
+  ;; Serve reads from local SSD and queue writes outside the caller's path.
+  ;; A read first observes a queued value for the same key, preserving read-after-write.
   (deftype
     ValcacheDirect
     [root shutdown_fn puts_pool]
@@ -165,6 +171,8 @@
       '->ValcacheDirect
       :ns
       *ns*))
+  ;; Open the configured cache directory and share the process-wide puts pool
+  ;; unless a caller supplies a dedicated pool.
   (defn create
     ([p__27894]
       (let [map__27895 p__27894

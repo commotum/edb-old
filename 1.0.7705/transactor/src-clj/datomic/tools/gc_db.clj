@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.tools.gc-db)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.tools.gc-db)
+    {:doc
+     "Standalone storage garbage collection for one Datomic database. The command accepts a database URI and an RFC3339-like cutoff instant, deletes unreachable storage segments older than that instant, prints per-batch and total segment counts, and always shuts down Datomic after a collection attempt. A conservative cutoff protects index values still used by long-running processes."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -23,17 +27,15 @@
   (defn -main
     ([& args]
       (if (= (count args) 2)
-        (let [vec__32075 args
-              uri (nth vec__32075 (int 0) nil)
-              tstamp_str (nth vec__32075 (int 1) nil)
-              tstamp (instant/read-instant-date tstamp_str)]
+        (let [[db-uri older-than] args
+              cutoff (instant/read-instant-date older-than)]
           (try
             (let [cluster (coord/create-db-cluster
-                            (coord/cluster-conf->resolved-conf (uri/parse uri)))
+                            (coord/cluster-conf->resolved-conf (uri/parse db-uri)))
                   counter (atom 0)]
               (garbage/gc
                 cluster
-                tstamp
+                cutoff
                 (fn fn__32078 ([ct] (swap! counter + ct) (prn {:segments ct}))))
               (prn {:finished true, :segments (deref counter)}))
             (finally (d/shutdown true))))
@@ -44,4 +46,12 @@
           nil))))
   (reset-meta!
     #'-main
-    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))
+    (assoc
+      {:arglists (clojure.core/list ['& 'args]),
+       :doc
+       "Collects unreachable storage for db-uri when it is older than the RFC3339-like older-than timestamp. Each callback prints {:segments n}; completion prints {:finished true :segments total}. Datomic shuts down in a finally block. Wrong argument count prints usage and exits -1; an invalid timestamp raises a parse error.",
+       :column (int 1)}
+      :name
+      '-main
+      :ns
+      *ns*)))

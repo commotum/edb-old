@@ -1,19 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.IDeref
- *  clojure.lang.IPersistentMap
- *  clojure.lang.RT
- *  clojure.lang.Var
- *  com.datomic.lucene.store.Directory
- *  com.datomic.lucene.store.IndexInput
- *  com.datomic.lucene.store.IndexOutput
- *  com.datomic.lucene.store.LockFactory
- *  com.datomic.lucene.store.RAMFile
- *  com.datomic.lucene.store.RAMOutputStream
- *  com.datomic.lucene.store.SingleInstanceLockFactory
- */
 package datomic.impl.lucene;
 
 import clojure.lang.IDeref;
@@ -32,6 +16,11 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.Map;
 
+/**
+ * In-memory Lucene directory backed by an atom containing an immutable map of
+ * file names to RAM files. File creation and deletion replace map entries
+ * atomically, and dereferencing returns the current directory snapshot.
+ */
 public class DirectoryRef
 extends Directory
 implements IDeref {

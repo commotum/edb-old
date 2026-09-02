@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.domain)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.domain)
+    {:doc
+     "Domain storage lookups and object caching. Composes immutable value-store reads, Fressian deserialization, repair retries, in-flight request sharing, and the process-wide object cache used by database indexes and logs."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -89,6 +93,7 @@
     (clojure.lang.RT/var "datomic.domain" "common-read-handlers")
     (merge log/read-handlers clusterfs/read-handlers fulltext/read-handlers gf/read-handlers))
   (defn uncached-lookup-factory
+    "Creates an object lookup that reads immutable values directly from storage and deserializes them with the handlers shared by logs, indexes, fulltext data, and cluster files."
     ([cluster]
       (cache/lookup-transformer
         (cluster/uncached-val-lookup cluster)
@@ -99,29 +104,36 @@
   (reset-meta!
     #'uncached-lookup-factory
     (assoc
-      {:arglists (clojure.core/list ['cluster]), :column (int 1)}
+      {:arglists (clojure.core/list ['cluster]),
+       :doc
+       "Creates an object lookup that reads immutable values directly from storage and deserializes them with the handlers shared by logs, indexes, fulltext data, and cluster files.",
+       :column (int 1)}
       :name
       'uncached-lookup-factory
       :ns
       *ns*))
   (defn create-object-cache
-    ([cache_bytes]
+    "Creates the weighted in-process cache for deserialized immutable storage values. The cache reserves headroom and accounts for the measured size of both keys and values."
+    ([cache-bytes]
       (do
         (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.domain")]
           (when (.isInfoEnabled ^org.slf4j.Logger logger)
             (.info
               ^org.slf4j.Logger logger
-              (logger/process {:event :cache/create, :cache-bytes cache_bytes})))
+              (logger/process {:event :cache/create, :cache-bytes cache-bytes})))
           nil)
         (cache/create-scaled-weight-limited
-          (long (* 0.9 cache_bytes))
+          (long (* 0.9 cache-bytes))
           (fn fn__17935 ([k v] (long (+ (size/memory-size k) (size/memory-size v)))))
           1000)))
     ([] (create-object-cache (config/property "datomic.objectCacheMax"))))
   (reset-meta!
     #'create-object-cache
     (assoc
-      {:arglists (clojure.core/list [] ['cache-bytes]), :column (int 1)}
+      {:arglists (clojure.core/list [] ['cache-bytes]),
+       :doc
+       "Creates the weighted in-process cache for deserialized immutable storage values. The cache reserves headroom and accounts for the measured size of both keys and values.",
+       :column (int 1)}
       :name
       'create-object-cache
       :ns
@@ -162,11 +174,21 @@
   (defmethod print-dup datomic.domain.ValcachePoller fn__17945 ([o w] (print-method o w)))
   (.setMeta (clojure.lang.RT/var "datomic.domain" "cache-delay") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.domain" "cache-delay") (delay (create-object-cache)))
-  (defn system-cache ([] (deref cache-delay)))
+  (defn system-cache
+    "Returns the lazily initialized process-wide object cache."
+    ([] (deref cache-delay)))
   (reset-meta!
     #'system-cache
-    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'system-cache :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list []),
+       :doc "Returns the lazily initialized process-wide object cache.",
+       :column (int 1)}
+      :name
+      'system-cache
+      :ns
+      *ns*))
   (defn peer-object-lookup
+    "Creates a peer lookup that shares concurrent loads, deserializes stored values, caches the resulting immutable objects, and records cache and segment-load statistics."
     ([val_lookup read_lookup object_cache]
       (let [load_counter (fn load_counter ([ctr] (keyword (str (name ctr) "-load"))))]
         (cache/lookup-cache
@@ -204,6 +226,8 @@
     (assoc
       {:arglists
        (clojure.core/list ['val-lookup 'read-lookup] ['val-lookup 'read-lookup 'object-cache]),
+       :doc
+       "Creates a peer lookup that shares concurrent loads, deserializes stored values, caches the resulting immutable objects, and records cache and segment-load statistics.",
        :column (int 1)}
       :name
       'peer-object-lookup
@@ -270,16 +294,22 @@
       '->DeserializingRepairingLookup
       :ns
       *ns*))
-  (defn deserializing-repairing-lookup ([cluster] (->DeserializingRepairingLookup cluster)))
+  (defn deserializing-repairing-lookup
+    "Creates a storage lookup that retries a failed deserialization after refreshing the underlying value-store cache."
+    ([cluster] (->DeserializingRepairingLookup cluster)))
   (reset-meta!
     #'deserializing-repairing-lookup
     (assoc
-      {:arglists (clojure.core/list ['cluster]), :column (int 1)}
+      {:arglists (clojure.core/list ['cluster]),
+       :doc
+       "Creates a storage lookup that retries a failed deserialization after refreshing the underlying value-store cache.",
+       :column (int 1)}
       :name
       'deserializing-repairing-lookup
       :ns
       *ns*))
   (defn lookup-with-object-cache
+    "Wraps an object lookup with in-process caching and records cache hits, misses, index loads, and segment loads."
     ([lookup object_cache]
       (let [load_counter (fn load_counter ([ctr] (keyword (str (name ctr) "-load"))))]
         (cache/lookup-cache
@@ -310,7 +340,10 @@
   (reset-meta!
     #'lookup-with-object-cache
     (assoc
-      {:arglists (clojure.core/list ['lookup] ['lookup 'object-cache]), :column (int 1)}
+      {:arglists (clojure.core/list ['lookup] ['lookup 'object-cache]),
+       :doc
+       "Wraps an object lookup with in-process caching and records cache hits, misses, index loads, and segment loads.",
+       :column (int 1)}
       :name
       'lookup-with-object-cache
       :ns

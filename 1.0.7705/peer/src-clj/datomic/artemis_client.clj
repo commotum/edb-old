@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.artemis-client)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.artemis-client)
+    {:doc
+     "Peer-side Artemis transport for transactor requests, transaction results, and database novelty notifications. Sessions authenticate from the published endpoint and surface connection failure to the reconnection lifecycle."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

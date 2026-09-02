@@ -1,6 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- */
 package datomic.impl;
 
 import java.util.concurrent.Callable;
@@ -10,6 +7,11 @@ import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Thread pool that orders submitted callable tasks by their natural priority.
+ * Callables must implement {@code Comparable}; their ordering is retained by
+ * the future tasks stored in the executor's priority queue.
+ */
 public class PriorityExecutor
 extends ThreadPoolExecutor {
     public PriorityExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit) {
@@ -37,4 +39,3 @@ extends ThreadPoolExecutor {
         }
     }
 }
-

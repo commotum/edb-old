@@ -2,7 +2,8 @@
   (clojure.core/in-ns 'datomic.monitor)
   (.resetMeta
     (clojure.lang.Namespace/find 'datomic.monitor)
-    {:doc "Deployment-agnostic status functions, requiring only a JVM."})
+    {:doc
+     "Deployment-agnostic process metrics. Collects counts and bounded statistics, takes reporting snapshots, emits alarms, and dispatches periodic metric maps to a configured callback. Metric maps are open to additional names and value shapes."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -152,6 +153,7 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.monitor" "statistics") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.monitor" "statistics") (atom (init-stats)))
+  ;; Atomically rotates the live accumulators and returns the completed reporting interval.
   (defn snapshot-statistics
     ([]
       (let [stats (deref statistics)]
@@ -210,10 +212,11 @@
       'snapshot-statistics
       :ns
       *ns*))
+  ;; Resolves a fully qualified callback symbol named by an EDN system property.
   (defn load-callback
-    ([prop_name]
+    ([prop-name]
       (let [temp__5804__auto__ (some->
-                                 (java.lang.System/getProperty ^java.lang.String prop_name)
+                                 (java.lang.System/getProperty ^java.lang.String prop-name)
                                  (edn/read-string))]
         (when temp__5804__auto__
           (let [s temp__5804__auto__]
@@ -235,6 +238,7 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.monitor" "metric-event-callback")
     (load-callback "datomic.metricEventCallback"))
+  ;; Records one observation and forwards it to the optional metric event callback.
   (defn add-stat
     ([k val]
       (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " val "\n" (pr-str 'k)))))
@@ -254,6 +258,7 @@
       'ns->ms
       :ns
       *ns*))
+  ;; Increments the aggregate alarm count and the count for a specific alarm category.
   (defn alarm ([k] (add-stat :Alarm 1) (add-stat (keyword (str "Alarm" (name k))) 1)))
   (reset-meta!
     #'alarm

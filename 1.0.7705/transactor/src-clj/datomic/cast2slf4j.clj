@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cast2slf4j)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cast2slf4j)
+    {:doc
+     "Routes Cognitect Caster events to structured SLF4J logging and increments Datomic metrics for event timing and alarm categories."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

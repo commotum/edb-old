@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.tools.repair-ch197761)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.tools.repair-ch197761)
+    {:doc
+     "Irreversible repair of incomplete excisions in stored history indexes. For each attempt, the tool loads the currently published index root, rebuilds the EAVT, AEVT, AVET, and reverse-reference history tiers without the reported datoms, verifies that only the four history roots and root revision changed, persists a replacement root map, and publishes it with a compare-and-swap. Concurrent index publication causes a retry; a successful publication marks and flushes superseded index segments for storage garbage collection."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -50,10 +54,18 @@
   (def DEFAULT_MAX_ATTEMPTS 3)
   (reset-meta!
     #'DEFAULT_MAX_ATTEMPTS
-    (assoc {:column (int 1)} :name 'DEFAULT_MAX_ATTEMPTS :ns *ns*))
+    (assoc
+      {:doc "Default number of index-root publication attempts when concurrent indexing causes conflicts.",
+       :column (int 1)}
+      :name
+      'DEFAULT_MAX_ATTEMPTS
+      :ns
+      *ns*))
   (.setMeta
     (clojure.lang.RT/var "datomic.tools.repair-ch197761" "merge-one-index")
-    {:column (int 1)})
+    {:doc
+     "Index merge primitive used to rebuild one stored history tier while applying excision predicates.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.tools.repair-ch197761" "merge-one-index")
     (deref #'index/merge-one-index))
@@ -62,13 +74,16 @@
     #'error
     (assoc
       {:private true, :arglists (clojure.core/list ['x]), :column (int 1)}
+      :doc "Writes x to the tool's synchronized progress-error stream."
       :name
       'error
       :ns
       *ns*))
   (.setMeta
     (clojure.lang.RT/var "datomic.tools.repair-ch197761" "index-configs")
-    {:column (int 1)})
+    {:doc
+     "Per-index configuration mapping report keys to history-root keys, datom comparators, directory comparators, partition functions, and merge result keys. VAET is stored under the RAET history root.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.tools.repair-ch197761" "index-configs")
     {:eavt
@@ -106,111 +121,114 @@
       :part-fn (constantly 42),
       :result-key :vaet}})
   (defn assert-root-map-ok
-    ([old_root_map new_root_map]
-      (let [vec__19891 (data/diff old_root_map new_root_map)
-            old_diff (nth vec__19891 (int 0) nil)
-            new_diff (nth vec__19891 (int 1) nil)
-            _ (nth vec__19891 (int 2) nil)
-            expected_different_keys #{:rev :avet-hist :eavt-hist :raet-hist :aevt-hist}]
+    ([old-root-map new-root-map]
+      (let [[old-diff new-diff _] (data/diff old-root-map new-root-map)
+            expected-different-keys #{:rev :avet-hist :eavt-hist :raet-hist :aevt-hist}]
         (when-not (and
-                    (= (set (keys old_diff)) expected_different_keys)
-                    (= (set (keys new_diff)) expected_different_keys))
+                    (= (set (keys old-diff)) expected-different-keys)
+                    (= (set (keys new-diff)) expected-different-keys))
           (throw
             (java.lang.RuntimeException.
               (str
                 "Something unexpected changed in the root-map.\nOld:\n"
-                old_root_map
+                old-root-map
                 "\nNew:\n"
-                new_root_map)))
+                new-root-map)))
           nil))))
   (reset-meta!
     #'assert-root-map-ok
     (assoc
       {:arglists (clojure.core/list ['old-root-map 'new-root-map]), :column (int 1)}
+      :doc
+      "Validates that a repaired root map changes exactly :rev, :eavt-hist, :aevt-hist, :avet-hist, and :raet-hist. Throws RuntimeException when any expected field is unchanged or any unrelated field differs."
       :name
       'assert-root-map-ok
       :ns
       *ns*))
   (defn update-and-persist-root-map
-    ([cluster old_root_map curr_root_map new_root_id new_rev]
-      (let [new_root_map (assoc curr_root_map :rev new_rev)
-            fressed_root (index/fress new_root_map index/common-write-handlers)]
-        (assert-root-map-ok old_root_map new_root_map)
-        (index/write-vals cluster {new_root_id fressed_root})
-        [new_root_id new_root_map])))
+    ([cluster old-root-map current-root-map new-root-id new-rev]
+      (let [new-root-map (assoc current-root-map :rev new-rev)
+            encoded-root (index/fress new-root-map index/common-write-handlers)]
+        (assert-root-map-ok old-root-map new-root-map)
+        (index/write-vals cluster {new-root-id encoded-root})
+        [new-root-id new-root-map])))
   (reset-meta!
     #'update-and-persist-root-map
     (assoc
       {:private true,
-       :arglists (clojure.core/list ['cluster 'old-root-map 'curr-root-map 'new-root-id 'new-rev]),
+       :arglists
+       (clojure.core/list ['cluster 'old-root-map 'current-root-map 'new-root-id 'new-rev]),
+       :doc
+       "Sets the replacement root revision, validates the permitted changes against old-root-map, writes the encoded map under new-root-id, and returns [new-root-id new-root-map]. Publication of that id is performed separately."
        :column (int 1)}
       :name
       'update-and-persist-root-map
       :ns
       *ns*))
   (defn prepare-excise-preds
-    ([unexcised_datoms]
-      (let [cmp (get-in index-configs [:eavt :cmp]) sds (sort cmp unexcised_datoms)]
+    ([unexcised-datoms]
+      (let [cmp (get-in index-configs [:eavt :cmp])
+            sorted-datoms (sort cmp unexcised-datoms)]
         [(reify
            datomic.excise.ExcisePred
            (ep-remove?
              [this d]
-             (<= 0 (Collections/binarySearch ^java.util.List sds d ^java.util.Comparator cmp)))
-           (ep-datoms [this] sds))])))
+             (<=
+               0
+               (Collections/binarySearch
+                 ^java.util.List sorted-datoms
+                 d
+                 ^java.util.Comparator cmp)))
+           (ep-datoms [this] sorted-datoms))])))
   (reset-meta!
     #'prepare-excise-preds
     (assoc
       {:private true, :arglists (clojure.core/list ['unexcised-datoms]), :column (int 1)}
+      :doc
+      "Returns an excision predicate backed by the reported datoms sorted in EAVT order. Membership uses binary search, and ep-datoms exposes the same ordered collection to the index merger."
       :name
       'prepare-excise-preds
       :ns
       *ns*))
   (defn excise-tier
-    ([p__19900 db as_of_t old_root_id config xpreds]
-      (let [map__19901 p__19900
-            map__19901 (if (seq? map__19901)
-                         (if (next map__19901)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19901))
-                           (if (seq map__19901) (first map__19901) {}))
-                         map__19901)
-            cluster (get map__19901 :cluster)
-            olookup (get map__19901 :olookup)]
-        (merge-one-index
-          db
-          cluster
-          olookup
-          old_root_id
-          []
-          []
-          (:part-fn config)
-          (:cmp config)
-          index/common-write-handlers
-          false
-          as_of_t
-          (:idxcmp config)
-          xpreds
-          nil
-          (:cmpi config)))))
+    ([{:keys [cluster olookup]} db as-of-t old-root-id config xpreds]
+      (merge-one-index
+        db
+        cluster
+        olookup
+        old-root-id
+        []
+        []
+        (:part-fn config)
+        (:cmp config)
+        index/common-write-handlers
+        false
+        as-of-t
+        (:idxcmp config)
+        xpreds
+        nil
+        (:cmpi config))))
   (reset-meta!
     #'excise-tier
     (assoc
       {:private true,
        :arglists
        (clojure.core/list [{:keys ['cluster 'olookup]} 'db 'as-of-t 'old-root-id 'config 'xpreds]),
+       :doc
+       "Rebuilds one history index rooted at old-root-id through basis as-of-t, removing datoms selected by xpreds. Returns the index merger's new root id, garbage ids, retractions, and metrics."
        :column (int 1)}
       :name
       'excise-tier
       :ns
       *ns*))
   (defn p
-    ([when map]
+    ([label root-map]
       (tools/progress
         prn
         (merge
-          {:when when}
+          {:when label}
           (select-keys
-            map
+            root-map
             [:basisT
              :nextT
              :rev
@@ -222,144 +240,137 @@
              :raet-hist])))))
   (reset-meta!
     #'p
-    (assoc {:arglists (clojure.core/list ['when 'map]), :column (int 1)} :name 'p :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['label 'root-map]),
+       :doc
+       "Emits the identifying revision, level, and history-root fields of root-map with label to the progress stream.",
+       :column (int 1)}
+      :name
+      'p
+      :ns
+      *ns*))
   (defn excise-index*
-    ([cr db root_map sort_kw_>datoms]
-      (let [as_of_t (:basisT root_map)
-            vec__19904 (reduce
-                         (fn fn__19908
-                           ([p__19907 sort]
-                             (let [vec__19909 p__19907
-                                   m (nth vec__19909 (int 0) nil)
-                                   g (nth vec__19909 (int 1) nil)
-                                   metrics (nth vec__19909 (int 2) nil)
-                                   config (index-configs sort)
-                                   hist_idx_root_id (^clojure.lang.IFn root_map
-                                                      (:hist-index-key config))
-                                   unexcised_datoms (get sort_kw_>datoms sort)
-                                   _ (tools/progress
-                                       prn
-                                       {:phase :repair/index-start,
-                                        :index sort,
-                                        :as-of-t as_of_t,
-                                        :hist-idx-root-id hist_idx_root_id,
-                                        :unexcised-datoms
-                                        (java.lang.Integer/valueOf (int (count unexcised_datoms))),
-                                        :version 1})
-                                   xpreds (prepare-excise-preds unexcised_datoms)
-                                   vec__19912 (excise-tier
-                                                cr
-                                                db
-                                                as_of_t
-                                                hist_idx_root_id
-                                                config
-                                                xpreds)
-                                   new_hist_idx_root_id (nth vec__19912 (int 0) nil)
-                                   garbage_ids (nth vec__19912 (int 1) nil)
-                                   _retract (nth vec__19912 (int 2) nil)
-                                   tier_metrics (nth vec__19912 (int 3) nil)]
-                               (tools/progress
-                                 prn
-                                 {:phase :repair/index-end,
-                                  :index sort,
-                                  :old-root-id hist_idx_root_id,
-                                  :new-root-id new_hist_idx_root_id,
-                                  :version 1})
-                               [(assoc m (:hist-index-key config) new_hist_idx_root_id)
-                                (into g garbage_ids)
-                                (index/aggregate-metrics metrics tier_metrics)])))
-                         [root_map [] {}]
-                         [:eavt :aevt :avet :raet])
-            new_root_map (nth vec__19904 (int 0) nil)
-            garbage_ids (nth vec__19904 (int 1) nil)
-            metrics (nth vec__19904 (int 2) nil)]
-        [new_root_map garbage_ids (:written metrics) (:dirs-written metrics)])))
+    ([connection-resources db root-map index->datoms]
+      (let [as-of-t (:basisT root-map)
+            [new-root-map garbage-ids metrics]
+            (reduce
+              (fn [[current-root-map accumulated-garbage metrics] index-name]
+                (let [config (index-configs index-name)
+                      history-index-root-id (root-map (:hist-index-key config))
+                      unexcised-datoms (get index->datoms index-name)
+                      _ (tools/progress
+                          prn
+                          {:phase :repair/index-start,
+                           :index index-name,
+                           :as-of-t as-of-t,
+                           :hist-idx-root-id history-index-root-id,
+                           :unexcised-datoms
+                           (java.lang.Integer/valueOf (int (count unexcised-datoms))),
+                           :version 1})
+                      xpreds (prepare-excise-preds unexcised-datoms)
+                      [new-history-index-root-id garbage-ids _retractions tier-metrics]
+                      (excise-tier
+                        connection-resources
+                        db
+                        as-of-t
+                        history-index-root-id
+                        config
+                        xpreds)]
+                  (tools/progress
+                    prn
+                    {:phase :repair/index-end,
+                     :index index-name,
+                     :old-root-id history-index-root-id,
+                     :new-root-id new-history-index-root-id,
+                     :version 1})
+                  [(assoc
+                     current-root-map
+                     (:hist-index-key config)
+                     new-history-index-root-id)
+                   (into accumulated-garbage garbage-ids)
+                   (index/aggregate-metrics metrics tier-metrics)]))
+              [root-map [] {}]
+              [:eavt :aevt :avet :raet])]
+        [new-root-map garbage-ids (:written metrics) (:dirs-written metrics)])))
   (reset-meta!
     #'excise-index*
     (assoc
       {:private true,
-       :arglists (clojure.core/list ['cr 'db 'root-map 'sort-kw->datoms]),
+       :arglists (clojure.core/list ['connection-resources 'db 'root-map 'index->datoms]),
+       :doc
+       "Rebuilds all four history indexes from root-map at its basis t. index->datoms supplies the reported removals for each index. Returns [new-root-map garbage-ids segments-written directories-written] after emitting per-index progress events."
        :column (int 1)}
       :name
       'excise-index*
       :ns
       *ns*))
   (defn excise-index
-    ([p__19917 sort_kw_>datoms max_attempts]
-      (let [map__19918 p__19917
-            map__19918 (if (seq? map__19918)
-                         (if (next map__19918)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19918))
-                           (if (seq map__19918) (first map__19918) {}))
-                         map__19918)
-            cr map__19918
-            cluster (get map__19918 :cluster)
-            olookup (get map__19918 :olookup)]
-        (loop [i 0]
-          (if (< i max_attempts)
-            (let [index_ref_key_name (index/index-ref-key-name cluster)
-                  index_root_ref (deref (cluster/get-ref cluster index_ref_key_name))
-                  index_root_id (cluster/val-key->uuid (common/getx index_root_ref :key))
-                  ref_rev (common/getx index_root_ref :rev)
-                  root_map (common/getx olookup index_root_id)
-                  _ (p "old-root-map" root_map)
-                  db (dx/get-db-from-connection-resources cr)
-                  vec__19919 (excise-index*
-                               cr
-                               db
-                               root_map
-                               (set/rename-keys sort_kw_>datoms {:vaet :raet}))
-                  new_root_map (nth vec__19919 (int 0) nil)
-                  garbage_ids (nth vec__19919 (int 1) nil)
-                  segs_written (nth vec__19919 (int 2) nil)
-                  dirs_written (nth vec__19919 (int 3) nil)
-                  vec__19922 (update-and-persist-root-map
-                               cluster
-                               root_map
-                               new_root_map
-                               (common/rand-uuid)
-                               (inc (:rev root_map)))
-                  new_root_id (nth vec__19922 (int 0) nil)
-                  new_root_map (nth vec__19922 (int 1) nil)
-                  _ (p "new-root-map" new_root_map)]
-              (if (=
-                    :ok
-                    (deref
-                      (cluster/set-ref
-                        cluster
-                        index_ref_key_name
-                        (inc ref_rev)
-                        (cluster/uuid->val-key new_root_id))))
-                (do
-                  (garbage/mark-garbage cluster olookup garbage_ids)
-                  (garbage/flush-garbage cluster olookup)
-                  (error (str "Index repair completed."))
-                  {:old-root-id index_root_id,
-                   :new-root-id new_root_id,
-                   :segs-written segs_written,
-                   :dirs-written dirs_written})
-                (do
-                  (error (str "Conflict updating index root at rev " (inc ref_rev)))
-                  (recur (inc i)))))
-            (do
-              (throw
-                (java.lang.RuntimeException.
-                  (str "Could not fix index after " max_attempts " tries. Quitting.")))
-              nil))))))
+    ([{:keys [cluster olookup], :as connection-resources} index->datoms max-attempts]
+      (loop [attempt 0]
+        (if (< attempt max-attempts)
+          (let [index-ref-key-name (index/index-ref-key-name cluster)
+                index-root-ref (deref (cluster/get-ref cluster index-ref-key-name))
+                index-root-id (cluster/val-key->uuid (common/getx index-root-ref :key))
+                ref-revision (common/getx index-root-ref :rev)
+                root-map (common/getx olookup index-root-id)
+                _ (p "old-root-map" root-map)
+                db (dx/get-db-from-connection-resources connection-resources)
+                [new-root-map garbage-ids segments-written directories-written]
+                (excise-index*
+                  connection-resources
+                  db
+                  root-map
+                  (set/rename-keys index->datoms {:vaet :raet}))
+                [new-root-id persisted-root-map]
+                (update-and-persist-root-map
+                  cluster
+                  root-map
+                  new-root-map
+                  (common/rand-uuid)
+                  (inc (:rev root-map)))
+                _ (p "new-root-map" persisted-root-map)]
+            (if (=
+                  :ok
+                  (deref
+                    (cluster/set-ref
+                      cluster
+                      index-ref-key-name
+                      (inc ref-revision)
+                      (cluster/uuid->val-key new-root-id))))
+              (do
+                (garbage/mark-garbage cluster olookup garbage-ids)
+                (garbage/flush-garbage cluster olookup)
+                (error (str "Index repair completed."))
+                {:old-root-id index-root-id,
+                 :new-root-id new-root-id,
+                 :segs-written segments-written,
+                 :dirs-written directories-written})
+              (do
+                (error (str "Conflict updating index root at rev " (inc ref-revision)))
+                (recur (inc attempt)))))
+          (do
+            (throw
+              (java.lang.RuntimeException.
+                (str "Could not fix index after " max-attempts " tries. Quitting.")))
+            nil)))))
   (reset-meta!
     #'excise-index
     (assoc
       {:private true,
        :arglists
-       (clojure.core/list [{:keys ['cluster 'olookup], :as 'cr} 'sort-kw->datoms 'max-attempts]),
+       (clojure.core/list
+         [{:keys ['cluster 'olookup], :as 'connection-resources}
+          'index->datoms
+          'max-attempts]),
+       :doc
+       "Builds and publishes a repaired index root. Publication uses the current reference revision as a compare-and-swap guard; conflicts reload the newest root and rebuild up to max-attempts. On success, merge-reported superseded segments are marked and flushed for garbage collection. Returns old and new root ids with write metrics, or throws after the final conflict.",
        :column (int 1)}
       :name
       'excise-index
       :ns
       *ns*))
   (defn repair-db*
-    ([uri report max_attempts]
+    ([uri report max-attempts]
       (error
         (str
           "Cleaning-up unexcised datoms for "
@@ -371,16 +382,12 @@
         prn
         {:phase :repair/start, :start-t 0, :end-t (:t report), :uri uri, :version 1})
       (when-not (deref cluster-stack/kv-cache-ref) (cluster-stack/start-kv-cache))
-      (let [cr (tools/connection-resources uri)
-            map__19926 (excise-index (assoc cr :uri uri) (:results report) max_attempts)
-            map__19926 (if (seq? map__19926)
-                         (if (next map__19926)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19926))
-                           (if (seq map__19926) (first map__19926) {}))
-                         map__19926)
-            segs_written (get map__19926 :segs-written)
-            dirs_written (get map__19926 :dirs-written)]
+      (let [connection-resources (tools/connection-resources uri)
+            {:keys [segs-written dirs-written]}
+            (excise-index
+              (assoc connection-resources :uri uri)
+              (:results report)
+              max-attempts)]
         (tools/progress
           prn
           {:phase :repair/end,
@@ -391,12 +398,14 @@
     #'repair-db*
     (assoc
       {:arglists (clojure.core/list ['uri 'report 'max-attempts]), :column (int 1)}
+      :doc
+      "Repairs the history roots described by report for uri, retrying root publication at most max-attempts times. Starts the storage cache when needed and emits start, per-index, root-map, and completion progress records with write counts."
       :name
       'repair-db*
       :ns
       *ns*))
   (defn repair-db
-    ([uri out_filename max_attempts]
+    ([uri out-filename max-attempts]
       (try
         (let [report (dx/find-zombie-datoms-with-summary uri)]
           (println " ")
@@ -410,7 +419,7 @@
                 (:uri report)))
             (if (:ok report)
               (error "DB does not need repair.")
-              (do (dx/write-report report out_filename) (repair-db* uri report max_attempts)))))
+              (do (dx/write-report report out-filename) (repair-db* uri report max-attempts)))))
         (catch
           java.lang.Throwable
           t
@@ -427,6 +436,8 @@
     #'repair-db
     (assoc
       {:arglists (clojure.core/list ['uri 'out-filename 'max-attempts]), :column (int 1)}
+      :doc
+      "Rechecks uri, prints its summary, and repairs it when incomplete excisions are found. The full report is written to out-filename before mutation. Failures print a stack trace, flush progress, shut down Datomic, and exit -1; normal completion flushes progress and shuts down Datomic."
       :name
       'repair-db
       :ns
@@ -441,20 +452,26 @@
         "bin/run -Xmx${MEM} -m datomic.tools.excise-history repair ${URI} ${report-file-name} ${max-attempts}")))
   (reset-meta!
     #'help
-    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'help :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list []),
+       :doc "Prints report and repair command forms for the excise-history tool.",
+       :column (int 1)}
+      :name
+      'help
+      :ns
+      *ns*))
   (defn -main
     ([& args]
       (if (>= (count args) 2)
         (let [op (first args)
               uri (second args)
-              out_filename (nth args (int 2) nil)
-              max_attempts (parse-long (nth args (int 3) ""))
-              G__19932 op]
+              out-filename (nth args (int 2) nil)
+              max-attempts (parse-long (nth args (int 3) ""))]
           (case
-            G__19932
+            op
             "report"
             (if (= (count args) 3)
-              (let [summary (dx/write-zombie-datoms-report uri out_filename)]
+              (let [summary (dx/write-zombie-datoms-report uri out-filename)]
                 (println " ")
                 (prn summary)
                 (when-not (:ok summary) (error (str "Database needs repair: " uri)))
@@ -463,9 +480,9 @@
               (help))
             "repair"
             (if (= (count args) 3)
-              (repair-db uri out_filename DEFAULT_MAX_ATTEMPTS)
-              (if (and (= (long (count args)) 4) max_attempts (number? max_attempts))
-                (repair-db uri out_filename max_attempts)
+              (repair-db uri out-filename DEFAULT_MAX_ATTEMPTS)
+              (if (and (= (long (count args)) 4) max-attempts (number? max-attempts))
+                (repair-db uri out-filename max-attempts)
                 (help)))
             (help)))
         (help))
@@ -473,4 +490,12 @@
       nil))
   (reset-meta!
     #'-main
-    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))
+    (assoc
+      {:arglists (clojure.core/list ['& 'args]),
+       :doc
+       "Runs excise-history report or repair mode. Report exits 0 when clean and 1 when repair is needed. Repair uses three publication attempts unless max-attempts is supplied, exits -1 on failure, and exits 0 after success. Malformed commands print usage and exit 0.",
+       :column (int 1)}
+      :name
+      '-main
+      :ns
+      *ns*)))

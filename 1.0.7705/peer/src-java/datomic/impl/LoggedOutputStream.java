@@ -1,10 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  org.fressian.impl.BytesOutputStream
- *  org.slf4j.Logger
- */
 package datomic.impl;
 
 import java.io.IOException;
@@ -12,6 +5,11 @@ import java.io.OutputStream;
 import org.fressian.impl.BytesOutputStream;
 import org.slf4j.Logger;
 
+/**
+ * Converts newline-delimited byte output into debug log records. Bytes are
+ * buffered until a line feed arrives, then the completed line is emitted and
+ * the buffer is reused.
+ */
 public class LoggedOutputStream
 extends OutputStream {
     BytesOutputStream bos = new BytesOutputStream();
@@ -31,4 +29,3 @@ extends OutputStream {
         }
     }
 }
-

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.connector)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.connector)
+    {:doc
+     "Peer-side transactor transport over ActiveMQ Artemis. Connectors consume coordination-published endpoints, choose primary or alternate hosts for the deployment environment, cache session factories, own producer and temporary notification-queue lifecycles, dispatch transaction, error, index, and sync messages, and perform bounded administrative RPCs. Failure handlers return endpoint loss to the connection recovery loop."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -49,7 +53,12 @@
     (defprotocol Startable (start [_] "Idempotently start a task, returning a future."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.connector" "Startable")
-      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'Startable :ns *ns*))
+      (assoc
+        (assoc protocol_metadata__7463 :doc "Idempotent activation of a lazily prepared transport task.")
+        :name
+        'Startable
+        :ns
+        *ns*))
     (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
@@ -67,14 +76,24 @@
   (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
       NotificationHandler
-      (notify-sync [_ id] "Sync completed")
-      (notify-data [_ msg] "Transaction completed. msg has id/data/tempids/io-stats")
-      (notify-error [_ id error] "Transaction id failed, with error")
-      (notify-db [_ db] "New database value. Used when catching up during connect or recovery.")
-      (notify-index [_] "Database has a new index in storage."))
+      (notify-sync [_ id] "Reports completion of the synchronization request identified by id.")
+      (notify-data
+        [_ msg]
+        "Reports a completed transaction. msg carries :id, :data, :tempids, and :io-stats.")
+      (notify-error [_ id error] "Reports that transaction id failed with error.")
+      (notify-db [_ db] "Installs a database value while catching up during connection or recovery.")
+      (notify-index [_] "Reports that a newer durable index is available."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.connector" "NotificationHandler")
-      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'NotificationHandler :ns *ns*))
+      (assoc
+        (assoc
+          protocol_metadata__7466
+          :doc
+          "Callbacks that apply transactor results and database-state notifications to a live connection.")
+        :name
+        'NotificationHandler
+        :ns
+        *ns*))
     (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
@@ -82,7 +101,8 @@
                                         'notify-sync
                                         {:arglists (clojure.core/list ['_ 'id])}),
                                       :arglists (clojure.core/list ['_ 'id]),
-                                      :doc "Sync completed"}
+                                      :doc
+                                      "Reports completion of the synchronization request identified by id."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -101,7 +121,7 @@
                                         {:arglists (clojure.core/list ['_ 'msg])}),
                                       :arglists (clojure.core/list ['_ 'msg]),
                                       :doc
-                                      "Transaction completed. msg has id/data/tempids/io-stats"}
+                                      "Reports a completed transaction. msg carries :id, :data, :tempids, and :io-stats."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -119,7 +139,7 @@
                                         'notify-error
                                         {:arglists (clojure.core/list ['_ 'id 'error])}),
                                       :arglists (clojure.core/list ['_ 'id 'error]),
-                                      :doc "Transaction id failed, with error"}
+                                      :doc "Reports that transaction id failed with error."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -138,7 +158,7 @@
                                         {:arglists (clojure.core/list ['_ 'db])}),
                                       :arglists (clojure.core/list ['_ 'db]),
                                       :doc
-                                      "New database value. Used when catching up during connect or recovery."}
+                                      "Installs a database value while catching up during connection or recovery."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -156,7 +176,7 @@
                                         'notify-index
                                         {:arglists (clojure.core/list ['_])}),
                                       :arglists (clojure.core/list ['_]),
-                                      :doc "Database has a new index in storage."}
+                                      :doc "Reports that a newer durable index is available."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -170,25 +190,33 @@
   (let [protocol_metadata__7477 {:column (int 1)}]
     (defprotocol
       TransactorConnector
-      (endpoint [_] "Return the transactor endpoint or nil.")
+      (endpoint [_] "Returns the transactor endpoint, or nil when unavailable.")
       (admin-request*
         [_ request arg timeout-msec]
-        "Send request to transactor. Returns map that will have :db/error and :message if error.")
+        "Sends a bounded request to the transactor and returns a response envelope. Error envelopes contain :db/error and :message.")
       (create-notifier
         [_ handler failure-handler]
-        "Create notifier, but do not start processing. Returns value implements Startable and AsyncShutdown")
+        "Creates an inactive notification consumer implementing Startable and AsyncShutdown.")
       (start-updater
         [_ update-queue push-handler failure-handler]
-        "Start updater, taking transactions from update-queue and queuing them to the transactor. Return value implements AsyncShutdown. Calls failure-handler with no args if update put fails. Calls push-handler (a NotificationHandler) with any errors that occur prior to remote call"))
+        "Starts a transaction updater over update-queue and returns an AsyncShutdown handle. Transport failures reach failure-handler; serialization failures reach push-handler as transaction errors."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.connector" "TransactorConnector")
-      (assoc (assoc protocol_metadata__7477 :doc nil) :name 'TransactorConnector :ns *ns*))
+      (assoc
+        (assoc
+          protocol_metadata__7477
+          :doc
+          "Transport operations connecting a peer's transaction, notification, synchronization, and administrative paths to one transactor endpoint.")
+        :name
+        'TransactorConnector
+        :ns
+        *ns*))
     (let [protocol_signature__7478 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'endpoint {:arglists (clojure.core/list ['_])}),
                                       :arglists (clojure.core/list ['_]),
-                                      :doc "Return the transactor endpoint or nil."}
+                                      :doc "Returns the transactor endpoint, or nil when unavailable."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -209,7 +237,7 @@
                                       :arglists
                                       (clojure.core/list ['_ 'request 'arg 'timeout-msec]),
                                       :doc
-                                      "Send request to transactor. Returns map that will have :db/error and :message if error."}
+                                      "Sends a bounded request to the transactor and returns a response envelope. Error envelopes contain :db/error and :message."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -229,7 +257,7 @@
                                          (clojure.core/list ['_ 'handler 'failure-handler])}),
                                       :arglists (clojure.core/list ['_ 'handler 'failure-handler]),
                                       :doc
-                                      "Create notifier, but do not start processing. Returns value implements Startable and AsyncShutdown"}
+                                      "Creates an inactive notification consumer implementing Startable and AsyncShutdown."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -252,7 +280,7 @@
                                       (clojure.core/list
                                         ['_ 'update-queue 'push-handler 'failure-handler]),
                                       :doc
-                                      "Start updater, taking transactions from update-queue and queuing them to the transactor. Return value implements AsyncShutdown. Calls failure-handler with no args if update put fails. Calls push-handler (a NotificationHandler) with any errors that occur prior to remote call"}
+                                      "Starts a transaction updater over update-queue and returns an AsyncShutdown handle. Transport failures reach failure-handler; serialization failures reach push-handler as transaction errors."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.connector"
@@ -264,8 +292,8 @@
         (clojure.lang.RT/var "datomic.connector" "start-updater")
         (assoc protocol_signature__7484 :name protocol_method_name__7485 :ns *ns*))))
   (defn admin-request
-    ([connector request arg timeout_msec]
-      (let [result (admin-request* connector request arg timeout_msec)]
+    ([connector request arg timeout-ms]
+      (let [result (admin-request* connector request arg timeout-ms)]
         (when (:db/error result) (throw (ex-info (:message result) (dissoc result :message))))
         (:value result)))
     ([connector request arg] (admin-request connector request arg 60000)))
@@ -274,43 +302,38 @@
     (assoc
       {:arglists
        (clojure.core/list ['connector 'request 'arg] ['connector 'request 'arg 'timeout-msec]),
+       :doc
+       "Sends an administrative request and returns the response :value. The default timeout is 60 seconds. Error envelopes are raised as ExceptionInfo with the response data and without the display message.",
        :column (int 1)}
       :name
       'admin-request
       :ns
       *ns*))
   (defn endpoint-error
-    ([p__18992 cause]
-      (let [map__18993 p__18992
-            map__18993 (if (seq? map__18993)
-                         (if (next map__18993)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__18993))
-                           (if (seq map__18993) (first map__18993) {}))
-                         map__18993)
-            endpoint map__18993
-            host (get map__18993 :host)
-            alt_host (get map__18993 :alt-host)
-            port (get map__18993 :port)]
-        (ex-info
-          (str
-            "Error communicating with HOST "
-            host
-            (if alt_host (str " or ALT_HOST " alt_host) "")
-            " on PORT "
-            port)
-          (logger/redact endpoint #{:password})
-          cause))))
+    ([{:keys [host alt-host port], :as endpoint} cause]
+      (ex-info
+        (str
+          "Error communicating with HOST "
+          host
+          (if alt-host (str " or ALT_HOST " alt-host) "")
+          " on PORT "
+          port)
+        (logger/redact endpoint #{:password})
+        cause)))
   (reset-meta!
     #'endpoint-error
     (assoc
       {:arglists (clojure.core/list [{:keys ['host 'alt-host 'port], :as 'endpoint} 'cause]),
+       :doc
+       "Returns ExceptionInfo describing a failed endpoint while redacting its password from attached data and preserving cause.",
        :column (int 1)}
       :name
       'endpoint-error
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.connector" "sfb-cache") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.connector" "sfb-cache")
+    {:doc "Soft, size-limited cache of reusable Artemis session-factory bundles.", :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.connector" "sfb-cache") (cache/create-soft-limited 10))
   (defn stop-all-connectors
     ([]
@@ -340,21 +363,23 @@
     #'stop-all-connectors
     (assoc
       {:arglists (clojure.core/list []), :column (int 1)}
+      :doc
+      "Removes every cached Artemis session-factory bundle and waits for each bundle to shut down."
       :name
       'stop-all-connectors
       :ns
       *ns*))
   (defn try-hornet-connect
-    ([conn_factory conn_args session_args]
+    ([connector-factory connection-args session-args]
       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
         (when (.isDebugEnabled ^org.slf4j.Logger logger)
           (.debug
             ^org.slf4j.Logger logger
-            (logger/process {:event :peer/hornet-connect, :host (:host conn_args)})))
+            (logger/process {:event :peer/hornet-connect, :host (:host connection-args)})))
         nil)
-      (let [cache_key [conn_factory conn_args session_args]]
+      (let [cache-key [connector-factory connection-args session-args]]
         (try
-          (let [temp__5823__auto__ (get sfb-cache cache_key)]
+          (let [temp__5823__auto__ (get sfb-cache cache-key)]
             (if temp__5823__auto__
               (let [bundle temp__5823__auto__]
                 (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.connector")]
@@ -362,26 +387,26 @@
                     (.debug
                       ^org.slf4j.Logger logger
                       (logger/process
-                        {:event :peer/hornet-reuse-factory, :host (:host conn_args)})))
+                        {:event :peer/hornet-reuse-factory, :host (:host connection-args)})))
                   nil)
                 bundle)
               (let [connector (apply
                                 aclient/create-connector
-                                conn_factory
+                                connector-factory
                                 :verifyHost
                                 false
                                 :trustStorePath
                                 "datomic/transactor-trust.jks"
                                 :trustStorePassword
                                 "transactor"
-                                (mapcat identity conn_args))
-                    bundle (aclient/create-session-factory connector session_args)]
+                                (mapcat identity connection-args))
+                    bundle (aclient/create-session-factory connector session-args)]
                 (cleanup/register-cleanup
                   (deref cleanup/shared-manager-ref)
                   bundle
                   (fn fn__19004
                     ([] ((.-cleanup ^datomic.artemis_client.SessionFactoryBundle bundle)))))
-                (cache/put sfb-cache cache_key bundle)
+                (cache/put sfb-cache cache-key bundle)
                 bundle)))
           (catch
             java.lang.Throwable
@@ -392,73 +417,55 @@
                   (.debug
                     ^org.slf4j.Logger logger
                     (logger/process
-                      {:event :peer/hornet-connect-failed, :host (:host conn_args)})))
+                      {:event :peer/hornet-connect-failed, :host (:host connection-args)})))
                 nil)
               e))))))
   (reset-meta!
     #'try-hornet-connect
     (assoc
       {:private true,
-       :arglists (clojure.core/list ['conn-factory 'conn-args 'session-args]),
+       :arglists
+       (clojure.core/list ['connector-factory 'connection-args 'session-args]),
+       :doc
+       "Returns a cached or newly created Artemis session-factory bundle for connection-args. Connection failures are returned as Throwable values so endpoint fallback can continue.",
        :column (int 1)}
       :name
       'try-hornet-connect
       :ns
       *ns*))
   (defn host-order
-    ([host alt_host]
+    ([host alt-host]
       (cond
-        (nil? host) [alt_host]
-        (nil? alt_host) [host]
+        (nil? host) [alt-host]
+        (nil? alt-host) [host]
         :default (do
                    (remove
                      nil?
-                     (if (aws-detect/running-in-ec2?) [host alt_host] [alt_host host]))))))
+                     (if (aws-detect/running-in-ec2?) [host alt-host] [alt-host host]))))))
   (reset-meta!
     #'host-order
     (assoc
-      {:private true, :arglists (clojure.core/list ['host 'alt-host]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['host 'alt-host]),
+       :doc
+       "Returns endpoint hosts in connection-attempt order. EC2 environments prefer host when both inputs are present; other environments prefer alt-host. With either input nil, returns a one-element vector containing the other input.",
+       :column (int 1)}
       :name
       'host-order
       :ns
       *ns*))
   (defn create-hornet-factory
-    ([p__19009 ttl]
-      (let [map__19010 p__19009
-            map__19010 (if (seq? map__19010)
-                         (if (next map__19010)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19010))
-                           (if (seq map__19010) (first map__19010) {}))
-                         map__19010)
-            endpoint map__19010
-            host (get map__19010 :host)
-            port (get map__19010 :port)
-            alt_host (get map__19010 :alt-host)
-            encrypt_channel (get map__19010 :encrypt-channel)
-            conn_args {:port port,
-                       :sslEnabled encrypt_channel,
-                       :keyStorePath "datomic/transactor-key.jks",
-                       :keyStorePassword "transactor"}
-            session_args {:ttl ttl}
-            G__19014 (host-order host alt_host)
-            vec__19015 G__19014
-            seq__19016 (seq vec__19015)
-            first__19017 (first seq__19016)
-            seq__19016 (next seq__19016)
-            host first__19017
-            more seq__19016]
-        (loop [G__19014 G__19014]
-          (let [vec__19018 G__19014
-                seq__19019 (seq vec__19018)
-                first__19020 (first seq__19019)
-                seq__19019 (next seq__19019)
-                host first__19020
-                more seq__19019
-                result (try-hornet-connect
+    ([{:keys [host port alt-host encrypt-channel], :as endpoint} ttl]
+      (let [connection-args {:port port,
+                             :sslEnabled encrypt-channel,
+                             :keyStorePath "datomic/transactor-key.jks",
+                             :keyStorePassword "transactor"}
+            session-args {:ttl ttl}]
+        (loop [[host & more] (host-order host alt-host)]
+          (let [result (try-hornet-connect
                          aclient/netty-connector-factory
-                         (assoc conn_args :host host)
-                         session_args)]
+                         (assoc connection-args :host host)
+                         session-args)]
             (if (instance? java.lang.Throwable result)
               (if more (recur more) (do (throw (endpoint-error endpoint result)) nil))
               result))))))
@@ -468,6 +475,8 @@
       {:private true,
        :arglists
        (clojure.core/list [{:keys ['host 'port 'alt-host 'encrypt-channel], :as 'endpoint} 'ttl]),
+       :doc
+       "Creates or reuses an Artemis session factory for endpoint. Host preference follows the deployment environment, alternate hosts are attempted after connection failures, and the session-factory connection TTL is ttl milliseconds. Throws endpoint-error after every host fails.",
        :column (int 1)}
       :name
       'create-hornet-factory
@@ -504,12 +513,12 @@
                   nil))))))))
   (clojure.core/import 'datomic.connector.HornetNotifier)
   (defn ->HornetNotifier
-    ([push_handler_ref session result_queue hornet_consumer starter cleanup]
+    ([push-handler-ref session result-queue hornet-consumer starter cleanup]
       (datomic.connector.HornetNotifier.
-        push_handler_ref
+        push-handler-ref
         session
-        result_queue
-        hornet_consumer
+        result-queue
+        hornet-consumer
         starter
         cleanup)))
   (reset-meta!
@@ -518,17 +527,27 @@
       {:arglists
        (clojure.core/list
          ['push-handler-ref 'session 'result-queue 'hornet-consumer 'starter 'cleanup]),
+       :doc
+       "Constructs a notification-loop handle from its weak handler reference, Artemis session and consumer, lazy starter, and idempotent cleanup function.",
        :column (int 1)}
       :name
       '->HornetNotifier
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.connector" "notify") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.connector" "notify")
+    {:doc
+     "Dispatches a decoded transactor push message to the corresponding NotificationHandler callback.",
+     :column (int 1)})
   (let [v__5813__auto__ #'notify]
     (when-not (and
                 (.hasRoot ^clojure.lang.Var v__5813__auto__)
                 (instance? clojure.lang.MultiFn (deref v__5813__auto__)))
-      (.setMeta (clojure.lang.RT/var "datomic.connector" "notify") {:column (int 1)})
+      (.setMeta
+        (clojure.lang.RT/var "datomic.connector" "notify")
+        {:doc
+         "Dispatches a decoded transactor push message to the corresponding NotificationHandler callback.",
+         :column (int 1)})
       (.bindRoot
         (clojure.lang.RT/var "datomic.connector" "notify")
         (clojure.lang.MultiFn.
@@ -768,6 +787,8 @@
       {:arglists
        (clojure.core/list
          ['push-handler 'session 'result-queue 'hornet-consumer 'failure-handler]),
+       :doc
+       "Creates an inactive notification consumer. Starting it reads Fressian message batches from the temporary result queue and dispatches each message to push-handler. Transport failures invoke failure-handler. Shutdown stops the loop, closes the consumer, deletes the queue, and closes the session exactly once.",
        :column (int 1)}
       :name
       'create-hornet-notifier
@@ -1000,7 +1021,7 @@
               (throw ^java.lang.Throwable t__8575__auto__)
               nil)))))
     (admin-request*
-      [this request arg timeout_msec]
+      [this request arg timeout-ms]
       (let [timeout (java.lang.Object.)
             result (try
                      (let [session (aclient/start-session
@@ -1019,7 +1040,7 @@
                                  rpc_client
                                  (seq
                                    (concat (clojure.core/list request) (clojure.core/list arg))))
-                               timeout_msec
+                               timeout-ms
                                timeout)
                              (finally (deref (common/async-shutdown rpc_client)))))
                          (finally (deref (common/async-shutdown session)))))
@@ -1054,33 +1075,37 @@
                      result)))))
   (clojure.core/import 'datomic.connector.TransactorHornetConnector)
   (defn ->TransactorHornetConnector
-    ([cluster_conf transactor_endpoint hornet_factory]
+    ([cluster-conf transactor-endpoint hornet-factory]
       (datomic.connector.TransactorHornetConnector.
-        cluster_conf
-        transactor_endpoint
-        hornet_factory)))
+        cluster-conf
+        transactor-endpoint
+        hornet-factory)))
   (reset-meta!
     #'->TransactorHornetConnector
     (assoc
       {:arglists (clojure.core/list ['cluster-conf 'transactor-endpoint 'hornet-factory]),
+       :doc
+       "Constructs an Artemis-backed connector for cluster-conf and transactor-endpoint using hornet-factory.",
        :column (int 1)}
       :name
       '->TransactorHornetConnector
       :ns
       *ns*))
   (defn create-transactor-hornet-connector
-    ([cluster_conf endpoint ttl]
-      (let [hornet_factory (create-hornet-factory endpoint ttl)]
-        (datomic.connector.TransactorHornetConnector. cluster_conf endpoint hornet_factory)))
-    ([cluster_conf endpoint]
+    ([cluster-conf endpoint ttl]
+      (let [hornet-factory (create-hornet-factory endpoint ttl)]
+        (datomic.connector.TransactorHornetConnector. cluster-conf endpoint hornet-factory)))
+    ([cluster-conf endpoint]
       (create-transactor-hornet-connector
-        cluster_conf
+        cluster-conf
         endpoint
         (config/property "datomic.peerConnectionTTLMsec"))))
   (reset-meta!
     #'create-transactor-hornet-connector
     (assoc
       {:arglists (clojure.core/list ['cluster-conf 'endpoint] ['cluster-conf 'endpoint 'ttl]),
+       :doc
+       "Creates a connector for the coordination-published transactor endpoint. The two-argument form uses the configured peer connection TTL; the three-argument form uses ttl milliseconds.",
        :column (int 1)}
       :name
       'create-transactor-hornet-connector

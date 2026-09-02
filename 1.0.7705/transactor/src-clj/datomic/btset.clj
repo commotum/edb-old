@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.btset)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.btset)
+    {:doc
+     "In-memory sorted set used for recent datoms. The balanced tree supports ordered insertion, forward seek, reverse seek, and bidirectional iteration. Memory indexes use these operations to merge recent transactions with durable index tiers while preserving each index's datom order."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['comp 'compare])
@@ -430,6 +434,9 @@
       '->BTSetLeaf
       :ns
       *ns*))
+  ;; IDataSet is the ordered-cursor contract shared by in-memory and durable
+  ;; index tiers. A keyed seek positions at the lowest value greater than or
+  ;; equal to the key; seekLast positions at the greatest value.
   (definterface
     IDataSet
     (^long longCount [])
@@ -518,7 +525,10 @@
       *ns*))
   (.setMeta
     (clojure.lang.RT/var "datomic.btset" "btset")
-    {:tag datomic.btset.BTSet, :arglists (clojure.core/list [] ['cmp]), :column (int 1)})
+    {:tag datomic.btset.BTSet,
+     :arglists (clojure.core/list [] ['cmp]),
+     :doc "Returns an empty immutable balanced-tree set, ordered by cmp or by the values' natural order.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.btset" "btset")
     (fn btset ([cmp] (datomic.btset.BTSet. cmp 0 nil)) ([] (btset nil))))
@@ -527,6 +537,8 @@
     {:tag datomic.iter.Iter,
      :arglists
      (clojure.core/list [(.withMeta 'ds {:tag 'IDataSet})] [(.withMeta 'ds {:tag 'IDataSet}) 'k]),
+     :doc
+     "Returns a forward cursor at the first value in ds, or at the lowest value greater than or equal to k. Returns nil when no such value exists.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.btset" "seek")
@@ -537,6 +549,7 @@
     (clojure.lang.RT/var "datomic.btset" "seek-last")
     {:tag datomic.iter.Iter,
      :arglists (clojure.core/list [(.withMeta 'ds {:tag 'IDataSet})]),
+     :doc "Returns a cursor positioned at the greatest value in ds, or nil when ds is empty.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.btset" "seek-last")
@@ -546,6 +559,8 @@
     {:tag datomic.iter.Iter,
      :arglists
      (clojure.core/list [(.withMeta 'bt {:tag 'BTSet})] [(.withMeta 'bt {:tag 'BTSet}) 'k]),
+     :doc
+     "Returns a reverse cursor at the greatest value in bt, or at the greatest value less than or equal to k. Returns nil when no such value exists.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.btset" "rseek")

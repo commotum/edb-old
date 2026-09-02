@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-mem)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-mem)
+    {:doc
+     "In-process KVStore implementation for transient databases. Values live only for the lifetime of the process and conditional reference writes use ConcurrentMap compare-and-replace operations."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['get])
@@ -17,6 +21,8 @@
         (clojure.core/import 'java.util.concurrent.ConcurrentHashMap)
         (clojure.core/import 'java.util.concurrent.ConcurrentMap))))
   (set! *warn-on-reflection* true)
+  ;; Store read-only buffer aliases and implement revision checks with atomic
+  ;; ConcurrentMap replacement. A conditional mismatch leaves the prior entry intact.
   (deftype
     KVMem
     [m]

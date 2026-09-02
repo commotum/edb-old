@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.garbage.pod)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.garbage.pod)
+    {:doc
+     "Delays reclamation of replaced pod-tail values so concurrent readers can finish using the prior immutable chain. Scheduled deletes are cancellable during process shutdown and failures are reported as storage alarms."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -51,6 +55,7 @@
       'warn
       :ns
       *ns*))
+  ;; Waits the configured safety delay, then deletes the captured immutable tail identifiers.
   (defn schedule-gc
     ([cluster garbage_ids_ref]
       (let [c__5899__auto__ (a/chan 1)

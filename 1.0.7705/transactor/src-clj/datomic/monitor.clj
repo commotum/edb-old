@@ -2,7 +2,8 @@
   (clojure.core/in-ns 'datomic.monitor)
   (.resetMeta
     (clojure.lang.Namespace/find 'datomic.monitor)
-    {:doc "Deployment-agnostic status functions, requiring only a JVM."})
+    {:doc
+     "Deployment-agnostic process metrics. Collects counts and bounded statistics, takes reporting snapshots, emits alarms, and dispatches periodic metric maps to a configured callback. Metric maps are open to additional names and value shapes."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -81,137 +82,49 @@
           (or
             (.get ^java.util.concurrent.ConcurrentHashMap lo k)
             (.computeIfAbsent
+              ^java.util.concurrent.ConcurrentHashMap lo
               k
               (reify
                 java.util.function.Function
                 (apply
                   [this metric]
                   (java.util.concurrent.atomic.LongAccumulator.
-                    (if (instance? clojure.lang.IFn min*)
-                      (instance? java.util.function.LongBinaryOperator min*)
-                      min*)
-                    (long java.lang.Long/MAX_VALUE))))
-              (if (instance?
-                    clojure.lang.IFn
-                    (reify
-                      java.util.function.Function
-                      (apply
-                        [this metric]
-                        (java.util.concurrent.atomic.LongAccumulator.
-                          (if (instance? clojure.lang.IFn min*)
-                            (instance? java.util.function.LongBinaryOperator min*)
-                            min*)
-                          (long java.lang.Long/MAX_VALUE)))))
-                (instance?
-                  java.util.function.Function
-                  (reify
-                    java.util.function.Function
-                    (apply
-                      [this metric]
-                      (java.util.concurrent.atomic.LongAccumulator.
-                        (if (instance? clojure.lang.IFn min*)
-                          (instance? java.util.function.LongBinaryOperator min*)
-                          min*)
-                        (long java.lang.Long/MAX_VALUE)))))
-                (reify
-                  java.util.function.Function
-                  (apply
-                    [this metric]
-                    (java.util.concurrent.atomic.LongAccumulator.
-                      (if (instance? clojure.lang.IFn min*)
-                        (instance? java.util.function.LongBinaryOperator min*)
-                        min*)
-                      (long java.lang.Long/MAX_VALUE)))))))
+                    min*
+                    (long java.lang.Long/MAX_VALUE))))))
           (long ^java.lang.Number v))
         (.accumulate
           (or
             (.get ^java.util.concurrent.ConcurrentHashMap hi k)
             (.computeIfAbsent
+              ^java.util.concurrent.ConcurrentHashMap hi
               k
               (reify
                 java.util.function.Function
                 (apply
                   [this metric]
                   (java.util.concurrent.atomic.LongAccumulator.
-                    (if (instance? clojure.lang.IFn max*)
-                      (instance? java.util.function.LongBinaryOperator max*)
-                      max*)
-                    (long java.lang.Long/MIN_VALUE))))
-              (if (instance?
-                    clojure.lang.IFn
-                    (reify
-                      java.util.function.Function
-                      (apply
-                        [this metric]
-                        (java.util.concurrent.atomic.LongAccumulator.
-                          (if (instance? clojure.lang.IFn max*)
-                            (instance? java.util.function.LongBinaryOperator max*)
-                            max*)
-                          (long java.lang.Long/MIN_VALUE)))))
-                (instance?
-                  java.util.function.Function
-                  (reify
-                    java.util.function.Function
-                    (apply
-                      [this metric]
-                      (java.util.concurrent.atomic.LongAccumulator.
-                        (if (instance? clojure.lang.IFn max*)
-                          (instance? java.util.function.LongBinaryOperator max*)
-                          max*)
-                        (long java.lang.Long/MIN_VALUE)))))
-                (reify
-                  java.util.function.Function
-                  (apply
-                    [this metric]
-                    (java.util.concurrent.atomic.LongAccumulator.
-                      (if (instance? clojure.lang.IFn max*)
-                        (instance? java.util.function.LongBinaryOperator max*)
-                        max*)
-                      (long java.lang.Long/MIN_VALUE)))))))
+                    max*
+                    (long java.lang.Long/MIN_VALUE))))))
           (long ^java.lang.Number v))
         (.add
           (or
             (.get ^java.util.concurrent.ConcurrentHashMap sum k)
             (.computeIfAbsent
+              ^java.util.concurrent.ConcurrentHashMap sum
               k
               (reify
                 java.util.function.Function
-                (apply [this metric] (java.util.concurrent.atomic.LongAdder.)))
-              (if (instance?
-                    clojure.lang.IFn
-                    (reify
-                      java.util.function.Function
-                      (apply [this metric] (java.util.concurrent.atomic.LongAdder.))))
-                (instance?
-                  java.util.function.Function
-                  (reify
-                    java.util.function.Function
-                    (apply [this metric] (java.util.concurrent.atomic.LongAdder.))))
-                (reify
-                  java.util.function.Function
-                  (apply [this metric] (java.util.concurrent.atomic.LongAdder.))))))
+                (apply [this metric] (java.util.concurrent.atomic.LongAdder.)))))
           (long ^java.lang.Number v))
         (.increment
           (or
             (.get ^java.util.concurrent.ConcurrentHashMap count k)
             (.computeIfAbsent
+              ^java.util.concurrent.ConcurrentHashMap count
               k
               (reify
                 java.util.function.Function
-                (apply [this metric] (java.util.concurrent.atomic.LongAdder.)))
-              (if (instance?
-                    clojure.lang.IFn
-                    (reify
-                      java.util.function.Function
-                      (apply [this metric] (java.util.concurrent.atomic.LongAdder.))))
-                (instance?
-                  java.util.function.Function
-                  (reify
-                    java.util.function.Function
-                    (apply [this metric] (java.util.concurrent.atomic.LongAdder.))))
-                (reify
-                  java.util.function.Function
-                  (apply [this metric] (java.util.concurrent.atomic.LongAdder.)))))))
+                (apply [this metric] (java.util.concurrent.atomic.LongAdder.))))))
         nil)))
   (clojure.core/import 'datomic.monitor.Statistics)
   (defn ->Statistics ([lo hi sum count] (datomic.monitor.Statistics. lo hi sum count)))
@@ -240,6 +153,7 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.monitor" "statistics") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.monitor" "statistics") (atom (init-stats)))
+  ;; Atomically rotates the live accumulators and returns the completed reporting interval.
   (defn snapshot-statistics
     ([]
       (let [stats (deref statistics)]
@@ -294,10 +208,11 @@
       'snapshot-statistics
       :ns
       *ns*))
+  ;; Resolves a fully qualified callback symbol named by an EDN system property.
   (defn load-callback
-    ([prop_name]
+    ([prop-name]
       (let [temp__5825__auto__ (some->
-                                 (java.lang.System/getProperty ^java.lang.String prop_name)
+                                 (java.lang.System/getProperty ^java.lang.String prop-name)
                                  (edn/read-string))]
         (when temp__5825__auto__
           (let [s temp__5825__auto__]
@@ -319,6 +234,7 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.monitor" "metric-event-callback")
     (load-callback "datomic.metricEventCallback"))
+  ;; Records one observation and forwards it to the optional metric event callback.
   (defn add-stat
     ([k val]
       (when-not k (throw (java.lang.AssertionError. (str "Assert failed: " val "\n" (pr-str 'k)))))
@@ -338,6 +254,7 @@
       'ns->ms
       :ns
       *ns*))
+  ;; Increments the aggregate alarm count and the count for a specific alarm category.
   (defn alarm ([k] (add-stat :Alarm 1) (add-stat (keyword (str "Alarm" (name k))) 1)))
   (reset-meta!
     #'alarm

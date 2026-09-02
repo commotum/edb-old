@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-cluster)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-cluster)
+    {:doc
+     "Adapts a KVStore to Datomic's clustered-store contract. Bounds concurrent reads and writes, retries transient failures with coordinated backoff, records storage latency and throughput, and implements immutable values plus revisioned refs and appendable pods."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -101,6 +105,8 @@
       'linear-backoff
       :ns
       *ns*))
+  ;; Bounds the outer storage call, retries retryable failures, and coordinates exponential delay
+  ;; across concurrent writers so throttled storage is not flooded by independent retries.
   (defn retry-fn
     ([sem metric nested group_ref backoff f]
       (binding [kv/*retry* (partial retry-fn sem metric true group_ref backoff)]
@@ -221,6 +227,8 @@
       'mark-pod-garbage
       :ns
       *ns*))
+  ;; Implements values, refs, and pods over a KVStore. Pod updates write a new immutable tail and
+  ;; conditionally publish it by revision, leaving replaced tails for asynchronous garbage marking.
   (deftype
     KVCluster
     [kvs
@@ -940,6 +948,7 @@
   (reset-meta!
     #'PRIORITY_WRITE_CONCURRENCY
     (assoc {:const true, :column (int 1)} :name 'PRIORITY_WRITE_CONCURRENCY :ns *ns*))
+  ;; Creates a database-scoped cluster with independent soft limits for reads, writes, and deletes.
   (defn kv-cluster
     ([kvs p__10702]
       (let [map__10703 p__10702

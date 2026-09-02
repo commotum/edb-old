@@ -1,8 +1,9 @@
-/*
- * Decompiled with CFR 0.152.
- */
 package datomic.impl;
 
+/**
+ * Computes a seeded 32-bit MurmurHash2-style value over a byte-array prefix.
+ * The deterministic result supports fast hash-table distribution.
+ */
 public class MurmurHash {
     public static int hash(byte[] data2, int length, int seed) {
         int m = 1540483477;

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.lifecycle)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.lifecycle)
+    {:doc
+     "Active and standby transactor heartbeat lifecycle. The active process renews a revisioned endpoint in storage; a standby observes heartbeat age and attempts takeover after consecutive missed intervals."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -29,12 +33,14 @@
           ['datomic.slf4j :as 'logger])
         (clojure.core/import 'java.util.UUID))))
   (set! *warn-on-reflection* true)
+  ;; Publishes the next heartbeat revision with compare-and-swap semantics.
+  ;; A failed write means this process no longer owns the active endpoint.
   (defn pump
-    ([cluster endpoint tick previous_rev]
+    ([cluster endpoint tick previous-rev]
       (let [timestamp (java.lang.System/currentTimeMillis)
             basis (assoc endpoint :timestamp (long timestamp))
             value (coord/create-heartbeat basis)
-            rev (inc previous_rev)
+            rev (inc previous-rev)
             vk (pr-str value)
             result (deref (cluster/set-ref cluster coord/pod-key rev vk) (* 2 tick) :timeout)]
         (if (= :ok result)
@@ -67,6 +73,7 @@
       'pump
       :ns
       *ns*))
+  ;; Renews the active heartbeat on schedule and fails the process if ownership is lost.
   (defn master-loop
     ([beat p__10991]
       (let [map__10992 p__10991
@@ -111,10 +118,10 @@
               (if rev
                 (let [elapsed (- (java.lang.System/currentTimeMillis) timestamp)]
                   (java.lang.Thread/sleep (long (max 1 (- tick elapsed))))
-                  (let [new_beat (pump cluster endpoint tick rev)]
-                    (when new_beat
-                      (monitor/add-stat :HeartbeatMsec (- (:timestamp new_beat) timestamp)))
-                    (recur new_beat)))
+                  (let [new-beat (pump cluster endpoint tick rev)]
+                    (when new-beat
+                      (monitor/add-stat :HeartbeatMsec (- (:timestamp new-beat) timestamp)))
+                    (recur new-beat)))
                 (do
                   (monitor/alarm :HeartbeatFailed)
                   (process/fail process/instance "Heartbeat failed")))))))))
@@ -126,6 +133,7 @@
       'master-loop
       :ns
       *ns*))
+  ;; Claims the endpoint revision, starts transaction service after takeover, and enters renewal.
   (defn standby-loop
     ([p__10998]
       (let [map__10999 p__10998
@@ -153,6 +161,7 @@
       'standby-loop
       :ns
       *ns*))
+  ;; Starts the lifecycle thread and defers serving until active ownership has been established.
   (defn start
     ([& p__11002]
       (let [map__11003 p__11002
@@ -164,7 +173,7 @@
                          map__11003)
             arg map__11003
             serve (get map__11003 :serve)
-            start_serving (fn start_serving
+            start-serving (fn start-serving
                             ([]
                               (future-call
                                 (fn fn__11005
@@ -177,7 +186,7 @@
                                         (do
                                           (monitor/alarm :ServeFailed)
                                           (process/fail process/instance "Serve failed" t)))))))))
-            standby_arg (assoc arg :serve start_serving)]
+            standby-arg (assoc arg :serve start-serving)]
         (let [G__11008 (java.lang.Thread.
                          (fn fn__11009
                            ([]
@@ -185,7 +194,7 @@
                                ((if (config/pro?)
                                   (resolve 'datomic.lifecycle-ext/standby-loop)
                                   standby-loop)
-                                 standby_arg)
+                                 standby-arg)
                                (catch
                                  java.lang.Throwable
                                  t

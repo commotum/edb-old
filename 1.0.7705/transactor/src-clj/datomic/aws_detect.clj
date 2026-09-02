@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.aws-detect)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.aws-detect)
+    {:doc
+     "Detects EC2 execution and reads the instance's private and public addresses from the metadata service for generated transactor host configuration."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

@@ -1,8 +1,10 @@
-/*
- * Decompiled with CFR 0.152.
- */
 package datomic.impl.db;
 
+/**
+ * Primitive-access view of an internal datom. It exposes entity, attribute,
+ * transaction, partition, and assertion state together with typed value
+ * accessors so index operations can avoid unnecessary boxing.
+ */
 public interface IDatum {
     public boolean isAssertion();
 
@@ -28,4 +30,3 @@ public interface IDatum {
 
     public boolean getBooleanV();
 }
-

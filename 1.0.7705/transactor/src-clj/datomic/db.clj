@@ -2,7 +2,9 @@
   (clojure.core/in-ns (.withMeta 'datomic.db {:author "Rich Hickey"}))
   (.resetMeta
     (clojure.lang.Namespace/find (.withMeta 'datomic.db {:author "Rich Hickey"}))
-    {:doc "db core data structures", :author "Rich Hickey"})
+    {:doc
+     "Core immutable database values and transaction semantics. Defines datoms, entity identifiers, attributes, indexes, temporal views, schema enforcement, transaction-data expansion, transaction functions, entity specs, partitions, tuples, and speculative transactions.",
+     :author "Rich Hickey"})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['resolve 'compare 'qualified-symbol?])
@@ -415,6 +417,7 @@
       :ns
       *ns*))
   (defn implicit-part
+    "Returns the entity id for an implicit partition number. Valid partition numbers are integers from zero through 524287; values outside that range are rejected."
     (^long [^long id]
       (.longValue
         (if (and (< id 524288) (>= id 0))
@@ -426,6 +429,8 @@
     #'implicit-part
     (assoc
       {:arglists (clojure.core/list (.withMeta [(.withMeta 'id {:tag 'long})] {:tag 'long})),
+       :doc
+       "Returns the entity id for an implicit partition number. Valid partition numbers are integers from zero through 524287; values outside that range are rejected.",
        :column (int 1)}
       :name
       'implicit-part
@@ -546,6 +551,7 @@
     (assoc {:arglists (clojure.core/list ['literal]), :column (int 1)} :name 'id-literal :ns *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.db" "resolve-id") {:declared true, :column (int 1)})
   (defn tempid
+    "Creates a temporary entity id in a partition. The two-argument form resolves a partition identifier against db before allocating the tempid."
     ([db part]
       (let [pid (datomic.db/resolve-id db part)]
         (if pid
@@ -555,7 +561,10 @@
   (reset-meta!
     #'tempid
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'part {:tag 'long})] ['db 'part]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'part {:tag 'long})] ['db 'part]),
+       :doc
+       "Creates a temporary entity id in a partition. The two-argument form resolves a partition identifier against db before allocating the tempid.",
+       :column (int 1)}
       :name
       'tempid
       :ns
@@ -1106,6 +1115,7 @@
       :ns
       *ns*))
   (defn resolve-lookup-ref
+    "Resolves a two-element [unique-attribute value] lookup ref against db. Returns the matching entity id, nil when no entity has the value, and rejects malformed refs or attributes without a uniqueness constraint."
     ([db x]
       (when-not (= 2 (count x))
         (error/arg :db.error/invalid-lookup-ref (str "Invalid list form: " x)))
@@ -1130,7 +1140,10 @@
   (reset-meta!
     #'resolve-lookup-ref
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'x]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'x]),
+       :doc
+       "Resolves a two-element [unique-attribute value] lookup ref against db. Returns the matching entity id, nil when no entity has the value, and rejects malformed refs or attributes without a uniqueness constraint.",
+       :column (int 1)}
       :name
       'resolve-lookup-ref
       :ns
@@ -1197,6 +1210,7 @@
       :ns
       *ns*))
   (defn resolve-id
+    "Resolves an entity identifier to its numeric entity id. Accepts entity ids, idents, lookup refs, and DbId values containing partition and index components; returns nil when an ident or lookup ref has no match."
     ([db x]
       (cond
         (instance? java.lang.Long x) x
@@ -1205,7 +1219,10 @@
   (reset-meta!
     #'resolve-id
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'x]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'x]),
+       :doc
+       "Resolves an entity identifier to its numeric entity id. Accepts entity ids, idents, lookup refs, and DbId values containing partition and index components; returns nil when an ident or lookup ref has no match.",
+       :column (int 1)}
       :name
       'resolve-id
       :ns
@@ -1706,6 +1723,7 @@
       (.write ^java.io.Writer w "}")
       nil))
   (defn attr-info
+    "Returns the schema description for an attribute identifier, including value type, cardinality, uniqueness, indexing, component, history, fulltext, and tuple-discontinuation properties."
     ([db attrid]
       (let [temp__5825__auto__ (let [G__12034 (datomic.db/resolve-id db attrid)]
                                  (when-not (nil? G__12034) (datomic.db/attribute db G__12034)))]
@@ -1717,7 +1735,10 @@
   (reset-meta!
     #'attr-info
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDbImpl}) 'attrid]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDbImpl}) 'attrid]),
+       :doc
+       "Returns the schema description for an attribute identifier, including value type, cardinality, uniqueness, indexing, component, history, fulltext, and tuple-discontinuation properties.",
+       :column (int 1)}
       :name
       'attr-info
       :ns
@@ -1787,6 +1808,7 @@
       (datomic.btset/btset datomic.db/raet-cmp)
       nil))
   (defn windowed
+    "Applies a database value's temporal and custom predicates to an index iterator. Point-in-time views collapse retractions; history views retain both assertions and retractions."
     ([db whilep iter]
       ((if (.getRaw ^datomic.db.IDb db) identity datomic.db/filter-retractions)
         (let [asof (.getAsOfT ^datomic.db.IDb db)
@@ -1810,12 +1832,16 @@
   (reset-meta!
     #'windowed
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'whilep 'iter]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'whilep 'iter]),
+       :doc
+       "Applies a database value's temporal and custom predicates to an index iterator. Point-in-time views collapse retractions; history views retain both assertions and retractions.",
+       :column (int 1)}
       :name
       'windowed
       :ns
       *ns*))
   (defn seek-datoms
+    "Returns datoms from index beginning at components, inclusive. Components follow the selected index order; lookup refs and idents are resolved against db, and AVET access requires an indexed attribute."
     ([db index components]
       (let [vec__12118 (let [G__12121 index]
                          (case
@@ -1890,7 +1916,10 @@
   (reset-meta!
     #'seek-datoms
     (assoc
-      {:arglists (clojure.core/list ['db 'index 'components]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'index 'components]),
+       :doc
+       "Returns datoms from index beginning at components, inclusive. Components follow the selected index order; lookup refs and idents are resolved against db, and AVET access requires an indexed attribute.",
+       :column (int 1)}
       :name
       'seek-datoms
       :ns
@@ -2045,6 +2074,7 @@
       :ns
       *ns*))
   (defn rseek-datoms
+    "Returns datoms from index in reverse order beginning at components, inclusive. Point-in-time databases expose current assertions while history databases also expose retractions."
     ([db index components]
       (let [vec__12189 (let [G__12192 index]
                          (case
@@ -2110,12 +2140,15 @@
     #'rseek-datoms
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'index 'components]),
+       :doc
+       "Returns datoms from index in reverse order beginning at components, inclusive. Point-in-time databases expose current assertions while history databases also expose retractions.",
        :column (int 1)}
       :name
       'rseek-datoms
       :ns
       *ns*))
   (defn datoms
+    "Returns the contiguous range of datoms matching components in the selected index order. Temporal and custom database filters are applied while the index is traversed."
     ([db index components]
       (let [vec__12219 (let [G__12222 index]
                          (case
@@ -2198,12 +2231,16 @@
   (reset-meta!
     #'datoms
     (assoc
-      {:arglists (clojure.core/list ['db 'index 'components]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'index 'components]),
+       :doc
+       "Returns the contiguous range of datoms matching components in the selected index order. Temporal and custom database filters are applied while the index is traversed.",
+       :column (int 1)}
       :name
       'datoms
       :ns
       *ns*))
   (defn attr-index-range
+    "Returns datoms for indexed attribute a whose values are greater than or equal to start and less than end. A nil bound leaves that side of the range open."
     ([db a start end]
       (let [attrid (datomic.db/require-id db a)
             attr (.elementAt ^datomic.db.IDbImpl db (long attrid))
@@ -2224,7 +2261,10 @@
   (reset-meta!
     #'attr-index-range
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'a 'start 'end]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'a 'start 'end]),
+       :doc
+       "Returns datoms for indexed attribute a whose values are greater than or equal to start and less than end. A nil bound leaves that side of the range open.",
+       :column (int 1)}
       :name
       'attr-index-range
       :ns
@@ -2355,6 +2395,7 @@
             iter)))
       ([db r] (datomic.db/find-raet db r nil))))
   (defn get-entity
+    "Returns an eager map view of the current facts for an entity identifier. Cardinality-many values become sets, reference values with idents become keywords, and component references are expanded recursively."
     ([db ent & p__12317]
       (let [map__12318 p__12317
             map__12318 (if (seq? map__12318)
@@ -2400,6 +2441,8 @@
     #'get-entity
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'ent '& {:keys ['raw]}]),
+       :doc
+       "Returns an eager map view of the current facts for an entity identifier. Cardinality-many values become sets, reference values with idents become keywords, and component references are expanded recursively.",
        :column (int 1)}
       :name
       'get-entity
@@ -2728,6 +2771,7 @@
       :ns
       *ns*))
   (defn tuple-install-errors
+    "Returns validation errors for a tuple schema definition. A tuple must declare exactly one of :db/tupleType, :db/tupleTypes, or :db/tupleAttrs; fixed and composite tuples contain two through eight scalar slots, and composite attributes are cardinality-one."
     ([db e]
       (let [type (get e :db/tupleType)
             types (get e :db/tupleTypes)
@@ -2814,12 +2858,17 @@
   (reset-meta!
     #'tuple-install-errors
     (assoc
-      {:private true, :arglists (clojure.core/list ['db 'e]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['db 'e]),
+       :doc
+       "Returns validation errors for a tuple schema definition. A tuple must declare exactly one of :db/tupleType, :db/tupleTypes, or :db/tupleAttrs; fixed and composite tuples contain two through eight scalar slots, and composite attributes are cardinality-one.",
+       :column (int 1)}
       :name
       'tuple-install-errors
       :ns
       *ns*))
   (defn install-attribute-errors
+    "Returns schema installation errors for eid. Attributes require :db/valueType and :db/cardinality; component attributes must contain references, unique byte attributes are rejected, and functional schema properties cannot be changed by reinstalling an attribute."
     ([before after eid]
       (let [eafter (datomic.db/get-entity after eid :raw true)
             errors (reduce
@@ -2870,6 +2919,8 @@
       {:arglists
        (clojure.core/list
          [(.withMeta 'before {:tag 'Database}) (.withMeta 'after {:tag 'Database}) 'eid]),
+       :doc
+       "Returns schema installation errors for eid. Attributes require :db/valueType and :db/cardinality; component attributes must contain references, unique byte attributes are rejected, and functional schema properties cannot be changed by reinstalling an attribute.",
        :column (int 1)}
       :name
       'install-attribute-errors
@@ -2889,6 +2940,7 @@
       :ns
       *ns*))
   (defn create-attr-pred
+    "Resolves attribute-predicate symbols and returns a validator for asserted values. Every predicate must return true; any other result aborts the transaction and is retained as :db.error/pred-return."
     ([kw fn_names]
       (let [fn_map (into
                      {}
@@ -2945,12 +2997,16 @@
   (reset-meta!
     #'create-attr-pred
     (assoc
-      {:arglists (clojure.core/list ['kw 'fn-names]), :column (int 1)}
+      {:arglists (clojure.core/list ['kw 'fn-names]),
+       :doc
+       "Resolves attribute-predicate symbols and returns a validator for asserted values. Every predicate must return true; any other result aborts the transaction and is retained as :db.error/pred-return.",
+       :column (int 1)}
       :name
       'create-attr-pred
       :ns
       *ns*))
   (defn create-attribute
+    "Constructs the in-memory schema descriptor for an installed attribute, including cardinality, value type, uniqueness, indexing, component, history, fulltext, predicate, and tuple properties."
     ([db p__12418]
       (let [map__12419 p__12418
             map__12419 (if (seq? map__12419)
@@ -3040,6 +3096,8 @@
             'tupleAttrs
             'attrPreds
             'tupleDiscontinued]}]),
+       :doc
+       "Constructs the in-memory schema descriptor for an installed attribute, including cardinality, value type, uniqueness, indexing, component, history, fulltext, predicate, and tuple properties.",
        :column (int 1)}
       :name
       'create-attribute
@@ -3353,6 +3411,7 @@
       :ns
       *ns*))
   (defn add-unique
+    "Applies a uniqueness constraint to a cardinality-one attribute. Existing current values must be unique, and an attribute containing data must already have AVET storage available. Returns the updated database and any validation errors."
     ([db aid _ unique]
       (let [attr (datomic.db/attribute db aid)]
         (if (= 27 (.-vtypeid ^datomic.db.Attribute attr))
@@ -3381,7 +3440,10 @@
   (reset-meta!
     #'add-unique
     (assoc
-      {:arglists (clojure.core/list ['db 'aid '_ 'unique]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'aid '_ 'unique]),
+       :doc
+       "Applies a uniqueness constraint to a cardinality-one attribute. Existing current values must be unique, and an attribute containing data must already have AVET storage available. Returns the updated database and any validation errors.",
+       :column (int 1)}
       :name
       'add-unique
       :ns
@@ -3666,6 +3728,7 @@
       :ns
       *ns*))
   (defn alter-attribute
+    "Applies supported synchronous schema changes and returns [database errors]. Cardinality, uniqueness, AVET indexing, component ownership, history retention, attribute predicates, and permanent composite discontinuation are checked against the current data and schema invariants."
     ([before after d]
       (let [eid (.getV ^datomic.impl.db.IDatum d)
             ebefore (datomic.db/get-entity before eid :raw true)
@@ -3705,6 +3768,8 @@
          [(.withMeta 'before {:tag 'IDbImpl})
           (.withMeta 'after {:tag 'IDbImpl})
           (.withMeta 'd {:tag 'IDatum})]),
+       :doc
+       "Applies supported synchronous schema changes and returns [database errors]. Cardinality, uniqueness, AVET indexing, component ownership, history retention, attribute predicates, and permanent composite discontinuation are checked against the current data and schema invariants.",
        :column (int 1)}
       :name
       'alter-attribute
@@ -3758,6 +3823,7 @@
       :ns
       *ns*))
   (defn safe-compile-function
+    "Compiles an installed Clojure or Java database function. Compilation failures become callable functions that report :db.error/data-function-compile-failed when invoked."
     ([db lang code]
       (let [try_compile (fn try_compile
                           ([p1__12547#]
@@ -3790,7 +3856,10 @@
   (reset-meta!
     #'safe-compile-function
     (assoc
-      {:arglists (clojure.core/list ['db 'lang 'code]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'lang 'code]),
+       :doc
+       "Compiles an installed Clojure or Java database function. Compilation failures become callable functions that report :db.error/data-function-compile-failed when invoked.",
+       :column (int 1)}
       :name
       'safe-compile-function
       :ns
@@ -3924,37 +3993,42 @@
   (.setMeta (clojure.lang.RT/var "datomic.db" "with-tx+opts") {:declared true, :column (int 1)})
   (.setMeta (clojure.lang.RT/var "datomic.db" "add-fulltext") {:declared true, :column (int 1)})
   (defn as-of-t
-    ([db t_or_date]
-      (if (instance? java.util.Date t_or_date)
+    "Resolves a transaction id, t value, or instant to the greatest database t at or before that point. Instants are located through :db/txInstant."
+    ([db t-or-date]
+      (if (instance? java.util.Date t-or-date)
         (let [d (datomic.db/dget
                   (.seekAVET
                     ^datomic.db.IDb db
-                    (datomic.db/datum db :a :db/txInstant :v t_or_date)))]
+                    (datomic.db/datum db :a :db/txInstant :v t-or-date)))]
           (if (and
                 d
                 (=
                   (datomic.db/resolve-id db :db/txInstant)
                   (long (.getA ^datomic.impl.db.IDatum d))))
-            (if (= (.getV ^datomic.impl.db.IDatum d) t_or_date)
+            (if (= (.getV ^datomic.impl.db.IDatum d) t-or-date)
               (long (.getT ^datomic.impl.db.IDatum d))
               (long (dec (.getT ^datomic.impl.db.IDatum d))))
             (:nextT db)))
-        (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date))))))
+        (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t-or-date))))))
   (reset-meta!
     #'as-of-t
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 't-or-date]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 't-or-date]),
+       :doc
+       "Resolves a transaction id, t value, or instant to the greatest database t at or before that point. Instants are located through :db/txInstant.",
+       :column (int 1)}
       :name
       'as-of-t
       :ns
       *ns*))
   (defn t-at-or-since
-    ([db t_or_date]
-      (if (instance? java.util.Date t_or_date)
+    "Resolves a transaction id, t value, or instant to the first database t at or after that point."
+    ([db t-or-date]
+      (if (instance? java.util.Date t-or-date)
         (let [d (datomic.db/dget
                   (.seekAVET
                     ^datomic.db.IDb db
-                    (datomic.db/datum db :a :db/txInstant :v t_or_date)))]
+                    (datomic.db/datum db :a :db/txInstant :v t-or-date)))]
           (if (and
                 d
                 (=
@@ -3962,25 +4036,29 @@
                   (long (.getA ^datomic.impl.db.IDatum d))))
             (long (.getT ^datomic.impl.db.IDatum d))
             (:nextT db)))
-        (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date))))))
+        (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t-or-date))))))
   (reset-meta!
     #'t-at-or-since
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 't-or-date]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 't-or-date]),
+       :doc
+       "Resolves a transaction id, t value, or instant to the first database t at or after that point.",
+       :column (int 1)}
       :name
       't-at-or-since
       :ns
       *ns*))
   (defn entid-at
-    ([db partition t_or_date]
+    "Constructs the entity-id boundary for partition at a transaction id, t value, or instant. The result can seed an EAVT seek for entities created at or after that point."
+    ([db partition t-or-date]
       (let [partition (datomic.db/partbits db partition)
-            t (if (instance? java.util.Date t_or_date)
+            t (if (instance? java.util.Date t-or-date)
                 (let [d (datomic.db/dget
-                          (.seekAVET ^datomic.db.IDb db (datomic.db/datum db :a 50 :v t_or_date)))]
+                          (.seekAVET ^datomic.db.IDb db (datomic.db/datum db :a 50 :v t-or-date)))]
                   (if (and d (= 50 (long (.getA ^datomic.impl.db.IDatum d))))
                     (long (.getT ^datomic.impl.db.IDatum d))
                     (:nextT db)))
-                (let [tpart (datomic.db/eid->part (unchecked-long ^java.lang.Number t_or_date))]
+                (let [tpart (datomic.db/eid->part (unchecked-long ^java.lang.Number t-or-date))]
                   (when-not (or (zero? tpart) (= 3 (long tpart)))
                     (throw
                       (java.lang.AssertionError.
@@ -3993,7 +4071,7 @@
                               'or
                               (clojure.core/list 'zero? 'tpart)
                               (clojure.core/list '= 'PART_TX 'tpart)))))))
-                  (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t_or_date)))))]
+                  (long (datomic.db/eid->eidx (unchecked-long ^java.lang.Number t-or-date)))))]
         (long
           (datomic.db/make-eid
             (unchecked-long ^java.lang.Number partition)
@@ -4002,16 +4080,22 @@
     #'entid-at
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'partition 't-or-date]),
+       :doc
+       "Constructs the entity-id boundary for partition at a transaction id, t value, or instant. The result can seed an EAVT seek for entities created at or after that point.",
        :column (int 1)}
       :name
       'entid-at
       :ns
       *ns*))
-  (defn invoke ([db eid_or_ident & args] (apply (.getFn ^datomic.db.IDb db eid_or_ident) args)))
+  (defn invoke
+    "Invokes a database function identified by entity id or ident with args. The function value is resolved from db and compiled on first invocation when necessary."
+    ([db eid-or-ident & args] (apply (.getFn ^datomic.db.IDb db eid-or-ident) args)))
   (reset-meta!
     #'invoke
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'db {:tag 'IDb}) 'eid-or-ident '& 'args]),
+       :doc
+       "Invokes a database function identified by entity id or ident with args. The function value is resolved from db and compiled on first invocation when necessary.",
        :column (int 1)}
       :name
       'invoke
@@ -4344,6 +4428,7 @@
       :ns
       *ns*))
   (defn filter-assess-tx-datoms
+    "Assesses the complete transaction information set. Removes redundant datoms and enforces operation, schema, cardinality-one, uniqueness, installation, and platform constraints before data is accepted."
     ([db check_installs? datoms]
       (let [p0 (datomic.db/create-schema-validator db)
             p1 (datomic.db/create-deduper)
@@ -4402,7 +4487,10 @@
   (reset-meta!
     #'filter-assess-tx-datoms
     (assoc
-      {:arglists (clojure.core/list ['db 'check-installs? 'datoms]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'check-installs? 'datoms]),
+       :doc
+       "Assesses the complete transaction information set. Removes redundant datoms and enforces operation, schema, cardinality-one, uniqueness, installation, and platform constraints before data is accepted.",
+       :column (int 1)}
       :name
       'filter-assess-tx-datoms
       :ns
@@ -4502,23 +4590,34 @@
   (reset-meta!
     #'user-proc?
     (assoc {:arglists (clojure.core/list ['procid]), :column (int 1)} :name 'user-proc? :ns *ns*))
+  ;; Transaction accrual metrics exclude queue, durability, storage-write, and network time.
+  ;; Count keys measure datoms; timing keys are accumulated in nanoseconds and reported in millis.
   (def tx-stat-keys
-   [:res-ct
-    :res-pf-ms
-    :res-tx-ms
-    :comp-ct
-    :comp-pf-ms
-    :comp-tx-ms
-    :dedup-ct
-    :dedup-pf-ms
-    :dedup-tx-ms
-    :ucheck-ct
-    :ucheck-pf-ms
-    :ucheck-tx-ms
-    :dup-datoms
-    :considered-datoms
-    :tx-fn-ms])
-  (reset-meta! #'tx-stat-keys (assoc {:column (int 1)} :name 'tx-stat-keys :ns *ns*))
+   [:res-ct               ; Datoms whose :db.unique/identity values require entity resolution.
+    :res-pf-ms            ; Time prefetching unique-identity resolution.
+    :res-tx-ms            ; Transaction-thread time resolving unique identities.
+    :comp-ct              ; Datoms that cause composite tuple generation.
+    :comp-pf-ms           ; Time prefetching composite constituents.
+    :comp-tx-ms           ; Transaction-thread time loading composite constituents.
+    :dedup-ct             ; Datoms checked for redundancy with db-before.
+    :dedup-pf-ms          ; Time prefetching redundancy checks.
+    :dedup-tx-ms          ; Transaction-thread time checking redundancy.
+    :ucheck-ct            ; Datoms whose values require uniqueness checks.
+    :ucheck-pf-ms         ; Time prefetching uniqueness checks.
+    :ucheck-tx-ms         ; Transaction-thread time checking uniqueness.
+    :dup-datoms           ; Datoms redundant with db-before.
+    :considered-datoms    ; Total datoms considered during accrual.
+    :tx-fn-ms])           ; Time expanding transaction functions.
+  (reset-meta!
+    #'tx-stat-keys
+    (assoc
+      {:doc
+       "Open-ended transaction accrual metric keys. Count values are datom counts; keys ending in -ms are elapsed milliseconds.",
+       :column (int 1)}
+      :name
+      'tx-stat-keys
+      :ns
+      *ns*))
   (defn empty-tx-stat-registers
     ([]
       (persistent!
@@ -4538,8 +4637,9 @@
    #{:dedup-tx-ms :tx-fn-ms :dedup-pf-ms :comp-tx-ms :res-pf-ms :ucheck-tx-ms :ucheck-pf-ms
      :comp-pf-ms :res-tx-ms})
   (reset-meta! #'timing-key? (assoc {:column (int 1)} :name 'timing-key? :ns *ns*))
+  ;; Snapshots concurrent metric registers, converting accumulated timing values to milliseconds.
   (defn summarize-tx-stats
-    ([tx_stat_registers]
+    ([tx-stat-registers]
       (persistent!
         (reduce-kv
           (fn fn__12719
@@ -4552,11 +4652,14 @@
                     (java.lang.Double/valueOf (double (monitor/ns->ms G__12720)))
                     (long G__12720))))))
           (transient {})
-          tx_stat_registers))))
+          tx-stat-registers))))
   (reset-meta!
     #'summarize-tx-stats
     (assoc
-      {:arglists (clojure.core/list ['tx-stat-registers]), :column (int 1)}
+      {:arglists (clojure.core/list ['tx-stat-registers]),
+       :doc
+       "Returns the current transaction accrual metrics, with timing registers converted from nanoseconds to milliseconds.",
+       :column (int 1)}
       :name
       'summarize-tx-stats
       :ns
@@ -4613,6 +4716,10 @@
   (.setMeta (clojure.lang.RT/var "datomic.db" "reverse-key?") {:declared true, :column (int 1)})
   (.setMeta (clojure.lang.RT/var "datomic.db" "->Db") {:declared true, :column (int 1)})
   (.setMeta (clojure.lang.RT/var "datomic.db" "map->Db") {:declared true, :column (int 1)})
+  ;; A Db is an immutable value at a single basis t. asOf, since, history, and
+  ;; filter derive new values by adding index predicates while preserving the
+  ;; underlying indexes. Entity navigation is available for point-in-time views;
+  ;; history retains assertions and retractions for across-time queries.
   (defrecord
     Db
     [id
@@ -5990,6 +6097,7 @@
     #'forward-attr
     (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'forward-attr :ns *ns*))
   (defn process-force-partition
+    "Records explicit partition assignments from a map of tempids to named or implicit partitions. Rejects any value that is not a map."
     ([forcemap db part_reqs local_tempids]
       (if (map? forcemap)
         (reduce-kv
@@ -6011,12 +6119,15 @@
       {:arglists
        (clojure.core/list
          ['forcemap 'db (.withMeta 'part-reqs {:tag 'AssignPartitions}) 'local-tempids]),
+       :doc
+       "Records explicit partition assignments from a map of tempids to named or implicit partitions. Rejects any value that is not a map.",
        :column (int 1)}
       :name
       'process-force-partition
       :ns
       *ns*))
   (defn process-match-partition
+    "Records affinity assignments from a map of tempids to entities whose partitions should be reused. Rejects non-map input and cyclic affinity chains."
     ([matchmap db part_reqs local_tempids]
       (if (map? matchmap)
         (reduce-kv
@@ -6038,12 +6149,15 @@
       {:arglists
        (clojure.core/list
          ['matchmap 'db (.withMeta 'part-reqs {:tag 'AssignPartitions}) 'local-tempids]),
+       :doc
+       "Records affinity assignments from a map of tempids to entities whose partitions should be reused. Rejects non-map input and cyclic affinity chains.",
        :column (int 1)}
       :name
       'process-match-partition
       :ns
       *ns*))
   (defn expand-map
+    "Expands a transaction map into primitive :db/add forms. Assigns an anonymous tempid when :db/id is absent, expands cardinality-many values, supports reverse attributes and nested reference maps, and records partition directives."
     ([db m part_reqs local_tempids]
       (let [dbid (datomic.db/local-id
                    (or (get m :db/id) (datomic.db/tempid 16))
@@ -6103,6 +6217,8 @@
     #'expand-map
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Db}) 'm 'part-reqs 'local-tempids]),
+       :doc
+       "Expands a transaction map into primitive :db/add forms. Assigns an anonymous tempid when :db/id is absent, expands cardinality-many values, supports reverse attributes and nested reference maps, and records partition directives.",
        :column (int 1)}
       :name
       'expand-map
@@ -6164,6 +6280,8 @@
         (clojure.lang.RT/var "datomic.db" "tuple-elem?")
         (assoc protocol_signature__7472 :name protocol_method_name__7473 :ns *ns*))))
   (extend nil datomic.db/TupleElem {:tuple-elem? (fn fn__13076 ([_] true))})
+  ;; Tuple slots use compact scalar representations. Strings, BigIntegers, and
+  ;; BigDecimals are bounded to 256 characters, bits, and digits respectively.
   (extend java.lang.Object datomic.db/TupleElem {:tuple-elem? (fn fn__13078 ([_] false))})
   (extend
     java.math.BigInteger
@@ -6337,6 +6455,7 @@
       :ns
       *ns*))
   (defn validated-v-for-attr
+    "Validates and canonicalizes a transaction value according to its attribute schema. Resolves reference identifiers, enforces tuple shape and element limits, rejects nil, and reports type mismatches."
     ([db attr v procargs procid]
       (let [vt (.elementAt ^datomic.db.Db db (.-vtypeid ^datomic.db.Attribute attr))]
         (cond
@@ -6396,11 +6515,17 @@
        (clojure.core/list
          ['db 'attr 'v]
          [(.withMeta 'db {:tag 'Db}) (.withMeta 'attr {:tag 'Attribute}) 'v 'procargs 'procid]),
+       :doc
+       "Validates and canonicalizes a transaction value according to its attribute schema. Resolves reference identifiers, enforces tuple shape and element limits, rejects nil, and reports type mismatches.",
        :column (int 1)}
       :name
       'validated-v-for-attr
       :ns
       *ns*))
+  ;; Transaction maps and primitive list forms converge here. Map order is used only
+  ;; for expansion; the resulting datoms are assessed together as one information set.
+  ;; Lookup refs resolve against db-before. Anonymous nested entities require either a
+  ;; component relationship to their parent or a unique identity of their own.
   (deftype
     ProcessInpoint
     [db part_reqs nextp]
@@ -6513,6 +6638,7 @@
       :ns
       *ns*))
   (defn get-ids
+    "Assigns permanent entity ids to transaction tempids and resolves unique-identity upserts against db-before. A tempid that identifies multiple existing entities is rejected as a conflict."
     ([db data part_reqs]
       (let [default_part_ref (delay (datomic.db/default-partition db))
             genid (fn genid
@@ -6695,12 +6821,15 @@
       {:arglists
        (clojure.core/list
          [(.withMeta 'db {:tag 'Db}) 'data (.withMeta 'part-reqs {:tag 'GetPartition})]),
+       :doc
+       "Assigns permanent entity ids to transaction tempids and resolves unique-identity upserts against db-before. A tempid that identifies multiple existing entities is rejected as a conflict.",
        :column (int 1)}
       :name
       'get-ids
       :ns
       *ns*))
   (defn has-tx-inst?
+    "Validates an explicit :db/txInstant for the current transaction. At most one value is allowed; it must be no earlier than the database basis and no later than the transactor clock."
     ([db now datoms]
       (reduce
         (fn fn__13204
@@ -6743,6 +6872,8 @@
     #'has-tx-inst?
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'now 'datoms]),
+       :doc
+       "Validates an explicit :db/txInstant for the current transaction. At most one value is allowed; it must be no earlier than the database basis and no later than the transactor clock.",
        :column (int 1)}
       :name
       'has-tx-inst?
@@ -7006,6 +7137,7 @@
       :ns
       *ns*))
   (defn generate-composites
+    "Derives composite-tuple datoms affected by constituent assertions and retractions. Missing constituents occupy nil slots, and removing every constituent retracts the composite value."
     ([db datoms tx_stat_registers]
       (let [eaop_map (java.util.HashMap.)
             needed_eas (java.util.HashSet.)
@@ -7059,6 +7191,8 @@
     (assoc
       {:private true,
        :arglists (clojure.core/list ['db 'datoms 'tx-stat-registers]),
+       :doc
+       "Derives composite-tuple datoms affected by constituent assertions and retractions. Missing constituents occupy nil slots, and removing every constituent retracts the composite value.",
        :column (int 1)}
       :name
       'generate-composites
@@ -7220,6 +7354,9 @@
       'prefetch-identity
       :ns
       *ns*))
+  ;; Transaction functions receive the immutable db-before and only their explicit
+  ;; arguments. Their returned transaction data is expanded into the same transaction;
+  ;; no function observes the return value of another function in that transaction.
   (deftype
     ProcessExpander
     [db part_reqs arraylist attr_hook_attrs prefetch_dispatcher tx_stat_registers]
@@ -7598,6 +7735,7 @@
       :ns
       *ns*))
   (defn ensure-entity!
+    "Checks one requested entity spec against db-after. Required attributes must be present and every entity predicate must return true; predicates receive db-after and the resolved entity id."
     ([db_before db_after e spec idmap]
       (let [spec_ent (.entity ^datomic.Database db_before spec)
             required (:db.entity/attrs spec_ent)
@@ -7634,6 +7772,8 @@
     (assoc
       {:arglists
        (clojure.core/list [(.withMeta 'db-before {:tag 'Database}) 'db-after 'e 'spec 'idmap]),
+       :doc
+       "Checks one requested entity spec against db-after. Required attributes must be present and every entity predicate must return true; predicates receive db-after and the resolved entity id.",
        :column (int 1)}
       :name
       'ensure-entity!
@@ -7750,6 +7890,7 @@
       :ns
       *ns*))
   (defn with-tx
+    "Applies transaction data as a pure computation over db. Expands maps and transaction functions against db-before, resolves tempids and unique identities, derives composites, enforces schema and entity predicates, and returns :db-before, :db-after, :tx-data, :tempids, and transaction statistics."
     ([db dispatcher txdata]
       (let [added (java.util.ArrayList.)
             local_tempids (java.util.HashMap.)
@@ -7785,12 +7926,16 @@
   (reset-meta!
     #'with-tx
     (assoc
-      {:arglists (clojure.core/list ['db 'dispatcher 'txdata]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'dispatcher 'txdata]),
+       :doc
+       "Applies transaction data as a pure computation over db. Expands maps and transaction functions against db-before, resolves tempids and unique identities, derives composites, enforces schema and entity predicates, and returns :db-before, :db-after, :tx-data, :tempids, and transaction statistics.",
+       :column (int 1)}
       :name
       'with-tx
       :ns
       *ns*))
   (defn with-tx+opts
+    "Applies a speculative transaction with optional I/O accounting and prefetch hints. :return-hints includes immutable storage keys read during processing; transaction semantics are unchanged when hints are requested."
     ([db txdata p__13418]
       (let [map__13419 p__13418
             map__13419 (if (seq? map__13419)
@@ -7828,6 +7973,8 @@
     #'with-tx+opts
     (assoc
       {:arglists (clojure.core/list ['db 'txdata {:keys ['return-hints 'io-context]}]),
+       :doc
+       "Applies a speculative transaction with optional I/O accounting and prefetch hints. :return-hints includes immutable storage keys read during processing; transaction semantics are unchanged when hints are requested.",
        :column (int 1)}
       :name
       'with-tx+opts

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cassandra-values-v4)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cassandra-values-v4)
+    {:doc
+     "Stores Datomic values through the Cassandra v4 driver, splitting large payloads into chunks and coordinating their reads and deletes with the owning row."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -49,6 +53,7 @@
       #'chunk-pool))
   (def cql-keys [:id2 :rev :map :val :chunks])
   (reset-meta! #'cql-keys (assoc {:column (int 1)} :name 'cql-keys :ns *ns*))
+  ;; Stores small values in one row and splits larger values across deterministic chunk rows.
   (defn put-value
     ([session table p__14940]
       (let [map__14941 p__14940
@@ -211,6 +216,7 @@
       'put-value
       :ns
       *ns*))
+  ;; Reads a value row and reassembles all chunk rows declared by its metadata.
   (defn get-value
     ([session table id]
       (let [temp__5804__auto__ (let [m_14970 {:event :cassandra-values/get-value, :id id}
@@ -360,6 +366,7 @@
       'get-value
       :ns
       *ns*))
+  ;; Removes a value row and its declared chunks through retryable CQL deletes.
   (defn delete-value
     ([session table id]
       (let [m_14998 {:event :cassandra-values/delete-value, :id id}

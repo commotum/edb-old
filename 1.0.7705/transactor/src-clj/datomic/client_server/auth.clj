@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.client-server.auth)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.client-server.auth)
+    {:doc
+     "Peer Server request authentication using configured access-key and secret pairs. Credential comparison and request validation produce anomaly data suitable for the Client protocol."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -49,8 +53,9 @@
   (reset-meta!
     #'ssl-config
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'ssl-config :ns *ns*))
+  ;; Verifies the request signature against the secret selected by its access-key identifier.
   (defn callback*
-    ([access_key_>secret req]
+    ([access-key->secret req]
       (let [temp__5823__auto__ (some->
                                  req
                                  (get-in [:headers "authorization"])
@@ -58,12 +63,12 @@
                                  (:access-key-id))]
         (if temp__5823__auto__
           (let [akid temp__5823__auto__
-                verify_params (merge
+                verify-params (merge
                                 {:service "peer-server",
                                  :region "none",
                                  :access-key-id akid,
-                                 :secret (get access_key_>secret akid)})
-                temp__5823__auto__ (hmac/verify-failure req verify_params)]
+                                 :secret (get access-key->secret akid)})
+                temp__5823__auto__ (hmac/verify-failure req verify-params)]
             (if temp__5823__auto__
               (let [failure temp__5823__auto__]
                 #:cognitect.anomalies{:category :cognitect.anomalies/forbidden,
@@ -79,9 +84,10 @@
       'callback*
       :ns
       *ns*))
+  ;; Returns the authenticated request, logging and rejecting invalid credentials.
   (defn callback
-    ([access_key_>secret req]
-      (let [result (callback* access_key_>secret req)]
+    ([access-key->secret req]
+      (let [result (callback* access-key->secret req)]
         (if (:cognitect.anomalies/category result)
           (do
             (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.client-server.auth")]
@@ -101,8 +107,8 @@
       :ns
       *ns*))
   (defn genkey
-    ([cipher_name]
-      (let [keygen (javax.crypto.KeyGenerator/getInstance ^java.lang.String cipher_name)]
+    ([cipher-name]
+      (let [keygen (javax.crypto.KeyGenerator/getInstance ^java.lang.String cipher-name)]
         (.init ^javax.crypto.KeyGenerator keygen (int 128))
         (.generateKey ^javax.crypto.KeyGenerator keygen))))
   (reset-meta!
@@ -113,6 +119,7 @@
       'genkey
       :ns
       *ns*))
+  ;; Creates the short-lived continuation-token manager bound to this server address.
   (defn create-token-manager
     ([p__26180]
       (let [map__26181 p__26180

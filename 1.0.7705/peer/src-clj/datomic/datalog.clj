@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.datalog)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.datalog)
+    {:doc
+     "Relational execution engine for Datomic Datalog. Builds relations from database and external sources, unifies logic variables across clauses, schedules clauses according to available bindings, evaluates predicates, functions, negation, disjunction, and rules, and reports insufficient or invalid bindings as query errors. Database relations seek directly into the supporting indexes whenever bound components permit."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'compare))
@@ -1529,15 +1533,30 @@
   (defn variable? ([x] (= \? (first (config/sym-name x)))))
   (reset-meta!
     #'variable?
-    (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'variable? :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['x]), :doc "Returns true when x is a query variable symbol beginning with ?.", :column (int 1)}
+      :name
+      'variable?
+      :ns
+      *ns*))
   (defn source? ([x] (= \$ (first (config/sym-name x)))))
   (reset-meta!
     #'source?
-    (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'source? :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['x]), :doc "Returns true when x is a query source symbol beginning with $.", :column (int 1)}
+      :name
+      'source?
+      :ns
+      *ns*))
   (defn blank? ([x] (= '_ x)))
   (reset-meta!
     #'blank?
-    (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'blank? :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['x]), :doc "Returns true when x is the _ placeholder, which matches without binding.", :column (int 1)}
+      :name
+      'blank?
+      :ns
+      *ns*))
   (defn variable-or-blank? ([x] (or (variable? x) (blank? x))))
   (reset-meta!
     #'variable-or-blank?
@@ -1868,6 +1887,8 @@
     (assoc
       {:arglists
        (clojure.core/list ['srcs 'prog [['hpred '& 'hargs] '& 'body :as 'rule] 'init-binds]),
+       :doc
+       "Schedules clauses in source order as their required variables become available. Clauses that cannot yet run are deferred. Throws an insufficient-binding error when no remaining clause can run, including rule invocations missing required bindings and database patterns that would require an unbounded scan.",
        :column (int 1)}
       :name
       'sched-in-order
@@ -2218,7 +2239,15 @@
                     (str "Invalid binding form: " binds)))))))
   (reset-meta!
     #'binding-type
-    (assoc {:arglists (clojure.core/list ['binds]), :column (int 1)} :name 'binding-type :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['binds]),
+       :doc
+       "Classifies a query binding form as :scalar, :tuple, :list, or :rel. A symbol binds one value, a vector binds tuple positions, [variable ...] binds collection members, and a nested vector binds relation tuples. Throws a query argument error for any other form.",
+       :column (int 1)}
+      :name
+      'binding-type
+      :ns
+      *ns*))
   (defn expr-clause
     ([p__18586]
       (let [vec__18587 p__18586
@@ -2569,7 +2598,10 @@
   (reset-meta!
     #'prep-clauses
     (assoc
-      {:arglists (clojure.core/list ['rm 'clauses]), :column (int 1)}
+      {:arglists (clojure.core/list ['rm 'clauses]),
+       :doc
+       "Normalizes negation and disjunction, lowers or-join branches into generated rules, lifts constants from predicate arguments, and compiles expression clauses. Returns the updated rule map and prepared clause vector.",
+       :column (int 1)}
       :name
       'prep-clauses
       :ns
@@ -2698,7 +2730,15 @@
         rules)))
   (reset-meta!
     #'rule-map
-    (assoc {:arglists (clojure.core/list ['rules]), :column (int 1)} :name 'rule-map :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['rules]),
+       :doc
+       "Compiles rule data or an EDN rule string into a map of rule name to alternative rule bodies. Rule definitions sharing a name form alternative logical paths and must have matching arity. Required head bindings are retained for clause scheduling.",
+       :column (int 1)}
+      :name
+      'rule-map
+      :ns
+      *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.datalog" "rule-cache") {:column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.datalog" "rule-cache")
@@ -3163,7 +3203,7 @@
       :ns
       *ns*))
   (defn qsqr
-    ([db query sched_fn]
+    ([db query sched-fn]
       (let [map__18825 query
             map__18825 (if (seq? map__18825)
                          (if (next map__18825)
@@ -3213,7 +3253,7 @@
                       oprog
                       apred
                       inrel
-                      sched_fn
+                      sched-fn
                       nil
                       ans
                       (java.util.HashMap.)
@@ -3228,7 +3268,10 @@
   (reset-meta!
     #'qsqr
     (assoc
-      {:arglists (clojure.core/list ['db 'query] ['db 'query 'sched-fn]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'query] ['db 'query 'sched-fn]),
+       :doc
+       "Evaluates a compiled query and returns its basis relation. Inputs are bound to named sources, range predicates become index start and continuation constraints, recursive rules iterate to a fixed point, and an optional timeout marks the running query for cancellation.",
+       :column (int 1)}
       :name
       'qsqr
       :ns

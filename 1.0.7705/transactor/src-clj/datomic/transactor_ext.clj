@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.transactor-ext)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.transactor-ext)
+    {:doc
+     "Datomic Pro transactor startup services. Adds the health endpoint, S3 log rotation, licensing, process callbacks, monitoring, and cloud integration around the core transactor lifecycle."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -89,6 +93,8 @@
     (assoc
       {:arglists
        (clojure.core/list [{:keys ['log-dir 'creds 'aws-s3-log-bucket-id 'log-path-fn 'process]}]),
+       :doc
+       "Starts S3 log rotation when :aws-s3-log-bucket-id is configured. Verifies bucket access before startup, scans the log directory every five minutes, and registers a process failure handler that performs a final compressed upload. Inaccessible storage raises :transactor/config.",
        :column (int 1)}
       :name
       'start-logrotate
@@ -132,7 +138,10 @@
   (reset-meta!
     #'start-ping-endpoint
     (assoc
-      {:arglists (clojure.core/list []), :column (int 1)}
+      {:arglists (clojure.core/list []),
+       :doc
+       "Starts the /health endpoint when datomic.pingHost and datomic.pingPort are configured. Connection concurrency comes from datomic.pingConcurrency or a processor-based default, pending requests are capped at ten, and requests have a 15-second bounding timeout. Startup failures include the configured address.",
+       :column (int 1)}
       :name
       'start-ping-endpoint
       :ns

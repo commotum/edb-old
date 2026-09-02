@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.transactor)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.transactor)
+    {:doc
+     "Transactor process orchestration. An active transactor serializes transactions, appends them to durable storage, maintains recent database state, runs background services, and publishes its endpoint; standby processes monitor the same storage heartbeat."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -74,6 +78,8 @@
   (reset-meta!
     #'aws-creds
     (assoc {:arglists (clojure.core/list ['ak 'sk]), :column (int 1)} :name 'aws-creds :ns *ns*))
+  ;; Couples storage heartbeat ownership to the lifetime of the transaction-processing master.
+  ;; The master is created only after this process becomes active and is closed on process failure.
   (defn start-lifecycle
     ([p__31961]
       (let [map__31962 p__31961
@@ -178,6 +184,9 @@
       'start-lifecycle
       :ns
       *ns*))
+  ;; Transactor property files use lower-case hyphenated names. Runtime components consume the
+  ;; corresponding datomic.* Java properties, where memory values are parsed as bytes, *-msec
+  ;; values are milliseconds, and *-concurrency values bound worker counts.
   (def tprop->sysprop
    {:memcached "datomic.memcachedServers",
     :aws-cloudwatch-region "datomic.cloudwatchRegion",
@@ -217,6 +226,7 @@
     :memcached-auto-discovery "datomic.memcachedAutoDiscovery",
     :local-memcached-username "datomic.localMemcachedUsername"})
   (reset-meta! #'tprop->sysprop (assoc {:column (int 1)} :name 'tprop->sysprop :ns *ns*))
+  ;; Publishes transactor-file settings through the system-property names used by runtime components.
   (defn convert-transactor-props-to-system-props
     ([props]
       (loop [seq_31978 (seq tprop->sysprop) chunk_31979 nil count_31980 0 i_31981 0]
@@ -257,6 +267,8 @@
       'convert-transactor-props-to-system-props
       :ns
       *ns*))
+  ;; Applies defaults, validates protocol-specific required settings, parses ports, and initializes
+  ;; the runtime configuration snapshot. Configuration is redacted before it is logged.
   (defn ensure-args
     ([props propsfile]
       (let [props (merge {:data-dir "./data", :log-dir "log"} props)
@@ -412,6 +424,7 @@
           :default
           #'clojure.core/global-hierarchy))
       #'create-cluster-map))
+  ;; Checks that the configured storage protocol is available in the running edition.
   (defn supported-protocol?
     ([protocol]
       (or
@@ -501,6 +514,7 @@
       'ddb+s3-uri
       :ns
       *ns*))
+  ;; Builds the database connection URI template printed at startup for the selected storage protocol.
   (defn connection-uri
     ([cluster_map args]
       (let [dbname "<DB-NAME>" G__32035 (:protocol cluster_map)]
@@ -705,6 +719,8 @@
       'ddb+s3-cluster-map
       :ns
       *ns*))
+  ;; Initializes storage, monitoring, cache services, and heartbeat lifecycle for one transactor process.
+  ;; Transaction service begins only after lifecycle establishes active ownership.
   (defn run*
     ([args]
       (db/use-transactor-tempid-range)
@@ -978,6 +994,7 @@
   (reset-meta!
     #'run*
     (assoc {:arglists (clojure.core/list ['args]), :column (int 1)} :name 'run* :ns *ns*))
+  ;; Installs logging bridges and uncaught-exception and garbage-collection reporting.
   (defn prepare-run
     ([]
       (bridge/install)
@@ -987,6 +1004,8 @@
   (reset-meta!
     #'prepare-run
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'prepare-run :ns *ns*))
+  ;; Validates configuration and starts the transactor asynchronously, routing startup failure
+  ;; through the process failure coordinator.
   (defn run
     ([props propsfile]
       (prepare-run)

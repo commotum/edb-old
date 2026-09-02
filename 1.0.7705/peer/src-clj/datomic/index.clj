@@ -2,7 +2,9 @@
   (clojure.core/in-ns (.withMeta 'datomic.index {:author "Rich Hickey"}))
   (.resetMeta
     (clojure.lang.Namespace/find (.withMeta 'datomic.index {:author "Rich Hickey"}))
-    {:doc "Index on cluster", :author "Rich Hickey"})
+    {:doc
+     "Persistent covering indexes over datoms. EAVT orders entity, attribute, value, and descending transaction; AEVT orders attribute, entity, value, and descending transaction; AVET orders attribute, value, entity, and descending transaction and contains :db/index or :db/unique attributes; VAET orders reference value, attribute, entity, and descending transaction and is stored under the internal RAET key. A seek key supplies leading components in index order. Forward traversal starts at the lowest completion of that prefix and reverse traversal starts at the highest; index ranges include the start value and exclude the end value. Durable indexes are shallow trees of immutable segments. Background indexing merges recent in-memory datoms into durable tiers, rewrites only affected ranges, and publishes a new root atomically."
+     :author "Rich Hickey"})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['bounded-count 'compare])
@@ -228,6 +230,8 @@
       'transposed-data
       :ns
       *ns*))
+  ;; Sparse root keys select immutable directory nodes. The dirs array is a
+  ;; weak in-process cache parallel to the durable directory identifiers.
   (deftype RootNode [keydata dirids dirs])
   (clojure.core/import 'datomic.index.RootNode)
   (defn ->RootNode ([keydata dirids dirs] (datomic.index.RootNode. keydata dirids dirs)))
@@ -258,6 +262,9 @@
       'root-node
       :ns
       *ns*))
+  ;; Directory keys select immutable segments. Offsets and counts delimit the
+  ;; portion of each stored segment owned by this directory entry; segs caches
+  ;; loaded segment values without changing their durable representation.
   (deftype DirNode [keydata segids offsets counts segs])
   (clojure.core/import 'datomic.index.DirNode)
   (defn ->DirNode
@@ -1339,6 +1346,10 @@
       'ibinary-search
       :ns
       *ns*))
+  ;; A covering index is a sorted set of complete datoms. A seek descends
+  ;; through sparse root and directory keys, loads at most the selected path,
+  ;; and returns a bidirectional cursor positioned at the first key greater
+  ;; than or equal to the requested key.
   (deftype
     Index
     [lookup cmpi root cached_count order]
@@ -1630,7 +1641,10 @@
   (reset-meta!
     #'lookup-index
     (assoc
-      {:arglists (clojure.core/list ['lookup 'cmpi 'rootid]), :column (int 1)}
+      {:arglists (clojure.core/list ['lookup 'cmpi 'rootid]),
+       :doc
+       "Loads a durable root and returns a covering sorted-set view using cmpi. Segment and directory values are fetched lazily through lookup and cached with weak references. The comparator determines the public index order recorded for I/O statistics.",
+       :column (int 1)}
       :name
       'lookup-index
       :ns
@@ -2065,15 +2079,15 @@
       :ns
       *ns*))
   (defn load-index
-    ([olookup index_root_id]
+    ([olookup index-root-id]
       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.index")]
         (when (.isDebugEnabled ^org.slf4j.Logger logger)
           (.debug
             ^org.slf4j.Logger logger
             (logger/process
-              {:event :index/load-index, :olookup olookup, :index-root-id index_root_id})))
+              {:event :index/load-index, :olookup olookup, :index-root-id index-root-id})))
         nil)
-      (let [temp__5804__auto__ (common/getx olookup index_root_id)]
+      (let [temp__5804__auto__ (common/getx olookup index-root-id)]
         (when temp__5804__auto__
           (let [root_map temp__5804__auto__
                 version (datomic.index/valid-version root_map)
@@ -2144,7 +2158,7 @@
                              datomic.index/raet-cmpi
                              (:raet-mid root_map)))]
             {:birth-level (or (:birth-level root_map) db/MIN_SCHEMA_LEVEL),
-             :root-id index_root_id,
+             :root-id index-root-id,
              :mid-index (datomic.db.IndexSet. eavt_mid avet_mid aevt_mid raet_mid nil),
              :nextT (:nextT root_map),
              :schema-level (or (:schema-level root_map) db/MIN_SCHEMA_LEVEL),
@@ -2156,11 +2170,16 @@
   (reset-meta!
     #'load-index
     (assoc
-      {:arglists (clojure.core/list ['olookup 'index-root-id]), :column (int 1)}
+      {:arglists (clojure.core/list ['olookup 'index-root-id]),
+       :doc
+       "Loads a published database index root and returns its main, mid, history, and fulltext tiers together with basis, schema, revision, and next-transaction metadata. Durable segment contents remain lazy.",
+       :column (int 1)}
       :name
       'load-index
       :ns
       *ns*))
+  ;; Index jobs build immutable leaf segments, group them into wide directory
+  ;; nodes, and retain sparse boundary keys so later seeks need only one path.
   (def SEG_BYTES_TARGET 16000)
   (reset-meta!
     #'SEG_BYTES_TARGET
@@ -4642,7 +4661,10 @@
   (reset-meta!
     #'mem-index-bytes
     (assoc
-      {:arglists (clojure.core/list ['index]), :column (int 1)}
+      {:arglists (clojure.core/list ['index]),
+       :doc
+       "Estimates the durable storage represented by an in-memory index using the configured memory-to-storage ratio. Returns zero for a missing tier.",
+       :column (int 1)}
       :name
       'mem-index-bytes
       :ns
@@ -6464,6 +6486,8 @@
     #'merge-db
     (assoc
       {:arglists (clojure.core/list ['cstore 'olookup (.withMeta 'db {:tag 'Db}) 'as-of-t]),
+       :doc
+       "Runs a background indexing job for db through as-of-t. The database must be prepared for indexing. Recent datoms are merged into immutable EAVT, AEVT, AVET, VAET, history, and fulltext tiers; a new root is published with revision checking; superseded values are marked for garbage collection. Returns the newly loaded index and any excision predicates.",
        :column (int 1)}
       :name
       'merge-db

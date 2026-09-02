@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.iam)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.iam)
+    {:doc
+     "IAM provisioning and least-privilege policy construction for Datomic on AWS. Peer policies grant DynamoDB reads; transactor policies grant database writes and optional S3 log and CloudWatch metric writes. Role and instance-profile operations avoid embedding long-lived access keys in EC2 configuration."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -472,6 +476,7 @@
       'create-credentials-command
       :ns
       *ns*))
+  ;; Emits the read-only DynamoDB policy used by Peer processes.
   (defn dynamo-r-policy-command
     ([p__26958]
       (let [map__26959 p__26958
@@ -504,6 +509,7 @@
       'dynamo-r-policy-command
       :ns
       *ns*))
+  ;; Emits the table-scoped DynamoDB policy required by a transactor or restore writer.
   (defn dynamo-rw-policy-command
     ([p__26962]
       (let [map__26963 p__26962
@@ -532,6 +538,7 @@
       'dynamo-rw-policy-command
       :ns
       *ns*))
+  ;; Emits a TLS-required CloudWatch metric publishing policy.
   (defn metrics-w-policy-command
     ([_] (metrics-w-policy-command))
     ([]
@@ -555,6 +562,7 @@
       'metrics-w-policy-command
       :ns
       *ns*))
+  ;; Emits an S3 PutObject policy for a log bucket and all keys beneath it.
   (defn s3-w-policy-command
     ([p__26968]
       (let [map__26969 p__26968

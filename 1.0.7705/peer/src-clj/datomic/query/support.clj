@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.query.support)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.query.support)
+    {:doc
+     "Shared query-form normalization and result adapters. Accepts EDN strings, sequential query forms, and query maps; handles :keys, :strs, and :syms return-map specifications; preserves find order in indexed return maps; and provides counted lazy query results."})
   (clojure.core/with-loading-context
     (do (clojure.core/refer 'clojure.core) (clojure.core/require ['clojure.edn :as 'edn])))
   (when-not (.equals 'datomic.query.support 'clojure.core)
@@ -34,7 +38,15 @@
         (partition 2 (partition-by #{:find :where :syms :keys :with :timeout :strs :in} lq)))))
   (reset-meta!
     #'listq->mapq
-    (assoc {:arglists (clojure.core/list ['lq]), :column (int 1)} :name 'listq->mapq :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['lq]),
+       :doc
+       "Converts a sequential query form into a map keyed by :find, :with, :in, :where, :timeout, and return-map clauses. Clause values retain their original order.",
+       :column (int 1)}
+      :name
+      'listq->mapq
+      :ns
+      *ns*))
   (defn disallow-find-variants!
     ([query]
       (when (some
@@ -45,6 +57,8 @@
     #'disallow-find-variants!
     (assoc
       {:arglists (clojure.core/list ['query]), :column (int 1)}
+      :doc
+      "Rejects scalar, collection, and tuple find specifications where only relation results are supported. Throws an incorrect-input anomaly."
       :name
       'disallow-find-variants!
       :ns
@@ -53,7 +67,15 @@
     ([q] (let [q (if (string? q) (edn/read-string q) q)] (if (sequential? q) (listq->mapq q) q))))
   (reset-meta!
     #'query-map
-    (assoc {:arglists (clojure.core/list ['q]), :column (int 1)} :name 'query-map :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['q]),
+       :doc
+       "Returns q as a query map. EDN strings are read first, sequential forms are partitioned into clauses, and maps are returned unchanged.",
+       :column (int 1)}
+      :name
+      'query-map
+      :ns
+      *ns*))
   (defn parse-as
     ([q]
       (let [map__18863 (query-map q)
@@ -79,45 +101,53 @@
           [nq nil]))))
   (reset-meta!
     #'parse-as
-    (assoc {:arglists (clojure.core/list ['q]), :column (int 1)} :name 'parse-as :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['q]),
+       :doc
+       "Returns [query-map result-keys]. Converts :keys names to keywords, :strs names to strings, and :syms names to symbols, then removes the return-map clause from the query. The number of names must equal the number of :find elements.",
+       :column (int 1)}
+      :name
+      'parse-as
+      :ns
+      *ns*))
   (defn counted-seq
-    ([base_seq ct meta]
+    ([base-seq ct meta]
       (when-not (< ct 1)
         (proxy
           [clojure.lang.ASeq clojure.lang.Counted]
           [^clojure.lang.IPersistentMap meta]
-          (more [] (rest base_seq))
-          (seq [] base_seq)
-          (next [] (next base_seq))
-          (contains [o] (.contains ^java.util.List base_seq o))
+          (more [] (rest base-seq))
+          (seq [] base-seq)
+          (next [] (next base-seq))
+          (contains [o] (.contains ^java.util.List base-seq o))
           (count [] ct)
           (listIterator
-            ([] (.listIterator ^java.util.List base_seq))
-            ([index] (.listIterator ^java.util.List base_seq (int ^java.lang.Number index))))
-          (cons [o] (cons o base_seq))
-          (iterator [] (.iterator ^java.util.List base_seq))
+            ([] (.listIterator ^java.util.List base-seq))
+            ([index] (.listIterator ^java.util.List base-seq (int ^java.lang.Number index))))
+          (cons [o] (cons o base-seq))
+          (iterator [] (.iterator ^java.util.List base-seq))
           (subList
             [from to]
             (.subList
-              ^java.util.List base_seq
+              ^java.util.List base-seq
               (int ^java.lang.Number from)
               (int ^java.lang.Number to)))
           (lastIndexOf
             [o]
-            (java.lang.Integer/valueOf (int (.lastIndexOf ^java.util.List base_seq o))))
-          (withMeta [meta] (counted-seq base_seq ct meta))
-          (hashCode [] (java.lang.Integer/valueOf (int (.hashCode base_seq))))
-          (hasheq [] (hash base_seq))
-          (indexOf [o] (java.lang.Integer/valueOf (int (.indexOf ^java.util.List base_seq o))))
+            (java.lang.Integer/valueOf (int (.lastIndexOf ^java.util.List base-seq o))))
+          (withMeta [meta] (counted-seq base-seq ct meta))
+          (hashCode [] (java.lang.Integer/valueOf (int (.hashCode base-seq))))
+          (hasheq [] (hash base-seq))
+          (indexOf [o] (java.lang.Integer/valueOf (int (.indexOf ^java.util.List base-seq o))))
           (toArray
-            ([] (.toArray ^java.util.List base_seq))
-            ([o] (.toArray ^java.util.List base_seq ^"[Ljava.lang.Object;" o)))
-          (get [index] (nth base_seq (int ^java.lang.Number index)))
-          (equals [o] (.equals base_seq o))
-          (equiv [o] (= base_seq o))
-          (containsAll [c] (.containsAll ^java.util.List base_seq ^java.util.Collection c))
-          (first [] (first base_seq)))))
-    ([base_seq ct] (counted-seq base_seq ct nil)))
+            ([] (.toArray ^java.util.List base-seq))
+            ([o] (.toArray ^java.util.List base-seq ^"[Ljava.lang.Object;" o)))
+          (get [index] (nth base-seq (int ^java.lang.Number index)))
+          (equals [o] (.equals base-seq o))
+          (equiv [o] (= base-seq o))
+          (containsAll [c] (.containsAll ^java.util.List base-seq ^java.util.Collection c))
+          (first [] (first base-seq)))))
+    ([base-seq ct] (counted-seq base-seq ct nil)))
   (reset-meta!
     #'counted-seq
     (assoc
@@ -125,6 +155,8 @@
        (clojure.core/list
          ['base-seq 'ct]
          [(.withMeta 'base-seq {:tag 'java.util.List}) 'ct 'meta]),
+       :doc
+       "Wraps base-seq in an ASeq whose Counted implementation returns ct without realizing the sequence. Returns nil when ct is less than one.",
        :column (int 1)}
       :name
       'counted-seq

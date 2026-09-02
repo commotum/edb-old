@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.process)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.process)
+    {:doc
+     "Process identity, lifecycle state, shutdown hooks, and shared executors used by Peer and Transactor components."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -143,6 +147,8 @@
       'map->SharedCriticalFailure
       :ns
       *ns*))
+  ;; Create a one-way critical-failure latch. The first failure runs every
+  ;; registered handler, waits the grace period, and optionally terminates the JVM.
   (defn create-instance
     ([shutdown_time exit?]
       (let [handlers (atom []) prom (promise)]
@@ -227,6 +233,7 @@
       (.setMeta (clojure.lang.RT/var "datomic.process" "instance") {:column (int 1)})
       (.bindRoot (clojure.lang.RT/var "datomic.process" "instance") (create-instance 30000 true))
       #'instance))
+  ;; Write the process id when datomic.pidFile names a non-empty path.
   (defn claim-pid-file
     ([]
       (let [temp__5825__auto__ (config/property "datomic.pidFile")]
@@ -242,6 +249,7 @@
   (reset-meta!
     #'throw-if-failing!
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'throw-if-failing! :ns *ns*))
+  ;; Decorate a function so any uncaught throwable initiates critical shutdown.
   (defn fail-on-exception
     ([f]
       (fn fn__10985

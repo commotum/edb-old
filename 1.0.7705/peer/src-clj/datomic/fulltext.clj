@@ -3,7 +3,7 @@
   (.resetMeta
     (clojure.lang.Namespace/find (.withMeta 'datomic.fulltext {:author "Stuart Halloway"}))
     {:doc
-     "Fulltext search. Most of the code in this namespace is used\nby the master and the peers to build indices. The only consumer-facing\nAPI is search.",
+     "Builds and searches per-attribute fulltext indexes. Indexing stores entity, transaction, and analyzed text fields, preserves historical assertions, and publishes immutable Lucene directories with the database index. Search merges readers from the memory, indexing, durable, and history tiers and produces scored hit rows for the Datalog fulltext relation. The consumer-facing entry point is search.",
      :author "Stuart Halloway"})
   (clojure.core/with-loading-context
     (do
@@ -166,8 +166,8 @@
       :ns
       *ns*))
   (defn search-iterable
-    ([searcher db attr search_map]
-      (let [qmap (if (string? search_map) {:search search_map} search_map)
+    ([searcher db attr search-map]
+      (let [qmap (if (string? search-map) {:search search-map} search-map)
             map__13183 qmap
             map__13183 (if (seq? map__13183)
                          (if (next map__13183)
@@ -186,7 +186,7 @@
         (if (seq scoredocs)
           (datomic.fulltext.SearchIterable.
             searcher
-            search_map
+            search-map
             (remove
               nil?
               (map
@@ -232,6 +232,8 @@
     (assoc
       {:arglists
        (clojure.core/list [(.withMeta 'searcher {:tag 'IndexSearcher}) 'db 'attr 'search-map]),
+       :doc
+       "Executes a fulltext search against searcher. search-map may be a search string or {:search string :limit n}; the default limit is 10000. Stale Lucene documents whose assertions are absent from db are removed. Results are lazy and ordered by relevance with scores normalized to the highest-scoring hit.",
        :column (int 1)}
       :name
       'search-iterable
@@ -996,6 +998,8 @@
     (assoc
       {:arglists
        (clojure.core/list ['cstore 'olookup 'db 'aevt 'attrids 'old-root-id 'old-hist-id]),
+       :doc
+       "Builds durable fulltext and fulltext-history roots for attrids from the AEVT indexing tier. Each attribute is maintained in its own immutable Lucene directory. Returns the new root identifiers and the durable values superseded by the job.",
        :column (int 1)}
       :name
       'build-index
@@ -1067,7 +1071,7 @@
       :ns
       *ns*))
   (defn search
-    ([db a search_map]
+    ([db a search-map]
       (let [attrid (db/resolve-id db a)
             temp__5802__auto__ (seq
                                  (remove
@@ -1085,12 +1089,14 @@
         (if temp__5802__auto__
           (let [readers temp__5802__auto__
                 reader (lucene/multi-reader readers :close-subreaders false)]
-            (datomic.fulltext/search-iterable (lucene/index-searcher reader) db a search_map))
+            (datomic.fulltext/search-iterable (lucene/index-searcher reader) db a search-map))
           []))))
   (reset-meta!
     #'search
     (assoc
       {:arglists (clojure.core/list (.withMeta ['db 'a 'search-map] {:tag 'java.lang.Iterable})),
+       :doc
+       "Searches fulltext attribute a across the database's memory, active-indexing, durable, and optional history tiers. search-map is a search string or {:search string :limit n}. Returns lazy rows of [search-map attribute entity value transaction normalized-score]; the Datalog fulltext function projects entity, value, transaction, and score.",
        :column (int 1)}
       :name
       'search

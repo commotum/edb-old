@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.ec2)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.ec2)
+    {:doc
+     "EC2 command support for Datomic deployment provisioning. Creates security groups and grants explicitly requested ingress rules through the AWS SDK."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -54,6 +58,7 @@
        (fn fn__27644
          ([]
            (software.amazon.awssdk.services.ec2.model.AuthorizeSecurityGroupIngressRequest/builder)))}))
+  ;; Grants one CIDR address range access to one port on an existing security group.
   (defn authorize-security-group-ingress-command
     ([p__27647]
       (let [map__27648 p__27647
@@ -88,6 +93,7 @@
       'authorize-security-group-ingress-command
       :ns
       *ns*))
+  ;; Creates a named EC2 security group and prints the AWS response for command-line callers.
   (defn create-security-group-command
     ([p__27651]
       (let [map__27652 p__27651

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.uri)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.uri)
+    {:doc
+     "Parses and constructs Datomic database and storage URIs. String and map forms are normalized into cluster configuration maps, including storage-specific parameters and read-only connection options."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -43,6 +47,7 @@
   (reset-meta!
     #'read-port
     (assoc {:arglists (clojure.core/list ['portstr]), :column (int 1)} :name 'read-port :ns *ns*))
+  ;; Returns the storage protocol keyword without performing full URI validation.
   (defn storage-protocol
     ([uri]
       (if (instance? java.util.Map uri)
@@ -480,6 +485,7 @@
                 :read-only
                 (java.lang.Boolean/parseBoolean ^java.lang.String read_only))
               params))))))
+  ;; Normalizes a URI string or protocol map into storage and connection configuration.
   (defn parse
     ([uri]
       (if (instance? java.lang.String uri)
@@ -489,11 +495,12 @@
   (reset-meta!
     #'parse
     (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'parse :ns *ns*))
+  ;; Requires a database-qualified URI and returns its normalized configuration.
   (defn parse-db
     ([uri]
-      (let [cluster_conf (parse uri)]
-        (if (or (:db-name cluster_conf) (= (:protocol cluster_conf) :backup))
-          cluster_conf
+      (let [cluster-conf (parse uri)]
+        (if (or (:db-name cluster-conf) (= (:protocol cluster-conf) :backup))
+          cluster-conf
           (error/arg :db.error/invalid-db-uri (str "Invalid database URI " uri))))))
   (reset-meta!
     #'parse-db
@@ -507,10 +514,11 @@
       'remove-query-string
       :ns
       *ns*))
+  ;; Selects endpoint fields suitable for structured logs and removes embedded query data.
   (defn loggable-cluster-conf
-    ([cluster_conf]
+    ([cluster-conf]
       (let [m (select-keys
-                cluster_conf
+                cluster-conf
                 [:protocol :db-name :system-root :host :port :bucket :db-id])]
         (cond-> m (:system-root m) (update :system-root remove-query-string)))))
   (reset-meta!
@@ -892,7 +900,7 @@
         (let [temp__5825__auto__ (:read-only cluster_conf)]
           (when temp__5825__auto__
             (let [read_only temp__5825__auto__] (str "?read-only=" read_only)))))))
-  (defn db-uri ([uri db_name] (create (assoc (parse uri) :db-name db_name))))
+  (defn db-uri ([uri db-name] (create (assoc (parse uri) :db-name db-name))))
   (reset-meta!
     #'db-uri
     (assoc

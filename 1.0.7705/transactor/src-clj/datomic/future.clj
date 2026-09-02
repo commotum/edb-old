@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.future)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.future)
+    {:doc
+     "Asynchronous tasks paired with core.async completion channels. Each wrapper remains dereferenceable as a future while exposing a promise channel containing its value, a sentinel for nil, or the original Throwable. Optional watchers record and log operations that remain unfilled beyond a configured bound."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'future 'future-call))
@@ -47,7 +51,11 @@
   (reset-meta!
     #'filling-promise
     (assoc
-      {:private true, :arglists (clojure.core/list ['f]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['f]),
+       :doc
+       "Returns [wrapped-task completion-channel]. The task publishes its value to a promise channel, using :datomic.future/nil for nil; a Throwable is published and then rethrown for the future to retain.",
+       :column (int 1)}
       :name
       'filling-promise
       :ns
@@ -57,10 +65,15 @@
       GetChannel
       (get-channel
         [fut]
-        "Returns a promise channel of return value (or exception) from fut.\nIf future returns nil, channel will get the special value ::nil."))
+        "Returns the promise channel carrying fut's value or Throwable. Nil is represented by :datomic.future/nil."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.future" "GetChannel")
-      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'GetChannel :ns *ns*))
+      (assoc
+        (assoc protocol_metadata__7463 :doc "Access to a future's core.async completion channel.")
+        :name
+        'GetChannel
+        :ns
+        *ns*))
     (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
@@ -69,7 +82,7 @@
                                         {:arglists (clojure.core/list ['fut])}),
                                       :arglists (clojure.core/list ['fut]),
                                       :doc
-                                      "Returns a promise channel of return value (or exception) from fut.\nIf future returns nil, channel will get the special value ::nil."}
+                                      "Returns the promise channel carrying fut's value or Throwable. Nil is represented by :datomic.future/nil."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.future" "GetChannel"))
           protocol_method_name__7465 (with-meta
@@ -86,13 +99,13 @@
     clojure.lang.IBlockingDeref
     clojure.lang.IDeref
     (deref
-      [this ^long timeout_ms timeout_val]
+      [this ^long timeout-ms timeout-value]
       (try
         (.get
           ^java.util.concurrent.Future fut
-          (long timeout_ms)
+          (long timeout-ms)
           java.util.concurrent.TimeUnit/MILLISECONDS)
-        (catch java.util.concurrent.TimeoutException e timeout_val)))
+        (catch java.util.concurrent.TimeoutException e timeout-value)))
     (deref [this] (.get ^java.util.concurrent.Future fut))
     (^boolean isRealized [this] (.isDone ^java.util.concurrent.Future fut))
     (get-channel [this] ch))
@@ -101,7 +114,9 @@
   (reset-meta!
     #'->JavaFutureWithChannel
     (assoc
-      {:arglists (clojure.core/list ['fut 'ch]), :column (int 1)}
+      {:arglists (clojure.core/list ['fut 'ch]),
+       :doc "Wraps a Java Future with its completion channel and Clojure dereference interfaces.",
+       :column (int 1)}
       :name
       '->JavaFutureWithChannel
       :ns
@@ -113,7 +128,8 @@
     clojure.lang.IPending
     clojure.lang.IBlockingDeref
     clojure.lang.IDeref
-    (deref [this ^long timeout_ms timeout_val] (deref fut (long timeout_ms) timeout_val))
+    (deref [this ^long timeout-ms timeout-value]
+      (deref fut (long timeout-ms) timeout-value))
     (deref [this] (.get ^java.util.concurrent.Future fut))
     (^boolean isRealized [this] (.isRealized ^clojure.lang.IPending fut))
     (get-channel [this] ch))
@@ -122,18 +138,20 @@
   (reset-meta!
     #'->ClojureFutureWithChannel
     (assoc
-      {:arglists (clojure.core/list ['fut 'ch]), :column (int 1)}
+      {:arglists (clojure.core/list ['fut 'ch]),
+       :doc "Wraps a Clojure future with its completion channel.",
+       :column (int 1)}
       :name
       '->ClojureFutureWithChannel
       :ns
       *ns*))
   (defn -future-with-channel-impl
-    ([exec f]
+    ([executor f]
       (let [vec__10032 (filling-promise ((deref #'clojure.core/binding-conveyor-fn) f))
             f (nth vec__10032 (int 0) nil)
             ch (nth vec__10032 (int 1) nil)
             fut (.submit
-                  ^java.util.concurrent.ExecutorService exec
+                  ^java.util.concurrent.ExecutorService executor
                   ^java.util.concurrent.Callable f)]
         (->JavaFutureWithChannel fut ch)))
     ([f]
@@ -145,20 +163,22 @@
   (reset-meta!
     #'-future-with-channel-impl
     (assoc
-      {:arglists (clojure.core/list ['f] [(.withMeta 'exec {:tag 'ExecutorService}) 'f]),
+      {:arglists (clojure.core/list ['f] [(.withMeta 'executor {:tag 'ExecutorService}) 'f]),
+       :doc
+       "Submits f to Clojure's future executor or to executor and returns a dereferenceable future with a completion channel. The explicit-executor form conveys the caller's dynamic bindings.",
        :column (int 1)}
       :name
       '-future-with-channel-impl
       :ns
       *ns*))
   (defn add-bounding-warning
-    ([promise_ch context seconds]
+    ([promise-ch context seconds]
       (let [c__6135__auto__ (a/chan 1)
             captured_bindings__6136__auto__ (clojure.lang.Var/getThreadBindingFrame)]
         (clojure.core.async.impl.dispatch/run
           (fn fn__10078
             ([]
-              (let [G__10036 (fn G__10036 ([] promise_ch))
+              (let [G__10036 (fn G__10036 ([] promise-ch))
                     G__10037 (fn G__10037 ([] context))
                     G__10038 (fn G__10038 ([] seconds))
                     f__6137__auto__ (fn state_machine__6040__auto__
@@ -213,11 +233,11 @@
                                                                                      (let
                                                                                        [inst_10044
                                                                                         (^clojure.lang.IFn G__10036)
-                                                                                        promise_ch
+                                                                                        promise-ch
                                                                                         inst_10044
                                                                                         inst_10045
                                                                                         (^clojure.lang.IFn G__10037)
-                                                                                        promise_ch
+                                                                                        promise-ch
                                                                                         inst_10044
                                                                                         context
                                                                                         inst_10045
@@ -408,7 +428,7 @@
                                                                                         (clojure.core.async.impl.ioc-macros/aget-object
                                                                                           state_10077
                                                                                           11)
-                                                                                        promise_ch
+                                                                                        promise-ch
                                                                                         inst_10047
                                                                                         context
                                                                                         inst_10048
@@ -572,12 +592,17 @@
   (reset-meta!
     #'add-bounding-warning
     (assoc
-      {:arglists (clojure.core/list ['promise-ch 'context 'seconds]), :column (int 1)}
+      {:arglists (clojure.core/list ['promise-ch 'context 'seconds]),
+       :doc
+       "Starts an asynchronous watcher for promise-ch. If the channel remains unfilled for seconds, records :FutureBoundExceeded and logs one :datomic.future/unfilled warning with context, then continues waiting. Returns a channel that completes with nil when promise-ch is filled.",
+       :column (int 1)}
       :name
       'add-bounding-warning
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.future" "bounding-warn-seconds") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.future" "bounding-warn-seconds")
+    {:doc "Default future-bound warning threshold in seconds.", :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.future" "bounding-warn-seconds") (atom 180))
   (def future
    (fn future
@@ -596,7 +621,14 @@
             (clojure.core/list)))))))
   (reset-meta!
     #'future
-    (assoc {:arglists (clojure.core/list ['& 'body]), :column (int 1)} :name 'future :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['& 'body]),
+       :doc "Evaluates body asynchronously and returns a dereferenceable future with a completion channel.",
+       :column (int 1)}
+      :name
+      'future
+      :ns
+      *ns*))
   (.setMacro #'future)
   (def future-call
    (fn future_call
@@ -607,15 +639,22 @@
            (clojure.core/list f))))))
   (reset-meta!
     #'future-call
-    (assoc {:arglists (clojure.core/list ['f]), :column (int 1)} :name 'future-call :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['f]),
+       :doc "Submits the zero-argument function f and returns a dereferenceable future with a completion channel.",
+       :column (int 1)}
+      :name
+      'future-call
+      :ns
+      *ns*))
   (.setMacro #'future-call)
   (def pfuture
    (fn pfuture
-     ([&form &env exec & body]
+     ([&form &env executor & body]
        (seq
          (concat
            (clojure.core/list 'datomic.future/-future-with-channel-impl)
-           (clojure.core/list exec)
+           (clojure.core/list executor)
            (-> (with-meta
                  (.withMeta 'fn* {:once true})
                  (apply
@@ -628,7 +667,10 @@
   (reset-meta!
     #'pfuture
     (assoc
-      {:arglists (clojure.core/list ['exec '& 'body]), :column (int 1)}
+      {:arglists (clojure.core/list ['executor '& 'body]),
+       :doc
+       "Evaluates body asynchronously on executor and returns a dereferenceable future with a completion channel.",
+       :column (int 1)}
       :name
       'pfuture
       :ns
@@ -636,16 +678,19 @@
   (.setMacro #'pfuture)
   (def pfuture-call
    (fn pfuture_call
-     ([&form &env exec f]
+     ([&form &env executor f]
        (seq
          (concat
            (clojure.core/list 'datomic.future/-future-with-channel-impl)
-           (clojure.core/list exec)
+           (clojure.core/list executor)
            (clojure.core/list f))))))
   (reset-meta!
     #'pfuture-call
     (assoc
-      {:arglists (clojure.core/list ['exec 'f]), :column (int 1)}
+      {:arglists (clojure.core/list ['executor 'f]),
+       :doc
+       "Submits the zero-argument function f to executor and returns a dereferenceable future with a completion channel.",
+       :column (int 1)}
       :name
       'pfuture-call
       :ns

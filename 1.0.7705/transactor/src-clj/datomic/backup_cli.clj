@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.backup-cli)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.backup-cli)
+    {:doc
+     "Command-line backup, restore, listing, and verification entry points. Runs jobs with bounded cache use, reports copied and skipped immutable segments, and exits unsuccessfully when verification finds missing or unreadable data."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -56,6 +60,7 @@
       'status-message-loop
       :ns
       *ns*))
+  ;; Runs an incremental backup and optionally requests S3 server-side encryption.
   (defn backup
     ([p__22681]
       (let [map__22682 p__22681
@@ -95,6 +100,7 @@
       'backup
       :ns
       *ns*))
+  ;; Restores the requested t or the newest available snapshot, then reports the restored basis.
   (defn restore
     ([p__22689]
       (let [map__22690 p__22689
@@ -160,6 +166,7 @@
       'list-backups
       :ns
       *ns*))
+  ;; Verifies referenced segment presence and optionally reads every segment to detect corruption.
   (defn verify-backup
     ([p__22699]
       (let [map__22700 p__22699

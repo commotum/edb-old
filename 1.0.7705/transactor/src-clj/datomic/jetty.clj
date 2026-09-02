@@ -2,7 +2,8 @@
   (clojure.core/in-ns 'datomic.jetty)
   (.resetMeta
     (clojure.lang.Namespace/find 'datomic.jetty)
-    {:doc "Adapter for the Jetty webserver."})
+    {:doc
+     "Ring adapter and lifecycle helpers for embedded Jetty servers. Builds HTTP and optional TLS connectors, configures client-certificate policy, adapts Ring request and response maps, and starts a server with optional caller customization and joining."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -55,6 +56,8 @@
           (.withMeta 'base-request {:tag 'Request})
           'request
           (.withMeta 'response {:tag 'Response})]),
+       :doc
+       "Runs a Ring handler for one Jetty exchange, writes a non-nil Ring response as UTF-8, and marks the base request handled.",
        :column (int 1)}
       :name
       'handle
@@ -117,7 +120,11 @@
   (reset-meta!
     #'ssl-context-factory
     (assoc
-      {:private true, :arglists (clojure.core/list ['options]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['options]),
+       :doc
+       "Builds the TLS context from :keystore and :key-password. A keystore may be a path or KeyStore object; :truststore and :trust-password configure trust material, and :client-auth may request (:want) or require (:need) client certificates.",
+       :column (int 1)}
       :name
       'ssl-context-factory
       :ns
@@ -164,7 +171,11 @@
   (reset-meta!
     #'http-configuration
     (assoc
-      {:private true, :arglists (clojure.core/list ['options]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['options]),
+       :doc
+       "Creates HTTP connection settings with date headers enabled. When :ssl? is true, :ssl-port is required and is recorded as the secure redirect port.",
+       :column (int 1)}
       :name
       'http-configuration
       :ns
@@ -191,7 +202,10 @@
   (reset-meta!
     #'create-server
     (assoc
-      {:arglists (clojure.core/list ['options]), :column (int 1)}
+      {:arglists (clojure.core/list ['options]),
+       :doc
+       "Creates an unstarted Jetty Server. :max-threads defaults to 50, the HTTP :port defaults to 80, and :host optionally restricts the bind address. A non-nil :ssl-port adds a TLS connector at that port. Setting :ssl? also requests TLS and requires :ssl-port for the HTTP secure-port configuration.",
+       :column (int 1)}
       :name
       'create-server
       :ns
@@ -200,6 +214,8 @@
     (clojure.lang.RT/var "datomic.jetty" "run-jetty")
     {:tag org.eclipse.jetty.server.Server,
      :arglists (clojure.core/list ['handler 'options]),
+     :doc
+     "Creates and starts a Jetty server for handler. An optional :configurator function receives the server before it starts. The call joins the server thread unless :join? is false and returns the Server after startup or join completion.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.jetty" "run-jetty")

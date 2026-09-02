@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cache.caffeine)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cache.caffeine)
+    {:doc
+     "Caffeine-backed object caches. Adapts native Cache and LoadingCache instances to Datomic's lookup, mutation, key-enumeration, metrics, and memory-size protocols, and provides constructors for size-, expiry-, soft-reference-, weight-, and computation-bounded caches."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -54,10 +58,17 @@
     #'CAFFEINE_ENTRY_OVERHEAD
     (assoc {:private true, :const true, :column (int 1)} :name 'CAFFEINE_ENTRY_OVERHEAD :ns *ns*))
   (let [protocol_metadata__7463 {:column (int 1)}]
-    (defprotocol CacheGet (cache-get [_ k]))
+    (defprotocol
+      CacheGet
+      (cache-get [_ k] "Returns the cached value for k. Loading caches compute a missing value through their CacheLoader."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.cache.caffeine" "CacheGet")
-      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'CacheGet :ns *ns*))
+      (assoc
+        (assoc protocol_metadata__7463 :doc "Lookup operation shared by plain and loading Caffeine caches.")
+        :name
+        'CacheGet
+        :ns
+        *ns*))
     (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
@@ -65,7 +76,8 @@
                                         'cache-get
                                         {:arglists (clojure.core/list ['_ 'k])}),
                                       :arglists (clojure.core/list ['_ 'k]),
-                                      :doc nil}
+                                      :doc
+                                      "Returns the cached value for k. Loading caches compute a missing value through their CacheLoader."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.cache.caffeine" "CacheGet"))
           protocol_method_name__7465 (with-meta
@@ -112,7 +124,10 @@
   (reset-meta!
     #'->WrappedCCache
     (assoc
-      {:arglists (clojure.core/list ['cache]), :column (int 1)}
+      {:arglists (clojure.core/list ['cache]),
+       :doc
+       "Wraps a Caffeine cache with Datomic cache protocols, Clojure lookup, object-count metrics, key enumeration, and estimated memory sizing. Memory estimates include 82 bytes of entry overhead plus measured key and value sizes.",
+       :column (int 1)}
       :name
       '->WrappedCCache
       :ns
@@ -123,6 +138,7 @@
     (assoc
       {:private true,
        :arglists (clojure.core/list [(.withMeta 'cache {:tag 'Cache})]),
+       :doc "Adapts a native Caffeine Cache to the Datomic cache interfaces.",
        :column (int 1)}
       :name
       'adapt-caffeine-cache
@@ -144,6 +160,8 @@
        (clojure.core/list
          [(.withMeta 'num-entries {:tag 'long})]
          [(.withMeta 'num-entries {:tag 'long}) (.withMeta 'timeout-minutes {:tag 'long})]),
+       :doc
+       "Creates a cache bounded by num-entries. The two-argument form also expires an entry timeout-minutes after it is written, regardless of later reads.",
        :column (int 1)}
       :name
       'create-write-limited
@@ -165,6 +183,8 @@
        (clojure.core/list
          [(.withMeta 'num-entries {:tag 'long})]
          [(.withMeta 'num-entries {:tag 'long}) (.withMeta 'timeout-minutes {:tag 'long})]),
+       :doc
+       "Creates a cache bounded by num-entries. The two-argument form expires an entry after timeout-minutes without access; reading or writing the entry resets its access deadline.",
        :column (int 1)}
       :name
       'create-limited
@@ -190,13 +210,15 @@
          []
          [(.withMeta 'num-entries {:tag 'long})]
          [(.withMeta 'num-entries {:tag 'long}) (.withMeta 'timeout-minutes {:tag 'long})]),
+       :doc
+       "Creates a cache whose values are held by soft references. Optional arguments add a maximum entry count and expiration after timeout-minutes without access.",
        :column (int 1)}
       :name
       'create-soft-limited
       :ns
       *ns*))
   (defn create-weight-limited
-    ([weight f]
+    ([weight weigh-fn]
       (when-not (< 0 weight (java.lang.Integer/valueOf (int java.lang.Integer/MAX_VALUE)))
         (throw
           (java.lang.AssertionError.
@@ -207,43 +229,54 @@
             (.maximumWeight (Caffeine/newBuilder) (long ^java.lang.Number weight))
             (reify
               com.github.benmanes.caffeine.cache.Weigher
-              (^int weigh [this k v] (.intValue (^clojure.lang.IFn f k v)))))))))
+              (^int weigh [this k v] (.intValue (^clojure.lang.IFn weigh-fn k v)))))))))
   (reset-meta!
     #'create-weight-limited
     (assoc
-      {:arglists (clojure.core/list ['weight 'f]), :column (int 1)}
+      {:arglists (clojure.core/list ['weight 'weigh-fn]),
+       :doc
+       "Creates a cache whose total entry weight is bounded by weight. weigh-fn receives each key and value and must return a numeric entry weight convertible to int. The maximum weight must be greater than zero and less than Integer/MAX_VALUE.",
+       :column (int 1)}
       :name
       'create-weight-limited
       :ns
       *ns*))
   (defn create-scaled-weight-limited
-    ([weight f divisor]
-      (let [scaled_weight (long (java.lang.Math/ceil (double (/ weight divisor))))
-            scaled_f (fn scaled_f
-                       ([k v]
-                         (long
-                           (java.lang.Math/ceil (double (/ (^clojure.lang.IFn f k v) divisor))))))]
-        (create-weight-limited (long scaled_weight) scaled_f))))
+    ([weight weigh-fn divisor]
+      (let [scaled-weight (long (java.lang.Math/ceil (double (/ weight divisor))))
+            scaled-weigh-fn (fn scaled-weigh-fn
+                              ([k v]
+                                (long
+                                  (java.lang.Math/ceil
+                                    (double
+                                      (/ (^clojure.lang.IFn weigh-fn k v) divisor))))))]
+        (create-weight-limited (long scaled-weight) scaled-weigh-fn))))
   (reset-meta!
     #'create-scaled-weight-limited
     (assoc
-      {:arglists (clojure.core/list ['weight 'f 'divisor]), :column (int 1)}
+      {:arglists (clojure.core/list ['weight 'weigh-fn 'divisor]),
+       :doc
+       "Creates a weight-bounded cache after dividing both the maximum and each computed entry weight by divisor and rounding each quotient upward. Scaling allows large raw sizes to fit the constructor's integer maximum-weight bound.",
+       :column (int 1)}
       :name
       'create-scaled-weight-limited
       :ns
       *ns*))
   (defn create-computing
-    ([f max_size]
+    ([load-fn max-size]
       (adapt-caffeine-cache
         (.build
-          (.maximumSize (Caffeine/newBuilder) (long ^java.lang.Number max_size))
+          (.maximumSize (Caffeine/newBuilder) (long ^java.lang.Number max-size))
           (reify
             com.github.benmanes.caffeine.cache.CacheLoader
-            (load [this k] (^clojure.lang.IFn f k)))))))
+            (load [this k] (^clojure.lang.IFn load-fn k)))))))
   (reset-meta!
     #'create-computing
     (assoc
-      {:arglists (clojure.core/list ['f 'max-size]), :column (int 1)}
+      {:arglists (clojure.core/list ['load-fn 'max-size]),
+       :doc
+       "Creates a loading cache bounded by max-size. A lookup for an absent key invokes load-fn through the Caffeine CacheLoader and caches the returned value.",
+       :column (int 1)}
       :name
       'create-computing
       :ns
@@ -256,7 +289,10 @@
   (reset-meta!
     #'create-response-map
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'timeout-minutes {:tag 'long})]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'timeout-minutes {:tag 'long})]),
+       :doc
+       "Creates a response cache whose entries expire timeout-minutes after they are written.",
+       :column (int 1)}
       :name
       'create-response-map
       :ns

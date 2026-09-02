@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.s3)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.s3)
+    {:doc
+     "Amazon S3 operations used by backup, value storage, and log rotation. Provides bucket discovery, paginated listing, object transfer, signed reads, and optional server-side encryption."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -71,6 +75,7 @@
         (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (extend java.lang.String Name {:s3-name (fn fn__26693 ([item] item))})
   (extend clojure.lang.APersistentMap Name {:s3-name (fn fn__26695 ([item] (:Name item)))})
+  ;; Creates a time-limited signed GET URL using the client's configured region and credentials.
   (defn signed-get-url
     ([s3 bucket path duration_days]
       (let [conf (.serviceClientConfiguration ^software.amazon.awssdk.services.s3.S3Client s3)
@@ -126,6 +131,7 @@
       'get-bucket
       :ns
       *ns*))
+  ;; Returns an existing bucket or creates it in the client's configured region.
   (defn ensure-bucket
     ([s3 bucket]
       (when-not (get-bucket s3 bucket)
@@ -138,6 +144,7 @@
       'ensure-bucket
       :ns
       *ns*))
+  ;; Lazily follows continuation tokens and returns every object beneath the requested prefix.
   (defn list-objects
     ([s3 bucket prefix delimiter]
       (let [s3_bucket (s3-name bucket)]
@@ -226,6 +233,7 @@
       'put-file-as
       :ns
       *ns*))
+  ;; Uploads a ByteBuffer and optionally requests S3 server-side encryption.
   (defn put-object
     ([s3 bucket path bytes opts]
       (aws/invoke

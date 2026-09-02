@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.s3-kv)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.s3-kv)
+    {:doc
+     "S3-backed immutable value storage. Database value keys map to objects beneath an isolated bucket prefix and are exposed through the value-store interface."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -55,6 +59,7 @@
       '->S3Storage
       :ns
       *ns*))
+  ;; Creates an immutable value store isolated beneath one bucket prefix.
   (defn s3-storage
     ([& p__23372]
       (let [map__23373 p__23372

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cloudwatch)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cloudwatch)
+    {:doc
+     "AWS SDK v2 CloudWatch client and PutMetricData operation used by Datomic process monitoring."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

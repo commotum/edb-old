@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.log-gc)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.log-gc)
+    {:doc
+     "Observes JVM garbage-collector notifications, logs pause details, and records G1 and ZGC stop-the-world durations as operational metrics."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -72,6 +76,7 @@
                   (logger/process (assoc k :event :gc :duration duration))))
               nil))
           nil))))
+  ;; Registers notification listeners for every collector that exposes GC pause events.
   (defn log-gc-events
     ([]
       (loop [seq_22137 (seq (ManagementFactory/getGarbageCollectorMXBeans))

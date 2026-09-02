@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.ddb-values)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.ddb-values)
+    {:doc
+     "Stores Datomic values in DynamoDB, splitting oversized payloads across deterministic chunk keys and reassembling them on read. Writes and deletes preserve the parent item's conditional revision semantics."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'chunk))
@@ -85,6 +89,7 @@
           (common/thread-pool
             {:nthreads (config/property "datomic.writeConcurrency"), :name "ddb-chunk"})))
       #'chunk-pool))
+  ;; Stores a value directly when it fits in one item and otherwise writes deterministic chunks.
   (defn put-value
     ([ddb_client table value]
       (let [map__9821 value
@@ -279,6 +284,7 @@
       'get-deitem
       :ns
       *ns*))
+  ;; Reads the parent item and reassembles all declared chunks in key order.
   (defn get-value
     ([ddb_client table id]
       (let [temp__5804__auto__ (let [m_9854 {:event :ddb-values/get-value, :id id}
@@ -413,6 +419,7 @@
       'get-value
       :ns
       *ns*))
+  ;; Deletes the parent and every chunk recorded by it; interrupted deletes remain safe to retry.
   (defn delete-value
     ([ddb_client table id]
       (let [m_9885 {:event :ddb-values/delete-value, :id id}

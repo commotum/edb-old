@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cluster)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cluster)
+    {:doc
+     "Storage-independent cluster operations over immutable values, compare-and-swap references, and appendable pods. Revision and etag checks serialize writers and expose conflicts for retry."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -428,6 +432,8 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "get-val2")
         (assoc protocol_signature__7486 :name protocol_method_name__7487 :ns *ns*))))
+  ;; Appends or touches a pod only at the next revision. Metadata keys must be namespaced and a
+  ;; stale etag is reported as {:failed :conflict} by the storage implementation.
   (defn update-pod
     ([cs pod_key rev etag buf metamap]
       (do
@@ -461,6 +467,7 @@
       'update-pod
       :ns
       *ns*))
+  ;; Reads the current revision and conditionally advances a ref to a new immutable value key.
   (defn reset-ref
     ([cluster k v]
       (let [map__9358 (deref (get-ref cluster k))
@@ -581,6 +588,7 @@
       'touch-pod
       :ns
       *ns*))
+  ;; Repeatedly touches a pod until this caller advances its revision or the deadline expires.
   (defn claim-pod
     ([cs pod_key msec]
       (let [start (java.lang.System/currentTimeMillis)]
@@ -669,6 +677,7 @@
   (reset-meta!
     #'BOUNDING_TIMEOUT_MSEC
     (assoc {:column (int 1)} :name 'BOUNDING_TIMEOUT_MSEC :ns *ns*))
+  ;; Creates immutable values in parallel and requires every write to finish within five minutes.
   (defn write-vals*
     ([cs source vmap]
       (let [event (let [G__9394 source]
@@ -804,6 +813,7 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.cluster" "sync-writes")
         (assoc protocol_signature__7491 :name protocol_method_name__7492 :ns *ns*))))
+  ;; Bounds outstanding value writes and exposes a barrier that completes after queued writes settle.
   (deftype
     QueueingWriter
     [cluster done_reason bounding_timeout_msec queue]
@@ -856,6 +866,7 @@
       '->QueueingWriter
       :ns
       *ns*))
+  ;; Creates an ordered completion queue over asynchronous immutable-value writes.
   (defn queueing-writer
     ([cluster par bounding_timeout_msec progress]
       (let [queue (java.util.concurrent.ArrayBlockingQueue. (int ^java.lang.Number par))

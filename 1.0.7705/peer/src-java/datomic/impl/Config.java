@@ -1,13 +1,12 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.RT
- */
 package datomic.impl;
 
 import clojure.lang.RT;
 
+/**
+ * Holds process-wide serialization extension handlers and enables the JRuby
+ * integration layer. Read and write handlers are published through volatile
+ * fields so all threads in the process observe configuration changes.
+ */
 public class Config {
     private static volatile Object readHandlers;
     private static volatile Object writeHandlers;
@@ -33,4 +32,3 @@ public class Config {
         RT.var((String)"datomic.jruby", (String)"jruby-mode").invoke(ruby);
     }
 }
-

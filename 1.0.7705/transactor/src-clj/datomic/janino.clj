@@ -1,11 +1,16 @@
 (do
   (set! *warn-on-reflection* true)
   (clojure.core/in-ns 'datomic.janino)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.janino)
+    {:doc
+     "Java database-function compilation. Adapts a Java expression body to the fixed Fn0 through Fn10 invocation interfaces used by database function values."})
   (clojure.core/with-loading-context (clojure.core/refer 'clojure.core))
   (when-not (.equals 'datomic.janino 'clojure.core)
     (dosync (commute (deref #'clojure.core/*loaded-libs*) conj 'datomic.janino))
     (clojure.core/with-loading-context (clojure.core/refer 'clojure.core)))
   (defn java-data-fn
+    "Compiles a Java database-function body with the supplied parameter names and returns a Clojure-callable function. The parameter count selects Fn0 through Fn10 and therefore cannot exceed ten."
     ([params body]
       (let [se (let [G__11229 (org.codehaus.commons.compiler.jdk.ScriptEvaluator.)]
                  (.setDefaultImports
@@ -48,7 +53,10 @@
   (reset-meta!
     #'java-data-fn
     (assoc
-      {:arglists (clojure.core/list ['params (.withMeta 'body {:tag 'String})]), :column (int 1)}
+      {:arglists (clojure.core/list ['params (.withMeta 'body {:tag 'String})]),
+       :doc
+       "Compiles a Java database-function body with the supplied parameter names and returns a Clojure-callable function. The parameter count selects Fn0 through Fn10 and therefore cannot exceed ten.",
+       :column (int 1)}
       :name
       'java-data-fn
       :ns

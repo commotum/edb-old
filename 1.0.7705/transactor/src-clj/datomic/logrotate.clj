@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.logrotate)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.logrotate)
+    {:doc
+     "Transactor log rotation to Amazon S3. Watches the configured log directory, compresses completed files, uploads them beneath the process prefix, and preserves the active files needed by Logback."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -28,6 +32,7 @@
           ['datomic.monitor :as 'monitor]
           ['datomic.s3 :as 's3])
         (clojure.core/import 'java.io.File))))
+  ;; Select completed log files while retaining the newest n uncompressed files.
   (defn all-but-most-recent-n-non-zip-files
     ([dir n]
       (drop
@@ -49,6 +54,7 @@
       'all-but-most-recent-n-non-zip-files
       :ns
       *ns*))
+  ;; Compress one log file into a sibling zip whose entry is grouped by basename.
   (defn zip-up-file
     ([file]
       (let [zipname (str (.getName ^java.io.File file) ".zip")
@@ -83,6 +89,8 @@
       'zip-up-file
       :ns
       *ns*))
+  ;; Upload completed compressed logs and remove local source and archive files
+  ;; only after the S3 put succeeds.
   (defn zip-and-put-in-s3
     ([dir bucket log_path_fn creds n]
       (try
@@ -223,6 +231,7 @@
       'zip-and-put-in-s3
       :ns
       *ns*))
+  ;; Verify write access to the configured log bucket with a small probe object.
   (defn probe
     ([creds bucket]
       (let [s3 (if (:aws-access-key-id creds)
@@ -238,6 +247,7 @@
       'probe
       :ns
       *ns*))
+  ;; Poll the log directory and rotate files on the configured interval.
   (defn watch-dir
     ([dir interval bucket log_path_fn creds]
       (doto

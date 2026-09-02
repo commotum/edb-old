@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.slf4j)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.slf4j)
+    {:doc
+     "Structured SLF4J event formatting and cause-chain logging shared by Peer and Transactor components."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -506,6 +510,7 @@
       :ns
       *ns*))
   (.setMacro #'dont-log-time)
+  ;; Redact AWS access-key query parameters before a URI enters process logs.
   (defn sanitize-uri
     ([uri]
       (str/replace
@@ -534,6 +539,7 @@
             (.warn ^org.slf4j.Logger logger (process "Caught exception") ex)
             (caused-by logger ex))
           nil))))
+  ;; Install the process-wide uncaught-exception logger for all subsequently created threads.
   (defn log-uncaught-exceptions
     ([]
       (java.lang.Thread/setDefaultUncaughtExceptionHandler

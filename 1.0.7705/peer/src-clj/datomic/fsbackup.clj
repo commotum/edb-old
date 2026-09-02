@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.fsbackup)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.fsbackup)
+    {:doc
+     "File-system implementation of backup storage. Keys are mapped to a bounded directory hierarchy and values are stored as files beneath the backup root."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -149,6 +153,7 @@
       '->FileSystemStorage
       :ns
       *ns*))
+  ;; Open or create a local backup directory and reject non-directory paths.
   (defn file-system-storage
     ([root]
       (let [f (jio/file root)]
@@ -167,6 +172,7 @@
       'file-system-storage
       :ns
       *ns*))
+  ;; Resolve a hostless file URI to backup storage.
   (defn storage-from-uri
     ([uri]
       (if (.getHost ^java.net.URI uri)

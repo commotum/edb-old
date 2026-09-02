@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.clusterfs)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.clusterfs)
+    {:doc
+     "Immutable chunked files stored as cluster values. File bytes are split into independently addressed segments and a Fressian root records names, lengths, base identifiers, and chunk size for random access."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -90,6 +94,7 @@
   (.setMeta
     (clojure.lang.RT/var "datomic.clusterfs" "map->ClusterFS")
     {:declared true, :column (int 1)})
+  ;; The directory is immutable: each file name maps to a base value id and exact byte length.
   (defrecord
     ClusterFS
     [dir ^int chunk-size]
@@ -234,6 +239,7 @@
       'fressian-chunk-from-channel
       :ns
       *ns*))
+  ;; Streams one local file into fixed-size immutable cluster values and returns its base identifier.
   (defn create-file
     ([cs local_file & p__13119]
       (let [map__13120 p__13119
@@ -310,6 +316,7 @@
       'create-file
       :ns
       *ns*))
+  ;; Creates the directory entries for [local-name cluster-name] file pairs.
   (defn create-files
     ([cs files & p__13135]
       (let [map__13136 p__13135
@@ -398,6 +405,7 @@
   (reset-meta!
     #'describe
     (assoc {:arglists (clojure.core/list ['cfs]), :column (int 1)} :name 'describe :ns *ns*))
+  ;; Writes every file segment, then publishes the immutable directory root as the final value.
   (defn create-fs
     ([cs files & p__13158]
       (let [map__13159 p__13158

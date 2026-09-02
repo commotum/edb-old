@@ -1,11 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.RT
- *  clojure.lang.Symbol
- *  clojure.lang.Var
- */
 package datomic.impl;
 
 import clojure.lang.RT;
@@ -20,6 +12,11 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.io.StringWriter;
 
+/**
+ * Support routines for the interactive Datomic shell. The class loads shell
+ * help text, opens script files, and ensures Clojure pretty-printing is
+ * available to the shell runtime.
+ */
 public class Shell {
     private static final Var REQUIRE = RT.var((String)"clojure.core", (String)"require");
 

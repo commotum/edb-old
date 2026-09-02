@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.adopter)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.adopter)
+    {:doc
+     "Atomically adopts a newly completed durable index while retaining transactions that arrived after indexing began. Compare-and-swap retries replay the intervening memory-log tail onto the candidate database."})
   (clojure.core/with-loading-context
     (do (clojure.core/refer 'clojure.core) (clojure.core/require ['datomic.db :as 'db])))
   (when-not (.equals 'datomic.adopter 'clojure.core)

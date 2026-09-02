@@ -1,15 +1,13 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.IExceptionInfo
- *  clojure.lang.IPersistentMap
- */
 package datomic.impl;
 
 import clojure.lang.IExceptionInfo;
 import clojure.lang.IPersistentMap;
 
+/**
+ * Java exception categories that retain Clojure exception data. These types
+ * preserve ordinary argument and state exception handling while exposing the
+ * structured map through {@code IExceptionInfo}.
+ */
 public class Exceptions {
 
     public static class IllegalStateExceptionInfo
@@ -62,4 +60,3 @@ public class Exceptions {
         }
     }
 }
-

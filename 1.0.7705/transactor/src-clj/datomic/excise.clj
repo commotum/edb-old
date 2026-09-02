@@ -2,7 +2,9 @@
   (clojure.core/in-ns (.withMeta 'datomic.excise {:author "Rich Hickey"}))
   (.resetMeta
     (clojure.lang.Namespace/find (.withMeta 'datomic.excise {:author "Rich Hickey"}))
-    {:doc "Excise utilities", :author "Rich Hickey"})
+    {:doc
+     "Excision planning utilities. Builds predicates that select historical datoms for permanent removal by entity or attribute, including inbound references and recursively owned component entities. The request is recorded transactionally; removal occurs during background indexing outside the database timeline and is irreversible. Bootstrap and schema datoms are protected. Memory databases and fulltext attributes do not support excision. Callers coordinate completion with sync-excise.",
+     :author "Rich Hickey"})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -44,7 +46,8 @@
       :ns
       *ns*))
   (defn component-es-set
-    ([db e via_attrs]
+    "Returns an entity and its recursively owned component entities. When via-attrs is supplied, the first traversal is limited to those component attributes."
+    ([db e via-attrs]
       (let [es #{e}
             G__14023 [e]
             vec__14024 G__14023
@@ -53,7 +56,7 @@
             seq__14025 (next seq__14025)
             check first__14026
             more seq__14025
-            via via_attrs]
+            via via-attrs]
         (loop [es es G__14023 G__14023 via via]
           (let [es es
                 vec__14027 G__14023
@@ -88,7 +91,10 @@
   (reset-meta!
     #'component-es-set
     (assoc
-      {:arglists (clojure.core/list ['db 'e] ['db 'e 'via-attrs]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'e] ['db 'e 'via-attrs]),
+       :doc
+       "Returns an entity and its recursively owned component entities. When via-attrs is supplied, the first traversal is limited to those component attributes.",
+       :column (int 1)}
       :name
       'component-es-set
       :ns
@@ -148,6 +154,7 @@
       :ns
       *ns*))
   (defn get-before-t
+    "Resolves the exclusive upper time bound of an excision specification. Specifications accept at most one of :db.excise/before and :db.excise/beforeT; if both reach this layer, the earlier point wins."
     ([db spec]
       (let [before_t (:db.excise/beforeT spec) before (:db.excise/before spec)]
         (if before
@@ -156,7 +163,10 @@
   (reset-meta!
     #'get-before-t
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'spec]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'spec]),
+       :doc
+       "Resolves the exclusive upper time bound of an excision specification. Specifications accept at most one of :db.excise/before and :db.excise/beforeT; if both reach this layer, the earlier point wins.",
+       :column (int 1)}
       :name
       'get-before-t
       :ns
@@ -412,26 +422,43 @@
       :ns
       *ns*))
   (defn create-xpreds
+    "Builds the entity and attribute excision predicates for a collection of excision specifications. Returns nil when no specifications are supplied."
     ([db specs]
       (when (seq specs)
         [(datomic.excise/create-es-pred db specs) (datomic.excise/create-as-pred db specs)])))
   (reset-meta!
     #'create-xpreds
     (assoc
-      {:arglists (clojure.core/list ['db 'specs]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'specs]),
+       :doc
+       "Builds the entity and attribute excision predicates for a collection of excision specifications. Returns nil when no specifications are supplied.",
+       :column (int 1)}
       :name
       'create-xpreds
       :ns
       *ns*))
-  (defn datoms ([epred] (datomic.excise/ep-datoms epred)))
+  (defn datoms
+    "Returns the historical datoms selected by an excision predicate."
+    ([epred] (datomic.excise/ep-datoms epred)))
   (reset-meta!
     #'datoms
-    (assoc {:arglists (clojure.core/list ['epred]), :column (int 1)} :name 'datoms :ns *ns*))
-  (defn remove? ([epred datom] (datomic.excise/ep-remove? epred datom)))
+    (assoc
+      {:arglists (clojure.core/list ['epred]),
+       :doc "Returns the historical datoms selected by an excision predicate.",
+       :column (int 1)}
+      :name
+      'datoms
+      :ns
+      *ns*))
+  (defn remove?
+    "Returns true when the excision predicate selects datom for removal."
+    ([epred datom] (datomic.excise/ep-remove? epred datom)))
   (reset-meta!
     #'remove?
     (assoc
-      {:arglists (clojure.core/list ['epred 'datom]), :column (int 1)}
+      {:arglists (clojure.core/list ['epred 'datom]),
+       :doc "Returns true when the excision predicate selects datom for removal.",
+       :column (int 1)}
       :name
       'remove?
       :ns

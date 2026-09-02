@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cassandra-v4)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cassandra-v4)
+    {:doc
+     "Cassandra driver v4 operations for conditional updates, inserts, reads, and deletes. Prepared statements carry explicit consistency levels and callbacks may supply a configured SyncCqlSession."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -359,6 +363,7 @@
       'cql-delete
       :ns
       *ns*))
+  ;; Resolves a configured one-argument callback and requires it to return a SyncCqlSession.
   (defn session-from-callback
     ([p__14925]
       (let [map__14926 p__14925

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.s3backup)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.s3backup)
+    {:doc
+     "Amazon S3 implementation of backup storage, including URI validation, prefix isolation, optional server-side encryption, object listing, and immutable segment transfer."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -145,6 +149,7 @@
       's3-storage
       :ns
       *ns*))
+  ;; Requires an s3 URI with a bucket name and a database-specific object prefix.
   (defn validate-s3-uri
     ([uri]
       (let [G__21781 nil
@@ -158,6 +163,7 @@
       'validate-s3-uri
       :ns
       *ns*))
+  ;; Creates prefix-isolated backup storage with optional server-side encryption.
   (defn storage-from-uri
     ([uri sse?]
       (let [temp__5804__auto__ (validate-s3-uri uri)]

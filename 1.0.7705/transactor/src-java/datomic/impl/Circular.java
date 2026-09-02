@@ -1,16 +1,14 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.RT
- *  clojure.lang.Var
- */
 package datomic.impl;
 
 import clojure.lang.RT;
 import clojure.lang.Var;
 import datomic.Util;
 
+/**
+ * Bridges Java implementation classes to the Clojure query, pull, cache, and
+ * database-statistics entry points. Centralizing these Var references keeps
+ * cross-language implementation dependencies from becoming circular.
+ */
 public class Circular {
     private static final Var EMAP = RT.var((String)"datomic.query", (String)"emap");
     private static final Var Q = RT.var((String)"datomic.query", (String)"q");
@@ -57,4 +55,3 @@ public class Circular {
         return DB_STATS.invoke(db2);
     }
 }
-

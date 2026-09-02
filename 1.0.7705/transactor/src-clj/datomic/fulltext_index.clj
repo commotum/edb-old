@@ -2,7 +2,9 @@
   (clojure.core/in-ns (.withMeta 'datomic.fulltext-index {:author "Stu Halloway"}))
   (.resetMeta
     (clojure.lang.Namespace/find (.withMeta 'datomic.fulltext-index {:author "Stu Halloway"}))
-    {:doc "building fulltext index", :author "Stu Halloway"})
+    {:doc
+     "In-memory fulltext-index tier. Groups supplied fulltext datoms by attribute, converts each datum to an analyzed Lucene document, and exposes an index reader for query-time fulltext search."
+     :author "Stu Halloway"})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -55,7 +57,15 @@
     (defprotocol LuceneProvider (fulltext-attr-reader [this attr]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.fulltext-index" "LuceneProvider")
-      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'LuceneProvider :ns *ns*))
+      (assoc
+        (assoc
+          protocol_metadata__7463
+          :doc
+          "Provides a Lucene index reader for one fulltext attribute.")
+        :name
+        'LuceneProvider
+        :ns
+        *ns*))
     (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
@@ -63,7 +73,7 @@
                                         'fulltext-attr-reader
                                         {:arglists (clojure.core/list ['this 'attr])}),
                                       :arglists (clojure.core/list ['this 'attr]),
-                                      :doc nil}
+                                      :doc "Returns the fulltext index reader for attr, or nil when no index exists."}
                                      :protocol
                                      (clojure.lang.RT/var
                                        "datomic.fulltext-index"
@@ -169,7 +179,10 @@
   (reset-meta!
     #'update-fulltext
     (assoc
-      {:arglists (clojure.core/list ['pft 'data]), :column (int 1)}
+      {:arglists (clojure.core/list ['pft 'data]),
+       :doc
+       "Adds every supplied fulltext datum to the in-memory tier, grouping documents by attribute. Writers are closed before the updated persistent directory map is returned.",
+       :column (int 1)}
       :name
       'update-fulltext
       :ns

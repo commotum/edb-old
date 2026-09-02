@@ -14,6 +14,7 @@
 ;; limitations under the License.
 
 (ns datomic.query.support
+  "Shared query-form normalization and result adapters. Accepts EDN strings, sequential query forms, and query maps; handles :keys, :strs, and :syms return-map specifications; preserves find order in indexed return maps; and provides counted lazy query results."
   (:require [clojure.edn :as edn]))
 
 (defn- incorrect!
@@ -22,8 +23,9 @@
                        :cognitect.anomalies/message msg})))
 
 (defn listq->mapq
-  "turns [:find ?a, ?b :in $src1 $src2 :where [$src1 ?a :likes ?b] ($src2 drummer ?b)] into
-  {:find (?a ?b) :in ($src1 $src2) :where ([$src1 ?a :likes ?b] ($src2 drummer ?b))}"
+  "Converts a sequential query form into a map keyed by :find, :with,
+  :in, :where, :timeout, and return-map clauses. Clause values retain
+  their original order."
   [lq]
   (->> lq
        (partition-by #{:find :keys :strs :syms :with :in :where :timeout})
@@ -34,13 +36,15 @@
                {})))
 
 (defn disallow-find-variants!
-  "Throws an anomay if query has a :find clause not supported in client"
+  "Rejects scalar, collection, and tuple find specifications where only
+  relation results are supported. Throws an incorrect-input anomaly."
   [query]
   (when (some #(or (vector? %) (= '. %)) (:find query))
     (incorrect! "Only find-rel elements are allowed in client :find")))
 
 (defn query-map
-  "Take a query map, string, or sequence and returns a normalized query map."
+  "Returns q as a query map. EDN strings are read first, sequential forms
+  are partitioned into clauses, and maps are returned unchanged."
   [q]
   (let [q (if (string? q) (edn/read-string q) q)]
     (if (sequential? q)
@@ -48,8 +52,10 @@
       q)))
 
 (defn parse-as
-  "takes a query (in any form, e.g. str/vec/map) and returns [q as]
-  the returned query will be in map form, and 'as' will be nil or a vector of keys"
+  "Returns [query-map result-keys]. Converts :keys names to keywords,
+  :strs names to strings, and :syms names to symbols, then removes the
+  return-map clause from the query. The number of names must equal the
+  number of :find elements."
   [q]
   (let [{:keys [find keys strs syms] :as nq} (query-map q)]
     (if-let [asyms (or keys strs syms)]
@@ -63,8 +69,8 @@
       [nq nil])))
 
 (defn counted-seq
-  "Creates a seq that is equal and equiv to base-seq, but whose head
-implements Counted by returning ct."
+  "Wraps base-seq in an ASeq whose Counted implementation returns ct
+  without realizing the sequence. Returns nil when ct is less than one."
   ([base-seq ct]
      (counted-seq base-seq ct nil))
   ([^java.util.List base-seq ct meta]

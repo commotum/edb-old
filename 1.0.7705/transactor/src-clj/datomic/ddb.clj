@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.ddb)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.ddb)
+    {:doc
+     "DynamoDB client operations and conversion between Clojure values and DynamoDB attribute maps. Operations use the AWS SDK v2 client registered for the Datomic storage request shapes."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

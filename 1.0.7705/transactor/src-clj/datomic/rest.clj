@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.rest)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.rest)
+    {:doc
+     "Standalone HTTP Peer service for non-JVM clients. Exposes self-describing HTML and EDN representations for storage catalogs, database values, datoms, entities, queries, transactions, and server-sent transaction reports. Storage aliases map URL path names to Datomic URI prefixes; Ring and Liberator middleware parse EDN and form parameters, negotiate representations, and apply the configured CORS origin policy. Jetty adapters provide servlet hosting and command-line lifecycle."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -85,23 +89,36 @@
         (clojure.core/import 'java.io.InputStreamReader)
         (clojure.core/import 'java.io.PushbackReader))))
   (set! *warn-on-reflection* true)
-  (.setMeta (clojure.lang.RT/var "datomic.rest" "storages") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.rest" "storages")
+    {:doc "Atom mapping public storage aliases to Datomic URI prefixes.", :column (int 1)})
   (let [v__6837__auto__ #'storages]
     (when-not (.hasRoot ^clojure.lang.Var v__6837__auto__)
-      (.setMeta (clojure.lang.RT/var "datomic.rest" "storages") {:column (int 1)})
+      (.setMeta
+        (clojure.lang.RT/var "datomic.rest" "storages")
+        {:doc "Atom mapping public storage aliases to Datomic URI prefixes.", :column (int 1)})
       (.bindRoot (clojure.lang.RT/var "datomic.rest" "storages") (atom nil))
       #'storages))
-  (.setMeta (clojure.lang.RT/var "datomic.rest" "whitelist") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.rest" "whitelist")
+    {:doc "Atom containing the exact CORS origins allowed by the service; an entry of * allows any non-null origin.",
+     :column (int 1)})
   (let [v__6837__auto__ #'whitelist]
     (when-not (.hasRoot ^clojure.lang.Var v__6837__auto__)
-      (.setMeta (clojure.lang.RT/var "datomic.rest" "whitelist") {:column (int 1)})
+      (.setMeta
+        (clojure.lang.RT/var "datomic.rest" "whitelist")
+        {:doc "Atom containing the exact CORS origins allowed by the service; an entry of * allows any non-null origin.",
+         :column (int 1)})
       (.bindRoot (clojure.lang.RT/var "datomic.rest" "whitelist") (atom nil))
       #'whitelist))
-  (defn set-storage-map ([alias_uri_map] (reset! storages alias_uri_map)))
+  (defn set-storage-map ([alias-uri-map] (reset! storages alias-uri-map)))
   (reset-meta!
     #'set-storage-map
     (assoc
-      {:arglists (clojure.core/list ['alias-uri-map]), :column (int 1)}
+      {:arglists (clojure.core/list ['alias-uri-map]),
+       :doc
+       "Replaces the storage-alias map. Each alias is a URL path component and each value is a Datomic URI with the database name omitted.",
+       :column (int 1)}
       :name
       'set-storage-map
       :ns
@@ -120,6 +137,8 @@
        (clojure.core/list
          [(.withMeta 'str {:tag 'String})]
          [(.withMeta 'stm {:tag 'InputStream}) (.withMeta 'encoding {:tag 'String})]),
+       :doc
+       "Reads one EDN value using the installed tagged-literal readers. The string arity returns nil for empty input; the stream arity decodes characters with encoding.",
        :column (int 1)}
       :name
       'read-edn
@@ -139,7 +158,10 @@
   (reset-meta!
     #'db-uri
     (assoc
-      {:arglists (clojure.core/list ['storage 'dbname]), :column (int 1)}
+      {:arglists (clojure.core/list ['storage 'dbname]),
+       :doc
+       "Resolves a storage alias and inserts dbname before any URI query string. Returns nil when storage is not configured.",
+       :column (int 1)}
       :name
       'db-uri
       :ns
@@ -151,7 +173,9 @@
   (reset-meta!
     #'conn
     (assoc
-      {:arglists (clojure.core/list ['storage 'dbname]), :column (int 1)}
+      {:arglists (clojure.core/list ['storage 'dbname]),
+       :doc "Connects to dbname under storage, or returns nil when the storage alias is unknown.",
+       :column (int 1)}
       :name
       'conn
       :ns
@@ -166,19 +190,8 @@
     #'tst
     (assoc {:arglists (clojure.core/list ['req]), :column (int 1)} :name 'tst :ns *ns*))
   (defn windowed
-    ([db p__29838]
-      (let [map__29839 p__29838
-            map__29839 (if (seq? map__29839)
-                         (if (next map__29839)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__29839))
-                           (if (seq map__29839) (first map__29839) {}))
-                         map__29839)
-            basis_t (get map__29839 :basis-t)
-            as_of (get map__29839 :as-of)
-            since (get map__29839 :since)
-            history (get map__29839 :history)
-            db (if (or as_of basis_t) (d/as-of db (or as_of basis_t)) db)
+    ([db {:keys [basis-t as-of since history]}]
+      (let [db (if (or as-of basis-t) (d/as-of db (or as-of basis-t)) db)
             db (if since (d/since db since) db)
             db (if history (d/history db) db)]
         db)))
@@ -186,28 +199,23 @@
     #'windowed
     (assoc
       {:arglists (clojure.core/list ['db {:keys ['basis-t 'as-of 'since 'history]}]),
+       :doc
+       "Applies database descriptor time filters. :basis-t and :as-of select an upper bound, :since selects a lower bound, and :history includes retractions.",
        :column (int 1)}
       :name
       'windowed
       :ns
       *ns*))
   (defn limited
-    ([data p__29843]
-      (let [map__29844 p__29843
-            map__29844 (if (seq? map__29844)
-                         (if (next map__29844)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__29844))
-                           (if (seq map__29844) (first map__29844) {}))
-                         map__29844)
-            offset (get map__29844 :offset)
-            limit (get map__29844 :limit)
-            data (if offset (drop offset data) data)]
+    ([data {:keys [offset limit]}]
+      (let [data (if offset (drop offset data) data)]
         (if limit (take limit data) data))))
   (reset-meta!
     #'limited
     (assoc
-      {:arglists (clojure.core/list ['data {:keys ['offset 'limit]}]), :column (int 1)}
+      {:arglists (clojure.core/list ['data {:keys ['offset 'limit]}]),
+       :doc "Applies optional offset and limit pagination to data.",
+       :column (int 1)}
       :name
       'limited
       :ns
@@ -217,16 +225,19 @@
     #'datom->map
     (assoc {:arglists (clojure.core/list ['d]), :column (int 1)} :name 'datom->map :ns *ns*))
   (defn prep-tx-ret
-    ([tx_ret storage dbname]
-      (let [db_base #:db{:alias (str storage "/" dbname)}]
-        {:db-before (assoc db_base :basis-t (d/basis-t (:db-before tx_ret))),
-         :db-after (assoc db_base :basis-t (d/basis-t (:db-after tx_ret))),
-         :tx-data (mapv datom->map (:tx-data tx_ret)),
-         :tempids (:tempids tx_ret)})))
+    ([tx-ret storage dbname]
+      (let [db-base #:db{:alias (str storage "/" dbname)}]
+        {:db-before (assoc db-base :basis-t (d/basis-t (:db-before tx-ret))),
+         :db-after (assoc db-base :basis-t (d/basis-t (:db-after tx-ret))),
+         :tx-data (mapv datom->map (:tx-data tx-ret)),
+         :tempids (:tempids tx-ret)})))
   (reset-meta!
     #'prep-tx-ret
     (assoc
-      {:arglists (clojure.core/list ['tx-ret 'storage 'dbname]), :column (int 1)}
+      {:arglists (clojure.core/list ['tx-ret 'storage 'dbname]),
+       :doc
+       "Converts a Peer transaction report into EDN-safe database descriptors, datom maps, and tempid resolutions for an HTTP response.",
+       :column (int 1)}
       :name
       'prep-tx-ret
       :ns
@@ -274,7 +285,10 @@
   (reset-meta!
     #'wrap-reading-params
     (assoc
-      {:arglists (clojure.core/list ['handler]), :column (int 1)}
+      {:arglists (clojure.core/list ['handler]),
+       :doc
+       "Returns middleware that parses form and query parameter values as EDN. An application/edn request body is already represented as :params. Invalid values raise :rest/invalid-params with the original parameter map.",
+       :column (int 1)}
       :name
       'wrap-reading-params
       :ns
@@ -290,7 +304,10 @@
   (reset-meta!
     #'matches-origin-whitelist?
     (assoc
-      {:arglists (clojure.core/list ['whitelist 'origin]), :column (int 1)}
+      {:arglists (clojure.core/list ['whitelist 'origin]),
+       :doc
+       "Returns true for an explicitly allowed origin or a wildcard policy. The browser origin value null is always rejected and a missing origin violates the helper contract.",
+       :column (int 1)}
       :name
       'matches-origin-whitelist?
       :ns
@@ -310,7 +327,10 @@
   (reset-meta!
     #'wrap-cors-preflight
     (assoc
-      {:arglists (clojure.core/list ['handler]), :column (int 1)}
+      {:arglists (clojure.core/list ['handler]),
+       :doc
+       "Handles OPTIONS preflight requests with status 204. Allowed origins receive Access-Control-Allow-Origin and X-Requested-With permission; other methods continue to handler.",
+       :column (int 1)}
       :name
       'wrap-cors-preflight
       :ns
@@ -330,7 +350,10 @@
   (reset-meta!
     #'wrap-cors-request
     (assoc
-      {:arglists (clojure.core/list ['handler]), :column (int 1)}
+      {:arglists (clojure.core/list ['handler]),
+       :doc
+       "Adds Access-Control-Allow-Origin to ordinary responses when the request origin satisfies the configured whitelist.",
+       :column (int 1)}
       :name
       'wrap-cors-request
       :ns
@@ -596,7 +619,16 @@
                          [:code (pr-str edn_ret)])
                        "application/edn"
                        (pr-str edn_ret))))))))))))
-  (reset-meta! #'stores (assoc {:column (int 1)} :name 'stores :ns *ns*))
+  (reset-meta!
+    #'stores
+    (assoc
+      {:doc
+       "Lists configured storage aliases as EDN or HTML. The resource is read-only and forms the root of database-catalog navigation.",
+       :column (int 1)}
+      :name
+      'stores
+      :ns
+      *ns*))
   (defn catalog
     ([storage]
       (if (contains? (deref storages) storage)
@@ -862,9 +894,17 @@
         (lib/resource :available-media-types edn-or-html-media :exists? false))))
   (reset-meta!
     #'catalog
-    (assoc {:arglists (clojure.core/list ['storage]), :column (int 1)} :name 'catalog :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['storage]),
+       :doc
+       "Returns the storage catalog resource. GET and HEAD list database names; POST creates the :db-name database and distinguishes a newly created database from an existing one. Unknown storage aliases return a non-existent resource.",
+       :column (int 1)}
+      :name
+      'catalog
+      :ns
+      *ns*))
   (defn datoms-table
-    ([id datoms ecell]
+    ([id datoms entity-cell]
       [:table
        {:id id, :class "table"}
        [:tr [:th "e"] [:th "a"] [:th "v"] [:th "tx"] [:th "added"]]
@@ -907,10 +947,10 @@
                                                           (chunk-append
                                                             b__29957
                                                             [:tr
-                                                             (^clojure.lang.IFn ecell e)
-                                                             (^clojure.lang.IFn ecell a)
+                                                             (^clojure.lang.IFn entity-cell e)
+                                                             (^clojure.lang.IFn entity-cell a)
                                                              [:td (pr-str v)]
-                                                             (^clojure.lang.IFn ecell tx)
+                                                             (^clojure.lang.IFn entity-cell tx)
                                                              [:td (str added)]])
                                                           (recur (inc i__29956)))
                                                         true))
@@ -938,10 +978,10 @@
                                                     added (get map__29963 :added)]
                                                 (cons
                                                   [:tr
-                                                   (^clojure.lang.IFn ecell e)
-                                                   (^clojure.lang.IFn ecell a)
+                                                   (^clojure.lang.IFn entity-cell e)
+                                                   (^clojure.lang.IFn entity-cell a)
                                                    [:td (pr-str v)]
-                                                   (^clojure.lang.IFn ecell tx)
+                                                   (^clojure.lang.IFn entity-cell tx)
                                                    [:td (str added)]]
                                                   (^clojure.lang.IFn iter__29954
                                                     (rest s__29955)))))))))))]
@@ -949,7 +989,9 @@
   (reset-meta!
     #'datoms-table
     (assoc
-      {:arglists (clojure.core/list ['id 'datoms 'ecell]), :column (int 1)}
+      {:arglists (clojure.core/list ['id 'datoms 'entity-cell]),
+       :doc "Renders datom maps as a five-column HTML table, using entity-cell for entity, attribute, and transaction links.",
+       :column (int 1)}
       :name
       'datoms-table
       :ns
@@ -1225,7 +1267,10 @@
   (reset-meta!
     #'db-transact
     (assoc
-      {:arglists (clojure.core/list ['storage 'dbname]), :column (int 1)}
+      {:arglists (clojure.core/list ['storage 'dbname]),
+       :doc
+       "Returns the transaction resource for a database. POST requires :tx-data, waits for transact to complete, and returns db-before, db-after, tx-data, and tempids as EDN or self-describing HTML. A database that cannot be connected is exposed as non-existent.",
+       :column (int 1)}
       :name
       'db-transact
       :ns
@@ -1328,7 +1373,10 @@
   (reset-meta!
     #'db-info
     (assoc
-      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      {:arglists (clojure.core/list ['storage 'dbname 't]),
+       :doc
+       "Returns a database descriptor resource. A t path segment of - captures the current basis; any other segment is read as EDN and used as the descriptor basis. The HTML representation links to datoms, entities, events, and transaction submission.",
+       :column (int 1)}
       :name
       'db-info
       :ns
@@ -1356,7 +1404,10 @@
   (reset-meta!
     #'get-datoms
     (assoc
-      {:arglists (clojure.core/list ['params 'db]), :column (int 1)}
+      {:arglists (clojure.core/list ['params 'db]),
+       :doc
+       "Returns paged datom maps from :eavt, :aevt, :avet, or :vaet. Components are arranged in index order and stop at the first missing component; time-window parameters are applied before lookup.",
+       :column (int 1)}
       :name
       'get-datoms
       :ns
@@ -1378,7 +1429,10 @@
   (reset-meta!
     #'get-range
     (assoc
-      {:arglists (clojure.core/list ['params 'db]), :column (int 1)}
+      {:arglists (clojure.core/list ['params 'db]),
+       :doc
+       "Returns paged AVET datom maps for attribute :a between optional :start and :end values after applying database time-window parameters.",
+       :column (int 1)}
       :name
       'get-range
       :ns
@@ -1512,7 +1566,10 @@
   (reset-meta!
     #'db-datoms
     (assoc
-      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      {:arglists (clojure.core/list ['storage 'dbname 't]),
+       :doc
+       "Returns the datoms resource for a database basis. Index and component parameters select datoms; AVET with an attribute and start or end uses index-range. Supports as-of, since, history, offset, and limit, with EDN and HTML representations.",
+       :column (int 1)}
       :name
       'db-datoms
       :ns
@@ -1944,7 +2001,10 @@
   (reset-meta!
     #'db-entity
     (assoc
-      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      {:arglists (clojure.core/list ['storage 'dbname 't]),
+       :doc
+       "Returns the entity resource for :e at the selected database basis. The entity is touched into a complete map; references link to related entities and component references are rendered recursively in HTML.",
+       :column (int 1)}
       :name
       'db-entity
       :ns
@@ -2637,7 +2697,16 @@
                        [:code (pr-str result)])
                      "application/edn"
                      (pr-str result)))))))))))
-  (reset-meta! #'query (assoc {:column (int 1)} :name 'query :ns *ns*))
+  (reset-meta!
+    #'query
+    (assoc
+      {:doc
+       "Executes GET or POST query requests. :q accepts list- or map-form Datalog; :args may contain database descriptors with :db/alias plus basis-t, as-of, since, and history windows. :offset and :limit page relation results. Responses are EDN or self-describing HTML.",
+       :column (int 1)}
+      :name
+      'query
+      :ns
+      *ns*))
   (defn db-events
     ([storage dbname t]
       (let [temp__5823__auto__ (try (conn storage dbname) (catch java.lang.Exception ex nil))]
@@ -2866,7 +2935,10 @@
   (reset-meta!
     #'db-events
     (assoc
-      {:arglists (clojure.core/list ['storage 'dbname 't]), :column (int 1)}
+      {:arglists (clojure.core/list ['storage 'dbname 't]),
+       :doc
+       "Returns the HTML monitor page for a database transaction-event stream. The page connects to /events/{storage}/{dbname}; the EventSource servlet sends transaction reports and heartbeat comments on the open HTTP response.",
+       :column (int 1)}
       :name
       'db-events
       :ns
@@ -2892,7 +2964,7 @@
       :ns
       *ns*))
   (defn parse-edn-post-body
-    ([h]
+    ([handler]
       (fn fn__30334
         ([p__30333]
           (let [map__30335 p__30333
@@ -2912,20 +2984,23 @@
                                 :params
                                 (read-edn body (or (:character-encoding request) "UTF-8")))
                               request)]
-            (^clojure.lang.IFn h new_request))))))
+            (^clojure.lang.IFn handler new_request))))))
   (reset-meta!
     #'parse-edn-post-body
     (assoc
-      {:arglists (clojure.core/list ['h]), :column (int 1)}
+      {:arglists (clojure.core/list ['handler]),
+       :doc
+       "Returns middleware that reads an application/edn POST body into :params using the request character encoding, defaulting to UTF-8. Other request bodies pass through unchanged.",
+       :column (int 1)}
       :name
       'parse-edn-post-body
       :ns
       *ns*))
   (defn accept-edn-default
-    ([h]
+    ([handler]
       (fn fn__30340
         ([request]
-          (^clojure.lang.IFn h
+          (^clojure.lang.IFn handler
             (assoc-in
               request
               [:headers "accept"]
@@ -2933,7 +3008,9 @@
   (reset-meta!
     #'accept-edn-default
     (assoc
-      {:arglists (clojure.core/list ['h]), :column (int 1)}
+      {:arglists (clojure.core/list ['handler]),
+       :doc "Defaults a request without an Accept header to application/edn.",
+       :column (int 1)}
       :name
       'accept-edn-default
       :ns
@@ -2960,7 +3037,11 @@
       'remove-nil-params
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.rest" "routes") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.rest" "routes")
+    {:doc
+     "Ring handler for the self-describing REST surface: service roots, storage catalogs, database transaction and basis resources, datom and entity resources, Datalog query, event monitor pages, and static assets. Its middleware defaults EDN negotiation, parses form/query values and EDN bodies, removes nil parameters, and applies CORS policy.",
+     :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.rest" "routes")
     (-> (wrap-cors-request
@@ -3198,10 +3279,17 @@
           (service [request response] (^clojure.lang.IFn servicer this request response))))))
   (reset-meta!
     #'servlet
-    (assoc {:arglists (clojure.core/list ['handler]), :column (int 1)} :name 'servlet :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['handler]),
+       :doc "Adapts a Ring handler to an HttpServlet service method.",
+       :column (int 1)}
+      :name
+      'servlet
+      :ns
+      *ns*))
   (defn service-queue
-    ([desc clients]
-      (let [vec__30495 (.split ^java.lang.String desc "/")
+    ([database-description clients]
+      (let [vec__30495 (.split ^java.lang.String database-description "/")
             storage (nth vec__30495 (int 0) nil)
             dbname (nth vec__30495 (int 1) nil)
             c (conn storage dbname)]
@@ -3217,7 +3305,7 @@
                           (let [tx_ret (.take ^java.util.concurrent.BlockingQueue q)
                                 tx_report (pr-str
                                             (dissoc (prep-tx-ret tx_ret storage dbname) :tempids))]
-                            (loop [seq_30499 (seq (get (deref clients) desc))
+                            (loop [seq_30499 (seq (get (deref clients) database-description))
                                    chunk_30500 nil
                                    count_30501 0
                                    i_30502 0]
@@ -3271,7 +3359,10 @@
   (reset-meta!
     #'service-queue
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'desc {:tag 'String}) 'clients]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'database-description {:tag 'String}) 'clients]),
+       :doc
+       "Starts a future that drains one database connection's transaction-report queue and broadcasts EDN reports to the registered EventSource emitters. Returns nil when the storage/database description cannot be connected.",
+       :column (int 1)}
       :name
       'service-queue
       :ns
@@ -3312,7 +3403,15 @@
                       nil))))))))))
   (reset-meta!
     #'event-servlet
-    (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'event-servlet :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list []),
+       :doc
+       "Creates the /events EventSource servlet. Emitters are grouped by storage/database, one queue-draining future is started per group, and emitters are removed when clients close.",
+       :column (int 1)}
+      :name
+      'event-servlet
+      :ns
+      *ns*))
   (defn start
     ([port]
       (let [s (jetty/create-server {:port (or port 8080), :join? false})
@@ -3332,7 +3431,15 @@
         nil)))
   (reset-meta!
     #'start
-    (assoc {:arglists (clojure.core/list ['port]), :column (int 1)} :name 'start :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['port]),
+       :doc
+       "Starts a non-joining Jetty server on port, defaulting to 8080, with /events/* served by the EventSource servlet and all other paths served by routes. Returns nil after the server starts.",
+       :column (int 1)}
+      :name
+      'start
+      :ns
+      *ns*))
   (defn -main
     ([& args]
       (let [vec__30530 (cli/cli
@@ -3400,4 +3507,12 @@
                           (recur (next seq_30538) nil 0 0)))))))))))))
   (reset-meta!
     #'-main
-    (assoc {:arglists (clojure.core/list ['& 'args]), :column (int 1)} :name '-main :ns *ns*)))
+    (assoc
+      {:arglists (clojure.core/list ['& 'args]),
+       :doc
+       "Starts the REST service from command-line arguments. Requires a numeric --port and one or more alias/URI pairs; --origins is a comma-delimited CORS allowlist and may include *. Invalid arguments print usage, shut down Peer resources, and return -1.",
+       :column (int 1)}
+      :name
+      '-main
+      :ns
+      *ns*)))

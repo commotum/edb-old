@@ -1,10 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.ILookup
- *  com.datomic.lucene.store.IndexInput
- */
 package datomic.impl.lucene;
 
 import clojure.lang.ILookup;
@@ -14,6 +7,11 @@ import datomic.impl.clusterfs.IClusterFS;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
+/**
+ * Seekable Lucene input over fixed-size clustered file chunks. Chunks are
+ * loaded on demand through {@code IClusterFS}; cloned inputs duplicate the
+ * current byte buffer so readers can advance independently.
+ */
 public class ClusterIndexInput
 extends IndexInput {
     private final int chunkSize;

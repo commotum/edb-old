@@ -1,8 +1,10 @@
-/*
- * Decompiled with CFR 0.152.
- */
 package datomic.impl;
 
+/**
+ * Computes deterministic 32-bit FNV-1a-style hashes with an additional
+ * avalanche step. String and byte-range variants share the same seed and
+ * provide stable hash-table distribution.
+ */
 public class ModifiedFNVHash {
     public static final int p = 16777619;
     public static final int seed = -2128831035;
@@ -32,4 +34,3 @@ public class ModifiedFNVHash {
         return ModifiedFNVHash.postProcess(hash2);
     }
 }
-

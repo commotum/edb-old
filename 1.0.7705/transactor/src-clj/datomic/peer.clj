@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.peer)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.peer)
+    {:doc
+     "Peer connection lifecycle, immutable database snapshots, transaction submission, live-index integration, transaction reports, and transactor reconnection. Live connections are thread-safe, cached by resolved database configuration, and intended to be long lived. Storage-only connections are uncached fixed snapshots."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -1109,13 +1113,15 @@
       'unsupported-operation
       :ns
       *ns*))
+  ;; Immutable storage-backed connection used for backup and read-only URIs.
+  ;; Transaction submission, report queues, indexing requests, and storage GC are unavailable.
   (deftype
     StorageOnlyConnection
-    [db_id cluster db log]
+    [db-id cluster db log]
     datomic.Connection
     datomic.common.AsyncShutdown
     (^void gcStorage
-      [this ^java.util.Date older_than]
+      [this ^java.util.Date older-than]
       (do (unsupported-operation "gcStorage") nil))
     (^void removeTxReportQueue [this] (do (unsupported-operation "removeTxReportQueue") nil))
     (^java.util.concurrent.BlockingQueue txReportQueue
@@ -1153,7 +1159,7 @@
     (async-shutdown [this] (when cluster (cluster/close cluster))))
   (clojure.core/import 'datomic.peer.StorageOnlyConnection)
   (defn ->StorageOnlyConnection
-    ([db_id cluster db log] (datomic.peer.StorageOnlyConnection. db_id cluster db log)))
+    ([db-id cluster db log] (datomic.peer.StorageOnlyConnection. db-id cluster db log)))
   (reset-meta!
     #'->StorageOnlyConnection
     (assoc
@@ -1203,18 +1209,20 @@
       'integrate-lucene
       :ns
       *ns*))
+  ;; Builds a long-lived Peer connection, installs bounded work queues, and reconnects indefinitely
+  ;; as the active transactor endpoint changes.
   (defn create-connection
-    ([cluster_conf]
+    ([cluster-conf]
       (let [unsent_updates_queue (java.util.concurrent.ArrayBlockingQueue. (int 128))
             lucene_queue (java.util.concurrent.ArrayBlockingQueue. (int 128))
             state_ref (promise)
-            cluster (coord/create-db-cluster cluster_conf)
-            system_cluster (coord/create-system-cluster cluster_conf)
+            cluster (coord/create-db-cluster cluster-conf)
+            system_cluster (coord/create-system-cluster cluster-conf)
             olookup (domain/system-cache-olookup cluster)
             pending_txes (cache/create-response-map 60)
             db_ref (atom nil)
             conn (datomic.peer.Connection.
-                   (common/getx cluster_conf :db-id)
+                   (common/getx cluster-conf :db-id)
                    cluster
                    olookup
                    state_ref
@@ -1240,7 +1248,7 @@
                                    (reset! endpoint_ref new_endpoint)
                                    (create-connection-state
                                      conn
-                                     cluster_conf
+                                     cluster-conf
                                      new_endpoint
                                      mode))))))
             state (^clojure.lang.IFn reconnect_fn :initial)]
@@ -1486,13 +1494,14 @@
       'rename-local-database
       :ns
       *ns*))
+  ;; Captures the current in-memory value behind the storage-only connection contract.
   (defn read-only-local-database
-    ([cluster_conf]
-      (let [db_name (:db-name cluster_conf)
-            conn (connect-local-database db_name)
+    ([cluster-conf]
+      (let [db-name (:db-name cluster-conf)
+            conn (connect-local-database db-name)
             db (deref (.-db-ref ^datomic.peer.LocalConnection conn))
             log (->LocalLog db)]
-        (->StorageOnlyConnection db_name nil db log))))
+        (->StorageOnlyConnection db-name nil db log))))
   (reset-meta!
     #'read-only-local-database
     (assoc
@@ -1501,8 +1510,9 @@
       'read-only-local-database
       :ns
       *ns*))
+  ;; Releases every cached connection and connector; optionally shuts down Clojure agent pools.
   (defn shutdown
-    ([shutdown_clojure]
+    ([shutdown-clojure]
       (locking connection-lock
        (loop [seq_19495 (seq (cache/cache-keys connection-cache))
               chunk_19496 nil
@@ -1531,7 +1541,7 @@
                      (recur (next seq_19495) nil 0 0)))))))))
       (conn/stop-all-connectors)
       (reset! cluster-stack/kv-cache-ref nil)
-      (when shutdown_clojure (shutdown-agents))))
+      (when shutdown-clojure (shutdown-agents))))
   (reset-meta!
     #'shutdown
     (assoc
@@ -1549,11 +1559,11 @@
                              (to-array map__19508))
                            (if (seq map__19508) (first map__19508) {}))
                          map__19508)
-            resolved_cluster_conf map__19508
-            db_id (get map__19508 :db-id)]
+            resolved-cluster-conf map__19508
+            db-id (get map__19508 :db-id)]
         (when-not :db-id
           (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str :db-id)))))
-        (let [temp__5825__auto__ (get connection-cache resolved_cluster_conf)]
+        (let [temp__5825__auto__ (get connection-cache resolved-cluster-conf)]
           (when temp__5825__auto__
             (let [conn temp__5825__auto__] (.release ^datomic.Connection conn))))
         (cache/clear coord/db-cache))))
@@ -1566,10 +1576,11 @@
       'stop-connection
       :ns
       *ns*))
+  ;; Returns the cached connection for a resolved database, creating it once under the connection lock.
   (defn get-connection
-    ([cluster_conf]
+    ([cluster-conf]
       (let [m_19511 {:event :peer/get-connection,
-                     :cluster-conf (uri/loggable-cluster-conf cluster_conf)}
+                     :cluster-conf (uri/loggable-cluster-conf cluster-conf)}
             ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
                               (when (.isDebugEnabled ^org.slf4j.Logger logger)
                                 (.debug
@@ -1579,7 +1590,7 @@
             start__8599__auto__ (java.lang.System/nanoTime)
             result__8600__auto__ (try
                                    {:returned
-                                    (let [temp__5823__auto__ (coord/resolve-db-name cluster_conf)]
+                                    (let [temp__5823__auto__ (coord/resolve-db-name cluster-conf)]
                                       (if temp__5823__auto__
                                         (let [map__19515 temp__5823__auto__
                                               map__19515 (if (seq? map__19515)
@@ -1592,16 +1603,16 @@
                                                                (first map__19515)
                                                                {}))
                                                            map__19515)
-                                              resolved_cluster_conf map__19515
-                                              db_id (get map__19515 :db-id)]
+                                              resolved-cluster-conf map__19515
+                                              db-id (get map__19515 :db-id)]
                                           (locking connection-lock
                                            (let [temp__5823__auto__ (get
                                                                       connection-cache
-                                                                      resolved_cluster_conf)]
+                                                                      resolved-cluster-conf)]
                                              (if temp__5823__auto__
                                                (let [conn temp__5823__auto__] conn)
                                                (let [conn (create-connection
-                                                            resolved_cluster_conf)]
+                                                            resolved-cluster-conf)]
                                                  (let [logger (org.slf4j.LoggerFactory/getLogger
                                                                 "datomic.peer")]
                                                    (when (.isInfoEnabled ^org.slf4j.Logger logger)
@@ -1611,11 +1622,11 @@
                                                          (merge
                                                            {:event :peer/cache-connection}
                                                            (uri/loggable-cluster-conf
-                                                             resolved_cluster_conf)))))
+                                                             resolved-cluster-conf)))))
                                                    nil)
                                                  (cache/put
                                                    connection-cache
-                                                   resolved_cluster_conf
+                                                   resolved-cluster-conf
                                                    conn)
                                                  conn)))))
                                         (do
@@ -1623,7 +1634,7 @@
                                             (java.lang.RuntimeException.
                                               (str
                                                 "Could not find "
-                                                (:db-name cluster_conf)
+                                                (:db-name cluster-conf)
                                                 " in catalog")))
                                           1)))}
                                    (catch
@@ -1651,19 +1662,20 @@
       'get-connection
       :ns
       *ns*))
+  ;; Loads a fixed backup snapshot as a storage-only connection.
   (defn connect-to-backup
-    ([backup_uri t]
-      (let [map__19528 (req/require-and-run 'datomic.backup/load-database backup_uri t)
+    ([backup-uri t]
+      (let [map__19528 (req/require-and-run 'datomic.backup/load-database backup-uri t)
             map__19528 (if (seq? map__19528)
                          (if (next map__19528)
                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
                              (to-array map__19528))
                            (if (seq map__19528) (first map__19528) {}))
                          map__19528)
-            db_id (get map__19528 :db-id)
+            db-id (get map__19528 :db-id)
             db (get map__19528 :db)
             log (get map__19528 :log)]
-        (->StorageOnlyConnection db_id nil db log))))
+        (->StorageOnlyConnection db-id nil db log))))
   (reset-meta!
     #'connect-to-backup
     (assoc
@@ -1672,20 +1684,21 @@
       'connect-to-backup
       :ns
       *ns*))
+  ;; Opens an uncached, fixed snapshot at the latest durable basis without contacting a transactor.
   (defn connect-to-storage
-    ([cluster_conf]
-      (let [map__19530 (coord/resolve-db-name cluster_conf)
+    ([cluster-conf]
+      (let [map__19530 (coord/resolve-db-name cluster-conf)
             map__19530 (if (seq? map__19530)
                          (if (next map__19530)
                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
                              (to-array map__19530))
                            (if (seq map__19530) (first map__19530) {}))
                          map__19530)
-            resolved_conf map__19530
-            db_id (get map__19530 :db-id)
-            cluster (coord/create-db-cluster resolved_conf)
+            resolved-conf map__19530
+            db-id (get map__19530 :db-id)
+            cluster (coord/create-db-cluster resolved-conf)
             olookup (domain/system-cache-olookup cluster)
-            map__19531 (db-io/load-db-from-basis cluster olookup db_id nil true)
+            map__19531 (db-io/load-db-from-basis cluster olookup db-id nil true)
             map__19531 (if (seq? map__19531)
                          (if (next map__19531)
                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
@@ -1694,7 +1707,7 @@
                          map__19531)
             db (get map__19531 :db)
             log (get map__19531 :log)]
-        (->StorageOnlyConnection db_id cluster db log))))
+        (->StorageOnlyConnection db-id cluster db log))))
   (reset-meta!
     #'connect-to-storage
     (assoc
@@ -1704,21 +1717,15 @@
       :ns
       *ns*))
   (defn revert-to-log-version-1
-    ([p__19533]
-      (let [map__19534 p__19533
-            map__19534 (if (seq? map__19534)
-                         (if (next map__19534)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19534))
-                           (if (seq map__19534) (first map__19534) {}))
-                         map__19534)
-            db_uri (get map__19534 :db-uri)
-            cluster (coord/create-db-cluster (coord/resolve-db-name (uri/parse db_uri)))]
+    ([{:keys [db-uri]}]
+      (let [cluster (coord/create-db-cluster (coord/resolve-db-name (uri/parse db-uri)))]
         (log/convert-log-version cluster 1))))
   (reset-meta!
     #'revert-to-log-version-1
     (assoc
       {:arglists (clojure.core/list [{:keys ['db-uri]}]), :column (int 1)}
+      :doc
+      "Converts the persistent log for db-uri to format version 1 for downgrade compatibility with software predating log version 2. A log-version-2 transactor will upgrade the database again when it is used. URI resolution, storage access, and conversion failures propagate."
       :name
       'revert-to-log-version-1
       :ns
@@ -1859,17 +1866,18 @@
       'ensure-schema-level
       :ns
       *ns*))
+  ;; Selects live, memory, backup, or direct-storage connection behavior from the parsed URI.
   (defn connect-uri
     ([uri]
       (deref initialize)
-      (let [cluster_conf (uri/parse-db uri) protocol (:protocol cluster_conf)]
+      (let [cluster-conf (uri/parse-db uri) protocol (:protocol cluster-conf)]
         (cond
-          (= protocol :backup) (connect-to-backup (:backup-uri cluster_conf) (:t cluster_conf))
-          (= protocol :mem) (if (:read-only cluster_conf)
-                              (read-only-local-database cluster_conf)
-                              (connect-local-database (:db-name cluster_conf)))
-          (:read-only cluster_conf) (connect-to-storage cluster_conf)
-          :else (do (get-connection cluster_conf))))))
+          (= protocol :backup) (connect-to-backup (:backup-uri cluster-conf) (:t cluster-conf))
+          (= protocol :mem) (if (:read-only cluster-conf)
+                              (read-only-local-database cluster-conf)
+                              (connect-local-database (:db-name cluster-conf)))
+          (:read-only cluster-conf) (connect-to-storage cluster-conf)
+          :else (do (get-connection cluster-conf))))))
   (reset-meta!
     #'connect-uri
     (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'connect-uri :ns *ns*))
@@ -1888,11 +1896,11 @@
         (when (and (= action :upgrade-schema) (nil? uri))
           (throw (java.lang.IllegalArgumentException. "Invalid options map.")))
         (if (and (= action :upgrade-schema) uri)
-          (let [cluster_conf (uri/parse uri)
-                _ (when (= (:protocol cluster_conf) :backup)
+          (let [cluster-conf (uri/parse uri)
+                _ (when (= (:protocol cluster-conf) :backup)
                     (error/arg
                       :db.error/unsupported-protocol
-                      (str "Unsupported protocol " (:protocol cluster_conf))))
+                      (str "Unsupported protocol " (:protocol cluster-conf))))
                 conn (connect-uri uri)]
             (ensure-schema-level conn)
             :completed)
@@ -1909,10 +1917,11 @@
       'administer-system
       :ns
       *ns*))
+  ;; Sends a database administration command to the active transactor endpoint.
   (defn send-admin-request
-    ([cluster_conf request arg]
+    ([cluster-conf request arg]
       (let [m_19571 {:event :peer/transactor-admin-request,
-                     :cluster (uri/loggable-cluster-conf cluster_conf),
+                     :cluster (uri/loggable-cluster-conf cluster-conf),
                      :request request,
                      :arg arg}
             ___8598__auto__ (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.peer")]
@@ -1926,13 +1935,13 @@
                                    {:returned
                                     (let [endpoint (or
                                                      (coord/lookup-compatible-transactor-endpoint
-                                                       (coord/create-system-cluster cluster_conf))
+                                                       (coord/create-system-cluster cluster-conf))
                                                      (error/raise
                                                        :db.error/transactor-not-registered
                                                        "No transactor registered"))]
                                       (conn/admin-request
                                         (conn/create-transactor-hornet-connector
-                                          cluster_conf
+                                          cluster-conf
                                           endpoint)
                                         request
                                         arg))}
@@ -1961,18 +1970,19 @@
       'send-admin-request
       :ns
       *ns*))
+  ;; Creates a catalog entry and initial database value; returns false when the name already exists.
   (defn create-database
     ([uri desc]
-      (let [cluster_conf (uri/parse-db uri)
-            db_name (:db-name cluster_conf)
-            uri (:uri cluster_conf)
-            protocol (:protocol cluster_conf)]
+      (let [cluster-conf (uri/parse-db uri)
+            db-name (:db-name cluster-conf)
+            uri (:uri cluster-conf)
+            protocol (:protocol cluster-conf)]
         (if (= protocol :mem)
-          (create-local-database db_name uri)
+          (create-local-database db-name uri)
           (let [result (send-admin-request
-                         cluster_conf
+                         cluster-conf
                          :create-database
-                         (assoc desc :db-name db_name))]
+                         (assoc desc :db-name db-name))]
             (cond
               (:created result) true
               (:exists result) false
@@ -1990,14 +2000,15 @@
       'create-database
       :ns
       *ns*))
+  ;; Removes a database from the live catalog after releasing its cached Peer connection.
   (defn delete-database
     ([uri]
-      (let [cluster_conf (uri/parse-db uri)
-            db_name (:db-name cluster_conf)
-            protocol (:protocol cluster_conf)]
+      (let [cluster-conf (uri/parse-db uri)
+            db-name (:db-name cluster-conf)
+            protocol (:protocol cluster-conf)]
         (if (= protocol :mem)
-          (delete-local-database db_name)
-          (let [temp__5823__auto__ (coord/resolve-db-name cluster_conf)]
+          (delete-local-database db-name)
+          (let [temp__5823__auto__ (coord/resolve-db-name cluster-conf)]
             (if temp__5823__auto__
               (let [map__19583 temp__5823__auto__
                     map__19583 (if (seq? map__19583)
@@ -2006,13 +2017,13 @@
                                      (to-array map__19583))
                                    (if (seq map__19583) (first map__19583) {}))
                                  map__19583)
-                    resolved_cluster_conf map__19583
-                    db_id (get map__19583 :db-id)]
+                    resolved-cluster-conf map__19583
+                    db-id (get map__19583 :db-id)]
                 (locking connection-lock
                  (do
-                   (stop-connection resolved_cluster_conf)
+                   (stop-connection resolved-cluster-conf)
                    (contains?
-                     (send-admin-request cluster_conf :delete-database {:db-name db_name})
+                     (send-admin-request cluster-conf :delete-database {:db-name db-name})
                      :deleted))))
               false))))))
   (reset-meta!
@@ -2023,17 +2034,18 @@
       'delete-database
       :ns
       *ns*))
+  ;; Changes a database catalog name while preserving its database identity.
   (defn rename-database
-    ([uri new_name]
-      (let [cluster_conf (uri/parse-db uri)
-            db_name (:db-name cluster_conf)
-            protocol (:protocol cluster_conf)]
+    ([uri new-name]
+      (let [cluster-conf (uri/parse-db uri)
+            db-name (:db-name cluster-conf)
+            protocol (:protocol cluster-conf)]
         (if (= protocol :mem)
-          (rename-local-database db_name new_name)
+          (rename-local-database db-name new-name)
           (let [result (send-admin-request
-                         cluster_conf
+                         cluster-conf
                          :rename-database
-                         {:db-name db_name, :new-name new_name})]
+                         {:db-name db-name, :new-name new-name})]
             (if (:renamed-to result)
               true
               (error/raise
@@ -2050,23 +2062,23 @@
       *ns*))
   (defn get-catalog
     ([uri]
-      (let [cluster_conf (uri/parse uri) protocol (:protocol cluster_conf)]
+      (let [cluster-conf (uri/parse uri) protocol (:protocol cluster-conf)]
         (keys
           (if (= protocol :mem)
             (deref local-dbs)
             (dissoc
-              (catalog/get-catalog (coord/create-system-cluster cluster_conf))
+              (catalog/get-catalog (coord/create-system-cluster cluster-conf))
               :datomic/rev
               :datomic/deleted))))))
   (reset-meta!
     #'get-catalog
     (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'get-catalog :ns *ns*))
   (defn undelete-database
-    ([db_id uri]
-      (let [cluster_conf (uri/parse uri)
-            cluster (coord/create-system-cluster cluster_conf)
-            db_name (:db-name cluster_conf)]
-        (if db_name (catalog/undelete-database cluster db_id db_name) {:no-db-name uri}))))
+    ([db-id uri]
+      (let [cluster-conf (uri/parse uri)
+            cluster (coord/create-system-cluster cluster-conf)
+            db-name (:db-name cluster-conf)]
+        (if db-name (catalog/undelete-database cluster db-id db-name) {:no-db-name uri}))))
   (reset-meta!
     #'undelete-database
     (assoc
@@ -2077,17 +2089,17 @@
       *ns*))
   (defn get-database-names
     ([uri]
-      (let [cluster_conf (uri/parse uri)]
-        (when (= (:protocol cluster_conf) :backup)
+      (let [cluster-conf (uri/parse uri)]
+        (when (= (:protocol cluster-conf) :backup)
           (error/arg
             :db.error/unsupported-protocol
-            (str "Unsupported protocol " (:protocol cluster_conf))))
+            (str "Unsupported protocol " (:protocol cluster-conf))))
         (if (instance? java.util.Map uri)
-          (when-not (= (or (:db-name cluster_conf) "*") "*")
+          (when-not (= (or (:db-name cluster-conf) "*") "*")
             (error/raise
               :db.error/invalid-db-uri
               "Invalid URI. Note :db-name should be omitted from connection map"))
-          (when-not (= (:db-name cluster_conf) "*")
+          (when-not (= (:db-name cluster-conf) "*")
             (error/raise
               :db.error/invalid-db-uri
               "Invalid URI. Note URI must have '*' in place of database name.")))
@@ -2100,7 +2112,8 @@
       'get-database-names
       :ns
       *ns*))
-  (defn list-backups ([backup_uri] (req/require-and-run 'datomic.backup/list-backups backup_uri)))
+  ;; Lists available snapshots and their read-only connection URIs.
+  (defn list-backups ([backup-uri] (req/require-and-run 'datomic.backup/list-backups backup-uri)))
   (reset-meta!
     #'list-backups
     (assoc

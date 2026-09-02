@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.indexer)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.indexer)
+    {:doc
+     "Tracks memory-index growth and schedules transactor background-indexing work. Usage is accounted separately for datoms still in memory and datoms currently being merged. Per-database thresholds request an index job, while the process-wide limit prioritizes the database consuming the most memory."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -30,7 +34,15 @@
     (defprotocol QueueDatabaseIndex (memory-threshold-request-index [db]))
     (reset-meta!
       (clojure.lang.RT/var "datomic.indexer" "QueueDatabaseIndex")
-      (assoc (assoc protocol_metadata__7463 :doc nil) :name 'QueueDatabaseIndex :ns *ns*))
+      (assoc
+        (assoc
+          protocol_metadata__7463
+          :doc
+          "Requests a background indexing job for a database whose memory index reached its threshold.")
+        :name
+        'QueueDatabaseIndex
+        :ns
+        *ns*))
     (let [protocol_signature__7464 (assoc
                                      {:tag nil,
                                       :name
@@ -38,7 +50,7 @@
                                         'memory-threshold-request-index
                                         {:arglists (clojure.core/list ['db])}),
                                       :arglists (clojure.core/list ['db]),
-                                      :doc nil}
+                                      :doc "Queues a background indexing request for db."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.indexer" "QueueDatabaseIndex"))
           protocol_method_name__7465 (with-meta
@@ -62,7 +74,15 @@
       (remove-database [_ db-name] "Remove database from indexer"))
     (reset-meta!
       (clojure.lang.RT/var "datomic.indexer" "Indexer")
-      (assoc (assoc protocol_metadata__7466 :doc nil) :name 'Indexer :ns *ns*))
+      (assoc
+        (assoc
+          protocol_metadata__7466
+          :doc
+          "Accounts for memory-index growth and coordinates per-database background indexing requests.")
+        :name
+        'Indexer
+        :ns
+        *ns*))
     (let [protocol_signature__7467 (assoc
                                      {:tag nil,
                                       :name
@@ -360,6 +380,8 @@
          (.withMeta
            ['& {:keys ['databases 'memidx-max-fn 'memidx-threshold-fn]}]
            {:tag 'datomic.indexer.IndexerImpl})),
+       :doc
+       "Creates an index scheduler for databases. memidx-threshold-fn controls per-database scheduling and memidx-max-fn controls process-wide pressure; both default to the corresponding Datomic configuration properties.",
        :column (int 1)}
       :name
       'create-indexer

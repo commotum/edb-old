@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-sql-ext)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-sql-ext)
+    {:doc
+     "Builds SQL storage from a JDBC URL, DataSource, or Callable connection factory. Connection pools validate on borrow using a provider-specific query or datomic.sqlValidationQuery override."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['get])
@@ -59,6 +63,7 @@
       #'validation-query*))
   (defmethod validation-query* :default fn__15340 ([_] "select 1"))
   (defmethod validation-query* "oracle" fn__15342 ([_] "select 1 from dual"))
+  ;; Selects the configured JDBC validation query, with an Oracle-specific fallback.
   (defn validation-query
     ([provider] (or (config/property "datomic.sqlValidationQuery") (validation-query* provider))))
   (reset-meta!
@@ -69,6 +74,7 @@
       'validation-query
       :ns
       *ns*))
+  ;; Probes a new connection specification and records an alarm when the validation query fails.
   (defn try-validation-query
     ([sql_url spec]
       (let [q (validation-query sql_url)]
@@ -162,6 +168,7 @@
                                nil)))))}]
             (try-validation-query sql_url spec)
             spec)))))
+  ;; Accepts one connection source: JDBC URL, DataSource, or Callable<Connection> factory.
   (defn cluster-conf->spec
     ([p__15361]
       (let [map__15362 p__15361

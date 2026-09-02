@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cleanup)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cleanup)
+    {:doc
+     "Associates cleanup actions with object reachability through phantom references and executes them on a dedicated queue consumer."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cluster-stack)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cluster-stack)
+    {:doc
+     "Composes immutable value storage with process-local cache tiers. Near-store misses fall through to durable cluster storage, successful reads repair nearer tiers, and storage failures are normalized as anomaly maps."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -43,6 +47,7 @@
         (clojure.lang.RT/var "datomic.cluster-stack" "pool-ref")
         (delay (common/cached-thread-pool {:name "KVCache"})))
       #'pool-ref))
+  ;; Adapts the synchronous external-cache interface to the asynchronous value-store SPI.
   (deftype
     ValStoreOnKvCache
     [exec kv_cache]
@@ -87,6 +92,7 @@
       'val-store-on-kv-cache
       :ns
       *ns*))
+  ;; Normalizes unexpected cluster results and throwables to value-store anomaly maps.
   (defn result->anom
     ([result]
       (cond
@@ -895,6 +901,8 @@
     (let [G__17089 (atom nil)]
       (add-watch G__17089 :datomic.cluster-stack/closer common/closing-watch)
       G__17089))
+  ;; Starts configured Memcached and Valcache tiers nearest-first and installs one closeable stack.
+  ;; Any subset of tiers may be present; reads repair a nearer tier after a farther-tier hit.
   (defn start-kv-cache
     ([]
       (let [wrap (fn wrap ([x] (when x (val-store-on-kv-cache (deref pool-ref) x))))
@@ -951,6 +959,7 @@
   (reset-meta!
     #'start-kv-cache
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'start-kv-cache :ns *ns*))
+  ;; Wraps durable cluster values with an optional near cache while preserving cluster ref and pod operations.
   (defn cluster-with-cache
     ([cluster cache opts]
       (let [cluster_store (val-store-on-cluster cluster)

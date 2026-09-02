@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.provisioning.aws)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.provisioning.aws)
+    {:doc
+     "AWS provisioning commands for Datomic transactor configuration. Ensures DynamoDB tables, S3 log buckets, IAM roles and policies, preserves comments while completing properties files, and renders the legacy EC2 CloudFormation template."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -260,6 +264,7 @@
       :ns
       *ns*))
   (.setMacro #'record-aws-exception)
+  ;; Accumulates missing and invalid property errors so an ensure run can report them together.
   (defn ensure-required-props
     ([props validators]
       (let [errors (reduce
@@ -286,6 +291,7 @@
       'ensure-required-props
       :ns
       *ns*))
+  ;; Accepts only the Datomic DynamoDB key shape: a string id attribute used as the hash key.
   (defn check-existing-table-schema
     ([props client table_name]
       (let [desc (aws/invoke client {:op :DescribeTable, :req {:TableName table_name}})
@@ -312,6 +318,7 @@
       'check-existing-table-schema
       :ns
       *ns*))
+  ;; Creates an unindexed DynamoDB table keyed by the string attribute id.
   (defn create-cluster-table
     ([ddb_client table_name read_units write_units]
       (aws/invoke
@@ -344,6 +351,7 @@
   (reset-meta!
     #'default-aws-region
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'default-aws-region :ns *ns*))
+  ;; Reuses a compatible table or creates one with low-volume initial provisioning.
   (defn ensure-ddb-table
     ([props]
       (if (ddb? props)
@@ -430,6 +438,7 @@
       'create-system-command
       :ns
       *ns*))
+  ;; Ensures the optional S3 log bucket, generating a globally unique name when its value is blank.
   (defn ensure-log-bucket
     ([props]
       (try
@@ -764,6 +773,7 @@
       'ensure-new-role
       :ns
       *ns*))
+  ;; Installs table-scoped peer/transactor policies plus optional log and metric publishing policies.
   (defn ensure-role-policies
     ([props prefix]
       (let [pred__32208 = expr__32209 prefix]
@@ -833,6 +843,8 @@
       'ensure-role
       :ns
       *ns*))
+  ;; Requires one transactor identity strategy and provisions its permissions.
+  ;; Instance roles avoid embedded long-lived keys; IAM users remain available for existing deployments.
   (defn ensure-transactor-identity
     ([props]
       (let [id_map (select-keys props ["aws-transactor-role" "aws-dynamodb-user"])]
@@ -873,6 +885,8 @@
       'ensure-transactor-identity
       :ns
       *ns*))
+  ;; Requires one peer identity strategy and grants read access to the configured table.
+  ;; Instance roles avoid embedded long-lived keys; IAM users remain available for existing deployments.
   (defn ensure-peer-identity
     ([props]
       (let [id_map (select-keys props ["aws-peer-role" "aws-dynamodb-peer-user"])]
@@ -1072,6 +1086,8 @@
       'new-keys
       :ns
       *ns*))
+  ;; Completes an input properties file idempotently, preserves its layout and comments, writes the
+  ;; requested output file, and reports all provisioning errors after the ensure pass.
   (defn ensure-transactor
     ([p__32256]
       (let [map__32257 p__32256
@@ -1663,6 +1679,7 @@
   (reset-meta!
     #'propmap
     (assoc {:arglists (clojure.core/list ['filename]), :column (int 1)} :name 'propmap :ns *ns*))
+  ;; Renders the EC2 autoscaling template from completed transactor and deployment properties.
   (defn create-cf-template
     ([p__32307]
       (let [map__32308 p__32307

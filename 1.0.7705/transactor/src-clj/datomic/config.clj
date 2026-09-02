@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.config)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.config)
+    {:doc
+     "Loads, coerces, validates, and exposes Datomic process configuration. Memory values accept byte counts or k, m, and g suffixes; invalid configured values raise information-bearing errors."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'reset!))
@@ -85,6 +89,7 @@
   (reset-meta!
     #'limited-edition?
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'limited-edition? :ns *ns*))
+  ;; Parses a byte count or a base-1024 k, m, or g quantity.
   (defn parse-memory-string
     ([s]
       (when s
@@ -115,6 +120,8 @@
       'parse-memory-string
       :ns
       *ns*))
+  ;; Reads one Java system property, applies its coercion and validator, and raises
+  ;; :db.error/invalid-config-value when an explicitly supplied value is invalid.
   (defn read-system-property
     ([prop coerce valid? default]
       (let [s (java.lang.System/getProperty ^java.lang.String prop)]
@@ -204,9 +211,13 @@
       :ns
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.config" "config-table") {:column (int 1)})
+  ;; Each property entry is [name coercion validation default]. Memory settings are bytes after
+  ;; coercion; names ending in Msec are milliseconds; concurrency settings are worker limits.
+  ;; A default function receives properties already resolved earlier in this table.
   (.bindRoot
     (clojure.lang.RT/var "datomic.config" "config-table")
-    [["datomic.heartbeatIntervalMsec" edn/read-string (at-least 1000) 5000]
+    [;; Process coordination, query execution, health checks, and storage write limits.
+     ["datomic.heartbeatIntervalMsec" edn/read-string (at-least 1000) 5000]
      ["datomic.readAheadPool"
       (fn fn__8978
         ([n]
@@ -226,6 +237,7 @@
      ["datomic.writeConcurrency" edn/read-string (at-least 2) 4]
      ["datomic.efsWritePool" edn/read-string (at-least 2) 128]
      ["datomic.efsDeletePool" edn/read-string (at-least 2) 128]
+     ;; Backup, restore, deletion concurrency, cache behavior, and garbage-collection pacing.
      ["datomic.deleteConcurrency"
       edn/read-string
       (fn fn__8982 ([p1__8971#] (<= 1 p1__8971# 128)))
@@ -244,6 +256,7 @@
       edn/read-string
       (at-least 2)
       (fn fn__8984 ([props] (* 2 (get props "datomic.writeConcurrency"))))]
+     ;; Remote-storage timeouts; -1 delegates timeout behavior to the client implementation.
      ["datomic.ddbRequestTimeout" edn/read-string (at-least -1) 1000]
      ["datomic.ddbSocketTimeout"
       edn/read-string
@@ -278,6 +291,8 @@
       edn/read-string
       (at-least -1)
       (fn fn__8996 ([props] (get props "datomic.s3SocketTimeout")))]
+     ;; Heap allocation and indexing thresholds. Indexing starts at the threshold and transaction
+     ;; back pressure begins at the maximum.
      ["datomic.memoryIndexMax" parse-memory-string (at-least (long (* (* 32 1024) 1024))) 67108864]
      ["datomic.memoryIndexThreshold"
       parse-memory-string
@@ -289,6 +304,7 @@
      ["datomic.logDirSizeLimit" edn/read-string (at-least 1000) 50000]
      ["datomic.luceneLogFile" identity string? nil]
      ["datomic.pidFile" identity string? nil]
+     ;; Peer connection, transaction, and external cache behavior.
      ["datomic.peerConnectionTTLMsec" edn/read-string (at-least 10000) 10000]
      ["datomic.txTimeoutMsec" edn/read-string (at-least 0) 10000]
      ["datomic.memcachedExpirationDays" edn/read-string (in-range 0 30) 30]
@@ -307,6 +323,7 @@
       edn/read-string
       (fn fn__9000 ([v] (or (nil? v) (and (int? v) (<= 1 v 1000)))))
       100]
+     ;; Background index construction and its filesystem workspace.
      ["datomic.dynamicIndexParallelism" edn/read-string bool? false]
      ["datomic.indexSegsPerSecond"
       edn/read-string
@@ -333,6 +350,7 @@
      ["datomic.version" (constantly (version)) string? (constantly (version))]
      ["datomic.versionUnique" (constantly (version-unique)) string? (constantly (version-unique))]
      ["datomic.buildRevision" read-revision identity read-revision]
+     ;; Monitoring callback and optional CloudWatch destination.
      ["datomic.cloudwatchName" identity string? nil]
      ["datomic.cloudwatchAccessKeyId" edn/read-string map? nil]
      ["datomic.cloudwatchSecretKey" edn/read-string map? nil]
@@ -354,6 +372,7 @@
       edn/read-string
       (fn fn__9021 ([p1__8974#] (and (integer? p1__8974#) (<= 1 p1__8974# 5))))
       1]
+     ;; Local SSD cache and transaction-read prefetching.
      ["datomic.valcachePutsPool" edn/read-string (fn fn__9024 ([p1__8975#] (<= 1 p1__8975# 32))) 4]
      ["datomic.valcachePath" identity string? nil]
      ["datomic.valcacheMaxGb" edn/read-string (at-least 1) nil]
@@ -371,6 +390,8 @@
       edn/read-string
       (fn fn__9030 ([p1__8977#] (and (number? p1__8977#) (<= 0 p1__8977# 1))))
       0.1]])
+  ;; Enforces the memory-index ordering and reserves at least one quarter of the heap
+  ;; for transaction processing, application work, and runtime overhead.
   (defn validate-properties
     ([m]
       (when (< (get m "datomic.memoryIndexMax") (get m "datomic.memoryIndexThreshold"))
@@ -425,6 +446,7 @@
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'reset! :ns *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.config" "initialized") {:private true, :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.config" "initialized") (delay (reset!)))
+  ;; Returns a validated process property, initializing the configuration table on demand.
   (defn property
     ([name]
       (deref initialized)
@@ -438,6 +460,7 @@
   (reset-meta!
     #'property
     (assoc {:arglists (clojure.core/list ['name]), :column (int 1)} :name 'property :ns *ns*))
+  ;; Valcache is enabled only when both its SSD path and capacity are configured.
   (defn local-valcache-enabled?
     ([] (boolean (and (property "datomic.valcachePath") (property "datomic.valcacheMaxGb")))))
   (reset-meta!
@@ -522,7 +545,7 @@
   (reset-meta!
     #'memcached-args
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'memcached-args :ns *ns*))
-  (defn max-gb->eviction-threshold-mb ([max_gb] (- (* max_gb 900) 500)))
+  (defn max-gb->eviction-threshold-mb ([max-gb] (- (* max-gb 900) 500)))
   (reset-meta!
     #'max-gb->eviction-threshold-mb
     (assoc
@@ -531,6 +554,7 @@
       'max-gb->eviction-threshold-mb
       :ns
       *ns*))
+  ;; Produces a complete Valcache configuration and reserves headroom below the requested disk cap.
   (defn valcache-args
     ([]
       (let [required {:path "datomic.valcachePath", :max-gb "datomic.valcacheMaxGb"}
@@ -545,6 +569,8 @@
   (reset-meta!
     #'valcache-args
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'valcache-args :ns *ns*))
+  ;; Supplies bounded DynamoDB client timeouts and disables SDK retries so storage retry policy
+  ;; remains centralized in the Datomic storage layer.
   (defn ddb-client-args
     ([args]
       (merge
@@ -563,6 +589,7 @@
       'ddb-client-args
       :ns
       *ns*))
+  ;; Supplies S3 client timeouts and a large connection pool for parallel backup and restore I/O.
   (defn s3-client-args
     ([args]
       (merge

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-sql)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-sql)
+    {:doc
+     "SQL-backed KVStore implementation. Stores immutable values and revisioned references in the Datomic key-value table and translates conditional-write conflicts into failed puts."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['get])
@@ -37,6 +41,8 @@
       'constraint-violation?
       :ns
       *ns*))
+  ;; Map KVStore reads and writes onto SQL rows. A revisioned put uses a guarded
+  ;; update; initial creation treats a uniqueness violation as a conditional miss.
   (deftype
     KVSql
     [spec]

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.aggregation)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.aggregation)
+    {:doc
+     "Built-in Datalog aggregate functions. Aggregates consume each query group as a Java collection and return a scalar or a bounded collection. Min and max order values with Datomic's cross-type comparator. Median sorts numeric values by their natural order and uses a truncating quotient for an even integer middle pair. Random sampling is performed independently for each group."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer
@@ -32,6 +36,8 @@
     #'min
     (assoc
       {:arglists (clojure.core/list ['coll] ['n (.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc
+       "Returns the least value in coll, or a vector containing up to n least values. Values are ordered with Datomic's comparator, which defines an order across database value types.",
        :column (int 1)}
       :name
       'min
@@ -55,6 +61,8 @@
     #'max
     (assoc
       {:arglists (clojure.core/list ['coll] ['n (.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc
+       "Returns the greatest value in coll, or a vector containing up to n greatest values. Values are ordered with Datomic's comparator, which defines an order across database value types.",
        :column (int 1)}
       :name
       'max
@@ -65,6 +73,7 @@
     #'count
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc "Returns the number of values in the aggregate group, including duplicates.",
        :column (int 1)}
       :name
       'count
@@ -75,6 +84,7 @@
     #'count-distinct
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc "Returns the number of distinct values in the aggregate group.",
        :column (int 1)}
       :name
       'count-distinct
@@ -85,6 +95,7 @@
     #'distinct
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc "Returns the set of distinct values in the aggregate group.",
        :column (int 1)}
       :name
       'distinct
@@ -95,6 +106,7 @@
     #'sum
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc "Returns the numeric sum of the aggregate group. The sum of an empty group is zero.",
        :column (int 1)}
       :name
       'sum
@@ -106,6 +118,7 @@
     #'avg
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc "Returns the arithmetic mean of the numeric values in the aggregate group as a double.",
        :column (int 1)}
       :name
       'avg
@@ -127,6 +140,8 @@
     #'median
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc
+       "Returns the median numeric value after sorting the aggregate group in natural ascending order. For an even group whose middle values are integers, sums that pair and applies quot by two, truncating toward zero.",
        :column (int 1)}
       :name
       'median
@@ -146,6 +161,7 @@
     #'variance
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc "Returns the population variance of the numeric values in the aggregate group.",
        :column (int 1)}
       :name
       'variance
@@ -157,6 +173,7 @@
     #'stddev
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'coll {:tag 'java.util.Collection})]),
+       :doc "Returns the population standard deviation of the numeric values in the aggregate group.",
        :column (int 1)}
       :name
       'stddev
@@ -175,6 +192,8 @@
        (clojure.core/list
          [(.withMeta 'coll {:tag 'java.util.List})]
          ['n (.withMeta 'coll {:tag 'java.util.List})]),
+       :doc
+       "Returns one random value, or a sequence of exactly n random values selected with replacement. Duplicate values may be returned.",
        :column (int 1)}
       :name
       'rand
@@ -183,4 +202,11 @@
   (defn sample ([n coll] (math/reservoir-sample n (set coll))))
   (reset-meta!
     #'sample
-    (assoc {:arglists (clojure.core/list ['n 'coll]), :column (int 1)} :name 'sample :ns *ns*)))
+    (assoc
+      {:arglists (clojure.core/list ['n 'coll]),
+       :doc "Returns up to n distinct values selected without replacement.",
+       :column (int 1)}
+      :name
+      'sample
+      :ns
+      *ns*)))

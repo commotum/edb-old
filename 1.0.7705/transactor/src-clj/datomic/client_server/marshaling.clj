@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.client-server.marshaling)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.client-server.marshaling)
+    {:doc
+     "Encodes and decodes Peer Server request, response, database, datom, and transaction values at the Client protocol boundary."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)

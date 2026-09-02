@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.memcached)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.memcached)
+    {:doc
+     "Memcached adapter for immutable Datomic segments. Supports fixed server lists, ElastiCache node discovery, optional SASL credentials, size limits, asynchronous writes, automatic client replacement after connection failure, and cache-tier metrics."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -240,6 +244,8 @@
         [this bs]
         (datomic.spy.memcached.CachedData. (int SPY_BYTEARRAY_FLAGS) ^bytes bs (int SPY_MAX_SIZE)))
       (^boolean asyncDecode [this ^datomic.spy.memcached.CachedData _] (.booleanValue false))))
+  ;; Configure the binary protocol, consistent hashing, request timeouts,
+  ;; failure redistribution, optional discovery, and optional SASL authentication.
   (defn factory*
     ([p__20709]
       (let [map__20710 p__20709
@@ -298,6 +304,7 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.memcached" "factory") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.memcached" "factory") factory*)
+  ;; Connect a client to the comma- or space-delimited server list in :servers.
   (defn create-client
     ([p__20713]
       (let [map__20714 p__20713
@@ -444,6 +451,8 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.memcached" "rc-reset-if-crashed")
         (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
+  ;; Recreate a failed client once per outage. The semaphore serializes reset
+  ;; and shutdown while ordinary reads continue to use the current client.
   (deftype
     RecoveringClient
     [client_ref create_client sem]
@@ -520,6 +529,8 @@
       'create-recovering-client
       :ns
       *ns*))
+  ;; Present Memcached as an immutable-value cache. Gets are synchronous and
+  ;; measured; puts are asynchronous and values above one megabyte are skipped.
   (defn create-cache
     ([p__20792]
       (let [map__20793 p__20792
@@ -643,6 +654,7 @@
       'create-cache
       :ns
       *ns*))
+  ;; Start the process-local Memcached tier when local cache properties are present.
   (defn start-local-memcached-from-config
     ([]
       (let [temp__5804__auto__ (config/local-memcached-args)]
@@ -665,6 +677,7 @@
       'start-local-memcached-from-config
       :ns
       *ns*))
+  ;; Start the shared Memcached tier when external cache properties are present.
   (defn start-memcached-from-config
     ([]
       (let [temp__5804__auto__ (config/memcached-args)]

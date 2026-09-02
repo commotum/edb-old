@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.extensions)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.extensions)
+    {:doc
+     "Datomic-aware functions and predicates available to Datalog expressions. These extensions provide full-text search, transaction-log access, missing and fallback attribute lookup, optimizer-visible constants, tuple bindings, nested queries, Datomic value comparisons, and integer-preserving division."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['/ '< '> '<= '>= 'compare 'eval])
@@ -79,16 +83,23 @@
       'project
       :ns
       *ns*))
-  (defn fulltext ([db attr qmap] (project (ft/search db attr qmap) [2 3 4 5])))
+  (defn fulltext
+    "Searches a fulltext attribute and returns distinct [entity value transaction score] tuples."
+    ([db attr qmap] (project (ft/search db attr qmap) [2 3 4 5])))
   (reset-meta!
     #'fulltext
     (assoc
-      {:private true, :arglists (clojure.core/list ['db 'attr 'qmap]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['db 'attr 'qmap]),
+       :doc
+       "Searches a fulltext attribute and returns distinct [entity value transaction score] tuples.",
+       :column (int 1)}
       :name
       'fulltext
       :ns
       *ns*))
   (defn tx-ids
+    "Returns transaction entity IDs from log in the half-open range [start, end)."
     ([log start end]
       (mapv
         (fn fn__15269 ([p1__15268#] (long (datomic.db/make-eid 3 (long (:t p1__15268#))))))
@@ -96,16 +107,23 @@
   (reset-meta!
     #'tx-ids
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'log {:tag 'Log}) 'start 'end]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'log {:tag 'Log}) 'start 'end]),
+       :doc "Returns transaction entity IDs from log in the half-open range [start, end).",
+       :column (int 1)}
       :name
       'tx-ids
       :ns
       *ns*))
-  (defn tx-data ([log t] (or (:data (first (.txRange ^datomic.Log log t (inc t)))) [])))
+  (defn tx-data
+    "Returns the datoms recorded for transaction t, or an empty collection when t is absent."
+    ([log t] (or (:data (first (.txRange ^datomic.Log log t (inc t)))) [])))
   (reset-meta!
     #'tx-data
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'log {:tag 'Log}) 't]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'log {:tag 'Log}) 't]),
+       :doc
+       "Returns the datoms recorded for transaction t, or an empty collection when t is absent.",
+       :column (int 1)}
       :name
       'tx-data
       :ns
@@ -114,7 +132,10 @@
   (reset-meta!
     #'missing?
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'e 'attr]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'e 'attr]),
+       :doc
+       "Returns true when entity e has no current value for attr in db.",
+       :column (int 1)}
       :name
       'missing?
       :ns
@@ -147,7 +168,10 @@
   (reset-meta!
     #'get-else
     (assoc
-      {:arglists (clojure.core/list ['db 'e 'attr 'v]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'e 'attr 'v]),
+       :doc
+       "Returns entity e's current value for the cardinality-one attr, or v when the attribute has no value. The default v must be non-nil.",
+       :column (int 1)}
       :name
       'get-else
       :ns
@@ -169,7 +193,10 @@
   (reset-meta!
     #'get-some
     (assoc
-      {:arglists (clojure.core/list ['db 'e '& 'attrs]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'e '& 'attrs]),
+       :doc
+       "Examines the cardinality-one attrs in order and returns [attribute-id value] for the first attribute that entity e possesses, or nil when none has a value.",
+       :column (int 1)}
       :name
       'get-some
       :ns
@@ -177,8 +204,17 @@
   (defn ground ([x] x))
   (reset-meta!
     #'ground
-    (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'ground :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['x]),
+       :doc
+       "Returns the constant x unchanged. Datalog query analysis recognizes ground as a constant binding and can use it when optimizing clause execution.",
+       :column (int 1)}
+      :name
+      'ground
+      :ns
+      *ns*))
   (defn -gather
+    "Returns the cardinality-one values of attrs for entity e in order, or nil when any value is missing."
     ([db e & attrs]
       (let [cnt (count attrs)
             eid (datomic.db/resolve-id db e)
@@ -216,7 +252,10 @@
   (reset-meta!
     #'-gather
     (assoc
-      {:arglists (clojure.core/list ['db 'e '& 'attrs]), :column (int 1)}
+      {:arglists (clojure.core/list ['db 'e '& 'attrs]),
+       :doc
+       "Returns the cardinality-one values of attrs for entity e in order, or nil when any value is missing.",
+       :column (int 1)}
       :name
       '-gather
       :ns
@@ -224,32 +263,89 @@
   (defn / ([a b] (if (and (integer? a) (integer? b)) (quot a b) (clojure.core// a b))))
   (reset-meta!
     #'/
-    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '/ :ns *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.extensions" "!=") {:column (int 1)})
+    (assoc
+      {:arglists (clojure.core/list ['a 'b]),
+       :doc
+       "Divides a by b. Integer arguments use quotient division so query results do not introduce ratio values; other numeric arguments use Clojure division.",
+       :column (int 1)}
+      :name
+      '/
+      :ns
+      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.extensions" "!=")
+    {:arglists (clojure.core/list ['a 'b]),
+     :doc "Returns true when a and b are unequal.",
+     :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.extensions" "!=") not=)
   (defn < ([a b] (neg? (datomic.common/compare a b))))
   (reset-meta!
     #'<
-    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '< :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['a 'b]),
+       :doc "Returns true when a sorts before b under Datomic value ordering.",
+       :column (int 1)}
+      :name
+      '<
+      :ns
+      *ns*))
   (defn > ([a b] (< b a)))
   (reset-meta!
     #'>
-    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '> :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['a 'b]),
+       :doc "Returns true when a sorts after b under Datomic value ordering.",
+       :column (int 1)}
+      :name
+      '>
+      :ns
+      *ns*))
   (defn <= ([a b] (not (< b a))))
   (reset-meta!
     #'<=
-    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '<= :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['a 'b]),
+       :doc "Returns true when a sorts before or equal to b under Datomic value ordering.",
+       :column (int 1)}
+      :name
+      '<=
+      :ns
+      *ns*))
   (defn >= ([a b] (not (< a b))))
   (reset-meta!
     #'>=
-    (assoc {:arglists (clojure.core/list ['a 'b]), :column (int 1)} :name '>= :ns *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.extensions" "tuple") {:column (int 1)})
+    (assoc
+      {:arglists (clojure.core/list ['a 'b]),
+       :doc "Returns true when a sorts after or equal to b under Datomic value ordering.",
+       :column (int 1)}
+      :name
+      '>=
+      :ns
+      *ns*))
+  (.setMeta
+    (clojure.lang.RT/var "datomic.extensions" "tuple")
+    {:arglists (clojure.core/list ['& 'values]),
+     :doc "Constructs a tuple containing the supplied query values in order.",
+     :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.extensions" "tuple") vector)
-  (.setMeta (clojure.lang.RT/var "datomic.extensions" "untuple") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.extensions" "untuple")
+    {:arglists (clojure.core/list ['tuple]),
+     :doc
+     "Returns tuple unchanged so a Datalog tuple binding can name its elements.",
+     :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.extensions" "untuple") identity)
   (defn q ([query & srcs] (Circular/q query srcs)))
   (reset-meta!
     #'q
-    (assoc {:arglists (clojure.core/list ['query '& 'srcs]), :column (int 1)} :name 'q :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['query '& 'srcs]),
+       :doc
+       "Executes query as a nested Datalog query against srcs. Query forms, source arguments, and result shapes follow the variable-arity query API.",
+       :column (int 1)}
+      :name
+      'q
+      :ns
+      *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.extensions" "db-attr-splits") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.extensions" "db-attr-splits") stats/db-attr-splits))

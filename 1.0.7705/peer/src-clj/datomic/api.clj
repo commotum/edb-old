@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.api)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.api)
+    {:doc
+     "Functional Clojure API for Datomic Peer. Database values are immutable snapshots; connections coordinate transactions and expose the latest locally available value."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['filter 'sync])
@@ -64,7 +68,7 @@
       'get-database-names
       :ns
       *ns*))
-  (defn list-backups ([backup_uri] (Peer/listBackups ^java.lang.String backup_uri)))
+  (defn list-backups ([backup-uri] (Peer/listBackups ^java.lang.String backup-uri)))
   (reset-meta!
     #'list-backups
     (assoc
@@ -82,7 +86,7 @@
       'administer-system
       :ns
       *ns*))
-  (defn rename-database ([uri new_name] (Peer/renameDatabase uri ^java.lang.String new_name)))
+  (defn rename-database ([uri new-name] (Peer/renameDatabase uri ^java.lang.String new-name)))
   (reset-meta!
     #'rename-database
     (assoc
@@ -95,11 +99,11 @@
   (reset-meta!
     #'q
     (assoc {:arglists (clojure.core/list ['query '& 'inputs]), :column (int 1)} :name 'q :ns *ns*))
-  (defn query ([query_map] (datomic.query/query query_map)))
+  (defn query ([query-map] (datomic.query/query query-map)))
   (reset-meta!
     #'query
     (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'query :ns *ns*))
-  (defn qseq ([query_map] (datomic.query/qseq query_map)))
+  (defn qseq ([query-map] (datomic.query/qseq query-map)))
   (reset-meta!
     #'qseq
     (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'qseq :ns *ns*))
@@ -214,8 +218,8 @@
       :ns
       *ns*))
   (defn gc-storage
-    ([connection older_than]
-      (.gcStorage ^datomic.Connection connection ^java.util.Date older_than)
+    ([connection older-than]
+      (.gcStorage ^datomic.Connection connection ^java.util.Date older-than)
       nil))
   (reset-meta!
     #'gc-storage
@@ -227,16 +231,8 @@
       :ns
       *ns*))
   (defn transact
-    ([connection tx_data & p__19400]
-      (let [map__19401 p__19400
-            map__19401 (if (seq? map__19401)
-                         (if (next map__19401)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19401))
-                           (if (seq map__19401) (first map__19401) {}))
-                         map__19401)
-            options map__19401]
-        (.transact ^datomic.Connection connection ^java.util.List tx_data options))))
+    ([connection tx-data & {:as options}]
+      (.transact ^datomic.Connection connection ^java.util.List tx-data options)))
   (reset-meta!
     #'transact
     (assoc
@@ -248,16 +244,8 @@
       :ns
       *ns*))
   (defn transact-async
-    ([connection tx_data & p__19403]
-      (let [map__19404 p__19403
-            map__19404 (if (seq? map__19404)
-                         (if (next map__19404)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19404))
-                           (if (seq map__19404) (first map__19404) {}))
-                         map__19404)
-            options map__19404]
-        (.transactAsync ^datomic.Connection connection ^java.util.List tx_data options))))
+    ([connection tx-data & {:as options}]
+      (.transactAsync ^datomic.Connection connection ^java.util.List tx-data options)))
   (reset-meta!
     #'transact-async
     (assoc
@@ -321,8 +309,8 @@
     (clojure.lang.RT/var "datomic.api" "filter")
     (fn filter ([db pred] (.filter ^datomic.Database db pred))))
   (defn with
-    ([db tx_data & opts] (.with ^datomic.Database db ^java.util.List tx_data opts))
-    ([db tx_data] (.with ^datomic.Database db ^java.util.List tx_data)))
+    ([db tx-data & opts] (.with ^datomic.Database db ^java.util.List tx-data opts))
+    ([db tx-data] (.with ^datomic.Database db ^java.util.List tx-data)))
   (reset-meta!
     #'with
     (assoc
@@ -408,16 +396,8 @@
       :ns
       *ns*))
   (defn pull
-    ([db pattern eid & p__19421]
-      (let [map__19422 p__19421
-            map__19422 (if (seq? map__19422)
-                         (if (next map__19422)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19422))
-                           (if (seq map__19422) (first map__19422) {}))
-                         map__19422)
-            options map__19422]
-        (.pull ^datomic.Database db pattern eid options))))
+    ([db pattern eid & {:as options}]
+      (.pull ^datomic.Database db pattern eid options)))
   (reset-meta!
     #'pull
     (assoc
@@ -428,7 +408,7 @@
       'pull
       :ns
       *ns*))
-  (defn index-pull ([db arg_map] (datomic.pull/dereffed-index-pull db arg_map)))
+  (defn index-pull ([db arg-map] (datomic.pull/dereffed-index-pull db arg-map)))
   (reset-meta!
     #'index-pull
     (assoc
@@ -438,16 +418,8 @@
       :ns
       *ns*))
   (defn pull-many
-    ([db pattern eids & p__19425]
-      (let [map__19426 p__19425
-            map__19426 (if (seq? map__19426)
-                         (if (next map__19426)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19426))
-                           (if (seq map__19426) (first map__19426) {}))
-                         map__19426)
-            options map__19426]
-        (.pullMany ^datomic.Database db pattern ^java.util.List eids options))))
+    ([db pattern eids & {:as options}]
+      (.pullMany ^datomic.Database db pattern ^java.util.List eids options)))
   (reset-meta!
     #'pull-many
     (assoc
@@ -513,7 +485,7 @@
       'entid
       :ns
       *ns*))
-  (defn entid-at ([db part t_or_date] (.entidAt ^datomic.Database db part t_or_date)))
+  (defn entid-at ([db part t-or-date] (.entidAt ^datomic.Database db part t-or-date)))
   (reset-meta!
     #'entid-at
     (assoc
@@ -523,7 +495,7 @@
       'entid-at
       :ns
       *ns*))
-  (defn invoke ([db eid_or_ident & args] (apply db/invoke db eid_or_ident args)))
+  (defn invoke ([db eid-or-ident & args] (apply db/invoke db eid-or-ident args)))
   (reset-meta!
     #'invoke
     (assoc
@@ -574,8 +546,8 @@
       :ns
       *ns*))
   (defn shutdown
-    ([shutdown_clojure]
-      (Peer/shutdown (boolean (.booleanValue ^java.lang.Boolean shutdown_clojure)))
+    ([shutdown-clojure]
+      (Peer/shutdown (boolean (.booleanValue ^java.lang.Boolean shutdown-clojure)))
       nil))
   (reset-meta!
     #'shutdown
@@ -597,38 +569,29 @@
       :ns
       *ns*))
   (defn cancel
-    ([p__19443]
-      (let [map__19444 p__19443
-            map__19444 (if (seq? map__19444)
-                         (if (next map__19444)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19444))
-                           (if (seq map__19444) (first map__19444) {}))
-                         map__19444)
-            anomaly_map map__19444
-            category (get map__19444 :cognitect.anomalies/category)
-            allowed_anoms #{:cognitect.anomalies/conflict :cognitect.anomalies/incorrect}
-            throw_incorrect_anom (fn throw_incorrect_anom
-                                   ([p1__19442#]
+    ([{category :cognitect.anomalies/category, :as anomaly-map}]
+      (let [allowed-anoms #{:cognitect.anomalies/conflict :cognitect.anomalies/incorrect}
+            throw-incorrect-anom (fn throw-incorrect-anom
+                                   ([message]
                                      (throw
                                        (ex-info
-                                         p1__19442#
+                                         message
                                          #:cognitect.anomalies{:category
                                                                :cognitect.anomalies/incorrect,
-                                                               :message p1__19442#}))))]
+                                                               :message message}))))]
         (if (not category)
-          (^clojure.lang.IFn throw_incorrect_anom "Cancel requires :cognitect.anomalies/category")
-          (if (not (some #{category} allowed_anoms))
-            (^clojure.lang.IFn throw_incorrect_anom
+          (^clojure.lang.IFn throw-incorrect-anom "Cancel requires :cognitect.anomalies/category")
+          (if (not (some #{category} allowed-anoms))
+            (^clojure.lang.IFn throw-incorrect-anom
               (str "Invalid :cognitect.anomalies/category provided to cancel: " category))
-            (if (not (fressian/fressianable? anomaly_map))
-              (^clojure.lang.IFn throw_incorrect_anom "Could not marshal data in cancel anomaly")
+            (if (not (fressian/fressianable? anomaly-map))
+              (^clojure.lang.IFn throw-incorrect-anom "Could not marshal data in cancel anomaly")
               (do
                 (when :default
                   (throw
                     (ex-info
-                      (or (:cognitect.anomalies/message anomaly_map) "Operation Cancelled")
-                      (merge {} anomaly_map #:datomic{:cancelled true}))))
+                      (or (:cognitect.anomalies/message anomaly-map) "Operation Cancelled")
+                      (merge {} anomaly-map #:datomic{:cancelled true}))))
                 nil)))))))
   (reset-meta!
     #'cancel
@@ -726,7 +689,7 @@
                       #'entity
                       "Returns a dynamic map of the entity's attributes for the given id, ident or lookup ref.\n   Entities implement\n     clojure.lang.Associative\n     clojure.lang.ILookup\n     clojure.lang.IPersistentCollection\n     clojure.lang.Seqable\n     datomic.Entity",
                       #'pull-many
-                      "Returns hierarchical selections of attributes for eids. \n    See https://docs.datomic.com/query/query-pull.html for more information.\n\n    You can get information about the I/O reads performed by a\n    pull with io-stats. To request io-stats, pass :io-context\n    (a qualified keyword) as an option to pull-many. The return\n    value will be a map with\n\n    :ret                the result of the pull\n    :io-stats           io-stats for the pull\n\n    The io-stats map includes:\n\n    :io-context         the io-context passed in\n    :api                :tx-with\n    :api-ms             msec to peform the API call\n    :reads              breakout of reads by cache tier and index sort\n    :nested             breakout iff nested queries set :io-context\n\n    See https://docs.datomic.com/reference/io-stats.html.",
+                      "Returns a vector of hierarchical attribute selections for eids,\n    preserving input order and using nil for an eid whose selection yields no values.\n    See https://docs.datomic.com/query/query-pull.html for more information.\n\n    To collect information about index reads, pass :io-context\n    (a qualified keyword) as an option to pull-many. The return\n    value will be a map with\n\n    :ret                the result of the pull\n    :io-stats           io-stats for the pull\n\n    The io-stats map includes:\n\n    :io-context         the io-context passed in\n    :api                :pull-many\n    :api-ms             msec to perform the API call\n    :reads              breakout of reads by cache tier and index sort\n    :nested             breakout when nested queries set :io-context\n\n    See https://docs.datomic.com/reference/io-stats.html.",
                       #'sync-index
                       "Used to coordinate with background indexing jobs. Returns a\n    future that will acquire a database value that is indexed\n    through time <= t.\n\n    Does not communicate with the transactor, so the future may be\n    available immediately.\n\n    The future can take arbitrarily long to complete.  Waiters\n    should specify a timeout.",
                       #'as-of
@@ -761,7 +724,7 @@
                       #'add-listener
                       "Register a completion listener for the future. The listener\n   will run once and only once, if and when the future's work is\n   complete. If the future has completed already, the listener will\n   run immediately.  Ordering of listeners is not guaranteed.",
                       #'query
-                      "Executes the query described by query-map\n\n   query-map form is {:query query\n                      :args args\n                      :timeout time-in-milliseconds\n                      :io-context qualified-keyword}\n\n   The query parameter is the same format as described in q.\n\n   The args parameter is the same format as inputs described in q.\n\n   The optional timeout is the number of milliseconds after which a\n   query may be stopped. Note: timeout is approximate, it is meant to\n   protect against long running queries, but is not guaranteed to stop\n   after precisely the duration specified.\n\n   You can get information about the I/O reads performed by a query\n   with io-stats. To request io-stats, add :io-context (a qualified\n   keyword) to the map you use to call query. Query will return a map\n   with\n\n   :ret                the result of the query\n   :io-stats           io-stats for the query\n\n   The io-stats map includes:\n\n   :io-context         the io-context passed in\n   :api                :tx-with\n   :api-ms             msec to perform the API call\n   :reads              breakout of reads by cache tier and index sort\n   :nested             breakout iff nested queries set :io-context\n\n   See https://docs.datomic.com/reference/io-stats.html.",
+                      "Executes the query described by query-map.\n\n   query-map form is {:query query\n                      :args args\n                      :timeout time-in-milliseconds\n                      :io-context qualified-keyword\n                      :query-stats boolean}\n\n   The query parameter is the same format as described in q.\n\n   The args parameter is the same format as inputs described in q.\n\n   The optional timeout is the approximate number of milliseconds after\n   which the query may be stopped.\n\n   Normally returns the result selected by :find. To collect information\n   about index reads, supply :io-context. The return value will be a map with\n\n   :ret                the result of the query\n   :io-stats           io-stats for the query\n\n   The io-stats map includes:\n\n   :io-context         the io-context passed in\n   :api                :query\n   :api-ms             msec to perform the API call\n   :reads              breakout of reads by cache tier and index sort\n   :nested             breakout when nested queries set :io-context\n\n   To collect clause execution statistics, supply :query-stats true.\n   The return value will include :ret and :query-stats. When both statistics\n   options are supplied, one return map contains :ret, :io-stats, and\n   :query-stats.\n\n   See https://docs.datomic.com/reference/io-stats.html.",
                       #'tx-report-queue
                       "Gets the data queue associated with this connection, creating one\n   if necessary. At any point in time either zero or one queue is\n   associated with a connection. The returned queue may be consumed\n   from more than one thread. Note that the returned queue does not\n   block producers, and will consume memory until you consume the\n   elements from it. Reports will be added to the queue at some point\n   after the db has been updated. If this connection originated the\n   transaction, the transaction future will be notified first, before\n   a report is placed on the queue.\n\n   Reports are records with the following keys:\n\n     :db-before    value of database before the transaction\n     :db-after     value of database after the transaction\n     :tx-data      the transaction data in E/A/V/Tx form.",
                       #'get-database-names

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.iter)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.iter)
+    {:doc
+     "Bidirectional immutable-index cursors. An Iter exposes the current value and advances with next or prev, allowing index consumers to seek once and consume lazily in either direction. The adapters in this namespace map, filter, concatenate, merge, reverse, reduce, and expose cursors as Clojure sequences or Java iterators without realizing the index."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer
@@ -19,6 +23,8 @@
         (clojure.core/require ['clojure.core :as 'core])
         (clojure.core/import 'java.util.Comparator))))
   (set! *warn-on-reflection* true)
+  ;; Iter is positioned on a value. next and prev return the cursor at the
+  ;; adjacent value, or nil at the corresponding end of the ordered source.
   (definterface
     Iter
     (^java.lang.Object prev [])
@@ -43,6 +49,7 @@
     #'iterator
     (assoc
       {:arglists (clojure.core/list (.withMeta ['iter] {:tag 'java.util.Iterator})),
+       :doc "Adapts an Iter to a forward-only java.util.Iterator without realizing its remaining values.",
        :column (int 1)}
       :name
       'iterator
@@ -57,6 +64,7 @@
     #'iterable
     (assoc
       {:arglists (clojure.core/list (.withMeta ['iter-fn] {:tag 'java.lang.Iterable})),
+       :doc "Returns a repeatable Java Iterable that obtains a fresh Iter by invoking iter-fn for each traversal.",
        :column (int 1)}
       :name
       'iterable
@@ -89,6 +97,8 @@
     #'iter-seq
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'iter {:tag 'Iter})]), :column (int 1)}
+      :doc
+      "Returns a lazy sequence beginning at iter's current value and continuing forward with next."
       :name
       'iter-seq
       :ns
@@ -102,6 +112,8 @@
     #'iter-rseq
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'iter {:tag 'Iter})]), :column (int 1)}
+      :doc
+      "Returns a lazy sequence beginning at iter's current value and continuing backward with prev."
       :name
       'iter-rseq
       :ns
@@ -288,7 +300,14 @@
   (defn reversed-iter ([iter] (when iter (datomic.iter.ReversedIter. iter))))
   (reset-meta!
     #'reversed-iter
-    (assoc {:arglists (clojure.core/list ['iter]), :column (int 1)} :name 'reversed-iter :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['iter]),
+       :doc "Returns a cursor whose next operation follows prev on iter, enabling reverse consumption from a seek position.",
+       :column (int 1)}
+      :name
+      'reversed-iter
+      :ns
+      *ns*))
   (.setMeta
     (clojure.lang.RT/var "datomic.iter" "merge-iters")
     {:tag datomic.iter.Iter,
@@ -300,6 +319,8 @@
        ['cmp 'iter1 'iter2 'iter3]
        ['cmp 'iter1 'iter2 'iter3 'iter4]
        ['cmp 'iter1 'iter2 'iter3 'iter4 'iter5]),
+     :doc
+     "Lazily merges two to five sorted cursors according to cmp. The returned cursor always exposes the least current value and advances only the source that supplied it.",
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.iter" "merge-iters")

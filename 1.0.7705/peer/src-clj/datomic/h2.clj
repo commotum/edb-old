@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.h2)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.h2)
+    {:doc
+     "Embedded H2 storage used by the development protocol. Initializes local and TCP JDBC access, manages administrator and peer credentials, rotates passwords, and builds local or remote connection specifications."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -196,6 +200,8 @@
       'updating-connect
       :ns
       *ns*))
+  ;; Connects with the configured administrator password and performs an explicit password rotation
+  ;; only when both old and new credentials are supplied.
   (defn ensure-admin-conn
     ([p__17572]
       (let [map__17573 p__17572
@@ -234,6 +240,7 @@
       'ensure-admin-conn
       :ns
       *ns*))
+  ;; Connects as the peer-facing datomic user and applies the requested password rotation.
   (defn ensure-datomic-password
     ([p__17577]
       (let [map__17578 p__17577
@@ -276,6 +283,7 @@
       'ensure-datomic-password
       :ns
       *ns*))
+  ;; Remote TCP access requires both administrator and peer passwords to be explicitly configured.
   (defn can-remote?
     ([p__17582]
       (let [map__17583 p__17582
@@ -333,6 +341,7 @@
   (reset-meta!
     #'init-embedded
     (assoc {:arglists (clojure.core/list ['spec]), :column (int 1)} :name 'init-embedded :ns *ns*))
+  ;; Initializes the schema and credentials before exposing the embedded store through H2 TCP.
   (defn init-tcp
     ([p__17590]
       (let [map__17591 p__17590

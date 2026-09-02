@@ -1,14 +1,3 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.ILookup
- *  com.datomic.lucene.store.Directory
- *  com.datomic.lucene.store.IndexInput
- *  com.datomic.lucene.store.IndexOutput
- *  com.datomic.lucene.store.LockFactory
- *  com.datomic.lucene.store.NoLockFactory
- */
 package datomic.impl.lucene;
 
 import clojure.lang.ILookup;
@@ -24,6 +13,11 @@ import datomic.impl.lucene.EmptyIndexInput;
 import java.io.IOException;
 import java.util.Collection;
 
+/**
+ * Read-only Lucene directory backed by immutable clustered index files. It
+ * lists file metadata through {@code IClusterFS}, opens chunked inputs, and
+ * rejects mutation operations; closing installs the closed sentinel.
+ */
 public class ClusterDirectory
 extends Directory {
     private volatile IClusterFS cluster;

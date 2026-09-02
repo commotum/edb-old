@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.artemis-server)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.artemis-server)
+    {:doc
+     "Transactor-side Artemis transport. Creates authenticated request and broadcast channels, bounds queues, tracks connected peers, and delivers transaction replies and database updates."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -64,6 +68,8 @@
     (clojure.lang.RT/var "datomic.artemis-server" "create-acceptor")
     (fn create_acceptor
       ([acceptor_class_name & kvs] (apply client/create-transport acceptor_class_name kvs))))
+  ;; Create an in-memory broker with local and TCP acceptors. The TCP acceptor
+  ;; optionally uses the configured key and trust stores for TLS.
   (defn create-configuration
     ([host port encrypt_channel]
       (let [acfgs #{(create-acceptor in-vm-acceptor-factory :serverId port)
@@ -117,6 +123,7 @@
       'create-configuration
       :ns
       *ns*))
+  ;; Return the distinct remote peer addresses currently attached to the broker.
   (defn remote-ips
     ([server]
       (let [local_addrs #{"invm"}
@@ -138,6 +145,8 @@
       'remote-ips
       :ns
       *ns*))
+  ;; Authenticate peers against the transactor endpoint and enforce the licensed
+  ;; connection limit by distinct remote address.
   (.setMeta
     (clojure.lang.RT/var "datomic.artemis-server" "create-security-manager")
     {:tag org.apache.activemq.artemis.spi.core.security.ActiveMQSecurityManager,
@@ -214,6 +223,7 @@
     org.apache.activemq.artemis.core.server.ActiveMQServer
     common/AsyncShutdown
     {:async-shutdown (fn fn__27605 ([this] (.stop this) (promise/delivered true)))})
+  ;; Install queue capacity and full-address behavior for a broker address pattern.
   (defn add-address-settings
     ([server address & p__27607]
       (let [map__27608 p__27607

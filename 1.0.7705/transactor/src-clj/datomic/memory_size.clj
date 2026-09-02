@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.memory-size)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.memory-size)
+    {:doc
+     "Estimates retained heap size for Datomic data structures. Type-specific handlers return primitive byte counts and provide the measurements used by cache and memory-index capacity controls."})
   (clojure.core/with-loading-context
     (do (clojure.core/refer 'clojure.core) (clojure.core/import 'clojure.lang.IFn$OL)))
   (when-not (.equals 'datomic.memory-size 'clojure.core)

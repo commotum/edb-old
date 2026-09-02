@@ -3,7 +3,7 @@
   (.resetMeta
     (clojure.lang.Namespace/find 'datomic.valcache)
     {:doc
-     "valcache implements a subset of the memcached binary protocol on top of the file system.\n per: https://github.com/memcached/memcached/wiki/BinaryProtocolRevamped\n\nNarrowing presumptions are:\n\nvalues never change\nare named by uuid-as-string keys\nare big enough to justify being stored in files (several kb +)\neviction is based on (required) threshold\nLRU, tracked with atime (use strictatime + lazytime flags when mounting)\nprovided/required dir is 'owned' by valcache, subdir structure is an impl detail\nlowish connection counts (< 1000)\n\nThe supported memcached commands are get/set/delete/noop/quit\ndata type, vbucket, cas, and expiry are not supported - non-zero values will be rejected.\n"})
+     "Local SSD-backed cache for immutable index and log segments. Values are named by UUID string, survive process restarts, and are evicted by access time to respect the configured capacity threshold. The cache owns its directory and on-disk layout. Its Memcached-compatible interface supports get, set, delete, noop, quit, and SASL authentication; nonzero data type, vbucket, CAS, and expiry fields are rejected."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -726,6 +726,9 @@
       '->Server
       :ns
       *ns*))
+  ;; Keep disk use below the configured threshold by sampling access times in
+  ;; each of the 4096 key directories and deleting the oldest sampled files.
+  ;; Eviction stops below ninety percent of the per-directory allowance.
   (defn eviction-loop
     ([path threshold interval_secs file_window shutdown_requested]
       (let [opts (into-array java.nio.file.LinkOption [])
@@ -903,6 +906,7 @@
     (clojure.lang.RT/var "datomic.valcache" "valcache-ref")
     {:private true, :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.valcache" "valcache-ref") (atom nil))
+  ;; Stop the active network server and its eviction worker, if one is running.
   (defn shutdown
     ([]
       (let [temp__5825__auto__ (deref valcache-ref)]
@@ -911,6 +915,7 @@
   (reset-meta!
     #'shutdown
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'shutdown :ns *ns*))
+  ;; Require a successful SASL exchange before processing cache commands.
   (defn sasl-loop
     ([creds sc sem]
       (loop [hb (ByteBuffer/wrap (byte-array 24))]
@@ -953,6 +958,8 @@
       'remote-ip
       :ns
       *ns*))
+  ;; Start a bounded-concurrency Memcached-compatible server over the cache
+  ;; directory, together with the access-time eviction worker.
   (defn start-server
     ([p__27834]
       (let [map__27835 p__27834
@@ -1174,6 +1181,8 @@
       'start-server
       :ns
       *ns*))
+  ;; Prepare an in-process cache directory and start its eviction worker.
+  ;; The returned function requests worker shutdown.
   (defn direct-init
     ([p__27857]
       (let [map__27858 p__27857
@@ -1233,6 +1242,7 @@
       'direct-init
       :ns
       *ns*))
+  ;; Read an immutable cached value after its four-byte on-disk header.
   (defn direct-get
     ([root k]
       (when-not root (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root)))))
@@ -1254,6 +1264,8 @@
       'direct-get
       :ns
       *ns*))
+  ;; Persist a value through a forced temporary file, then replace its final path.
+  ;; A failed write removes the temporary file and leaves a cache miss recoverable.
   (defn direct-put
     ([root k v]
       (when-not root (throw (java.lang.AssertionError. (str "Assert failed: " (pr-str 'root)))))

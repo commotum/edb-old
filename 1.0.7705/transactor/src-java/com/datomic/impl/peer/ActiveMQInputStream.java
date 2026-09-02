@@ -1,15 +1,14 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  org.apache.activemq.artemis.api.core.ActiveMQBuffer
- */
 package com.datomic.impl.peer;
 
 import java.io.IOException;
 import java.io.InputStream;
 import org.apache.activemq.artemis.api.core.ActiveMQBuffer;
 
+/**
+ * Presents an Artemis message buffer as a sequential input stream for message
+ * decoding. Reads consume bytes directly from the buffer, and bulk reads are
+ * bounded by the number of bytes currently available.
+ */
 public class ActiveMQInputStream
 extends InputStream {
     private final ActiveMQBuffer buf;

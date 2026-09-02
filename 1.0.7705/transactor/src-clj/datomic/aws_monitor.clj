@@ -2,7 +2,8 @@
   (clojure.core/in-ns 'datomic.aws-monitor)
   (.resetMeta
     (clojure.lang.Namespace/find 'datomic.aws-monitor)
-    {:doc "Functions to publish monitoring data to AWS."})
+    {:doc
+     "Publishes process metrics to Amazon CloudWatch. Converts scalar and bounded-statistics values to CloudWatch metric data, attaches deployment dimensions, and partitions requests to the service limit of twenty metrics."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -138,6 +139,7 @@
          {:Unit (get units k "None"),
           :MetricName (qualified-name k),
           :Value (java.lang.Double/valueOf (double v))}))})
+  ;; Converts scalar samples and {:lo :hi :sum :count} accumulators to CloudWatch metric values.
   (defn to-metric-data
     ([statistics]
       (mapv
@@ -177,6 +179,7 @@
       *ns*))
   (def MILLION 1000000)
   (reset-meta! #'MILLION (assoc {:const true, :column (int 1)} :name 'MILLION :ns *ns*))
+  ;; Attaches dimensions and partitions metric data into CloudWatch's twenty-item request limit.
   (defn partitioned-metrics-requests
     ([dimensions metrics]
       (map (partial create-request-map dimensions) (partition-all 20 metrics))))
@@ -188,6 +191,7 @@
       'partitioned-metrics-requests
       :ns
       *ns*))
+  ;; Submits every request partition synchronously; service failures propagate to the reporter.
   (defn report-metrics
     ([client dimensions metrics]
       (let [mparts (partitioned-metrics-requests dimensions metrics)]
@@ -217,6 +221,8 @@
       'report-metrics
       :ns
       *ns*))
+  ;; Creates a callback when both dimension and region are configured. Static credentials are
+  ;; accepted for compatibility; otherwise the AWS SDK default credentials provider is used.
   (defn create-cloudwatch-reporter
     ([& p__30714]
       (let [map__30715 p__30714

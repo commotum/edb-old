@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.integrity)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.integrity)
+    {:doc
+     "Read-only database integrity checks. Cross-checks log and index representations, ordering, history pairs, uniqueness, excision results, fulltext trees, storage reachability, transaction time, and aggregate datom counts."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'assert))
@@ -2635,6 +2639,7 @@
     #'e-ts
     (assoc {:arglists (clojure.core/list ['db 'e]), :column (int 1)} :name 'e-ts :ns *ns*))
   (defn validate-excision
+    "Verifies one indexed excision specification against the database value at the applicable time boundary. Throws with the surviving entity, attributes, or datoms when selected data remains visible."
     ([spec]
       (let [db (d/entity-db spec)
             id (fn id ([p1__21191#] (or (:db/id p1__21191#) (db/resolve-id db p1__21191#))))
@@ -2680,12 +2685,16 @@
   (reset-meta!
     #'validate-excision
     (assoc
-      {:arglists (clojure.core/list ['spec]), :column (int 1)}
+      {:arglists (clojure.core/list ['spec]),
+       :doc
+       "Verifies one indexed excision specification against the database value at the applicable time boundary. Throws with the surviving entity, attributes, or datoms when selected data remains visible.",
+       :column (int 1)}
       :name
       'validate-excision
       :ns
       *ns*))
   (defn validate-indexed-excisions
+    "Validates every excision whose transaction has been incorporated into the current index."
     ([db]
       (dorun
         (map
@@ -2697,7 +2706,10 @@
   (reset-meta!
     #'validate-indexed-excisions
     (assoc
-      {:arglists (clojure.core/list ['db]), :column (int 1)}
+      {:arglists (clojure.core/list ['db]),
+       :doc
+       "Validates every excision whose transaction has been incorporated into the current index.",
+       :column (int 1)}
       :name
       'validate-indexed-excisions
       :ns
@@ -2882,6 +2894,7 @@
       :ns
       *ns*))
   (defn crosscheck-tx-range-with-tx-instant
+    "Verifies that transaction ordering in the log agrees with the t values represented by :db/txInstant datoms."
     ([conn]
       (let [count (atom 0)
             progress (fn progress
@@ -2898,7 +2911,10 @@
   (reset-meta!
     #'crosscheck-tx-range-with-tx-instant
     (assoc
-      {:arglists (clojure.core/list ['conn]), :column (int 1)}
+      {:arglists (clojure.core/list ['conn]),
+       :doc
+       "Verifies that transaction ordering in the log agrees with the t values represented by :db/txInstant datoms.",
+       :column (int 1)}
       :name
       'crosscheck-tx-range-with-tx-instant
       :ns
@@ -2996,6 +3012,7 @@
       :ns
       *ns*))
   (defn validate-index-totals
+    "Compares total datom counts in the EAVT and AEVT index representations and returns their summaries when the totals agree."
     ([db]
       (let [eavt (stats/datom-counts stats/eavt db)
             aevt (stats/datom-counts stats/aevt db)
@@ -3016,12 +3033,16 @@
   (reset-meta!
     #'validate-index-totals
     (assoc
-      {:arglists (clojure.core/list ['db]), :column (int 1)}
+      {:arglists (clojure.core/list ['db]),
+       :doc
+       "Compares total datom counts in the EAVT and AEVT index representations and returns their summaries when the totals agree.",
+       :column (int 1)}
       :name
       'validate-index-totals
       :ns
       *ns*))
   (defn validate-all
+    "Runs the complete read-only integrity suite for a database URI, including log, index, uniqueness, fulltext, excision, transaction-time, and garbage reachability checks."
     ([uri]
       (let [uri (enhance-uri uri)
             cr (tools/connection-resources uri)
@@ -3060,7 +3081,15 @@
         (prn))))
   (reset-meta!
     #'validate-all
-    (assoc {:arglists (clojure.core/list ['uri]), :column (int 1)} :name 'validate-all :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['uri]),
+       :doc
+       "Runs the complete read-only integrity suite for a database URI, including log, index, uniqueness, fulltext, excision, transaction-time, and garbage reachability checks.",
+       :column (int 1)}
+      :name
+      'validate-all
+      :ns
+      *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.integrity" "diagnostics") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.integrity" "diagnostics") tools/diagnostics)
   (defn describe-segment

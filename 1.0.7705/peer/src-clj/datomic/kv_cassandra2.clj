@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-cassandra2)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-cassandra2)
+    {:doc
+     "Cassandra KVStore adapter for chunked cass2 values. Uses conditional CQL updates for references, splits large immutable values, and shares driver sessions by endpoint configuration."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['get])

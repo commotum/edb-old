@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.function)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.function)
+    {:doc
+     "Database function values. Normalizes function definitions, compiles Clojure or Java source on first invocation, and exposes fixed arities from zero through ten to Clojure and Java callers."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude (clojure.core/list 'compare))
@@ -139,6 +143,7 @@
   (defmethod print-method datomic.function.Function fn__10837 ([dbfn w] (print-function dbfn w)))
   (defmethod print-dup datomic.function.Function fn__10839 ([dbfn w] (print-function dbfn w)))
   (defn compile-clojure
+    "Compiles a Clojure database-function body in an isolated namespace. Imports and requires are established before the function expression is evaluated."
     ([imports requires params code]
       (binding [*ns* *ns*]
         (let [code (read-string code)
@@ -157,7 +162,10 @@
   (reset-meta!
     #'compile-clojure
     (assoc
-      {:arglists (clojure.core/list ['imports 'requires 'params 'code]), :column (int 1)}
+      {:arglists (clojure.core/list ['imports 'requires 'params 'code]),
+       :doc
+       "Compiles a Clojure database-function body in an isolated namespace. Imports and requires are established before the function expression is evaluated.",
+       :column (int 1)}
       :name
       'compile-clojure
       :ns
@@ -208,6 +216,7 @@
       :ns
       *ns*))
   (defn construct
+    "Creates a lazily compiled database function from a definition map. :lang, :params, and :code are required; :imports and :requires configure Clojure compilation. Supported languages are :clojure and :java, and callable arity is limited to ten arguments."
     ([m]
       (let [map__10853 (normalize m)
             map__10853 (if (seq? map__10853)
@@ -234,4 +243,12 @@
         (datomic.function.Function. lang imports requires params code fnref))))
   (reset-meta!
     #'construct
-    (assoc {:arglists (clojure.core/list ['m]), :column (int 1)} :name 'construct :ns *ns*)))
+    (assoc
+      {:arglists (clojure.core/list ['m]),
+       :doc
+       "Creates a lazily compiled database function from a definition map. :lang, :params, and :code are required; :imports and :requires configure Clojure compilation. Supported languages are :clojure and :java, and callable arity is limited to ten arguments.",
+       :column (int 1)}
+      :name
+      'construct
+      :ns
+      *ns*)))

@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.lifecycle-ext)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.lifecycle-ext)
+    {:doc
+     "High-availability standby coordination. Tracks standby ownership in storage and starts the active lifecycle when the published transactor heartbeat expires."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -26,6 +30,7 @@
           ['datomic.lifecycle :as 'lifecycle]
           ['datomic.monitor :as 'monitor]
           ['datomic.slf4j :as 'logger]))))
+  ;; Extract the active transactor timestamp encoded in a coordination reference.
   (defn timestamp
     ([refval]
       (let [temp__5825__auto__ (:key refval)]
@@ -35,6 +40,7 @@
   (reset-meta!
     #'timestamp
     (assoc {:arglists (clojure.core/list ['refval]), :column (int 1)} :name 'timestamp :ns *ns*))
+  ;; Publish this process's standby heartbeat using the reference revision observed in storage.
   (defn set-standby-ref
     ([cluster basis]
       (try
@@ -73,6 +79,8 @@
       'set-standby-ref
       :ns
       *ns*))
+  ;; Observe the active heartbeat once per tick. Two consecutive unchanged
+  ;; timestamps trigger the attempt to acquire the active process reference.
   (defn standby-loop
     ([p__28136]
       (let [map__28137 p__28136

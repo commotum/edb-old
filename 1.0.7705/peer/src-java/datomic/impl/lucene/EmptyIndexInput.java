@@ -1,14 +1,13 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  com.datomic.lucene.store.IndexInput
- */
 package datomic.impl.lucene;
 
 import com.datomic.lucene.store.IndexInput;
 import java.io.IOException;
 
+/**
+ * Zero-length Lucene input used for empty clustered index files. Its position
+ * remains at zero, while positive seeks and all read attempts report
+ * end-of-file conditions.
+ */
 public class EmptyIndexInput
 extends IndexInput {
     public void close() throws IOException {
@@ -39,4 +38,3 @@ extends IndexInput {
         throw new IOException("read past EOF");
     }
 }
-

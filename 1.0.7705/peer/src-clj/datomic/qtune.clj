@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.qtune)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.qtune)
+    {:doc
+     "Interactive query clause-order tuning. Candidate clause orders are measured by running progressively larger partial queries, favoring clauses that produce the fewest intermediate rows. Tuning executes the supplied query repeatedly, prints measurements, and returns an equivalent list-form query with a selected clause order."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -23,46 +27,46 @@
           ['clojure.edn :as 'edn]
           ['clojure.set :as 'set]))))
   (defn mapq->listq
-    ([p__19471]
-      (let [map__19472 p__19471
-            map__19472 (if (seq? map__19472)
-                         (if (next map__19472)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__19472))
-                           (if (seq map__19472) (first map__19472) {}))
-                         map__19472)
-            find (get map__19472 :find)
-            with (get map__19472 :with)
-            in (get map__19472 :in)
-            where (get map__19472 :where)
-            timeout (get map__19472 :timeout)
-            G__19473 []
-            G__19473 (if find (into (conj G__19473 :find) find) G__19473)
-            G__19473 (if with (into (conj G__19473 :with) with) G__19473)
-            G__19473 (if in (into (conj G__19473 :in) in) G__19473)]
+    ([{:keys [find with in where timeout]}]
+      (let [query []
+            query (if find (into (conj query :find) find) query)
+            query (if with (into (conj query :with) with) query)
+            query (if in (into (conj query :in) in) query)]
         (cond->
-          (if where (into (conj G__19473 :where) where) G__19473)
+          (if where (into (conj query :where) where) query)
           timeout
           (conj :timeout (first timeout))))))
   (reset-meta!
     #'mapq->listq
     (assoc
-      {:arglists (clojure.core/list [{:keys ['find 'with 'in 'where 'timeout]}]), :column (int 1)}
+      {:arglists (clojure.core/list [{:keys ['find 'with 'in 'where 'timeout]}]),
+       :doc "Converts a map-form query to the equivalent list form, retaining find, with, in, where, and timeout clauses.",
+       :column (int 1)}
       :name
       'mapq->listq
       :ns
       *ns*))
   (defn cvars
-    ([c] (filter datalog/variable? (if (instance? java.util.List (first c)) (first c) c))))
+    ([clause]
+      (filter
+        datalog/variable?
+        (if (instance? java.util.List (first clause)) (first clause) clause))))
   (reset-meta!
     #'cvars
-    (assoc {:arglists (clojure.core/list ['c]), :column (int 1)} :name 'cvars :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['clause]),
+       :doc "Returns the logic variables referenced by a data, predicate, or function clause.",
+       :column (int 1)}
+      :name
+      'cvars
+      :ns
+      *ns*))
   (defn cbinds
-    ([c]
+    ([clause]
       (concat
-        (cvars c)
-        (when (instance? java.util.List (first c))
-          (let [binds (second c)]
+        (cvars clause)
+        (when (instance? java.util.List (first clause))
+          (let [binds (second clause)]
             (cond
               (symbol? binds) [binds]
               (instance? java.util.List binds) (do
@@ -73,14 +77,22 @@
                                                    :else (do binds)))))))))
   (reset-meta!
     #'cbinds
-    (assoc {:arglists (clojure.core/list ['c]), :column (int 1)} :name 'cbinds :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['clause]),
+       :doc
+       "Returns variables made available after a clause runs, including scalar, tuple, collection, and relation bindings from function expressions.",
+       :column (int 1)}
+      :name
+      'cbinds
+      :ns
+      *ns*))
   (defn partial-query
-    ([qmap preds clauses clause rclauses allow_cross]
+    ([qmap preds clauses clause rclauses allow-cross]
       (let [bindings (into #{} (mapcat cbinds clauses))
             fxp? (fn fxp_QMARK_ ([p1__19477#] (instance? java.util.List (first p1__19477#))))]
         (when (if (^clojure.lang.IFn fxp? clause)
                 (every? bindings (cvars clause))
-                (or allow_cross (some bindings (cvars clause))))
+                (or allow-cross (some bindings (cvars clause))))
           (let [bindings (into bindings (cbinds clause))
                 remvars (into (set (:find qmap)) (mapcat cvars rclauses))
                 next_find (vec (set/intersection bindings remvars))
@@ -92,13 +104,15 @@
     #'partial-query
     (assoc
       {:arglists (clojure.core/list ['qmap 'preds 'clauses 'clause 'rclauses 'allow-cross]),
+       :doc
+       "Builds the smallest executable query that appends clause to the already selected clauses. Returns nil while the clause lacks required bindings; allow-cross permits the initial unbound data clause.",
        :column (int 1)}
       :name
       'partial-query
       :ns
       *ns*))
   (defn partial-queries
-    ([query preds clauses rclauses allow_cross]
+    ([query preds clauses rclauses allow-cross]
       (reduce
         (fn fn__19485
           ([m c]
@@ -108,7 +122,7 @@
                                        clauses
                                        c
                                        (disj rclauses c)
-                                       allow_cross)]
+                                       allow-cross)]
               (if temp__5802__auto__ (let [q temp__5802__auto__] (assoc m c q)) m))))
         {}
         rclauses)))
@@ -116,15 +130,18 @@
     #'partial-queries
     (assoc
       {:arglists (clojure.core/list ['query 'preds 'clauses 'rclauses 'allow-cross]),
+       :doc "Returns each currently executable remaining clause paired with the partial query used to measure it.",
        :column (int 1)}
       :name
       'partial-queries
       :ns
       *ns*))
   (defn min-ret
-    ([qs args timeout]
-      (if (= 1 (count qs))
-        (let [vec__19490 (first qs) clause (nth vec__19490 (int 0) nil)] (prn clause) clause)
+    ([queries args timeout]
+      (if (= 1 (count queries))
+        (let [vec__19490 (first queries) clause (nth vec__19490 (int 0) nil)]
+          (prn clause)
+          clause)
         (let [ret (apply
                     min-key
                     (fn fn__19493
@@ -154,34 +171,40 @@
                                       (common/root-cause e))
                                   (do (prn :timeout) [clause nil])
                                   (do (throw ^java.lang.Throwable e) nil)))))))
-                      qs))]
+                      queries))]
           (if (nil? (second ret))
             (let [timeout (* 2 timeout)]
               (println "Retrying with timeout: " timeout " milliseconds")
-              (recur qs args timeout))
+              (recur queries args timeout))
             (first ret))))))
   (reset-meta!
     #'min-ret
     (assoc
-      {:arglists (clojure.core/list ['qs 'args 'timeout]), :column (int 1)}
+      {:arglists (clojure.core/list ['queries 'args 'timeout]),
+       :doc
+       "Runs candidate partial queries and returns the clause with the smallest result. Timed-out candidates are ranked after completed candidates; when all candidates time out, the timeout is doubled and the measurements repeat.",
+       :column (int 1)}
       :name
       'min-ret
       :ns
       *ns*))
   (defn aug
-    ([query preds clauses rclauses args]
-      (loop [i 0 clauses clauses rclauses rclauses]
+    ([query predicates clauses remaining-clauses args]
+      (loop [i 0 clauses clauses remaining-clauses remaining-clauses]
         (do
           (println "Slot: " (long i))
-          (if (= 1 (count rclauses))
-            (into clauses rclauses)
-            (let [qs (partial-queries query preds clauses rclauses (zero? i))
+          (if (= 1 (count remaining-clauses))
+            (into clauses remaining-clauses)
+            (let [qs (partial-queries query predicates clauses remaining-clauses (zero? i))
                   clause (min-ret qs args 1)]
-              (recur (inc i) (conj clauses clause) (disj rclauses clause))))))))
+              (recur (inc i) (conj clauses clause) (disj remaining-clauses clause))))))))
   (reset-meta!
     #'aug
     (assoc
-      {:arglists (clojure.core/list ['query 'preds 'clauses 'rclauses 'args]), :column (int 1)}
+      {:arglists (clojure.core/list ['query 'predicates 'clauses 'remaining-clauses 'args]),
+       :doc
+       "Greedily orders remaining-clauses by repeatedly measuring executable partial queries. The predicates collection is passed through when each candidate partial query is constructed.",
+       :column (int 1)}
       :name
       'aug
       :ns
@@ -265,7 +288,10 @@
   (reset-meta!
     #'qtune
     (assoc
-      {:arglists (clojure.core/list ['query '& 'args]), :column (int 1)}
+      {:arglists (clojure.core/list ['query '& 'args]),
+       :doc
+       "Tunes a query supplied as EDN text, list form, or map form. The input sources follow query in args. Runs five warmup executions with a five-second timeout, selects a clause order from partial-result cardinalities, runs the selected query ten times, prints timings, and returns the selected list-form query. Throws IllegalArgumentException when query has an unsupported representation.",
+       :column (int 1)}
       :name
       'qtune
       :ns

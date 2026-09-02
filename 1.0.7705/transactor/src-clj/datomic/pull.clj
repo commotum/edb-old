@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.pull)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.pull)
+    {:doc
+     "Compiles pull patterns and realizes hierarchical entity selections. Patterns support forward and reverse attributes, wildcards, nested maps, bounded or unbounded recursion, result-key aliases, cardinality-many limits, defaults, and configured value transforms. Cardinality-many attributes return at most 1000 values unless :limit supplies a positive bound or nil for all values. Recursive traversal tracks visited entities to terminate cycles. Index pull combines the same selectors with lazy AVET or AEVT index walks."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -170,13 +174,16 @@
       'ea->v
       :ns
       *ns*))
-  (.setMeta (clojure.lang.RT/var "datomic.pull" "default-limit") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.pull" "default-limit")
+    {:doc "Default maximum number of values returned for a cardinality-many attribute.",
+     :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.pull" "default-limit") (atom 1000))
   (defn attr-spec->fn
-    ([attr_spec]
-      (if (not (instance? java.util.List attr_spec))
+    ([attr-spec]
+      (if (not (instance? java.util.List attr-spec))
         [(deref default-limit) identity]
-        (let [vec__16248 attr_spec
+        (let [vec__16248 attr-spec
               sym (nth vec__16248 (int 0) nil)
               kw (nth vec__16248 (int 1) nil)
               arg (nth vec__16248 (int 2) nil)
@@ -190,14 +197,14 @@
               [arg identity]
               (error/arg
                 :db.error/invalid-limit
-                (str "'" arg "' is not a valid limit in '" attr_spec "'")))
+                (str "'" arg "' is not a valid limit in '" attr-spec "'")))
             (error/arg
               :db.error/invalid-attr-spec
               (str
                 "Cannot interpret as an attribute spec: "
-                attr_spec
+                attr-spec
                 " of class: "
-                (class attr_spec))))))))
+                (class attr-spec))))))))
   (reset-meta!
     #'attr-spec->fn
     (assoc
@@ -207,13 +214,13 @@
       :ns
       *ns*))
   (defn attr-spec->attr
-    ([attr_spec]
-      (if (instance? java.util.List attr_spec)
-        (attr-spec->attr (second attr_spec))
-        (if (not (keyword? attr_spec))
-          (let [s (str attr_spec) s (if (or (= s "*") (= s ":*")) "*" s)]
+    ([attr-spec]
+      (if (instance? java.util.List attr-spec)
+        (attr-spec->attr (second attr-spec))
+        (if (not (keyword? attr-spec))
+          (let [s (str attr-spec) s (if (or (= s "*") (= s ":*")) "*" s)]
             (if (= s "*")
-              (if (string? attr_spec) s (keyword attr_spec))
+              (if (string? attr-spec) s (keyword attr-spec))
               (if (= (char (.charAt ^java.lang.String s (int 0))) (char (.charValue \:)))
                 s
                 (error/arg
@@ -224,7 +231,7 @@
                     " of class: "
                     (class s)
                     " does not start with a colon")))))
-          attr_spec))))
+          attr-spec))))
   (reset-meta!
     #'attr-spec->attr
     (assoc
@@ -284,7 +291,11 @@
   (reset-meta!
     #'try-xform
     (assoc
-      {:private true, :arglists (clojure.core/list ['xform]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list ['xform]),
+       :doc
+       "Resolves an allowed pull transform and returns a wrapper that preserves cancellation and reports transform failures with the expression and input value.",
+       :column (int 1)}
       :name
       'try-xform
       :ns
@@ -313,7 +324,11 @@
   (reset-meta!
     #'attr-with-opts->valfn
     (assoc
-      {:private true, :arglists (clojure.core/list [['& 'args]]), :column (int 1)}
+      {:private true,
+       :arglists (clojure.core/list [['& 'args]]),
+       :doc
+       "Builds the value transform for an attribute expression. A configured :xform receives the pulled value, including nil. Its result takes precedence; :default is applied afterward only when that result is nil and is never passed through the transform.",
+       :column (int 1)}
       :name
       'attr-with-opts->valfn
       :ns
@@ -348,10 +363,10 @@
       :ns
       *ns*))
   (defn normalize-attr
-    ([attr_spec]
-      (if (attr-with-opts? attr_spec)
-        (attr-with-opts->attr-tuple attr_spec)
-        (conj (into [(attr-spec->attr attr_spec)] (attr-spec->fn attr_spec)) identity))))
+    ([attr-spec]
+      (if (attr-with-opts? attr-spec)
+        (attr-with-opts->attr-tuple attr-spec)
+        (conj (into [(attr-spec->attr attr-spec)] (attr-spec->fn attr-spec)) identity))))
   (reset-meta!
     #'normalize-attr
     (assoc
@@ -378,10 +393,10 @@
       :ns
       *ns*))
   (defn normalize-pattern
-    ([pull_spec]
+    ([pull-spec]
       (cond
-        (map? pull_spec) pull_spec
-        (string? pull_spec) (normalize-pattern (edn/read-string pull_spec))
+        (map? pull-spec) pull-spec
+        (string? pull-spec) (normalize-pattern (edn/read-string pull-spec))
         :else (do
                 (let [direction (fn direction
                                   ([kw]
@@ -440,11 +455,14 @@
                                   [(^clojure.lang.IFn direction attr_name) attr_name]
                                   {:limit limit, :keyfn keyfn, :valfn valfn})))))))
                     {}
-                    pull_spec))))))
+                    pull-spec))))))
   (reset-meta!
     #'normalize-pattern
     (assoc
-      {:arglists (clojure.core/list ['pull-spec]), :column (int 1)}
+      {:arglists (clojure.core/list ['pull-spec]),
+       :doc
+       "Compiles an EDN pull pattern into forward and reverse attribute specifications. Accepts an EDN string, a pattern sequence, or an already normalized map. Validates recursion limits and rejects duplicate attribute specifications. Wildcards include direct attributes and recursively select component references; ordinary references default to :db/id.",
+       :column (int 1)}
       :name
       'normalize-pattern
       :ns
@@ -572,28 +590,10 @@
       :ns
       *ns*))
   (defn pull*
-    ([db p__16325 recursed prefer_aevt? e]
-      (let [map__16326 p__16325
-            map__16326 (if (seq? map__16326)
-                         (if (next map__16326)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__16326))
-                           (if (seq map__16326) (first map__16326) {}))
-                         map__16326)
-            spec map__16326
-            wildcard (get map__16326 :wildcard)
-            dbid (get map__16326 :dbid)]
-        (when (.isHistory ^datomic.Database db)
-          (throw (java.lang.IllegalStateException. "Can't pull from history")))
-        (let [map__16327 (fix-specs-for-underscore-prefix-attrs spec db)
-              map__16327 (if (seq? map__16327)
-                           (if (next map__16327)
-                             (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                               (to-array map__16327))
-                             (if (seq map__16327) (first map__16327) {}))
-                           map__16327)
-              forward (get map__16327 :forward)
-              reverse (get map__16327 :reverse)
+    ([db {:keys [wildcard dbid], :as spec} recursed prefer-aevt? e]
+      (when (.isHistory ^datomic.Database db)
+        (throw (java.lang.IllegalStateException. "Can't pull from history")))
+      (let [{:keys [forward reverse]} (fix-specs-for-underscore-prefix-attrs spec db)
               kw_>attr (partial resolve-attr db)
               mk_xf (fn mk_xf
                       ([path subspec def_subspec]
@@ -646,7 +646,7 @@
                               _subspec (nth vec__16329 (int 0) nil)
                               _recursed (nth vec__16329 (int 1) nil)]
                           (if _subspec
-                            (fn fn__16332 ([e] (pull* db _subspec _recursed prefer_aevt? e)))
+                            (fn fn__16332 ([e] (pull* db _subspec _recursed prefer-aevt? e)))
                             identity))))
               eid (db/resolve-id db e)
               ret (transient (if dbid {(denormalize-kw :db/id dbid) eid} {}))
@@ -704,7 +704,7 @@
                                       (^clojure.lang.IFn mk_xf [:forward kw] subspec def_subspec)
                                       limit
                                       valfn
-                                      (and prefer_aevt? (not wildcard)))]
+                                      (and prefer-aevt? (not wildcard)))]
                               (if (nil? v)
                                 ret
                                 (assoc!
@@ -744,7 +744,7 @@
                               r)))))
                     ret
                     reverse)]
-          (nilify-empty (persistent! ret))))))
+        (nilify-empty (persistent! ret)))))
   (reset-meta!
     #'pull*
     (assoc
@@ -761,7 +761,7 @@
       :ns
       *ns*))
   (defn parse-index-pull-arg-map
-    ([arg_map] (if (string? arg_map) (edn/read-string arg_map) arg_map)))
+    ([arg-map] (if (string? arg-map) (edn/read-string arg-map) arg-map)))
   (reset-meta!
     #'parse-index-pull-arg-map
     (assoc
@@ -771,8 +771,8 @@
       :ns
       *ns*))
   (defn index-pull
-    ([db arg_map]
-      (let [map__16355 (parse-index-pull-arg-map arg_map)
+    ([db arg-map]
+      (let [map__16355 (parse-index-pull-arg-map arg-map)
             map__16355 (if (seq? map__16355)
                          (if (next map__16355)
                            (clojure.lang.PersistentArrayMap/createAsIfByAssoc
@@ -835,35 +835,33 @@
   (reset-meta!
     #'index-pull
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'arg-map]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'arg-map]),
+       :doc
+       "Walks :avet or :aevt from :start and returns a lazy sequence of delayed pull results using :selector. :start contains components in index order and must begin with an attribute. :reverse selects reverse iteration. AVET pulls the entity component and requires a value component for cardinality-many attributes. AEVT pulls reference values from cardinality-many reference attributes and can return an entity more than once. History database values are rejected.",
+       :column (int 1)}
       :name
       'index-pull
       :ns
       *ns*))
-  (defn dereffed-index-pull ([db arg_map] (seq (map deref (index-pull db arg_map)))))
+  (defn dereffed-index-pull ([db arg-map] (seq (map deref (index-pull db arg-map)))))
   (reset-meta!
     #'dereffed-index-pull
     (assoc
-      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'arg-map]), :column (int 1)}
+      {:arglists (clojure.core/list [(.withMeta 'db {:tag 'Database}) 'arg-map]),
+       :doc
+       "Returns the lazy index-pull result sequence, realizing each selected entity map as it is consumed.",
+       :column (int 1)}
       :name
       'dereffed-index-pull
       :ns
       *ns*))
   (defn pull-1
-    ([db selector e p__16370]
-      (let [map__16371 p__16370
-            map__16371 (if (seq? map__16371)
-                         (if (next map__16371)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__16371))
-                           (if (seq map__16371) (first map__16371) {}))
-                         map__16371)
-            options map__16371
-            io_context (get map__16371 :io-context)
-            f (fn f ([] (pull* db (get normalized-pattern-cache selector) #{} false e)))]
-        (if io_context
-          (io-stats/throw-if-ex! (io-stats/with-io-stats f {:io-context io_context, :api :pull}))
-          (^clojure.lang.IFn f))))
+    ([db selector e {:keys [io-context], :as options}]
+      (let [run-pull (fn [] (pull* db (get normalized-pattern-cache selector) #{} false e))]
+        (if io-context
+          (io-stats/throw-if-ex!
+            (io-stats/with-io-stats run-pull {:io-context io-context, :api :pull}))
+          (run-pull))))
     ([db selector e] (pull-1 db selector e nil)))
   (reset-meta!
     #'pull-1
@@ -872,29 +870,25 @@
        (clojure.core/list
          ['db 'selector 'e]
          ['db 'selector 'e {:keys ['io-context], :as 'options}]),
+       :doc
+       "Applies selector to one entity identifier in db. Normally returns the selected attribute map, or nil when no selected attribute yields a value. Selector may be an EDN string or pattern data. Missing attributes are omitted unless they specify :default; recursive cycles terminate with :db/id. With :io-context, returns a map containing the pull result under :ret and index I/O accounting under :io-stats.",
        :column (int 1)}
       :name
       'pull-1
       :ns
       *ns*))
   (defn pull
-    ([db selector es p__16375]
-      (let [map__16376 p__16375
-            map__16376 (if (seq? map__16376)
-                         (if (next map__16376)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__16376))
-                           (if (seq map__16376) (first map__16376) {}))
-                         map__16376)
-            options map__16376
-            io_context (get map__16376 :io-context)
-            f (fn f
-                ([]
-                  (mapv (partial pull* db (get normalized-pattern-cache selector) #{} true) es)))]
-        (if io_context
+    ([db selector es {:keys [io-context], :as options}]
+      (let [run-pull (fn []
+                       (mapv
+                         (partial pull* db (get normalized-pattern-cache selector) #{} true)
+                         es))]
+        (if io-context
           (io-stats/throw-if-ex!
-            (io-stats/with-io-stats f {:io-context io_context, :api :pull-many}))
-          (^clojure.lang.IFn f))))
+            (io-stats/with-io-stats
+              run-pull
+              {:io-context io-context, :api :pull-many}))
+          (run-pull))))
     ([db selector es] (pull db selector es nil)))
   (reset-meta!
     #'pull
@@ -903,6 +897,8 @@
        (clojure.core/list
          ['db 'selector 'es]
          ['db 'selector 'es {:keys ['io-context], :as 'options}]),
+       :doc
+       "Applies selector to each entity identifier in es. Normally returns a vector preserving input order; each entry is the selected map, or nil when no selected attribute yields a value. Cardinality-many attributes return collections and reverse attributes navigate incoming references. With :io-context, returns a map containing the result vector under :ret and index I/O accounting under :io-stats.",
        :column (int 1)}
       :name
       'pull

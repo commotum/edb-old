@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.update)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.update)
+    {:doc
+     "Per-database transactor runtime. Queues and applies transactions in total order, writes transaction batches to the log, publishes novelty to peers, manages the memory index, applies back pressure, and coordinates background indexing."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['compare])
@@ -113,6 +117,8 @@
   (reset-meta!
     #'PREFETCH_CHAN_BUFFER_SIZE
     (assoc {:const true, :column (int 1)} :name 'PREFETCH_CHAN_BUFFER_SIZE :ns *ns*))
+  ;; Run a named critical worker with a cooperative shutdown hook. An uncaught
+  ;; worker failure marks the entire transactor process as failed.
   (defn background
     ([thread_name f & args]
       (let [shutdown_hook (promise)
@@ -337,6 +343,8 @@
       :ns
       *ns*))
   (.setMacro #'until-interrupt)
+  ;; Warm an immutable segment into the lookup cache; a prefetch failure is
+  ;; observable but does not decide the transaction result.
   (defn prefetch-segment
     ([olookup k]
       (try
@@ -361,6 +369,8 @@
       'prefetch-segment
       :ns
       *ns*))
+  ;; Expand client-supplied segment hints onto the bounded prefetch worker channel.
+  ;; Work is abandoned as soon as the corresponding transaction completes.
   (defn segment-prefetch-processor
     ([shutdown_hook & p__30803]
       (let [map__30804 p__30803
@@ -544,6 +554,8 @@
       '->dispatcher
       :ns
       *ns*))
+  ;; Receive transaction submissions from the database address and enqueue them
+  ;; for serial processing. The bounded queue is the first transaction back-pressure point.
   (defn reader
     ([shutdown_hook & p__30837]
       (let [map__30838 p__30837
@@ -676,6 +688,8 @@
       'reader
       :ns
       *ns*))
+  ;; Install a completed index root, release the single-index permit, schedule
+  ;; any remaining work, and publish the new basis to peers.
   (defn process-new-index
     ([p__30859 p__30860]
       (let [map__30861 p__30859
@@ -781,6 +795,8 @@
       'process-new-index
       :ns
       *ns*))
+  ;; Record the requested target basis and start indexing when the memory index
+  ;; and indexing semaphore permit it.
   (defn process-request-index
     ([p__30878 p__30879]
       (let [map__30880 p__30878
@@ -1051,6 +1067,8 @@
       'process-request-index
       :ns
       *ns*))
+  ;; Apply f against a stable atom value, install xf's projection of the result,
+  ;; and retry the calculation when another thread wins the compare-and-swap.
   (defn swap-xf!
     ([atom xf f & args]
       (loop []
@@ -1064,6 +1082,8 @@
       'swap-xf!
       :ns
       *ns*))
+  ;; Evaluate a transaction while converting a thrown failure into a result map
+  ;; whose :db-after remains the original database value.
   (defn with-tx*
     ([db dispatcher tx_data]
       (try
@@ -1077,6 +1097,8 @@
       'with-tx*
       :ns
       *ns*))
+  ;; Evaluate one transaction against the current database, atomically advance
+  ;; :db-after, capture I/O statistics, and route the result toward logging and reply.
   (defn process-transaction
     ([procargs p__30900]
       (let [map__30901 p__30900
@@ -1189,6 +1211,8 @@
       'process-transaction
       :ns
       *ns*))
+  ;; Serialize database state transitions, giving maintenance messages priority
+  ;; over ordinary submissions and keeping result publication off this worker.
   (defn processor
     ([shutdown_hook & p__30912]
       (let [map__30913 p__30912
@@ -1329,6 +1353,8 @@
       'processor
       :ns
       *ns*))
+  ;; Encode successful transaction results for the durable log and pass encoded
+  ;; work to the writer without making the processor perform serialization.
   (defn fressianer
     ([shutdown_hook & p__30933]
       (let [map__30934 p__30933
@@ -1454,6 +1480,8 @@
       'fressian-tx-notification
       :ns
       *ns*))
+  ;; Encode the peer notification form and enqueue it for publication after the
+  ;; writer has established the transaction's durable block boundary.
   (defn notify-fressianer
     ([shutdown_hook & p__30951]
       (let [map__30952 p__30951
@@ -1625,6 +1653,8 @@
             (queue/put log_tree_queue {:type :new-tail, :tail tail})))
         (events/publish {:key :datomic.garbage/mark, :cluster cs, :garbage garbage_ids})
         (some-> completed (deliver true)))))
+  ;; Batch encoded transactions into log appends. Each transaction's :logged
+  ;; promise is delivered only after the batch append succeeds.
   (defn writer
     ([& p__30988]
       (let [map__30989 p__30988
@@ -1751,6 +1781,7 @@
       'writer
       :ns
       *ns*))
+  ;; Broadcast committed transaction blocks to connected peers in log order.
   (defn block-notifier
     ([shutdown_hook & p__31009]
       (let [map__31010 p__31009
@@ -2084,6 +2115,8 @@
            :root-id root_id,
            :t (deref t_ref),
            :garbage-ids garbage_ids}))))
+  ;; Fold accumulated log-tail blocks into persistent log-tree roots and hand
+  ;; adopted roots back to the writer for publication.
   (defn log-treeifier
     ([_ & p__31067]
       (let [map__31068 p__31067
@@ -2506,6 +2539,7 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.update" "rename-database")
         (assoc protocol_signature__7482 :name protocol_method_name__7483 :ns *ns*))))
+  ;; Bound catalog administration to one operation at a time, failing after five minutes.
   (defn acquire-transactor-semaphore
     ([sem]
       (when-not (.tryAcquire ^java.util.concurrent.Semaphore sem 300 TimeUnit/SECONDS)
@@ -3165,6 +3199,7 @@
       'map->Master
       :ns
       *ns*))
+  ;; Dispatch the transactor's catalog, indexing, and garbage-collection control protocol.
   (defn run-admin-command
     ([master p__31370]
       (let [vec__31371 p__31370
@@ -3230,6 +3265,8 @@
       'run-admin-command
       :ns
       *ns*))
+  ;; Scale index computation linearly from zero at the memory threshold to the
+  ;; configured maximum at the redline.
   (defn compute-index-parallelism
     (^double [p__31382 bytes]
       (.doubleValue
@@ -3261,6 +3298,8 @@
       'compute-index-parallelism
       :ns
       *ns*))
+  ;; Adjust indexing concurrency as memory-index pressure rises, reserving more
+  ;; compute capacity to drain novelty before reaching the configured maximum.
   (defn start-dynamic-index-parallelism
     ([memidx_usage]
       (let [threshold (config/property "datomic.memoryIndexThreshold")
@@ -3304,6 +3343,8 @@
       'start-dynamic-index-parallelism
       :ns
       *ns*))
+  ;; Start the process-wide transport and indexer and construct the catalog
+  ;; service that owns all per-database runtimes.
   (defn create-master
     ([& args]
       (let [m_31390 {:event :update/create-master}

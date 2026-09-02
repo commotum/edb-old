@@ -1,15 +1,12 @@
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  clojure.lang.IFn
- *  com.google.common.cache.CacheLoader
- */
 package datomic.impl;
 
 import clojure.lang.IFn;
 import com.google.common.cache.CacheLoader;
 
+/**
+ * Adapts a one-argument Clojure function to a Guava cache loader. Each cache
+ * miss invokes the function with the requested key and caches its result.
+ */
 public class FnCacheLoader
 extends CacheLoader {
     public final IFn fn;
@@ -22,4 +19,3 @@ extends CacheLoader {
         return this.fn.invoke(key);
     }
 }
-

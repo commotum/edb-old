@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.backup)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.backup)
+    {:doc
+     "Differential backup, point-in-time restore, backup discovery, direct backup reads, and integrity verification. A backup location is claimed by one database identity and stores immutable segments shared by successive snapshots."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -277,6 +281,7 @@
   (reset-meta!
     #'claimed-by
     (assoc {:arglists (clojure.core/list ['storage]), :column (int 1)} :name 'claimed-by :ns *ns*))
+  ;; Claims an empty backup location for one database identity and rejects cross-database reuse.
   (defn ensure-claim
     ([storage id]
       (let [temp__5823__auto__ (claimed-by storage)]
@@ -296,7 +301,7 @@
       'ensure-claim
       :ns
       *ns*))
-  (defn ->connect-uri ([backup_uri t] (str "datomic:backup:" backup_uri (when t (str "?t=" t)))))
+  (defn ->connect-uri ([backup-uri t] (str "datomic:backup:" backup-uri (when t (str "?t=" t)))))
   (reset-meta!
     #'->connect-uri
     (assoc
@@ -1062,6 +1067,7 @@
       'backup->mem
       :ns
       *ns*))
+  ;; Publishes the snapshot root descriptor after all referenced immutable values have been copied.
   (defn backup-roots
     ([job t to_storage]
       (store
@@ -1115,11 +1121,12 @@
       'describe-backups
       :ns
       *ns*))
+  ;; Returns available snapshots newest first, with a directly connectable URI for each t.
   (defn list-backups
-    ([backup_uri]
-      (let [storage (create-storage backup_uri) ts (list-roots storage)]
+    ([backup-uri]
+      (let [storage (create-storage backup-uri) ts (list-roots storage)]
         {:backups
-         (mapv (fn fn__22466 ([t] {:t t, :connect-uri (->connect-uri backup_uri t)})) ts)})))
+         (mapv (fn fn__22466 ([t] {:t t, :connect-uri (->connect-uri backup-uri t)})) ts)})))
   (reset-meta!
     #'list-backups
     (assoc
@@ -1128,6 +1135,7 @@
       'list-backups
       :ns
       *ns*))
+  ;; Installs the restored index and log roots only after their immutable values are available.
   (defn restore-roots
     ([job cluster]
       (let [map__22469 job
@@ -1166,6 +1174,7 @@
       'restore-roots
       :ns
       *ns*))
+  ;; Captures one consistent index root, log root, and log tail from a live database.
   (defn create-backup-job
     ([cluster lookup]
       (let [vec__22472 (log/read-tail-descriptor cluster)
@@ -1336,6 +1345,7 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.backup" "create-ids->nodes") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.backup" "create-ids->nodes") treewalk/create-ids->nodes)
+  ;; Copies all values reachable from one backup root before publishing that root in the target.
   (defn restore-db
     ([p__22492 p__22493 progress concurrency incremental?]
       (let [map__22494 p__22492
@@ -1559,6 +1569,8 @@
       'maybe-segset-storage
       :ns
       *ns*))
+  ;; Copies values reachable from a live basis and writes the root descriptor last. Existing values
+  ;; in a repeatedly used backup location are skipped, making later snapshots differential.
   (defn backup-db
     ([from_uri to_storage progress concurrency incremental?]
       (let [cluster_conf (uri/parse-db from_uri)
@@ -1677,14 +1689,15 @@
       'backup-concurrency
       :ns
       *ns*))
+  ;; Starts a differential backup and returns a future reporting :succeeded or throwing on failure.
   (defn backup
-    ([from_conn_uri to_storage_uri sse? progress incremental?]
-      (let [storage (create-storage to_storage_uri sse?)]
+    ([from-conn-uri to-storage-uri sse? progress incremental?]
+      (let [storage (create-storage to-storage-uri sse?)]
         (backup-db
-          from_conn_uri
+          from-conn-uri
           storage
           progress
-          (backup-concurrency to_storage_uri)
+          (backup-concurrency to-storage-uri)
           incremental?))))
   (reset-meta!
     #'backup
@@ -1696,13 +1709,14 @@
       'backup
       :ns
       *ns*))
+  ;; Restores the latest snapshot, or the requested t, into a compatible target database URI.
   (defn restore
-    ([from_storage_uri to_uri progress t incremental?]
+    ([from-storage-uri to-uri progress t incremental?]
       (restore-db
-        {:from-storage (create-storage from_storage_uri), :t t}
-        {:to-uri to_uri}
+        {:from-storage (create-storage from-storage-uri), :t t}
+        {:to-uri to-uri}
         progress
-        (backup-concurrency from_storage_uri)
+        (backup-concurrency from-storage-uri)
         incremental?)))
   (reset-meta!
     #'restore
@@ -1873,6 +1887,7 @@
       'unreadable-seg-ids
       :ns
       *ns*))
+  ;; Verifies that every referenced log and index segment exists; read-all also reads each value.
   (defn verify-backup
     ([p__22596]
       (let [map__22597 p__22596
@@ -1930,6 +1945,7 @@
       'verify-backup
       :ns
       *ns*))
+  ;; Materializes a fixed database and log value directly from a backup without a transactor.
   (defn load-database
     ([backup_uri t]
       (let [storage (create-storage backup_uri)

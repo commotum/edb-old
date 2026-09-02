@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.error)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.error)
+    {:doc
+     "Constructs information-bearing Datomic exceptions and anomaly maps. Error data uses namespaced keys and preserves cause chains so callers can classify failures and choose retry or correction strategies."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -138,6 +142,7 @@
       :ns
       *ns*))
   (.setMacro #'create)
+  ;; Throw a general Datomic ExceptionInfo carrying :db/error and anomaly data.
   (defn raise
     ([code msg details cause]
       (throw
@@ -167,6 +172,7 @@
       'raise
       :ns
       *ns*))
+  ;; Throw a Datomic illegal-argument exception for invalid caller input.
   (defn arg
     ([code msg details cause]
       (throw
@@ -248,6 +254,7 @@
       'add-details-to-msg
       :ns
       *ns*))
+  ;; Throw an illegal-argument exception with bounded printed details in its message.
   (defn argd
     ([code msg details cause]
       (throw
@@ -280,6 +287,7 @@
       'argd
       :ns
       *ns*))
+  ;; Throw a Datomic illegal-state exception for an invalid runtime transition.
   (defn state
     ([code msg details cause]
       (throw
@@ -355,6 +363,8 @@
                         (clojure.core/list (symbol classname))
                         (clojure.core/list 'msg__8558__auto__)))))))
             (fn fn__8560 ([msg] (java.lang.RuntimeException. ^java.lang.String msg))))))))
+  ;; Reconstruct serialized exception data through the recognized information
+  ;; classes, or use a cached String constructor for supported java.* classes.
   (defn deserialize-exception
     ([p__8564]
       (let [map__8565 p__8564

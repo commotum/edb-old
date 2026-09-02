@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.stats)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.stats)
+    {:doc
+     "Calculates database, attribute, index, segment, and datom statistics from durable indexes and the in-memory index. Returned maps summarize counts and sizes by index tier and sort."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -297,6 +301,7 @@
   (reset-meta!
     #'db-attr-stats
     (assoc {:arglists (clojure.core/list ['db]), :column (int 1)} :name 'db-attr-stats :ns *ns*))
+  ;; Summarize total datoms and per-attribute counts across all index tiers.
   (defn db-stats
     ([db]
       (let [attr_stats (db-attr-stats db)]
@@ -468,6 +473,7 @@
       'attr-stats-from-splits
       :ns
       *ns*))
+  ;; Return one size summary per index and tier, optionally including key ranges.
   (defn sizes
     ([db & p__17894]
       (let [map__17895 p__17894
@@ -679,6 +685,7 @@
   (reset-meta!
     #'sizes->metrics
     (assoc {:arglists (clojure.core/list ['s]), :column (int 1)} :name 'sizes->metrics :ns *ns*))
+  ;; Produce the open monitoring counts derived from current index storage.
   (defn index-metrics ([db] (sizes->metrics (sizes db))))
   (reset-meta!
     #'index-metrics

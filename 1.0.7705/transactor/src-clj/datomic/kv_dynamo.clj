@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.kv-dynamo)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.kv-dynamo)
+    {:doc
+     "DynamoDB-backed KVStore implementation. Immutable values use eventually consistent reads; revisioned references use strongly consistent reads and conditional expressions for atomic preconditions."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['get])
@@ -42,6 +46,7 @@
       'remove-prefix
       :ns
       *ns*))
+  ;; Converts :ensure preconditions to DynamoDB expected-value clauses for conditional puts.
   (defn expected-map
     ([expect_map]
       (into
@@ -63,6 +68,7 @@
       'expected-map
       :ns
       *ns*))
+  ;; Reference reads are strongly consistent; immutable value reads may use eventual consistency.
   (deftype
     KVDynamo
     [client table prefix]

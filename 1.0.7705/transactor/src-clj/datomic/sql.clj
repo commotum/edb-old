@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.sql)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.sql)
+    {:doc
+     "JDBC primitives for the datomic_kvs table. Rows contain an id, integer revision, serialized map value, and binary value. Updates use the current revision in the WHERE clause so callers can perform optimistic compare-and-swap. Row operations acquire and close their connections; connect and execute-commands expose caller-owned connection lifecycles."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/require ['datomic.error :as 'error] ['clojure.string :as 'str])
@@ -46,6 +50,8 @@
       {:arglists
        (clojure.core/list
          [{:keys [(.withMeta 'datasource {:tag 'DataSource}) 'factory], :as 'args}]),
+       :doc
+       "Obtains a JDBC Connection from :datasource or by invoking :factory. Raises :db.error/invalid-sql-connection when neither source is supplied. The caller owns the returned connection.",
        :column (int 1)}
       :name
       'connect
@@ -84,6 +90,8 @@
     #'update-with-nulls
     (assoc
       {:arglists (clojure.core/list ['spec 'id 'ensure-rev {:keys ['rev 'map 'val]}]),
+       :doc
+       "Replaces rev, map, and val for id only when the stored revision equals ensure-rev. Uses explicit JDBC types so nil map and val values are preserved. Returns the number of updated rows; zero reports a missing row or revision conflict.",
        :column (int 1)}
       :name
       'update-with-nulls
@@ -117,13 +125,16 @@
   (reset-meta!
     #'insert-with-nulls
     (assoc
-      {:arglists (clojure.core/list ['spec {:keys ['id 'rev 'map 'val]}]), :column (int 1)}
+      {:arglists (clojure.core/list ['spec {:keys ['id 'rev 'map 'val]}]),
+       :doc
+       "Inserts a complete datomic_kvs row using explicit JDBC types, including SQL NULL values. Returns the number of inserted rows and propagates duplicate-key and other JDBC failures.",
+       :column (int 1)}
       :name
       'insert-with-nulls
       :ns
       *ns*))
   (defn update
-    ([spec id ensure_rev v_map]
+    ([spec id ensure_rev value-map]
       (with-open [conn (connect spec)]
         (let [col_vals (filter
                          (fn fn__10724
@@ -132,7 +143,7 @@
                                    k (nth vec__10725 (int 0) nil)
                                    v (nth vec__10725 (int 1) nil)]
                                v)))
-                         (select-keys v_map [:rev :map :val]))
+                         (select-keys value-map [:rev :map :val]))
               col_num (count col_vals)
               col_str (str/join
                         ", "
@@ -163,13 +174,16 @@
   (reset-meta!
     #'update
     (assoc
-      {:arglists (clojure.core/list ['spec 'id 'ensure-rev 'v-map]), :column (int 1)}
+      {:arglists (clojure.core/list ['spec 'id 'ensure-rev 'value-map]),
+       :doc
+       "Updates the truthy :rev, :map, and :val entries in value-map when id currently has ensure-rev. Returns the affected-row count, with zero indicating a missing row or revision conflict. Use update-with-nulls when a column must be set to nil.",
+       :column (int 1)}
       :name
       'update
       :ns
       *ns*))
   (defn insert
-    ([spec v_map]
+    ([spec value-map]
       (with-open [conn (connect spec)]
         (let [col_vals (filter
                          (fn fn__10739
@@ -178,7 +192,7 @@
                                    k (nth vec__10740 (int 0) nil)
                                    v (nth vec__10740 (int 1) nil)]
                                v)))
-                         (select-keys v_map [:id :rev :map :val]))
+                         (select-keys value-map [:id :rev :map :val]))
               col_num (count col_vals)
               col_str (str/join
                         ", "
@@ -216,7 +230,15 @@
                 (int (.executeUpdate ^java.sql.PreparedStatement stmt)))))))))
   (reset-meta!
     #'insert
-    (assoc {:arglists (clojure.core/list ['spec 'v-map]), :column (int 1)} :name 'insert :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['spec 'value-map]),
+       :doc
+       "Inserts the truthy :id, :rev, :map, and :val entries in value-map and returns the affected-row count. Use insert-with-nulls when SQL NULL columns must be written explicitly.",
+       :column (int 1)}
+      :name
+      'insert
+      :ns
+      *ns*))
   (defn select
     ([spec id]
       (with-open [conn (connect spec)]
@@ -233,7 +255,15 @@
                  :val (.getBytes ^java.sql.ResultSet rs "val")})))))))
   (reset-meta!
     #'select
-    (assoc {:arglists (clojure.core/list ['spec 'id]), :column (int 1)} :name 'select :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['spec 'id]),
+       :doc
+       "Returns the datomic_kvs row for id as {:id :rev :map :val}, or nil when no row exists. Binary values are returned as byte arrays.",
+       :column (int 1)}
+      :name
+      'select
+      :ns
+      *ns*))
   (defn delete
     ([spec id]
       (with-open [conn (connect spec)]
@@ -246,7 +276,14 @@
               (int (.executeUpdate ^java.sql.PreparedStatement stmt))))))))
   (reset-meta!
     #'delete
-    (assoc {:arglists (clojure.core/list ['spec 'id]), :column (int 1)} :name 'delete :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['spec 'id]),
+       :doc "Deletes id from datomic_kvs and returns the number of affected rows.",
+       :column (int 1)}
+      :name
+      'delete
+      :ns
+      *ns*))
   (defn execute-commands
     ([conn & cmds]
       (loop [seq_10755 (seq cmds) chunk_10756 nil count_10757 0 i_10758 0]
@@ -275,6 +312,8 @@
     #'execute-commands
     (assoc
       {:arglists (clojure.core/list [(.withMeta 'conn {:tag 'Connection}) '& 'cmds]),
+       :doc
+       "Executes SQL command strings sequentially on a caller-owned connection. Each prepared statement is closed after execution; transaction and connection lifecycle remain with the caller.",
        :column (int 1)}
       :name
       'execute-commands

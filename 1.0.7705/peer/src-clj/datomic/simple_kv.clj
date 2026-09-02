@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.simple-kv)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.simple-kv)
+    {:doc
+     "Minimal ByteBuffer key-value protocol and value envelope. Packed values carry an EDN metadata map alongside their binary payload, while unpacking also accepts legacy raw ByteBuffer entries."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/require ['clojure.edn :as 'edn])
@@ -15,9 +19,9 @@
   (let [protocol_metadata__7463 {:column (int 1)}]
     (defprotocol
       KV
-      (put [_ key val] "returns :ok or nil")
-      (get [_ key] "returns ByteBuffer val or nil")
-      (delete [_ key] "returns :ok"))
+      (put [_ key val] "Stores a ByteBuffer at key. Return and failure behavior is defined by the storage implementation.")
+      (get [_ key] "Returns the ByteBuffer stored at key, or nil when the key is absent.")
+      (delete [_ key] "Deletes key and returns :ok."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.simple-kv" "KV")
       (assoc (assoc protocol_metadata__7463 :doc nil) :name 'KV :ns *ns*))
@@ -28,7 +32,8 @@
                                         'put
                                         {:arglists (clojure.core/list ['_ 'key 'val])}),
                                       :arglists (clojure.core/list ['_ 'key 'val]),
-                                      :doc "returns :ok or nil"}
+                                      :doc
+                                      "Stores a ByteBuffer at key. Return and failure behavior is defined by the storage implementation."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.simple-kv" "KV"))
           protocol_method_name__7465 (with-meta
@@ -42,7 +47,8 @@
                                       :name
                                       (.withMeta 'get {:arglists (clojure.core/list ['_ 'key])}),
                                       :arglists (clojure.core/list ['_ 'key]),
-                                      :doc "returns ByteBuffer val or nil"}
+                                      :doc
+                                      "Returns the ByteBuffer stored at key, or nil when the key is absent."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.simple-kv" "KV"))
           protocol_method_name__7467 (with-meta
@@ -58,7 +64,7 @@
                                         'delete
                                         {:arglists (clojure.core/list ['_ 'key])}),
                                       :arglists (clojure.core/list ['_ 'key]),
-                                      :doc "returns :ok"}
+                                      :doc "Deletes key and returns :ok."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.simple-kv" "KV"))
           protocol_method_name__7469 (with-meta
@@ -69,6 +75,7 @@
         (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*))))
   (def map-magic 568780356367818079)
   (reset-meta! #'map-magic (assoc {:const true, :column (int 1)} :name 'map-magic :ns *ns*))
+  ;; Prefixes a value with a magic number and an EDN metadata map for KVStore round trips.
   (defn pack
     ([m v]
       (let [mbytes (.getBytes (pr-str m) "UTF-8")]
@@ -91,6 +98,7 @@
       'pack
       :ns
       *ns*))
+  ;; Decodes packed entries and also accepts legacy raw ByteBuffer values.
   (defn unpack
     ([k v]
       (let [vmap (if (and
@@ -115,6 +123,7 @@
       'unpack
       :ns
       *ns*))
+  ;; Retries a temporarily absent immutable value with a short bounded backoff window.
   (defn get-with-retry
     ([skv k]
       (or

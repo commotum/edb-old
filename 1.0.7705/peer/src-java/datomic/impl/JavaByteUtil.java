@@ -1,8 +1,10 @@
-/*
- * Decompiled with CFR 0.152.
- */
 package datomic.impl;
 
+/**
+ * Converts arbitrary bytes to and from a lossless seven-bit representation.
+ * The packed form is suitable for text-safe storage and generated Java string
+ * literals while preserving the original byte sequence.
+ */
 public class JavaByteUtil {
     protected static final char bs = '\\';
 

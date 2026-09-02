@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.coordination-ext)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.coordination-ext)
+    {:doc
+     "Storage-protocol registrations for cluster construction. Dispatches DynamoDB, DynamoDB/S3, Infinispan, Cassandra, SQL, and embedded development configurations to their storage adapters. Remote SQL stores are shared by system root, while :dev and :limited-edition use an initialized local H2 service when available."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -102,7 +106,11 @@
         (kvc/kv-cluster
           (req/require-and-run 'datomic.kv-cassandra3/kv-cassandra endpoint)
           cluster_conf))))
-  (.setMeta (clojure.lang.RT/var "datomic.coordination-ext" "remote-sql-stores") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.coordination-ext" "remote-sql-stores")
+    {:doc
+     "Process-local cache of SQL key-value stores keyed by :system-root. Sharing the adapter preserves one connection-pool boundary for cluster configurations that address the same Datomic system.",
+     :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.coordination-ext" "remote-sql-stores") (atom {}))
   (defmethod
     coord/create-cluster
@@ -136,7 +144,10 @@
                                    :sql-driver-params])))))))
                     (get (deref remote-sql-stores) ck)))]
         (kvc/kv-cluster kvs cluster_conf))))
-  (.setMeta (clojure.lang.RT/var "datomic.coordination-ext" "devspec") {:column (int 1)})
+  (.setMeta
+    (clojure.lang.RT/var "datomic.coordination-ext" "devspec")
+    {:doc "JDBC specification for the process's initialized local development H2 service.",
+     :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.coordination-ext" "devspec") (atom nil))
   (defn init-dev
     ([cluster_map data_dir]
@@ -145,7 +156,10 @@
   (reset-meta!
     #'init-dev
     (assoc
-      {:arglists (clojure.core/list ['cluster-map 'data-dir]), :column (int 1)}
+      {:arglists (clojure.core/list ['cluster-map 'data-dir]),
+       :doc
+       "Initializes the local H2 TCP service for :dev and :limited-edition storage under data-dir/db. The first successful initialization establishes the process-wide development JDBC specification.",
+       :column (int 1)}
       :name
       'init-dev
       :ns
@@ -172,7 +186,10 @@
   (reset-meta!
     #'create-dev-cluster
     (assoc
-      {:arglists (clojure.core/list ['cluster-conf]), :column (int 1)}
+      {:arglists (clojure.core/list ['cluster-conf]),
+       :doc
+       "Creates the development key-value cluster. Uses the initialized local H2 service in the transactor process, or derives a remote JDBC specification when connecting from another process.",
+       :column (int 1)}
       :name
       'create-dev-cluster
       :ns

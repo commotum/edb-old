@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.query)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.query)
+    {:doc
+     "Compiles and executes Datomic Datalog queries. Query forms are normalized and validated, inputs are bound to sources and logic variables, clauses are scheduled and evaluated, and find specifications shape the result as a relation, collection, tuple, scalar, or return map. Ready clauses retain source order, so selective clauses placed early reduce intermediate relation sizes. Aggregates and pull expressions are applied after the basis relation is formed. Parsed query plans are cached by structural equality."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['compare 'qualified-symbol?])
@@ -1155,7 +1159,15 @@
         query)))
   (reset-meta!
     #'parse-query
-    (assoc {:arglists (clojure.core/list ['query]), :column (int 1)} :name 'parse-query :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['query]),
+       :doc
+       "Normalizes and validates a list-form or map-form query. Produces find, input, range, aggregate, pull, and construction metadata suitable for clause planning. Throws query argument errors for malformed clauses, unbound find variables, missing inputs or where clauses, and invalid find or aggregate forms.",
+       :column (int 1)}
+      :name
+      'parse-query
+      :ns
+      *ns*))
   (defn load-query
     ([query]
       (let [query (parse-query query)
@@ -1168,7 +1180,15 @@
         query)))
   (reset-meta!
     #'load-query
-    (assoc {:arglists (clojure.core/list ['query]), :column (int 1)} :name 'load-query :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['query]),
+       :doc
+       "Compiles a validated query into scheduled clauses, prepared rules, source metadata, and a result constructor. The compiled value is suitable for reuse by the query-plan cache.",
+       :column (int 1)}
+      :name
+      'load-query
+      :ns
+      *ns*))
   (defn group-rel
     ([fv rel]
       (let [grp_idxs (filterv integer? fv)]
@@ -1478,10 +1498,10 @@
     #'q*
     (assoc {:arglists (clojure.core/list ['query 'srcs]), :column (int 1)} :name 'q* :ns *ns*))
   (defn query*
-    ([query_map]
-      (let [timeout (:timeout query_map)
-            qmap (cond-> (mapify-query (:query query_map)) timeout (assoc :timeout [timeout]))]
-        (q* qmap (:args query_map)))))
+    ([query-map]
+      (let [timeout (:timeout query-map)
+            qmap (cond-> (mapify-query (:query query-map)) timeout (assoc :timeout [timeout]))]
+        (q* qmap (:args query-map)))))
   (reset-meta!
     #'query*
     (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'query* :ns *ns*))
@@ -1502,74 +1522,61 @@
   (defn q ([query srcs] (apply-pf (q* query srcs))))
   (reset-meta!
     #'q
-    (assoc {:arglists (clojure.core/list ['query 'srcs]), :column (int 1)} :name 'q :ns *ns*))
+    (assoc
+      {:arglists (clojure.core/list ['query 'srcs]),
+       :doc
+       "Executes query against the ordered source arguments. Find relations return collections of tuples; collection, tuple, and scalar find specifications return their corresponding shapes. Pull expressions and return-map keys are realized before the result is returned. Throws a query argument error when fewer inputs are supplied than the :in clause requires.",
+       :column (int 1)}
+      :name
+      'q
+      :ns
+      *ns*))
   (defn query
-    ([p__16888]
-      (let [map__16889 p__16888
-            map__16889 (if (seq? map__16889)
-                         (if (next map__16889)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__16889))
-                           (if (seq map__16889) (first map__16889) {}))
-                         map__16889)
-            query_map map__16889
-            io_context (get map__16889 :io-context)
-            query_stats (get map__16889 :query-stats)
-            f (fn f ([] (apply-pf (query* query_map))))
-            f (if io_context
-                (fn fn__16892
-                  ([]
-                    (io-stats/throw-if-ex!
-                      (io-stats/with-io-stats f {:io-context io_context, :api :query}))))
-                f)
-            f (if query_stats
-                (fn fn__16894 ([] (query-stats/with-query-stats f {:query (:query query_map)})))
-                f)]
-        (^clojure.lang.IFn f))))
+    ([{:keys [io-context query-stats], :as query-map}]
+      (let [run-query (fn [] (apply-pf (query* query-map)))
+            run-query (if io-context
+                        (fn []
+                          (io-stats/throw-if-ex!
+                            (io-stats/with-io-stats
+                              run-query
+                              {:io-context io-context, :api :query})))
+                        run-query)
+            run-query (if query-stats
+                        (fn []
+                          (query-stats/with-query-stats
+                            run-query
+                            {:query (:query query-map)}))
+                        run-query)]
+        (run-query))))
   (reset-meta!
     #'query
     (assoc
       {:arglists (clojure.core/list [{:keys ['io-context 'query-stats], :as 'query-map}]),
+       :doc
+       "Executes a query request map containing :query and :args. An optional :timeout limits elapsed query execution in milliseconds. Normally returns the fully realized result in the shape selected by :find. With :io-context, returns a map containing :ret and :io-stats. With :query-stats, returns a map containing :ret and :query-stats. When both options are supplied, one wrapper map contains :ret, :io-stats, and :query-stats.",
        :column (int 1)}
       :name
       'query
       :ns
       *ns*))
   (defn qseq
-    ([query_map args] (qseq {:query query_map, :args args}))
-    ([p__16897]
-      (let [map__16898 p__16897
-            map__16898 (if (seq? map__16898)
-                         (if (next map__16898)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__16898))
-                           (if (seq map__16898) (first map__16898) {}))
-                         map__16898)
-            query_map map__16898
-            offset (get map__16898 :offset 0)
-            limit (get map__16898 :limit (long java.lang.Long/MAX_VALUE))
-            io_context (get map__16898 :io-context)
-            f (fn f ([] (query* query_map)))
-            map__16899 (when io_context
-                         (io-stats/throw-if-ex!
-                           (io-stats/with-io-stats f {:io-context io_context, :api :qseq})))
-            map__16899 (if (seq? map__16899)
-                         (if (next map__16899)
-                           (clojure.lang.PersistentArrayMap/createAsIfByAssoc
-                             (to-array map__16899))
-                           (if (seq map__16899) (first map__16899) {}))
-                         map__16899)
-            ret (get map__16899 :ret)
-            io_stats (get map__16899 :io-stats)
-            ret (if io_context ret (^clojure.lang.IFn f))
-            vec__16900 ret
-            result (nth vec__16900 (int 0) nil)
-            pf (nth vec__16900 (int 1) nil)
-            xform (common/result-xform offset limit pf)
-            cseq (qs/counted-seq
-                   (sequence xform result)
-                   (common/result-count offset limit result))]
-        (if io_context {:ret cseq, :io-stats io_stats} cseq))))
+    ([query-map args] (qseq {:query query-map, :args args}))
+    ([{:keys [offset limit io-context],
+       :or {offset 0, limit Long/MAX_VALUE},
+       :as query-map}]
+      (let [run-query (fn [] (query* query-map))
+            {:keys [ret io-stats]} (when io-context
+                                     (io-stats/throw-if-ex!
+                                       (io-stats/with-io-stats
+                                         run-query
+                                         {:io-context io-context, :api :qseq})))
+            query-result (if io-context ret (run-query))
+            [result post-fn] query-result
+            xform (common/result-xform offset limit post-fn)
+            result-seq (qs/counted-seq
+                         (sequence xform result)
+                         (common/result-count offset limit result))]
+        (if io-context {:ret result-seq, :io-stats io-stats} result-seq))))
   (reset-meta!
     #'qseq
     (assoc
@@ -1579,6 +1586,8 @@
            :or {'offset 0, 'limit 'Long/MAX_VALUE},
            :as 'query-map}]
          ['query-map 'args]),
+       :doc
+       "Returns a counted lazy sequence of query tuples. Pull expressions and result transformations are deferred until consumption. :offset omits initial tuples and :limit bounds the result; :io-context returns the sequence together with index I/O statistics.",
        :column (int 1)}
       :name
       'qseq

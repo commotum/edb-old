@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.cache)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.cache)
+    {:doc
+     "Composes immutable segment lookup caches, coordinates concurrent misses, performs read-ahead, and records I/O by cache tier. Segment identifiers name immutable values, so cached entries remain valid for their lifetime."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core :exclude ['remove])
@@ -89,6 +93,7 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.cache" "read-ahead-pool-prop")
     (delay (config/property "datomic.readAheadPool")))
+  ;; Schedules a background lookup only when read-ahead is enabled and the value is not cached.
   (defn read-ahead
     ([lookup k]
       (when (< 0 (deref read-ahead-pool-prop))
@@ -221,6 +226,7 @@
       'safe-lookup-transformer
       :ns
       *ns*))
+  ;; Wraps a backing lookup with a read-through cache and an optional hit/miss observer.
   (defn lookup-cache
     ([m cache f]
       (reify
@@ -260,6 +266,7 @@
       'lookup-cache
       :ns
       *ns*))
+  ;; Coalesces concurrent misses for the same key so the backing lookup executes once.
   (defn lookup-with-inflight-cache
     ([m]
       (let [in_flight (java.util.concurrent.ConcurrentHashMap.)]
@@ -298,6 +305,7 @@
   (reset-meta!
     #'fn->lookup
     (assoc {:arglists (clojure.core/list ['f]), :column (int 1)} :name 'fn->lookup :ns *ns*))
+  ;; Reads from the first lookup and falls through to the second only when the key is absent.
   (defn double-lookup
     ([m1 m2]
       (reify
@@ -314,6 +322,7 @@
       'double-lookup
       :ns
       *ns*))
+  ;; Reads through two cache tiers, repairs the first tier from the second, and writes both tiers.
   (defn repairing-cache-stack
     ([p__10351]
       (let [map__10352 p__10351

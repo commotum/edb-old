@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.callback)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.callback)
+    {:doc
+     "Resolves configured callbacks to a Clojure function or public static Java method. Java callbacks accept one Object argument; Clojure callbacks accept one value."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -46,6 +50,8 @@
       'has-callback-signature?
       :ns
       *ns*))
+  ;; Compile ClassName.method into a one-argument callback after verifying a
+  ;; public static method whose sole parameter is Object.
   (defn compile-static-method-callback
     ([sym]
       (let [temp__5823__auto__ (re-matches #"(.*)\.(.*)" (str sym))]
@@ -98,6 +104,8 @@
       'compile-static-method-callback
       :ns
       *ns*))
+  ;; Resolve a namespace-qualified symbol as a Clojure var; otherwise interpret
+  ;; the symbol as a Java static method name. Missing vars and unsupported methods warn and return nil.
   (defn create-callback
     ([sym]
       (if (namespace sym)

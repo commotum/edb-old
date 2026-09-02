@@ -1,5 +1,9 @@
 (do
   (clojure.core/in-ns 'datomic.memory)
+  (.resetMeta
+    (clojure.lang.Namespace/find 'datomic.memory)
+    {:doc
+     "Memory sizing and capacity checks for Peer and Transactor processes. Estimates heap requirements for the memory index, object cache, segment work, and supported deployment shapes."})
   (clojure.core/with-loading-context
     (do
       (clojure.core/refer 'clojure.core)
@@ -40,6 +44,7 @@
   (reset-meta!
     #'TRANSACTOR_SPARE_MEM
     (assoc {:const true, :column (int 1)} :name 'TRANSACTOR_SPARE_MEM :ns *ns*))
+  ;; Parse an integer memory size with a B, K, M, or G suffix.
   (defn ram->bytes
     ([ram]
       (let [ram (str/trim ram)
@@ -113,6 +118,7 @@
      "m3.large" (long (* 7500 1048576)),
      "c1.xlarge" (long (* 7 1073741824)),
      "r4.4xlarge" (long (* 122 1073741824))})
+  ;; Convert a segment-cache byte budget into a maximum count of 64 KiB segments.
   (defn segment-cache-max ([segment_memory_size] (quot segment_memory_size 65536)))
   (reset-meta!
     #'segment-cache-max
@@ -122,6 +128,7 @@
       'segment-cache-max
       :ns
       *ns*))
+  ;; Estimate the number of decoded segments supportable by an object-cache byte budget.
   (defn object-cache-max ([virtual_memory_size] (quot virtual_memory_size 480000)))
   (reset-meta!
     #'object-cache-max
@@ -131,6 +138,8 @@
       'object-cache-max
       :ns
       *ns*))
+  ;; Derive JVM heap and memory-index settings from available RAM. The default
+  ;; memory index is 64 MiB and total RAM must exceed 256 MiB.
   (defn transactor-settings
     ([ram_bytes memidx_bytes]
       (let [available_bytes (- (- (- ram_bytes 100663296) 0) memidx_bytes)
@@ -155,6 +164,7 @@
       'transactor-settings
       :ns
       *ns*))
+  ;; Reserve thirty percent of an EC2 instance's memory outside the JVM heap.
   (defn aws-transactor-settings
     ([instance_type]
       (transactor-settings (long (* 0.7 (common/getx aws-instance-mem instance_type))))))
@@ -170,6 +180,7 @@
   (.bindRoot (clojure.lang.RT/var "datomic.memory" "peer-settings") transactor-settings)
   (.setMeta (clojure.lang.RT/var "datomic.memory" "aws-peer-settings") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.memory" "aws-peer-settings") aws-transactor-settings)
+  ;; Return heap space available to caches after the memory index and 100 MiB reserve.
   (defn transactor-cache-bytes
     ([memidx_max]
       (- (- (.maxMemory (java.lang.Runtime/getRuntime)) (* (* 100 1024) 1024)) memidx_max)))

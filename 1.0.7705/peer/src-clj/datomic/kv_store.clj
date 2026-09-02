@@ -2,7 +2,8 @@
   (clojure.core/in-ns 'datomic.kv-store)
   (.resetMeta
     (clojure.lang.Namespace/find 'datomic.kv-store)
-    {:doc "SPI for datomic.kv-cluster/KVCluster's store access."})
+    {:doc
+     "Storage-provider interface beneath KVCluster. Immutable values use ByteBuffer payloads and permit non-consistent reads; revisioned refs use consistent reads and atomic :ensure preconditions. Implementations classify failures for bounded retry."})
   (clojure.core/with-loading-context (clojure.core/refer 'clojure.core :exclude ['get]))
   (when-not (.equals 'datomic.kv-store 'clojure.core)
     (dosync (commute (deref #'clojure.core/*loaded-libs*) conj 'datomic.kv-store))
@@ -93,16 +94,25 @@
         (clojure.lang.RT/var "datomic.kv-store" "close")
         (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
   (let [protocol_metadata__7472 {:column (int 1)}]
-    (defprotocol Retryable (retryable? [_]))
+    (defprotocol
+      Retryable
+      "Classifies storage failures for the bounded retry policy."
+      (retryable? [_] "Returns true when repeating the storage operation may succeed."))
     (reset-meta!
       (clojure.lang.RT/var "datomic.kv-store" "Retryable")
-      (assoc (assoc protocol_metadata__7472 :doc nil) :name 'Retryable :ns *ns*))
+      (assoc
+        (assoc protocol_metadata__7472 :doc "Classifies storage failures for the bounded retry policy.")
+        :name
+        'Retryable
+        :ns
+        *ns*))
     (let [protocol_signature__7473 (assoc
                                      {:tag nil,
                                       :name
                                       (.withMeta 'retryable? {:arglists (clojure.core/list ['_])}),
                                       :arglists (clojure.core/list ['_]),
-                                      :doc nil}
+                                      :doc
+                                      "Returns true when repeating the storage operation may succeed."}
                                      :protocol
                                      (clojure.lang.RT/var "datomic.kv-store" "Retryable"))
           protocol_method_name__7474 (with-meta
