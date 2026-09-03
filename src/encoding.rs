@@ -1,6 +1,6 @@
 use crate::{
-    Attribute, Cardinality, Datom, EntityRef, ErrorCategory, Keyword, Schema, SchemaChange,
-    SemanticError, Symbol, TupleSpec, TxOp, TxValue, Unique, Value, ValueType,
+    Attribute, Cardinality, Datom, EntityRef, ErrorCategory, IndexOrder, Keyword, Schema,
+    SchemaChange, SemanticError, Symbol, TupleSpec, TxOp, TxValue, Unique, Value, ValueType,
 };
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
@@ -19,6 +19,8 @@ const MAX_COLLECTION_LEN: usize = 1_000_000;
 const KIND_SCHEMA: u8 = 1;
 const KIND_TRANSACTION: u8 = 2;
 const KIND_REQUEST: u8 = 3;
+const KIND_INDEX_SEGMENT: u8 = 4;
+const KIND_INDEX_MANIFEST: u8 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableTransaction {
@@ -29,6 +31,33 @@ pub struct DurableTransaction {
     pub tempids: BTreeMap<String, u64>,
     pub tx_data: Vec<Datom>,
     pub schema_changes: Vec<SchemaChange>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexSegment {
+    pub order: IndexOrder,
+    pub history: bool,
+    pub datoms: Vec<Datom>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SegmentRef {
+    pub order: IndexOrder,
+    pub history: bool,
+    pub ordinal: u32,
+    pub hash: Digest,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexManifest {
+    pub database_id: String,
+    pub basis_t: u64,
+    pub tx_hash: Digest,
+    pub next_eid: u64,
+    pub schema: Schema,
+    pub schema_history: Vec<Vec<SchemaChange>>,
+    pub segments: Vec<SegmentRef>,
 }
 
 pub fn sha256(bytes: &[u8]) -> Digest {
@@ -121,6 +150,206 @@ pub fn decode_transaction(bytes: &[u8]) -> Result<DurableTransaction, SemanticEr
 
 pub fn transaction_hash(encoded_transaction: &[u8]) -> Digest {
     sha256(encoded_transaction)
+}
+
+pub fn encode_index_segment(segment: &IndexSegment) -> Result<Vec<u8>, SemanticError> {
+    validate_index_segment(segment)?;
+    let mut body = Vec::new();
+    body.push(index_order_tag(segment.order));
+    put_bool(&mut body, segment.history);
+    put_len(&mut body, segment.datoms.len())?;
+    for datom in &segment.datoms {
+        encode_datom(&mut body, datom)?;
+    }
+    encode_blob(KIND_INDEX_SEGMENT, &body)
+}
+
+pub fn decode_index_segment(bytes: &[u8]) -> Result<IndexSegment, SemanticError> {
+    let body = decode_blob(bytes, KIND_INDEX_SEGMENT)?;
+    let mut cursor = Cursor::new(body);
+    let order = decode_index_order(cursor.u8()?)?;
+    let history = cursor.boolean()?;
+    let count = cursor.collection_len()?;
+    let mut datoms = Vec::with_capacity(count);
+    for _ in 0..count {
+        datoms.push(decode_datom(&mut cursor)?);
+    }
+    cursor.finish()?;
+    let segment = IndexSegment {
+        order,
+        history,
+        datoms,
+    };
+    validate_index_segment(&segment)?;
+    if encode_index_segment(&segment)? != bytes {
+        return Err(fault(
+            "encoding/noncanonical-index-segment",
+            "index segment is not canonical",
+        ));
+    }
+    Ok(segment)
+}
+
+pub fn encode_index_manifest(manifest: &IndexManifest) -> Result<Vec<u8>, SemanticError> {
+    validate_index_manifest(manifest)?;
+    let mut body = Vec::new();
+    put_string(&mut body, &manifest.database_id)?;
+    put_u64(&mut body, manifest.basis_t);
+    body.extend_from_slice(&manifest.tx_hash);
+    put_u64(&mut body, manifest.next_eid);
+    put_bytes(&mut body, &encode_schema(&manifest.schema)?)?;
+    put_len(&mut body, manifest.schema_history.len())?;
+    for changes in &manifest.schema_history {
+        put_len(&mut body, changes.len())?;
+        for change in changes {
+            encode_schema_change(&mut body, change)?;
+        }
+    }
+    put_len(&mut body, manifest.segments.len())?;
+    for reference in &manifest.segments {
+        body.push(index_order_tag(reference.order));
+        put_bool(&mut body, reference.history);
+        put_u32(&mut body, reference.ordinal);
+        body.extend_from_slice(&reference.hash);
+        put_u32(&mut body, reference.count);
+    }
+    encode_blob(KIND_INDEX_MANIFEST, &body)
+}
+
+pub fn decode_index_manifest(bytes: &[u8]) -> Result<IndexManifest, SemanticError> {
+    let body = decode_blob(bytes, KIND_INDEX_MANIFEST)?;
+    let mut cursor = Cursor::new(body);
+    let database_id = cursor.string()?;
+    let basis_t = cursor.u64()?;
+    let tx_hash = cursor.digest()?;
+    let next_eid = cursor.u64()?;
+    let schema = decode_schema(cursor.bytes()?)?;
+    let history_len = cursor.collection_len()?;
+    let mut schema_history = Vec::with_capacity(history_len);
+    for _ in 0..history_len {
+        let count = cursor.collection_len()?;
+        let mut changes = Vec::with_capacity(count);
+        for _ in 0..count {
+            changes.push(decode_schema_change(&mut cursor)?);
+        }
+        schema_history.push(changes);
+    }
+    let count = cursor.collection_len()?;
+    let mut segments = Vec::with_capacity(count);
+    for _ in 0..count {
+        segments.push(SegmentRef {
+            order: decode_index_order(cursor.u8()?)?,
+            history: cursor.boolean()?,
+            ordinal: cursor.u32()?,
+            hash: cursor.digest()?,
+            count: cursor.u32()?,
+        });
+    }
+    cursor.finish()?;
+    let manifest = IndexManifest {
+        database_id,
+        basis_t,
+        tx_hash,
+        next_eid,
+        schema,
+        schema_history,
+        segments,
+    };
+    validate_index_manifest(&manifest)?;
+    if encode_index_manifest(&manifest)? != bytes {
+        return Err(fault(
+            "encoding/noncanonical-index-manifest",
+            "index manifest is not canonical",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn validate_index_segment(segment: &IndexSegment) -> Result<(), SemanticError> {
+    if segment.datoms.is_empty() {
+        return Err(fault(
+            "encoding/empty-index-segment",
+            "index segments cannot be empty",
+        ));
+    }
+    if segment
+        .datoms
+        .windows(2)
+        .any(|pair| pair[0].cmp_in(&pair[1], segment.order).is_gt())
+    {
+        return Err(fault(
+            "encoding/unsorted-index-segment",
+            "index segment datoms must be ordered",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_index_manifest(manifest: &IndexManifest) -> Result<(), SemanticError> {
+    if manifest.database_id.is_empty() || manifest.basis_t == 0 {
+        return Err(fault(
+            "encoding/invalid-index-manifest",
+            "index manifest needs a database id and positive basis",
+        ));
+    }
+    if manifest.schema_history.len() != usize::try_from(manifest.basis_t).unwrap_or(usize::MAX) {
+        return Err(fault(
+            "encoding/index-schema-history-basis",
+            "manifest schema history must have one chunk per basis",
+        ));
+    }
+    let mut expected = std::collections::BTreeMap::<(bool, u8), u32>::new();
+    let mut last_key = None;
+    for reference in &manifest.segments {
+        if reference.count == 0 {
+            return Err(fault(
+                "encoding/empty-index-reference",
+                "manifest segment count must be positive",
+            ));
+        }
+        let key = (
+            reference.history,
+            index_order_tag(reference.order),
+            reference.ordinal,
+        );
+        if last_key.is_some_and(|last| last >= key) {
+            return Err(fault(
+                "encoding/noncanonical-index-manifest",
+                "segment references must be strictly ordered",
+            ));
+        }
+        let ordinal = expected
+            .entry((reference.history, index_order_tag(reference.order)))
+            .or_default();
+        if reference.ordinal != *ordinal {
+            return Err(fault(
+                "encoding/index-segment-gap",
+                "segment ordinals must be contiguous",
+            ));
+        }
+        *ordinal += 1;
+        last_key = Some(key);
+    }
+    Ok(())
+}
+
+fn index_order_tag(order: IndexOrder) -> u8 {
+    match order {
+        IndexOrder::Eavt => 0,
+        IndexOrder::Aevt => 1,
+        IndexOrder::Avet => 2,
+        IndexOrder::Vaet => 3,
+    }
+}
+
+fn decode_index_order(tag: u8) -> Result<IndexOrder, SemanticError> {
+    match tag {
+        0 => Ok(IndexOrder::Eavt),
+        1 => Ok(IndexOrder::Aevt),
+        2 => Ok(IndexOrder::Avet),
+        3 => Ok(IndexOrder::Vaet),
+        _ => Err(invalid_tag("index order", tag)),
+    }
 }
 
 /// Canonical digest of an unordered primitive transaction request.

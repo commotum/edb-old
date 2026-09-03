@@ -6,8 +6,10 @@ use crate::{
 use postgres::{Client, GenericClient, NoTls};
 use std::collections::BTreeMap;
 
-const MIGRATION_VERSION: i64 = 1;
-const MIGRATION_SQL: &str = include_str!("../migrations/0001_atomic.sql");
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_atomic.sql")),
+    (2, include_str!("../migrations/0002_peer_indexes.sql")),
+];
 const GENESIS_HASH: Digest = [0; 32];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,7 +58,6 @@ impl PostgresStore {
     }
 
     pub fn migrate(&mut self) -> Result<(), SemanticError> {
-        let checksum = sha256(MIGRATION_SQL.as_bytes());
         let mut transaction = self
             .client
             .transaction()
@@ -64,30 +65,33 @@ impl PostgresStore {
         transaction
             .query_one("SELECT pg_advisory_xact_lock($1)", &[&0x41544f4d_i64])
             .map_err(|error| postgres_error("postgres/migration-lock", error))?;
-        transaction
-            .batch_execute(MIGRATION_SQL)
-            .map_err(|error| postgres_error("postgres/migration-ddl", error))?;
-        let stored = transaction
-            .query_opt(
-                "SELECT checksum FROM atomic_schema_migrations WHERE version = $1",
-                &[&MIGRATION_VERSION],
-            )
-            .map_err(|error| postgres_error("postgres/migration-read", error))?;
-        if let Some(row) = stored {
-            let stored: Vec<u8> = row.get(0);
-            if stored.as_slice() != checksum {
-                return Err(fault(
-                    "postgres/migration-checksum-mismatch",
-                    "installed migration 1 differs from this binary",
-                ));
-            }
-        } else {
+        for (version, sql) in MIGRATIONS {
+            let checksum = sha256(sql.as_bytes());
             transaction
-                .execute(
-                    "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
-                    &[&MIGRATION_VERSION, &&checksum[..]],
+                .batch_execute(sql)
+                .map_err(|error| postgres_error("postgres/migration-ddl", error))?;
+            let stored = transaction
+                .query_opt(
+                    "SELECT checksum FROM atomic_schema_migrations WHERE version = $1",
+                    &[version],
                 )
-                .map_err(|error| postgres_error("postgres/migration-record", error))?;
+                .map_err(|error| postgres_error("postgres/migration-read", error))?;
+            if let Some(row) = stored {
+                let stored: Vec<u8> = row.get(0);
+                if stored.as_slice() != checksum {
+                    return Err(fault(
+                        "postgres/migration-checksum-mismatch",
+                        format!("installed migration {version} differs from this binary"),
+                    ));
+                }
+            } else {
+                transaction
+                    .execute(
+                        "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
+                        &[version, &&checksum[..]],
+                    )
+                    .map_err(|error| postgres_error("postgres/migration-record", error))?;
+            }
         }
         transaction
             .commit()
@@ -352,13 +356,13 @@ impl PostgresStore {
     }
 }
 
-struct Recovered {
-    database: Database,
-    final_transaction: Option<DurableTransaction>,
-    final_hash: Digest,
+pub(crate) struct Recovered {
+    pub(crate) database: Database,
+    pub(crate) final_transaction: Option<DurableTransaction>,
+    pub(crate) final_hash: Digest,
 }
 
-fn recover_to<C: GenericClient>(
+pub(crate) fn recover_to<C: GenericClient>(
     client: &mut C,
     database_id: &str,
     target_basis: u64,
@@ -525,7 +529,7 @@ fn unknown_outcome(request_key: &str, message: impl Into<String>) -> SemanticErr
     .detail("request_key", request_key)
 }
 
-fn postgres_error(code: &'static str, error: postgres::Error) -> SemanticError {
+pub(crate) fn postgres_error(code: &'static str, error: postgres::Error) -> SemanticError {
     let category = match error.as_db_error().map(|error| error.code().code()) {
         Some("23505" | "40001" | "40P01") => ErrorCategory::Conflict,
         Some("42501") => ErrorCategory::Forbidden,

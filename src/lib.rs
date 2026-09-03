@@ -9,6 +9,7 @@ mod datom;
 mod encoding;
 mod error;
 mod index;
+mod peer;
 mod postgres;
 mod schema;
 mod transaction;
@@ -19,11 +20,14 @@ pub use database::{
 };
 pub use datom::{Datom, IndexOrder};
 pub use encoding::{
-    Digest, DurableTransaction, decode_schema, decode_transaction, encode_schema,
-    encode_transaction, request_digest, sha256, transaction_hash,
+    Digest, DurableTransaction, IndexManifest, IndexSegment, SegmentRef, decode_index_manifest,
+    decode_index_segment, decode_schema, decode_transaction, encode_index_manifest,
+    encode_index_segment, encode_schema, encode_transaction, request_digest, sha256,
+    transaction_hash,
 };
 pub use error::{ErrorCategory, SemanticError};
 pub use index::IndexPrefix;
+pub use peer::{CacheStats, IndexBuildFault, IndexBuildReceipt, Peer, PostgresIndexer};
 pub use postgres::{CommitFault, CommitReceipt, PostgresStore};
 pub use schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};

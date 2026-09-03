@@ -139,6 +139,13 @@ impl IndexRoots {
         Ok(&datoms[start..])
     }
 
+    pub(crate) fn reverse_seek(&self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
+        prefix.validate()?;
+        let datoms = self.get(prefix.order());
+        let end = datoms.partition_point(|datom| !compare_prefix(datom, prefix).is_gt());
+        Ok(datoms[..end].iter().rev().cloned().collect())
+    }
+
     pub(crate) fn avet_range(
         &self,
         attribute: u32,

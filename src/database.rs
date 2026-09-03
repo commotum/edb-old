@@ -220,6 +220,110 @@ impl Database {
         self.next_eid
     }
 
+    /// Reconstitute a verified immutable value from a persistent index base.
+    ///
+    /// This is intentionally crate-private: durable manifests are the only
+    /// caller, and all ordinary state transitions continue through `with` or
+    /// `apply_committed`.
+    pub(crate) fn from_index_base(
+        schema: Schema,
+        basis_t: u64,
+        next_eid: u64,
+        current_datoms: Vec<Datom>,
+        history_chunks: Vec<Vec<Datom>>,
+        schema_chunks: Vec<Vec<SchemaChange>>,
+    ) -> Result<Self, SemanticError> {
+        if basis_t == 0
+            || history_chunks.len() != usize::try_from(basis_t).unwrap_or(usize::MAX)
+            || schema_chunks.len() != usize::try_from(basis_t).unwrap_or(usize::MAX)
+        {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "index/base-basis-mismatch",
+                "index base must contain one history and schema chunk per positive basis",
+            ));
+        }
+        let tx_instant_attribute = schema
+            .resolve_ident(&crate::Keyword::new("db", "txInstant"))
+            .ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::Fault,
+                    "index/missing-tx-instant",
+                    "index base schema has no :db/txInstant",
+                )
+            })?;
+        let mut current = Vec::with_capacity(current_datoms.len());
+        for datom in &current_datoms {
+            if !datom.added || datom.tx == 0 || datom.tx > basis_t {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "index/invalid-current-datom",
+                    "current index base contains a retraction or invalid transaction",
+                ));
+            }
+            schema.validate_value(schema.attribute(datom.attribute)?, &datom.value)?;
+            current.push(CurrentFact {
+                entity: datom.entity,
+                attribute: datom.attribute,
+                value: datom.value.clone(),
+                tx: datom.tx,
+            });
+        }
+        current.sort_by(compare_current);
+        if current
+            .windows(2)
+            .any(|pair| compare_current(&pair[0], &pair[1]).is_eq())
+        {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "index/duplicate-current-datom",
+                "current index base contains duplicate facts",
+            ));
+        }
+        let last_tx_instant = history_chunks
+            .last()
+            .and_then(|chunk| {
+                chunk.iter().find_map(|datom| {
+                    (datom.entity == basis_t
+                        && datom.attribute == tx_instant_attribute
+                        && datom.added)
+                        .then(|| match datom.value {
+                            Value::Instant(value) => Some(value),
+                            _ => None,
+                        })
+                        .flatten()
+                })
+            })
+            .ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::Fault,
+                    "index/invalid-last-tx-instant",
+                    "index base lacks its final transaction instant",
+                )
+            })?;
+        let history: Vec<Arc<[Datom]>> = history_chunks.into_iter().map(Arc::from).collect();
+        let schema_history: Vec<Arc<[SchemaChange]>> =
+            schema_chunks.into_iter().map(Arc::from).collect();
+        let current_datoms = facts_as_datoms(&current);
+        let mut database = Self {
+            schema: Arc::new(schema),
+            basis_t,
+            next_eid,
+            last_tx_instant: Some(last_tx_instant),
+            tx_instant_attribute: Some(tx_instant_attribute),
+            current: current.into(),
+            history: history.into(),
+            schema_history: schema_history.into(),
+            current_indexes: IndexRoots::default(),
+            history_indexes: IndexRoots::default(),
+        };
+        database.current_indexes = IndexRoots::build(&database.schema, current_datoms);
+        database.history_indexes =
+            IndexRoots::build(&database.schema, database.history_datoms().cloned());
+        database.validate_invariants()?;
+        Ok(database)
+    }
+
     /// Greatest transaction t whose transaction instant is at or before the
     /// supplied millisecond instant, or zero when the instant predates the DB.
     pub fn t_at_or_before_instant(&self, instant: i64) -> u64 {
@@ -324,6 +428,13 @@ impl Database {
     /// Current-database datoms at or after a left-contiguous index prefix.
     pub fn seek_datoms(&self, prefix: &IndexPrefix) -> Result<&[Datom], SemanticError> {
         self.current_indexes.seek(prefix)
+    }
+
+    /// Current datoms at or before a left-contiguous prefix, in reverse index
+    /// order. The owned result keeps the public API independent of a future
+    /// segmented reverse cursor.
+    pub fn reverse_seek_datoms(&self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
+        self.current_indexes.reverse_seek(prefix)
     }
 
     /// Historical assertions and retractions matching an index prefix.

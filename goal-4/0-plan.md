@@ -32,6 +32,12 @@ This goal realizes Stage 4 of `goal-0/0-plan.md`. It establishes the indexed dat
 
 ### 1. Recovered index and peer contract
 
+**Status:** Complete. `ARCHITECTURE.md` maps the recovered database/index,
+base/recent, connection, watcher, cache, consolidation, corruption, and
+`:db/noHistory` behavior to explicit Rust/PostgreSQL invariants. The sole
+material physical deviation is using PostgreSQL-transactional immutable
+manifests in place of a key/value-store root CAS.
+
 **Outcome:** The logical/physical boundary, peer state machine, and derived-data invariants are explicit before persistent index formats become commitments.
 
 **Focus:** Map documented database-value, index, cache, sync, transaction-report, history, and time-view behavior to the narrow `1.0.7705` paths; define base versus recent layers, authoritative versus derived state, snapshot identity, sync outcomes, consolidation visibility, cache trust, and corruption/rebuild policy; settle `:db/noHistory` semantics.
