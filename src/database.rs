@@ -3,8 +3,9 @@ use crate::idents::IdentIndex;
 use crate::index::IndexRoots;
 use crate::state_commitment::{CommitmentWork, SemanticStateCommitment};
 use crate::vocabulary::{
-    DB_IDENT, DB_TX_INSTANT, canonical_genesis_datoms, supported_system_attributes,
-    supported_system_idents,
+    DB_EXCISE, DB_EXCISE_ATTRS, DB_EXCISE_BEFORE, DB_EXCISE_BEFORE_T, DB_IDENT, DB_TX_INSTANT,
+    PRE_EXCISION_GENESIS_HASH, canonical_genesis_datoms, pre_excision_genesis_datoms,
+    supported_system_attributes, supported_system_idents,
 };
 use crate::{
     Cardinality, Datom, ErrorCategory, INITIAL_EIDX_FRONTIER, IndexOrder, IndexPrefix, Schema,
@@ -109,6 +110,30 @@ struct EnsureCheck {
     spec: u64,
     required: Vec<u32>,
     predicates: Vec<String>,
+}
+
+/// The time boundary exactly as it existed when `:db/excise` was asserted.
+/// The effective predicate is additionally capped by `request_t`, so facts
+/// added after the request can never be removed by delayed background work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExcisionCutoff {
+    BeforeT(u64),
+    BeforeInstant(i64),
+}
+
+/// One immutable excision predicate reconstructed from ordinary history.
+///
+/// Recovered 1.0.7705's repair detector identifies requests by the transaction
+/// that asserted A=15 and pulls the entity as-of that transaction
+/// (`tools/detect_ch197761.clj:51-73`). Keeping the same identity prevents
+/// later edits to the request entity from changing work already requested.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FrozenExcisionRequest {
+    pub(crate) request_entity: u64,
+    pub(crate) request_t: u64,
+    pub(crate) target: u64,
+    pub(crate) attributes: BTreeSet<u64>,
+    pub(crate) cutoff: Option<ExcisionCutoff>,
 }
 
 /// One pure, fully assessed successor plus the predicate checks that remain
@@ -635,6 +660,149 @@ impl Database {
             .collect()
     }
 
+    /// Reconstruct every currently pending excision request after a durable
+    /// processed-through frontier. Request data is read as-of the transaction
+    /// that asserted `:db/excise`, not from the mutable current entity.
+    pub(crate) fn pending_excision_requests_after(
+        &self,
+        processed_through_t: u64,
+    ) -> Result<Vec<FrozenExcisionRequest>, SemanticError> {
+        let targets = self.current_indexes.matching(&IndexPrefix::Aevt {
+            attribute: DB_EXCISE as u32,
+            entity: None,
+            value: None,
+        })?;
+        let mut requests = Vec::new();
+        for target_datom in targets {
+            let request_t = tx_to_t(target_datom.tx).map_err(|error| {
+                SemanticError::new(
+                    ErrorCategory::Fault,
+                    "excision/invalid-request-transaction",
+                    format!("excision request has an invalid assertion transaction: {error}"),
+                )
+            })?;
+            if request_t <= processed_through_t {
+                continue;
+            }
+            requests.push(self.freeze_excision_assertion(target_datom)?);
+        }
+        requests.sort_by_key(|request| (request.request_t, request.request_entity));
+        Ok(requests)
+    }
+
+    /// Historical excision assertions are an audit surface, distinct from the
+    /// current A=15 assertions that still need background work. A later
+    /// ordinary retraction removes a request from the pending set but does not
+    /// erase the assertion from history.
+    pub(crate) fn historical_excision_requests(
+        &self,
+    ) -> Result<Vec<FrozenExcisionRequest>, SemanticError> {
+        let assertions = self.history_indexes.matching(&IndexPrefix::Aevt {
+            attribute: DB_EXCISE as u32,
+            entity: None,
+            value: None,
+        })?;
+        let mut requests = assertions
+            .iter()
+            .filter(|datom| datom.added)
+            .map(|datom| self.freeze_excision_assertion(datom))
+            .collect::<Result<Vec<_>, _>>()?;
+        requests.sort_by_key(|request| (request.request_t, request.request_entity));
+        Ok(requests)
+    }
+
+    fn freeze_excision_assertion(
+        &self,
+        target_datom: &Datom,
+    ) -> Result<FrozenExcisionRequest, SemanticError> {
+        let request_t = tx_to_t(target_datom.tx).map_err(|error| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "excision/invalid-request-transaction",
+                format!("excision request has an invalid assertion transaction: {error}"),
+            )
+        })?;
+        let as_asserted = self.datoms(View::AsOf(request_t), IndexOrder::Eavt);
+        let request_datoms: Vec<_> = as_asserted
+            .iter()
+            .filter(|datom| datom.entity == target_datom.entity)
+            .collect();
+        let targets: Vec<_> = request_datoms
+            .iter()
+            .filter_map(|datom| {
+                (datom.attribute == DB_EXCISE as u32)
+                    .then_some(&datom.value)
+                    .and_then(|value| match value {
+                        Value::Ref(target) => Some(*target),
+                        _ => None,
+                    })
+            })
+            .collect();
+        let target = match targets.as_slice() {
+            [target] => *target,
+            _ => {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "excision/invalid-frozen-target",
+                    "an excision assertion does not reconstruct to exactly one reference target",
+                ));
+            }
+        };
+        let attributes = request_datoms
+            .iter()
+            .filter_map(|datom| {
+                (datom.attribute == DB_EXCISE_ATTRS as u32)
+                    .then_some(&datom.value)
+                    .and_then(|value| match value {
+                        Value::Ref(attribute) => Some(*attribute),
+                        _ => None,
+                    })
+            })
+            .collect();
+        let before_t = one_excision_value(&request_datoms, DB_EXCISE_BEFORE_T as u32)?;
+        let before = one_excision_value(&request_datoms, DB_EXCISE_BEFORE as u32)?;
+        let cutoff = match (before_t, before) {
+            (None, None) => None,
+            (Some(Value::Long(value)), None) => Some(ExcisionCutoff::BeforeT(
+                normalize_excision_before_t(*value)?,
+            )),
+            (None, Some(Value::Instant(value))) => Some(ExcisionCutoff::BeforeInstant(*value)),
+            (Some(_), Some(_)) => {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "excision/frozen-cutoff-conflict",
+                    "frozen excision request contains both beforeT and before",
+                ));
+            }
+            _ => {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "excision/invalid-frozen-cutoff",
+                    "frozen excision request cutoff has the wrong stored type",
+                ));
+            }
+        };
+        Ok(FrozenExcisionRequest {
+            request_entity: target_datom.entity,
+            request_t,
+            target,
+            attributes,
+            cutoff,
+        })
+    }
+
+    /// Resolve the exclusive transaction boundary of a frozen request. The
+    /// request transaction is always an additional cap, preserving recovered
+    /// `pred-and-extent`'s `< request-t` rule even if indexing is delayed.
+    pub(crate) fn excision_before_t(&self, request: &FrozenExcisionRequest) -> u64 {
+        let requested = match request.cutoff {
+            Some(ExcisionCutoff::BeforeT(t)) => t,
+            Some(ExcisionCutoff::BeforeInstant(instant)) => self.t_at_or_after_instant(instant),
+            None => request.request_t,
+        };
+        request.request_t.min(requested)
+    }
+
     /// Exact current-database matches for a left-contiguous index prefix.
     pub fn datoms_with_prefix(&self, prefix: &IndexPrefix) -> Result<&[Datom], SemanticError> {
         self.current_indexes.matching(prefix)
@@ -741,6 +909,7 @@ impl Database {
         }
         validate_cardinality(&self.schema, &self.current)?;
         validate_uniqueness(&self.schema, &self.current)?;
+        validate_excision_requests(&self.current)?;
         for fact in self.current.iter() {
             let attribute = self.schema.attribute(fact.attribute)?;
             self.schema.validate_value(attribute, &fact.value)?;
@@ -904,7 +1073,11 @@ impl Database {
         final_current: &[CurrentFact],
         logical: &[LogicalDatom],
     ) -> Result<Vec<SchemaChange>, SemanticError> {
-        for required in canonical_genesis_datoms() {
+        // Protect the exact stored root information, not whatever a newer
+        // binary now emits for newly created databases. Recovered Datomic
+        // installs bootstrap data upgrades as ordinary transactions; mutating
+        // old genesis here would silently change the root chain identity.
+        for required in self.genesis.iter() {
             if !contains_fact(
                 final_current,
                 required.entity,
@@ -918,7 +1091,9 @@ impl Database {
             }
         }
         for system in supported_system_attributes() {
-            if successor.attribute(system.id)? != &system {
+            if self.schema.attribute(system.id).is_ok()
+                && successor.attribute(system.id)? != &system
+            {
                 return Err(SemanticError::incorrect(
                     "schema/native-attribute-immutable",
                     format!(
@@ -965,10 +1140,10 @@ impl Database {
                     changes.push(SchemaChange::Alter(proposed.clone()));
                 }
                 Err(_) => {
-                    if supported_system_idents()
+                    let reserved = supported_system_idents()
                         .iter()
-                        .any(|(entity, _)| *entity == u64::from(proposed.id))
-                    {
+                        .any(|(entity, _)| *entity == u64::from(proposed.id));
+                    if reserved && !self.is_exact_excision_bootstrap_upgrade(successor, proposed) {
                         return Err(SemanticError::incorrect(
                             "schema/reserved-system-entity",
                             format!(
@@ -984,6 +1159,34 @@ impl Database {
         }
         successor.validate_tuple_installations(&installed)?;
         Ok(changes)
+    }
+
+    fn is_exact_excision_bootstrap_upgrade(
+        &self,
+        successor: &Schema,
+        proposed: &crate::Attribute,
+    ) -> bool {
+        const IDS: [u32; 4] = [
+            DB_EXCISE as u32,
+            DB_EXCISE_ATTRS as u32,
+            DB_EXCISE_BEFORE_T as u32,
+            DB_EXCISE_BEFORE as u32,
+        ];
+        same_stored_datoms(&self.genesis, &pre_excision_genesis_datoms())
+            && IDS.contains(&proposed.id)
+            && supported_system_attributes()
+                .iter()
+                .find(|attribute| attribute.id == proposed.id)
+                == Some(proposed)
+            && IDS.iter().all(|id| {
+                self.schema.attribute(*id).is_err()
+                    && successor.attribute(*id).is_ok_and(|candidate| {
+                        supported_system_attributes()
+                            .iter()
+                            .find(|attribute| attribute.id == *id)
+                            == Some(candidate)
+                    })
+            })
     }
 
     pub fn lookup(&self, attribute: u32, value: &Value) -> Result<Option<u64>, SemanticError> {
@@ -1018,6 +1221,27 @@ impl Database {
     pub(crate) fn apply_committed(
         &self,
         transaction: &crate::DurableTransaction,
+    ) -> Result<Self, SemanticError> {
+        self.apply_committed_with_excision(transaction, false)
+    }
+
+    /// Replay a transaction from a generation whose history was filtered by
+    /// an authenticated excision rewrite. A later retraction can legitimately
+    /// remain after the earlier assertion it once retracted was removed. Only
+    /// that one non-material shape is relaxed; duplicate additions, schema
+    /// transitions, transaction identity, instants, cardinality, uniqueness,
+    /// and every other recovery invariant remain strict.
+    pub(crate) fn apply_excised_committed(
+        &self,
+        transaction: &crate::DurableTransaction,
+    ) -> Result<Self, SemanticError> {
+        self.apply_committed_with_excision(transaction, true)
+    }
+
+    fn apply_committed_with_excision(
+        &self,
+        transaction: &crate::DurableTransaction,
+        allow_dangling_retractions: bool,
     ) -> Result<Self, SemanticError> {
         let t = self.basis_t.checked_add(1).ok_or_else(|| {
             SemanticError::new(
@@ -1123,9 +1347,15 @@ impl Database {
                     format!("committed schema hooks are invalid: {error}"),
                 )
             })?;
+        self.validate_exact_committed_excision_bootstrap_upgrade(
+            &logical,
+            &transaction.tx_data,
+            tx_instant,
+        )?;
         for datom in &transaction.tx_data {
             let existed = contains_fact(&self.current, datom.entity, datom.attribute, &datom.value);
             if existed == datom.added
+                && !(allow_dangling_retractions && !datom.added && !existed)
                 && !(datom.added && datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32)
             {
                 return Err(SemanticError::new(
@@ -1137,6 +1367,7 @@ impl Database {
         }
 
         let mut final_current = apply_logical(&self.current, &logical, tx);
+        validate_excision_requests(&final_current)?;
         let proposed_history: Vec<_> = self
             .history_datoms()
             .chain(transaction.tx_data.iter())
@@ -1308,6 +1539,7 @@ impl Database {
         dedupe(&mut logical);
         validate_same_transaction(&self.schema, &logical)?;
         let mut final_current = apply_logical(&self.current, &logical, tx);
+        validate_excision_requests(&final_current)?;
         let mut tx_data = material_changes(&self.current, &final_current, &logical, tx);
         tx_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
         let proposed_history: Vec<_> = self
@@ -1506,6 +1738,50 @@ impl Database {
         Ok(())
     }
 
+    fn validate_exact_committed_excision_bootstrap_upgrade(
+        &self,
+        logical: &[LogicalDatom],
+        committed: &[Datom],
+        tx_instant: i64,
+    ) -> Result<(), SemanticError> {
+        const IDS: [u64; 4] = [
+            DB_EXCISE,
+            DB_EXCISE_ATTRS,
+            DB_EXCISE_BEFORE_T,
+            DB_EXCISE_BEFORE,
+        ];
+        let touches_upgrade = logical.iter().any(|datom| {
+            IDS.contains(&datom.entity)
+                || ((datom.attribute == crate::DB_INSTALL_ATTRIBUTE as u32
+                    || datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32)
+                    && matches!(datom.value, Value::Ref(target) if IDS.contains(&target)))
+        });
+        if !touches_upgrade || self.schema.attribute(DB_EXCISE as u32).is_ok() {
+            return Ok(());
+        }
+
+        let ops = supported_system_attributes()
+            .into_iter()
+            .filter(|attribute| IDS.contains(&u64::from(attribute.id)))
+            .map(TxOp::InstallAttribute)
+            .collect::<Vec<_>>();
+        let expected = self.with(&ops, tx_instant).map_err(|error| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/invalid-excision-bootstrap-upgrade",
+                format!("cannot construct canonical excision bootstrap upgrade: {error}"),
+            )
+        })?;
+        if !same_stored_datoms(committed, &expected.tx_data) {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/noncanonical-excision-bootstrap-upgrade",
+                "reserved excision vocabulary must be installed by its exact canonical transaction",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_attribute_predicates_with(
         &self,
         schema: &Schema,
@@ -1557,6 +1833,7 @@ impl Database {
         let mut installed = Vec::new();
         let mut candidate = self.schema.as_ref().clone();
         let mut changes = Vec::new();
+        let excision_bootstrap_upgrade = self.is_exact_excision_bootstrap_ops(ops);
 
         // First form the complete descriptor set. This temporary Rust value
         // is only a lowering aid for composite names; it is discarded and the
@@ -1578,9 +1855,15 @@ impl Database {
             }
             crate::schema_eid_to_attr_id(u64::from(attribute.id))?;
             if install {
-                if supported_system_idents()
+                let reserved = supported_system_idents()
                     .iter()
-                    .any(|(entity, _)| *entity == u64::from(attribute.id))
+                    .any(|(entity, _)| *entity == u64::from(attribute.id));
+                if reserved
+                    && !(excision_bootstrap_upgrade
+                        && matches!(
+                            u64::from(attribute.id),
+                            DB_EXCISE | DB_EXCISE_ATTRS | DB_EXCISE_BEFORE_T | DB_EXCISE_BEFORE
+                        ))
                 {
                     return Err(SemanticError::incorrect(
                         "schema/reserved-system-entity",
@@ -1693,6 +1976,26 @@ impl Database {
         });
         validate_frontier(allocation_frontier)?;
         Ok((logical, changes, allocation_frontier))
+    }
+
+    fn is_exact_excision_bootstrap_ops(&self, ops: &[TxOp]) -> bool {
+        const IDS: [u32; 4] = [
+            DB_EXCISE as u32,
+            DB_EXCISE_ATTRS as u32,
+            DB_EXCISE_BEFORE_T as u32,
+            DB_EXCISE_BEFORE as u32,
+        ];
+        if !same_stored_datoms(&self.genesis, &pre_excision_genesis_datoms()) || ops.len() != 4 {
+            return false;
+        }
+        IDS.iter().all(|id| {
+            let expected = supported_system_attributes()
+                .into_iter()
+                .find(|attribute| attribute.id == *id)
+                .expect("every excision bootstrap id has a descriptor");
+            ops.iter()
+                .any(|op| matches!(op, TxOp::InstallAttribute(attribute) if attribute == &expected))
+        })
     }
 
     fn resolve_tempids(
@@ -2556,6 +2859,98 @@ fn validate_uniqueness(schema: &Schema, facts: &[CurrentFact]) -> Result<(), Sem
     Ok(())
 }
 
+fn validate_excision_requests(facts: &[CurrentFact]) -> Result<(), SemanticError> {
+    let request_entities: BTreeSet<_> = facts
+        .iter()
+        .filter(|fact| fact.attribute == DB_EXCISE as u32)
+        .map(|fact| fact.entity)
+        .collect();
+    for entity in request_entities {
+        let before_t = facts
+            .iter()
+            .find(|fact| fact.entity == entity && fact.attribute == DB_EXCISE_BEFORE_T as u32);
+        let before = facts
+            .iter()
+            .find(|fact| fact.entity == entity && fact.attribute == DB_EXCISE_BEFORE as u32);
+        if before_t.is_some() && before.is_some() {
+            return Err(SemanticError::incorrect(
+                "transaction/excision-cutoff-conflict",
+                "an excision request may use at most one of :db.excise/beforeT and :db.excise/before",
+            ));
+        }
+        if let Some(fact) = before_t {
+            let Value::Long(value) = &fact.value else {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "kernel/excision-cutoff-type",
+                    ":db.excise/beforeT does not contain a long",
+                ));
+            };
+            normalize_excision_before_t(*value)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_excision_before_t(value: i64) -> Result<u64, SemanticError> {
+    let encoded = u64::try_from(value).map_err(|_| {
+        SemanticError::incorrect(
+            "transaction/excision-before-t",
+            ":db.excise/beforeT must be a non-negative t or transaction entity id",
+        )
+    })?;
+    let partition = eid_to_part(encoded).map_err(|error| {
+        SemanticError::incorrect(
+            "transaction/excision-before-t",
+            format!(":db.excise/beforeT is outside the entity-id range: {error}"),
+        )
+    })?;
+    match partition {
+        crate::DB_PARTITION => {
+            if encoded > crate::MAX_EIDX {
+                Err(SemanticError::incorrect(
+                    "transaction/excision-before-t",
+                    ":db.excise/beforeT exceeds the logical transaction range",
+                ))
+            } else {
+                Ok(encoded)
+            }
+        }
+        crate::TX_PARTITION => tx_to_t(encoded).map_err(|error| {
+            SemanticError::incorrect(
+                "transaction/excision-before-t",
+                format!(":db.excise/beforeT contains an invalid transaction id: {error}"),
+            )
+        }),
+        partition => Err(SemanticError::incorrect(
+            "transaction/excision-before-t",
+            format!(
+                ":db.excise/beforeT entity id belongs to partition {partition}, not the transaction partition"
+            ),
+        )),
+    }
+}
+
+fn one_excision_value<'a>(
+    datoms: &[&'a Datom],
+    attribute: u32,
+) -> Result<Option<&'a Value>, SemanticError> {
+    let values: Vec<_> = datoms
+        .iter()
+        .filter(|datom| datom.attribute == attribute)
+        .map(|datom| &datom.value)
+        .collect();
+    match values.as_slice() {
+        [] => Ok(None),
+        [value] => Ok(Some(*value)),
+        _ => Err(SemanticError::new(
+            ErrorCategory::Fault,
+            "excision/frozen-cardinality",
+            "frozen excision request violates cardinality-one",
+        )),
+    }
+}
+
 fn validate_uniqueness_for_attribute(
     facts: &[CurrentFact],
     attribute: u32,
@@ -2717,12 +3112,25 @@ fn validate_genesis_information(genesis: &[Datom]) -> Result<(), SemanticError> 
             "genesis must be a nonempty, strictly ordered set of t=0 assertions",
         ));
     }
-    let expected = canonical_genesis_datoms();
-    if !same_stored_datoms(genesis, &expected) {
+    let current = canonical_genesis_datoms();
+    let pre_excision = pre_excision_genesis_datoms();
+    let exact_pre_excision = if same_stored_datoms(genesis, &pre_excision) {
+        let encoded = crate::encode_genesis(genesis).map_err(|error| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "kernel/legacy-genesis-encoding",
+                format!("recognized legacy genesis cannot be canonically encoded: {error}"),
+            )
+        })?;
+        crate::sha256(&encoded) == PRE_EXCISION_GENESIS_HASH
+    } else {
+        false
+    };
+    if !same_stored_datoms(genesis, &current) && !exact_pre_excision {
         return Err(SemanticError::new(
             ErrorCategory::Fault,
             "kernel/noncanonical-genesis",
-            "genesis must equal the exact native system information set",
+            "genesis must equal a recognized exact native system information set",
         ));
     }
     Ok(())
@@ -3231,5 +3639,415 @@ mod schema_hook_recovery_tests {
                 (3, crate::DB_ALTER_ATTRIBUTE as u32),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod excision_kernel_tests {
+    use super::*;
+    use crate::vocabulary::pre_excision_genesis_datoms;
+    use crate::{DB_DOC, DB_FULLTEXT, DurableTransaction};
+
+    fn durable(report: &TxReport) -> DurableTransaction {
+        DurableTransaction {
+            database_id: "excision-kernel-test".into(),
+            basis_t: report.db_after.basis_t(),
+            previous_hash: [0; 32],
+            eidx_frontier: report.db_after.eidx_frontier(),
+            tempids: report.tempids.clone(),
+            tx_data: report.tx_data.clone(),
+        }
+    }
+
+    fn install_excision_vocabulary(database: &Database) -> TxReport {
+        let ids = [
+            DB_EXCISE as u32,
+            DB_EXCISE_ATTRS as u32,
+            DB_EXCISE_BEFORE_T as u32,
+            DB_EXCISE_BEFORE as u32,
+        ];
+        let ops = supported_system_attributes()
+            .into_iter()
+            .filter(|attribute| ids.contains(&attribute.id))
+            .map(TxOp::InstallAttribute)
+            .collect::<Vec<_>>();
+        database.with(&ops, 10).unwrap()
+    }
+
+    #[test]
+    fn exact_legacy_genesis_upgrades_through_ordinary_queryable_information() {
+        let legacy_genesis = pre_excision_genesis_datoms();
+        let legacy = Database::from_genesis(legacy_genesis.clone()).unwrap();
+        assert!(legacy.schema().attribute(DB_EXCISE as u32).is_err());
+
+        let upgrade = install_excision_vocabulary(&legacy);
+        assert_eq!(upgrade.db_after.basis_t(), 1);
+        assert_eq!(upgrade.db_after.genesis_datoms(), legacy_genesis);
+        for id in [
+            DB_EXCISE,
+            DB_EXCISE_ATTRS,
+            DB_EXCISE_BEFORE_T,
+            DB_EXCISE_BEFORE,
+        ] {
+            assert!(upgrade.db_after.schema().attribute(id as u32).is_ok());
+            assert!(upgrade.tx_data.iter().any(|datom| {
+                datom.entity == id && datom.attribute == DB_IDENT as u32 && datom.added
+            }));
+            assert!(upgrade.tx_data.iter().any(|datom| {
+                datom.entity == crate::DB_PART_DB
+                    && datom.attribute == crate::DB_INSTALL_ATTRIBUTE as u32
+                    && datom.value == Value::Ref(id)
+                    && datom.added
+            }));
+        }
+
+        let recovered = legacy.apply_committed(&durable(&upgrade)).unwrap();
+        assert!(recovered.same_information_as(&upgrade.db_after));
+        let recovered_history = recovered.datoms(View::History, IndexOrder::Eavt);
+        for id in [
+            DB_EXCISE,
+            DB_EXCISE_ATTRS,
+            DB_EXCISE_BEFORE_T,
+            DB_EXCISE_BEFORE,
+        ] {
+            assert!(recovered_history.iter().any(|datom| {
+                datom.entity == id && datom.attribute == DB_IDENT as u32 && datom.added
+            }));
+            assert!(recovered_history.iter().any(|datom| {
+                datom.entity == crate::DB_PART_DB
+                    && datom.attribute == crate::DB_INSTALL_ATTRIBUTE as u32
+                    && datom.value == Value::Ref(id)
+                    && datom.added
+            }));
+        }
+    }
+
+    #[test]
+    fn partial_or_modified_reserved_upgrade_is_rejected() {
+        let legacy = Database::from_genesis(pre_excision_genesis_datoms()).unwrap();
+        let excise = supported_system_attributes()
+            .into_iter()
+            .find(|attribute| attribute.id == DB_EXCISE as u32)
+            .unwrap();
+        let error = legacy
+            .with(&[TxOp::InstallAttribute(excise)], 10)
+            .unwrap_err();
+        assert_eq!(error.code, "schema/reserved-system-entity");
+
+        let upgrade = install_excision_vocabulary(&legacy);
+        let mut mixed = durable(&upgrade);
+        mixed.tx_data.push(Datom {
+            entity: make_eid(USER_PARTITION, 1).unwrap(),
+            attribute: DB_DOC as u32,
+            value: Value::String("smuggled".into()),
+            tx: t_to_tx(1).unwrap(),
+            added: true,
+        });
+        mixed
+            .tx_data
+            .sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+        assert_eq!(
+            legacy.apply_committed(&mixed).unwrap_err().code,
+            "recovery/noncanonical-excision-bootstrap-upgrade"
+        );
+    }
+
+    #[test]
+    fn malformed_cutoffs_fail_in_the_request_transaction() {
+        let database = Database::bootstrap().unwrap();
+        let error = database
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE as u32,
+                        value: TxValue::Entity(EntityRef::Id(DB_FULLTEXT)),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE_BEFORE_T as u32,
+                        value: Value::Long(1).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE_BEFORE as u32,
+                        value: Value::Instant(1).into(),
+                    },
+                ],
+                10,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "transaction/excision-cutoff-conflict");
+
+        let negative = database
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE as u32,
+                        value: TxValue::Entity(EntityRef::Id(DB_FULLTEXT)),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE_BEFORE_T as u32,
+                        value: Value::Long(-1).into(),
+                    },
+                ],
+                10,
+            )
+            .unwrap_err();
+        assert_eq!(negative.code, "transaction/excision-before-t");
+    }
+
+    #[test]
+    fn protected_target_request_commits_and_freezes_at_a15_assertion() {
+        let database = Database::bootstrap().unwrap();
+        // Full-text behavior itself is deliberately unsupported, so there can
+        // be no installed native full-text attribute to excise. Keep that
+        // limitation distinct from the documented behavior below: requests
+        // targeting protected db-partition information commit as recorded
+        // no-ops at the background predicate layer.
+        assert!(database.schema().attribute(DB_FULLTEXT as u32).is_err());
+        let request = database
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE as u32,
+                        value: TxValue::Entity(EntityRef::Id(crate::DB_PART_DB)),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE_ATTRS as u32,
+                        value: TxValue::Entity(EntityRef::Id(DB_IDENT)),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE_BEFORE_T as u32,
+                        value: Value::Long(crate::t_to_tx(1).unwrap() as i64).into(),
+                    },
+                ],
+                100,
+            )
+            .unwrap();
+        let request_entity = request.tempids["request"];
+        let edited = request
+            .db_after
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Id(request_entity),
+                        attribute: DB_EXCISE_ATTRS as u32,
+                        value: TxValue::Entity(EntityRef::Id(DB_TX_INSTANT)),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Id(request_entity),
+                        attribute: DB_EXCISE_BEFORE_T as u32,
+                        value: Value::Long(0).into(),
+                    },
+                ],
+                200,
+            )
+            .unwrap();
+
+        let frozen = edited.db_after.pending_excision_requests_after(0).unwrap();
+        assert_eq!(
+            frozen,
+            vec![FrozenExcisionRequest {
+                request_entity,
+                request_t: 1,
+                target: crate::DB_PART_DB,
+                attributes: BTreeSet::from([DB_IDENT]),
+                cutoff: Some(ExcisionCutoff::BeforeT(1)),
+            }]
+        );
+        assert!(
+            edited
+                .db_after
+                .pending_excision_requests_after(1)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retracted_a15_leaves_a_historical_audit_but_is_not_pending() {
+        let database = Database::bootstrap().unwrap();
+        let request = database
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("request".into()),
+                    attribute: DB_EXCISE as u32,
+                    value: TxValue::Entity(EntityRef::Id(crate::DB_PART_DB)),
+                }],
+                100,
+            )
+            .unwrap();
+        let request_entity = request.tempids["request"];
+        let retracted = request
+            .db_after
+            .with(
+                &[TxOp::Retract {
+                    entity: EntityRef::Id(request_entity),
+                    attribute: DB_EXCISE as u32,
+                    value: Some(TxValue::Entity(EntityRef::Id(crate::DB_PART_DB))),
+                }],
+                200,
+            )
+            .unwrap()
+            .db_after;
+        assert!(
+            retracted
+                .pending_excision_requests_after(0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            retracted.historical_excision_requests().unwrap(),
+            vec![FrozenExcisionRequest {
+                request_entity,
+                request_t: 1,
+                target: crate::DB_PART_DB,
+                attributes: BTreeSet::new(),
+                cutoff: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn instant_cutoff_is_exclusive_and_capped_by_request_time() {
+        let database = Database::bootstrap().unwrap();
+        let one = database.with(&[], 100).unwrap().db_after;
+        let two = one.with(&[], 200).unwrap().db_after;
+        let request = two
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE as u32,
+                        value: TxValue::Entity(EntityRef::Id(DB_FULLTEXT)),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("request".into()),
+                        attribute: DB_EXCISE_BEFORE as u32,
+                        value: Value::Instant(200).into(),
+                    },
+                ],
+                300,
+            )
+            .unwrap()
+            .db_after;
+        let frozen = request.pending_excision_requests_after(0).unwrap();
+        assert_eq!(request.excision_before_t(&frozen[0]), 2);
+
+        let duplicate_one = Database::bootstrap()
+            .unwrap()
+            .with(&[], 100)
+            .unwrap()
+            .db_after;
+        let duplicate_two = duplicate_one.with(&[], 100).unwrap().db_after;
+        assert_eq!(duplicate_two.t_at_or_after_instant(100), 1);
+    }
+
+    #[test]
+    fn cutoff_matrix_uses_a_strict_boundary_and_never_crosses_request_t() {
+        let one = Database::bootstrap()
+            .unwrap()
+            .with(&[], 100)
+            .unwrap()
+            .db_after;
+        let two = one.with(&[], 200).unwrap().db_after;
+        let three = two.with(&[], 200).unwrap().db_after;
+        let four = three.with(&[], 300).unwrap().db_after;
+        let request = |request_t, cutoff| FrozenExcisionRequest {
+            request_entity: make_eid(USER_PARTITION, 1).unwrap(),
+            request_t,
+            target: crate::DB_PART_DB,
+            attributes: BTreeSet::new(),
+            cutoff,
+        };
+
+        assert_eq!(
+            four.excision_before_t(&request(4, Some(ExcisionCutoff::BeforeT(2)))),
+            2
+        );
+        assert_eq!(
+            four.excision_before_t(&request(4, Some(ExcisionCutoff::BeforeInstant(150)))),
+            2
+        );
+        assert_eq!(
+            four.excision_before_t(&request(4, Some(ExcisionCutoff::BeforeInstant(200)))),
+            2,
+            "every transaction at the duplicate exact instant is excluded"
+        );
+        assert_eq!(
+            four.excision_before_t(&request(3, Some(ExcisionCutoff::BeforeT(99)))),
+            3,
+            "a future cutoff cannot remove facts at or after request_t"
+        );
+        assert_eq!(four.excision_before_t(&request(3, None)), 3);
+        assert_eq!(
+            four.excision_before_t(&request(4, Some(ExcisionCutoff::BeforeT(0)))),
+            0
+        );
+    }
+
+    #[test]
+    fn excision_replay_accepts_only_the_legitimate_dangling_retraction_case() {
+        let base = Database::bootstrap().unwrap();
+        let first = base
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("entity".into()),
+                    attribute: DB_DOC as u32,
+                    value: Value::String("old".into()).into(),
+                }],
+                100,
+            )
+            .unwrap();
+        let entity = first.tempids["entity"];
+        let second = first
+            .db_after
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(entity),
+                    attribute: DB_DOC as u32,
+                    value: Value::String("new".into()).into(),
+                }],
+                200,
+            )
+            .unwrap();
+        assert!(second.tx_data.iter().any(|datom| {
+            datom.entity == entity
+                && datom.attribute == DB_DOC as u32
+                && datom.value == Value::String("old".into())
+                && !datom.added
+        }));
+
+        let mut filtered_first = durable(&first);
+        filtered_first
+            .tx_data
+            .retain(|datom| !(datom.entity == entity && datom.attribute == DB_DOC as u32));
+        let after_filtered_first = base.apply_excised_committed(&filtered_first).unwrap();
+        let second_envelope = durable(&second);
+        assert_eq!(
+            after_filtered_first
+                .apply_committed(&second_envelope)
+                .unwrap_err()
+                .code,
+            "recovery/nonmaterial-datom"
+        );
+        let recovered = after_filtered_first
+            .apply_excised_committed(&second_envelope)
+            .unwrap();
+        assert_eq!(
+            recovered
+                .values(entity, DB_DOC as u32)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![Value::String("new".into())]
+        );
+        recovered.validate_invariants().unwrap();
     }
 }

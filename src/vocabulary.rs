@@ -16,6 +16,15 @@ use crate::value::{Keyword, Value};
 
 pub const MAX_SCHEMA_ATTRIBUTE_ID: u32 = 1_048_576;
 
+/// SHA-256 of the canonical ATMC format-3 encoded genesis emitted immediately
+/// before native excision vocabulary support. This pins the one legacy root
+/// profile accepted for the ordinary bootstrap-data upgrade; future
+/// vocabulary additions must not silently redefine it.
+pub(crate) const PRE_EXCISION_GENESIS_HASH: [u8; 32] = [
+    0x30, 0xbf, 0x2a, 0xf2, 0xb3, 0xda, 0x46, 0x7b, 0xb9, 0x3e, 0x41, 0xbf, 0xf4, 0xf5, 0x72, 0x16,
+    0x11, 0x55, 0xc4, 0x3d, 0x98, 0x13, 0x9d, 0xa0, 0x8e, 0xc3, 0xfb, 0x3f, 0xaf, 0x3a, 0x88, 0xdb,
+];
+
 pub const DB_PART_DB: u64 = 0;
 pub const DB_ADD: u64 = 1;
 pub const DB_RETRACT: u64 = 2;
@@ -24,6 +33,12 @@ pub const DB_PART_USER: u64 = 4;
 
 pub const DB_IDENT: u64 = 10;
 pub const DB_INSTALL_ATTRIBUTE: u64 = 13;
+/// Excision request target. Recovered fixed id from Datomic Pro 1.0.7705
+/// `datomic.db/BOOT-IDS` and `bootstrap-data-upgrades`.
+pub const DB_EXCISE: u64 = 15;
+pub const DB_EXCISE_ATTRS: u64 = 16;
+pub const DB_EXCISE_BEFORE_T: u64 = 17;
+pub const DB_EXCISE_BEFORE: u64 = 18;
 pub const DB_ALTER_ATTRIBUTE: u64 = 19;
 
 pub const DB_TYPE_REF: u64 = 20;
@@ -208,6 +223,30 @@ pub fn supported_system_attributes() -> Vec<Attribute> {
             kw("db.install", "attribute"),
             ValueType::Ref,
             Cardinality::Many,
+        ),
+        Attribute::new(
+            attr_id(DB_EXCISE),
+            kw("db", "excise"),
+            ValueType::Ref,
+            Cardinality::One,
+        ),
+        Attribute::new(
+            attr_id(DB_EXCISE_ATTRS),
+            kw("db.excise", "attrs"),
+            ValueType::Ref,
+            Cardinality::Many,
+        ),
+        Attribute::new(
+            attr_id(DB_EXCISE_BEFORE_T),
+            kw("db.excise", "beforeT"),
+            ValueType::Long,
+            Cardinality::One,
+        ),
+        Attribute::new(
+            attr_id(DB_EXCISE_BEFORE),
+            kw("db.excise", "before"),
+            ValueType::Instant,
+            Cardinality::One,
         ),
         Attribute::new(
             attr_id(DB_ALTER_ATTRIBUTE),
@@ -397,6 +436,32 @@ pub fn canonical_genesis_datoms() -> Vec<Datom> {
     datoms
 }
 
+/// Exact native genesis emitted before the excision vocabulary was restored.
+///
+/// Existing catalogs must never have their stored genesis reinterpreted or
+/// rewritten: its hash is the root of the authenticated transaction chain.
+/// Migration installs ids 15--18 as one ordinary schema-information
+/// transaction, matching recovered 1.0.7705
+/// `datomic.db/bootstrap-data-upgrades` (`db.clj:5235-5254`). This helper is
+/// intentionally crate-private and exact; it is not another supported way to
+/// create a database.
+pub(crate) fn pre_excision_genesis_datoms() -> Vec<Datom> {
+    canonical_genesis_datoms()
+        .into_iter()
+        .filter(|datom| {
+            !matches!(
+                datom.entity,
+                DB_EXCISE | DB_EXCISE_ATTRS | DB_EXCISE_BEFORE_T | DB_EXCISE_BEFORE
+            ) && !(datom.entity == DB_PART_DB
+                && u64::from(datom.attribute) == DB_INSTALL_ATTRIBUTE
+                && matches!(
+                    datom.value,
+                    Value::Ref(DB_EXCISE | DB_EXCISE_ATTRS | DB_EXCISE_BEFORE_T | DB_EXCISE_BEFORE)
+                ))
+        })
+        .collect()
+}
+
 fn indexed(mut attribute: Attribute) -> Attribute {
     attribute.indexed = true;
     attribute
@@ -438,6 +503,10 @@ const SYSTEM_IDENT_SPECS: &[(u64, &str, &str)] = &[
     (DB_PART_USER, "db.part", "user"),
     (DB_IDENT, "db", "ident"),
     (DB_INSTALL_ATTRIBUTE, "db.install", "attribute"),
+    (DB_EXCISE, "db", "excise"),
+    (DB_EXCISE_ATTRS, "db.excise", "attrs"),
+    (DB_EXCISE_BEFORE_T, "db.excise", "beforeT"),
+    (DB_EXCISE_BEFORE, "db.excise", "before"),
     (DB_ALTER_ATTRIBUTE, "db.alter", "attribute"),
     (DB_TYPE_REF, "db.type", "ref"),
     (DB_TYPE_KEYWORD, "db.type", "keyword"),
@@ -600,6 +669,53 @@ mod tests {
                 && datom.attribute == attr_id(DB_CARDINALITY)
                 && datom.value == Value::Ref(DB_CARDINALITY_ONE)
         }));
+        for (entity, ident, value_type, cardinality) in [
+            (
+                DB_EXCISE,
+                kw("db", "excise"),
+                DB_TYPE_REF,
+                DB_CARDINALITY_ONE,
+            ),
+            (
+                DB_EXCISE_ATTRS,
+                kw("db.excise", "attrs"),
+                DB_TYPE_REF,
+                DB_CARDINALITY_MANY,
+            ),
+            (
+                DB_EXCISE_BEFORE_T,
+                kw("db.excise", "beforeT"),
+                DB_TYPE_LONG,
+                DB_CARDINALITY_ONE,
+            ),
+            (
+                DB_EXCISE_BEFORE,
+                kw("db.excise", "before"),
+                DB_TYPE_INSTANT,
+                DB_CARDINALITY_ONE,
+            ),
+        ] {
+            assert!(genesis.iter().any(|datom| {
+                datom.entity == entity
+                    && datom.attribute == attr_id(DB_IDENT)
+                    && datom.value == Value::Keyword(ident.clone())
+            }));
+            assert!(genesis.iter().any(|datom| {
+                datom.entity == entity
+                    && datom.attribute == attr_id(DB_VALUE_TYPE)
+                    && datom.value == Value::Ref(value_type)
+            }));
+            assert!(genesis.iter().any(|datom| {
+                datom.entity == entity
+                    && datom.attribute == attr_id(DB_CARDINALITY)
+                    && datom.value == Value::Ref(cardinality)
+            }));
+            assert!(genesis.iter().any(|datom| {
+                datom.entity == DB_PART_DB
+                    && datom.attribute == attr_id(DB_INSTALL_ATTRIBUTE)
+                    && datom.value == Value::Ref(entity)
+            }));
+        }
         assert!(
             !supported_system_attributes()
                 .iter()
@@ -611,6 +727,28 @@ mod tests {
                 datom.entity == DB_PART_DB
                     && datom.attribute == attr_id(DB_INSTALL_ATTRIBUTE)
                     && datom.value == Value::Ref(u64::from(attribute.id))
+            }));
+        }
+    }
+
+    #[test]
+    fn pre_excision_genesis_is_one_exact_upgrade_behind_current() {
+        let legacy = pre_excision_genesis_datoms();
+        assert!(legacy.len() < canonical_genesis_datoms().len());
+        let encoded = crate::encode_genesis(&legacy).unwrap();
+        assert_eq!(encoded.len(), 4_051);
+        assert_eq!(crate::sha256(&encoded), PRE_EXCISION_GENESIS_HASH);
+        for entity in [
+            DB_EXCISE,
+            DB_EXCISE_ATTRS,
+            DB_EXCISE_BEFORE_T,
+            DB_EXCISE_BEFORE,
+        ] {
+            assert!(!legacy.iter().any(|datom| {
+                datom.entity == entity
+                    || (datom.entity == DB_PART_DB
+                        && datom.attribute == attr_id(DB_INSTALL_ATTRIBUTE)
+                        && datom.value == Value::Ref(entity))
             }));
         }
     }
