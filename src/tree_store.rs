@@ -5,9 +5,14 @@
 //! the append-only publication row is inserted last.  This module deliberately
 //! does not define a storage trait; PostgreSQL is the only durable boundary.
 
+use crate::persistent_tree::{TreeNode, TreeNodeSet, decode_tree_node, validate_tree};
 use crate::postgres::{postgres_error, verify_schema_compatibility};
-use crate::{Digest, ErrorCategory, IndexOrder, PostgresConnectionConfig, SemanticError, sha256};
+use crate::{
+    Digest, ErrorCategory, IndexOrder, PersistentTreeManifest, PostgresConnectionConfig,
+    SemanticError, sha256,
+};
 use postgres::Client;
+use std::collections::{BTreeMap, BTreeSet};
 
 const TREE_MANIFEST_VERSION: i16 = 4;
 const ROOT_BINDING_COUNT: usize = 8;
@@ -281,6 +286,8 @@ impl PostgresTreeStore {
             for root in &manifest.roots {
                 verify_root_row(&mut transaction, manifest.manifest_hash, root)?;
             }
+            let closure = derive_manifest_closure(&mut transaction, manifest)?;
+            verify_manifest_closure(&mut transaction, manifest.manifest_hash, &closure)?;
             transaction
                 .commit()
                 .map_err(|error| postgres_error("tree/publication-retry-commit", error))?;
@@ -373,6 +380,36 @@ impl PostgresTreeStore {
             root_binding_writes = root_binding_writes.saturating_add(inserted);
             verify_root_row(&mut transaction, manifest.manifest_hash, root)?;
         }
+
+        // Traverse and validate the exact immutable graph before the root-last
+        // publication. Closure rows are derived metadata, but once recorded
+        // they are immutable and let GC avoid reading live tree payloads.
+        let closure = derive_manifest_closure(&mut transaction, manifest)?;
+        for hash in &closure {
+            transaction
+                .execute(
+                    "INSERT INTO atomic_tree_manifest_nodes (manifest_hash, node_hash) \
+                     VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[&&manifest.manifest_hash[..], &&hash[..]],
+                )
+                .map_err(|error| postgres_error("tree/closure-node-insert", error))?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO atomic_tree_manifest_closures \
+                       (manifest_hash, complete, node_count, problem_code) \
+                 VALUES ($1, true, $2, NULL) ON CONFLICT DO NOTHING",
+                &[
+                    &&manifest.manifest_hash[..],
+                    &sql_u64(
+                        u64::try_from(closure.len())
+                            .map_err(|_| fault("tree/closure-size", "tree closure exceeds u64"))?,
+                        "tree closure count",
+                    )?,
+                ],
+            )
+            .map_err(|error| postgres_error("tree/closure-insert", error))?;
+        verify_manifest_closure(&mut transaction, manifest.manifest_hash, &closure)?;
 
         // This is intentionally the final write. A crash or rollback before
         // here cannot make the candidate discoverable by a peer.
@@ -475,6 +512,9 @@ impl PostgresTreeStore {
                      ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
                    LEFT JOIN atomic_database_generations g \
                      ON g.database_id = m.database_id \
+                   JOIN atomic_tree_manifest_closures c \
+                     ON c.manifest_hash = m.manifest_hash \
+                    AND c.complete AND c.problem_code IS NULL \
                   WHERE p.database_id = $1 AND p.publication_revision = $2",
                 &[&database_id, &revision],
             )
@@ -536,6 +576,112 @@ impl PostgresTreeStore {
             .saturating_add(manifest.payload.len() as u64);
         Ok(Some(manifest))
     }
+}
+
+fn derive_manifest_closure(
+    client: &mut postgres::Transaction<'_>,
+    manifest: &TreeManifestRecord,
+) -> Result<BTreeSet<Digest>, SemanticError> {
+    let envelope = PersistentTreeManifest::decode(&manifest.payload)?;
+    if envelope.database_id != manifest.database_id
+        || envelope.publication_revision != manifest.publication_revision
+        || envelope.basis_t != manifest.basis_t
+        || envelope.tx_hash != manifest.tx_hash
+        || envelope.state_hash != manifest.state_hash
+        || envelope.excision_generation != manifest.excision_generation
+        || envelope.eidx_frontier != manifest.eidx_frontier
+        || envelope.trees.len() != manifest.roots.len()
+        || !envelope.trees.iter().all(|tree| {
+            manifest.roots.iter().any(|root| {
+                root.order == tree.descriptor.order
+                    && root.history == tree.descriptor.history
+                    && root.root_hash == tree.descriptor.root_hash
+                    && root.datom_count == tree.descriptor.count
+                    && root.encoded_bytes == tree.root_bytes
+            })
+        })
+    {
+        return Err(fault(
+            "tree/closure-manifest-mismatch",
+            "canonical tree manifest disagrees with publication metadata or roots",
+        ));
+    }
+    let mut pending = envelope
+        .trees
+        .iter()
+        .map(|tree| tree.descriptor.root_hash)
+        .collect::<Vec<_>>();
+    let mut nodes = BTreeMap::new();
+    while let Some(hash) = pending.pop() {
+        if nodes.contains_key(&hash) {
+            continue;
+        }
+        let payload: Vec<u8> = client
+            .query_opt(
+                "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
+                &[&&hash[..]],
+            )
+            .map_err(|error| postgres_error("tree/closure-node-read", error))?
+            .ok_or_else(|| {
+                fault(
+                    "tree/closure-missing-node",
+                    "tree closure references an absent immutable node",
+                )
+            })?
+            .get(0);
+        match decode_tree_node(&hash, &payload)? {
+            TreeNode::Root(root) => {
+                pending.extend(root.directories.into_iter().map(|child| child.hash));
+            }
+            TreeNode::Directory(directory) => {
+                pending.extend(directory.leaves.into_iter().map(|child| child.hash));
+            }
+            TreeNode::Leaf(_) => {}
+        }
+        nodes.insert(hash, payload);
+    }
+    let node_set = TreeNodeSet::from_nodes(nodes);
+    for tree in &envelope.trees {
+        validate_tree(&tree.descriptor, &node_set)?;
+    }
+    Ok(node_set.iter().map(|(hash, _)| *hash).collect())
+}
+
+fn verify_manifest_closure(
+    client: &mut postgres::Transaction<'_>,
+    manifest_hash: Digest,
+    expected: &BTreeSet<Digest>,
+) -> Result<(), SemanticError> {
+    let status = client
+        .query_opt(
+            "SELECT complete, node_count, problem_code \
+             FROM atomic_tree_manifest_closures WHERE manifest_hash = $1",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("tree/closure-status-read", error))?
+        .ok_or_else(|| fault("tree/missing-closure", "tree manifest closure is absent"))?;
+    let complete: bool = status.get(0);
+    let count = pg_u64(status.get(1), "tree closure count")?;
+    let problem: Option<String> = status.get(2);
+    let stored = client
+        .query(
+            "SELECT node_hash FROM atomic_tree_manifest_nodes \
+             WHERE manifest_hash = $1 ORDER BY node_hash",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("tree/closure-nodes-read", error))?
+        .into_iter()
+        .map(|row| digest(row.get(0), "stored closure node hash"))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let expected_count = u64::try_from(expected.len())
+        .map_err(|_| fault("tree/closure-size", "tree closure exceeds u64"))?;
+    if !complete || problem.is_some() || count != expected_count || stored != *expected {
+        return Err(fault(
+            "tree/closure-mismatch",
+            "stored tree closure is incomplete or disagrees with exact reachability",
+        ));
+    }
+    Ok(())
 }
 
 fn verify_manifest_row(

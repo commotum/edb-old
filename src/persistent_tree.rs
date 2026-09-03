@@ -15,7 +15,7 @@ use crate::index::IndexPrefix;
 use crate::recent::NoHistoryPair;
 use crate::{Datom, ErrorCategory, IndexOrder, SemanticError, Value};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem::size_of;
 
 const TREE_MAGIC: &[u8; 4] = b"ATIX";
@@ -2048,6 +2048,71 @@ pub fn validate_tree(
     Ok(())
 }
 
+/// Result of exhaustive tree authentication through a one-node-at-a-time
+/// resolver. The fixed shallow shape guarantees at most root + directory +
+/// leaf decoded nodes are live together; raw encoded payloads are dropped
+/// before descending.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamingTreeValidation {
+    pub node_hashes: BTreeSet<Digest>,
+    pub nodes_read: u64,
+    pub peak_live_decoded_nodes: u64,
+    pub peak_live_payloads: u64,
+}
+
+/// Exhaustively validate one complete persistent tree without materializing
+/// its node payload set. The loader is invoked once per reachable hash in the
+/// tree and may copy the authenticated bytes to durable backup storage before
+/// returning them. Hashes are retained because callers need the exact closure
+/// in a root descriptor; payload memory remains bounded by one canonical node.
+pub fn validate_tree_streaming<F>(
+    descriptor: &TreeDescriptor,
+    mut load: F,
+) -> Result<StreamingTreeValidation, SemanticError>
+where
+    F: FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
+{
+    let mut state = StreamingValidationState::default();
+    state.visit(descriptor.root_hash)?;
+    state.payload_loaded();
+    let root_bytes = load(&descriptor.root_hash)?;
+    let root = expect_root(decode_tree_node(&descriptor.root_hash, &root_bytes)?)?;
+    drop(root_bytes);
+    state.enter_node();
+    require_tree_identity(
+        root.order,
+        root.history,
+        descriptor.order,
+        descriptor.history,
+    )?;
+    if root.count != descriptor.count {
+        return Err(fault(
+            "tree/descriptor-count-mismatch",
+            "tree descriptor and root disagree on datom count",
+        ));
+    }
+
+    let span = validate_root_children_streaming(&root, &mut load, &mut state)?;
+    let first_hash = span.first.as_ref().map(datom_boundary_hash).transpose()?;
+    let last_hash = span.last.as_ref().map(datom_boundary_hash).transpose()?;
+    if span.count != descriptor.count
+        || first_hash != descriptor.first_hash
+        || last_hash != descriptor.last_hash
+    {
+        return Err(fault(
+            "tree/descriptor-range-mismatch",
+            "tree descriptor does not match the resolved root range",
+        ));
+    }
+    state.leave_node();
+    Ok(StreamingTreeValidation {
+        nodes_read: state.visited.len() as u64,
+        node_hashes: state.visited.into_iter().collect(),
+        peak_live_decoded_nodes: state.peak_live_nodes,
+        peak_live_payloads: state.peak_live_payloads,
+    })
+}
+
 /// Return the first datom greater than or equal to a complete index key.
 /// Routing follows sparse lower bounds in the declared order for EAVT, AEVT,
 /// AVET, and VAET alike.
@@ -3016,6 +3081,105 @@ fn leaf_lower_bound(leaf: &LeafSegment, key: &Datom, order: IndexOrder) -> usize
         }
     }
     low
+}
+
+#[derive(Default)]
+struct StreamingValidationState {
+    visited: HashSet<Digest>,
+    live_nodes: u64,
+    peak_live_nodes: u64,
+    peak_live_payloads: u64,
+}
+
+impl StreamingValidationState {
+    fn visit(&mut self, hash: Digest) -> Result<(), SemanticError> {
+        if !self.visited.insert(hash) {
+            return Err(fault(
+                "tree/duplicate-child",
+                "one tree cannot route to the same content node twice",
+            ));
+        }
+        Ok(())
+    }
+
+    fn payload_loaded(&mut self) {
+        self.peak_live_payloads = self.peak_live_payloads.max(1);
+    }
+
+    fn enter_node(&mut self) {
+        self.live_nodes += 1;
+        self.peak_live_nodes = self.peak_live_nodes.max(self.live_nodes);
+    }
+
+    fn leave_node(&mut self) {
+        self.live_nodes -= 1;
+    }
+}
+
+fn validate_root_children_streaming<F>(
+    root: &RootNode,
+    load: &mut F,
+    state: &mut StreamingValidationState,
+) -> Result<Span, SemanticError>
+where
+    F: FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
+{
+    let mut combined = Span::default();
+    for reference in &root.directories {
+        state.visit(reference.hash)?;
+        state.payload_loaded();
+        let bytes = load(&reference.hash)?;
+        let directory = expect_directory(decode_tree_node(&reference.hash, &bytes)?)?;
+        drop(bytes);
+        state.enter_node();
+        require_tree_identity(directory.order, directory.history, root.order, root.history)?;
+        let span = validate_directory_children_streaming(&directory, load, state)?;
+        require_child_span(reference, &span, combined.last.as_ref(), root.order)?;
+        combined.push(span, root.order)?;
+        state.leave_node();
+    }
+    if combined.count != root.count {
+        return Err(fault(
+            "tree/root-count-mismatch",
+            "root count does not equal its resolved directory counts",
+        ));
+    }
+    Ok(combined)
+}
+
+fn validate_directory_children_streaming<F>(
+    directory: &DirectoryNode,
+    load: &mut F,
+    state: &mut StreamingValidationState,
+) -> Result<Span, SemanticError>
+where
+    F: FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
+{
+    let mut combined = Span::default();
+    for reference in &directory.leaves {
+        state.visit(reference.hash)?;
+        state.payload_loaded();
+        let bytes = load(&reference.hash)?;
+        let leaf = expect_leaf(decode_tree_node(&reference.hash, &bytes)?)?;
+        drop(bytes);
+        state.enter_node();
+        require_tree_identity(leaf.order, leaf.history, directory.order, directory.history)?;
+        let span = Span {
+            first: leaf.first(),
+            last: leaf.last(),
+            count: leaf.len() as u64,
+        };
+        require_child_span(reference, &span, combined.last.as_ref(), directory.order)?;
+        combined.push(span, directory.order)?;
+        state.leave_node();
+    }
+    if combined.count != directory.count {
+        return Err(fault(
+            "tree/directory-count-mismatch",
+            "directory count does not equal its resolved leaf counts",
+        ));
+    }
+    Ok(combined)
 }
 
 fn validate_root_children(
@@ -4433,6 +4597,21 @@ mod tests {
             let datoms = sorted_datoms(order, true);
             let build = build_tree(order, true, datoms.clone(), &tiny_config()).unwrap();
             validate_tree(&build.descriptor, &build.nodes).unwrap();
+            let streamed = validate_tree_streaming(&build.descriptor, |hash| {
+                build
+                    .nodes
+                    .get(hash)
+                    .map(<[u8]>::to_vec)
+                    .ok_or_else(|| fault("test/missing-node", "fixture node is absent"))
+            })
+            .unwrap();
+            assert_eq!(streamed.nodes_read as usize, build.nodes.len());
+            assert_eq!(
+                streamed.node_hashes,
+                build.nodes.iter().map(|(hash, _)| *hash).collect()
+            );
+            assert!(streamed.peak_live_decoded_nodes <= 3);
+            assert_eq!(streamed.peak_live_payloads, 1);
             assert_eq!(build.descriptor.count, datoms.len() as u64);
             assert!(build.stats.leaf_nodes > 1);
             assert!(build.stats.directory_nodes > 1);

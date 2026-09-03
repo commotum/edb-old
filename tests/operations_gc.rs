@@ -75,6 +75,85 @@ fn republish_same_basis(connection: &str, database_id: &str) -> TreeManifestReco
     successor
 }
 
+fn republish_with_forged_old_timestamp(connection: &str, database_id: &str) -> TreeManifestRecord {
+    let mut trees = PostgresTreeStore::connect(connection).unwrap();
+    let revision = trees.current_publication_revision(database_id).unwrap();
+    let current = trees.load_manifest(database_id, revision).unwrap().unwrap();
+    let mut envelope = PersistentTreeManifest::decode(&current.payload).unwrap();
+    envelope.publication_revision += 1;
+    let payload = envelope.encode().unwrap();
+    let successor = TreeManifestRecord {
+        publication_revision: envelope.publication_revision,
+        manifest_hash: sha256(&payload),
+        payload,
+        ..current.clone()
+    };
+    drop(trees);
+
+    let mut client = Client::connect(connection, NoTls).unwrap();
+    let mut transaction = client.transaction().unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_tree_manifests \
+               (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9)",
+            &[
+                &successor.database_id,
+                &(successor.publication_revision as i64),
+                &(successor.basis_t as i64),
+                &&successor.tx_hash[..],
+                &&successor.state_hash[..],
+                &(successor.excision_generation as i64),
+                &(successor.eidx_frontier as i64),
+                &&successor.manifest_hash[..],
+                &&successor.payload[..],
+            ],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_tree_manifest_roots \
+                   (manifest_hash, index_order, history, root_hash, datom_count, encoded_bytes) \
+             SELECT $1, index_order, history, root_hash, datom_count, encoded_bytes \
+               FROM atomic_tree_manifest_roots WHERE manifest_hash = $2",
+            &[&&successor.manifest_hash[..], &&current.manifest_hash[..]],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_tree_manifest_nodes (manifest_hash, node_hash) \
+             SELECT $1, node_hash FROM atomic_tree_manifest_nodes WHERE manifest_hash = $2",
+            &[&&successor.manifest_hash[..], &&current.manifest_hash[..]],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_tree_manifest_closures \
+                   (manifest_hash, complete, node_count, problem_code) \
+             SELECT $1, complete, node_count, problem_code \
+               FROM atomic_tree_manifest_closures WHERE manifest_hash = $2",
+            &[&&successor.manifest_hash[..], &&current.manifest_hash[..]],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_tree_publications \
+                   (database_id, publication_revision, basis_t, tx_hash, manifest_hash, published_at) \
+             VALUES ($1, $2, $3, $4, $5, clock_timestamp() - interval '31 days')",
+            &[
+                &successor.database_id,
+                &(successor.publication_revision as i64),
+                &(successor.basis_t as i64),
+                &&successor.tx_hash[..],
+                &&successor.manifest_hash[..],
+            ],
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    successor
+}
+
 fn tree_nodes_for_database(client: &mut Client, database_id: &str) -> BTreeSet<Digest> {
     let mut pending = client
         .query(
@@ -131,6 +210,14 @@ fn backdate_native_values(client: &mut Client, database_id: &str) {
         .unwrap();
     client
         .execute(
+            "UPDATE atomic_tree_retirements \
+                SET retired_at = clock_timestamp() - interval '31 days' \
+              WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap();
+    client
+        .execute(
             "UPDATE atomic_tree_manifests \
                 SET created_at = clock_timestamp() - interval '31 days' \
               WHERE database_id = $1",
@@ -162,7 +249,7 @@ fn pin_application_name(database_id: &str) -> String {
 }
 
 #[test]
-fn dry_run_and_apply_delete_only_unreachable_aged_content() {
+fn gc_retains_legacy_values_without_an_exact_retirement_mark() {
     let Some(connection) = connection() else {
         return;
     };
@@ -201,6 +288,11 @@ fn dry_run_and_apply_delete_only_unreachable_aged_content() {
     };
     let program_bytes = encode_program(&orphan_program).unwrap();
     let program_hash = sha256(&program_bytes);
+    // Content-first publishers may upload a node long before a manifest/root
+    // wins. Without an exact retired-manifest closure, even a very old value
+    // is an in-flight possibility rather than garbage.
+    let in_flight_node_bytes = b"content-first-node-awaiting-manifest".to_vec();
+    let in_flight_node_hash = sha256(&in_flight_node_bytes);
     let mut client = Client::connect(&connection, NoTls).unwrap();
     client
         .execute(
@@ -218,6 +310,14 @@ fn dry_run_and_apply_delete_only_unreachable_aged_content() {
             &[&&program_hash[..], &&program_bytes[..]],
         )
         .unwrap();
+    client
+        .execute(
+            "INSERT INTO atomic_tree_nodes (node_hash, payload, created_at) \
+             VALUES ($1, $2, clock_timestamp() - interval '31 days') \
+             ON CONFLICT DO NOTHING",
+            &[&&in_flight_node_hash[..], &&in_flight_node_bytes[..]],
+        )
+        .unwrap();
     let _ = db; // retain an immutable pre-GC value while storage is reclaimed
 
     let mut operator = PostgresOperator::connect(&connection).unwrap();
@@ -229,8 +329,9 @@ fn dry_run_and_apply_delete_only_unreachable_aged_content() {
         .garbage_inventory(MIN_GARBAGE_COLLECTION_AGE)
         .unwrap();
     assert!(!dry.applied);
-    assert!(dry.segment_hashes.contains(&segment_hash));
-    assert!(dry.program_hashes.contains(&program_hash));
+    assert!(dry.segment_hashes.is_empty());
+    assert!(dry.program_hashes.is_empty());
+    assert!(!dry.tree_node_hashes.contains(&in_flight_node_hash));
     assert_eq!(
         client
             .query_one(
@@ -241,12 +342,22 @@ fn dry_run_and_apply_delete_only_unreachable_aged_content() {
             .get::<_, i64>(0),
         1
     );
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*) FROM atomic_programs WHERE program_hash = $1",
+                &[&&program_hash[..]],
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
     let applied = operator
         .collect_garbage(MIN_GARBAGE_COLLECTION_AGE)
         .unwrap();
     assert!(applied.applied);
-    assert!(applied.segment_hashes.contains(&segment_hash));
-    assert!(applied.program_hashes.contains(&program_hash));
+    assert!(applied.segment_hashes.is_empty());
+    assert!(applied.program_hashes.is_empty());
     assert_eq!(
         client
             .query_one(
@@ -255,12 +366,82 @@ fn dry_run_and_apply_delete_only_unreachable_aged_content() {
             )
             .unwrap()
             .get::<_, i64>(0),
-        0
+        1
+    );
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*) FROM atomic_tree_nodes WHERE node_hash = $1",
+                &[&&in_flight_node_hash[..]],
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*) FROM atomic_programs WHERE program_hash = $1",
+                &[&&program_hash[..]],
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        1
     );
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
     assert_eq!(
         peer.db().values(user(42), ITEM_VALUE),
         vec![&Value::Long(1)]
+    );
+    service.shutdown();
+}
+
+#[test]
+fn forged_publication_time_cannot_backdate_the_retirement_mark() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("gc_retirement_clock");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&database_id, schema()).unwrap();
+    let service = common::start_service(&connection, &database_id);
+    common::transact(
+        &service,
+        "retirement-clock",
+        created.basis_t(),
+        &[add(1)],
+        1_000,
+    );
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+    indexer.consolidate().unwrap();
+    let forged = republish_with_forged_old_timestamp(&connection, &database_id);
+
+    let mut client = Client::connect(&connection, NoTls).unwrap();
+    let row = client
+        .query_one(
+            "SELECT p.published_at < clock_timestamp() - interval '30 days', \
+                    r.retired_at > clock_timestamp() - interval '1 minute' \
+               FROM atomic_tree_publications p \
+               JOIN atomic_tree_retirements r \
+                 ON r.database_id = p.database_id \
+                AND r.publication_revision = p.publication_revision - 1 \
+              WHERE p.database_id = $1 AND p.publication_revision = $2",
+            &[&database_id, &(forged.publication_revision as i64)],
+        )
+        .unwrap();
+    let publication_is_old: bool = row.get(0);
+    let retirement_is_recent: bool = row.get(1);
+    assert!(publication_is_old);
+    assert!(retirement_is_recent);
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    assert!(
+        operator
+            .garbage_inventory(MIN_GARBAGE_COLLECTION_AGE)
+            .unwrap()
+            .tree_publications
+            .is_empty()
     );
     service.shutdown();
 }
@@ -440,7 +621,6 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     );
     let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
     let publication_one = indexer.consolidate().unwrap();
-    assert_eq!(publication_one.publication_revision, 1);
 
     // Zero cache capacity ensures the retained snapshot must still be able to
     // fetch directories/leaves after GC, not merely return a cached answer.
@@ -449,16 +629,25 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     let snapshot_clones = (0..128).map(|_| old_snapshot.clone()).collect::<Vec<_>>();
     let publication_two = republish_same_basis(&connection, &database_id);
     assert_eq!(publication_two.basis_t, publication_one.basis_t);
-    assert_eq!(publication_two.publication_revision, 2);
+    assert_eq!(
+        publication_two.publication_revision,
+        publication_one.publication_revision + 1
+    );
 
     let second = common::transact(&service, "native-second", first.basis_t, &[add(2)], 2_000);
     let publication_three = indexer.consolidate().unwrap();
-    assert_eq!(publication_three.publication_revision, 3);
+    assert_eq!(
+        publication_three.publication_revision,
+        publication_two.publication_revision + 1
+    );
     assert_eq!(publication_three.basis_t, second.basis_t);
     peer.sync_to_snapshot(second.basis_t, Duration::from_secs(1))
         .unwrap();
     assert!(peer.refresh_index().unwrap());
-    assert_eq!(peer.durable_base_revision(), 3);
+    assert_eq!(
+        peer.durable_base_revision(),
+        publication_three.publication_revision
+    );
 
     // One PeerCore uses exactly one pin backend even while two physical roots
     // and many snapshot handles remain live.
@@ -478,14 +667,14 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     let dry_pinned = operator
         .garbage_inventory(MIN_GARBAGE_COLLECTION_AGE)
         .unwrap();
-    assert_eq!(
-        dry_pinned
-            .tree_publications
-            .iter()
-            .map(|candidate| candidate.publication_revision)
-            .collect::<Vec<_>>(),
-        vec![2]
-    );
+    let pinned_candidates = dry_pinned
+        .tree_publications
+        .iter()
+        .map(|candidate| candidate.publication_revision)
+        .collect::<BTreeSet<_>>();
+    assert!(pinned_candidates.contains(&publication_two.publication_revision));
+    assert!(!pinned_candidates.contains(&publication_one.publication_revision));
+    assert!(!pinned_candidates.contains(&publication_three.publication_revision));
     assert!(
         !dry_pinned
             .tree_manifest_hashes
@@ -520,7 +709,7 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
             .iter()
             .map(|candidate| candidate.publication_revision)
             .collect::<Vec<_>>(),
-        vec![1]
+        vec![publication_one.publication_revision]
     );
     assert!(
         !dry_released.tree_node_hashes.is_empty(),

@@ -807,6 +807,9 @@ fn load_latest_native_manifest<C: GenericClient>(
                JOIN atomic_transactions t \
                  ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
                 AND t.tx_hash = m.tx_hash AND t.state_hash = m.state_hash \
+               JOIN atomic_tree_manifest_closures c \
+                 ON c.manifest_hash = m.manifest_hash \
+                AND c.complete AND c.problem_code IS NULL \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.excision_generation = $3 \
               ORDER BY p.publication_revision DESC",
@@ -4033,6 +4036,9 @@ fn load_latest_tree_base<C: GenericClient>(
                JOIN atomic_transactions t \
                  ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
                 AND t.tx_hash = m.tx_hash AND t.state_hash = m.state_hash \
+               JOIN atomic_tree_manifest_closures c \
+                 ON c.manifest_hash = m.manifest_hash \
+                AND c.complete AND c.problem_code IS NULL \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.excision_generation = $3 \
               ORDER BY p.publication_revision DESC",

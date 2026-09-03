@@ -1,5 +1,6 @@
 use crate::database::{AssessedTransaction, PredicateRole};
 use crate::encoding::program_call_digest;
+use crate::persistent_tree::{TreeNode, decode_tree_node};
 use crate::program::ValidatedProgram;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
 use crate::{
@@ -185,12 +186,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         12,
         include_str!("../migrations/0012_tree_publication_revisions.sql"),
     ),
+    (
+        13,
+        include_str!("../migrations/0013_lineage_and_tree_gc.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 12;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 13;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -218,7 +223,10 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_tree_nodes",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
+    "atomic_tree_manifest_nodes",
+    "atomic_tree_manifest_closures",
     "atomic_tree_publications",
+    "atomic_tree_retirements",
 ];
 
 const WRITER_RUNTIME_TABLES: &[&str] = &["atomic_transactor_leases"];
@@ -230,6 +238,8 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_tree_nodes",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
+    "atomic_tree_manifest_nodes",
+    "atomic_tree_manifest_closures",
     "atomic_tree_publications",
 ];
 
@@ -327,6 +337,14 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
                 &[version, &&checksum[..]],
             )
             .map_err(|error| postgres_error("postgres/migration-record", error))?;
+    }
+    // Explicit migration is also the repair boundary for derived closure
+    // metadata written by an older/buggy v13 binary. Reauthenticate every
+    // published graph even when the schema version is already current; valid
+    // closures are rebuilt exactly and corrupt graphs retain an incomplete
+    // marker that makes GC fail closed without hiding the authoritative log.
+    if installed_version <= POSTGRES_SCHEMA_VERSION && POSTGRES_SCHEMA_VERSION >= 13 {
+        backfill_tree_manifest_closures(&mut transaction)?;
     }
     transaction
         .commit()
@@ -465,6 +483,248 @@ fn backfill_state_commitments<C: GenericClient>(client: &mut C) -> Result<(), Se
              ENABLE TRIGGER atomic_transactions_immutable",
         )
         .map_err(|error| postgres_error("postgres/state-backfill-enable-guard", error))
+}
+
+/// Authenticate the node graph of every v12 publication and persist exact
+/// closure metadata during migration 13. Derived corruption is scoped: an
+/// incomplete status blocks shared GC but does not make unrelated
+/// authoritative logs unopenable or prevent the catalog upgrade.
+fn backfill_tree_manifest_closures<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
+    let manifests = client
+        .query(
+            "SELECT DISTINCT manifest_hash FROM atomic_tree_publications \
+             ORDER BY manifest_hash",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/tree-closure-publications", error))?;
+    for row in manifests {
+        let manifest_hash = digest(row.get(0), "closure manifest hash")?;
+        let closure = authenticated_manifest_nodes(client, manifest_hash);
+        client
+            .query_one(
+                "SELECT set_config('atomic.tree_gc_active', 'v13', true)",
+                &[],
+            )
+            .map_err(|error| postgres_error("postgres/tree-closure-repair-privilege", error))?;
+        client
+            .execute(
+                "DELETE FROM atomic_tree_manifest_nodes WHERE manifest_hash = $1",
+                &[&&manifest_hash[..]],
+            )
+            .map_err(|error| postgres_error("postgres/tree-closure-repair-nodes", error))?;
+        client
+            .execute(
+                "DELETE FROM atomic_tree_manifest_closures WHERE manifest_hash = $1",
+                &[&&manifest_hash[..]],
+            )
+            .map_err(|error| postgres_error("postgres/tree-closure-repair-status", error))?;
+        client
+            .query_one(
+                "SELECT set_config('atomic.tree_gc_active', 'off', true)",
+                &[],
+            )
+            .map_err(|error| postgres_error("postgres/tree-closure-repair-guards", error))?;
+        match closure {
+            Ok(nodes) => {
+                for hash in &nodes {
+                    client
+                        .execute(
+                            "INSERT INTO atomic_tree_manifest_nodes \
+                                   (manifest_hash, node_hash) VALUES ($1, $2)",
+                            &[&&manifest_hash[..], &&hash[..]],
+                        )
+                        .map_err(|error| postgres_error("postgres/tree-closure-write", error))?;
+                }
+                client
+                    .execute(
+                        "INSERT INTO atomic_tree_manifest_closures \
+                               (manifest_hash, complete, node_count, problem_code) \
+                         VALUES ($1, true, $2, NULL)",
+                        &[
+                            &&manifest_hash[..],
+                            &i64::try_from(nodes.len()).map_err(|_| {
+                                SemanticError::new(
+                                    ErrorCategory::Unsupported,
+                                    "postgres/tree-closure-size",
+                                    "tree closure count exceeds PostgreSQL BIGINT",
+                                )
+                            })?,
+                        ],
+                    )
+                    .map_err(|error| postgres_error("postgres/tree-closure-status", error))?;
+            }
+            Err(error) => {
+                client
+                    .execute(
+                        "INSERT INTO atomic_tree_manifest_closures \
+                               (manifest_hash, complete, node_count, problem_code) \
+                         VALUES ($1, false, 0, $2)",
+                        &[&&manifest_hash[..], &error.code],
+                    )
+                    .map_err(|error| postgres_error("postgres/tree-closure-status", error))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn authenticated_manifest_nodes<C: GenericClient>(
+    client: &mut C,
+    manifest_hash: Digest,
+) -> Result<BTreeSet<Digest>, SemanticError> {
+    let row = client
+        .query_opt(
+            "SELECT p.database_id, p.publication_revision, p.basis_t, p.tx_hash, \
+                    m.state_hash, m.excision_generation, m.eidx_frontier, \
+                    m.manifest_version, m.payload, t.state_hash \
+               FROM atomic_tree_publications p \
+               JOIN atomic_tree_manifests m \
+                 ON m.database_id = p.database_id \
+                AND m.publication_revision = p.publication_revision \
+                AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
+                AND m.manifest_hash = p.manifest_hash \
+               JOIN atomic_transactions t \
+                 ON t.database_id = p.database_id AND t.basis_t = p.basis_t \
+                AND t.tx_hash = p.tx_hash \
+              WHERE p.manifest_hash = $1",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("postgres/tree-closure-manifest", error))?
+        .ok_or_else(|| {
+            fault(
+                "postgres/tree-closure-missing-manifest",
+                "published tree is missing its manifest or authoritative transaction",
+            )
+        })?;
+    let database_id: String = row.get(0);
+    let revision = pg_basis(row.get(1), "closure publication revision")?;
+    let basis_t = pg_basis(row.get(2), "closure publication basis")?;
+    let tx_hash = digest(row.get(3), "closure transaction hash")?;
+    let state_hash = digest(row.get(4), "closure state hash")?;
+    let generation = pg_basis(row.get(5), "closure excision generation")?;
+    let frontier = pg_basis(row.get(6), "closure entity frontier")?;
+    let version: i16 = row.get(7);
+    let payload: Vec<u8> = row.get(8);
+    let authoritative_state = digest(row.get(9), "closure authoritative state hash")?;
+    let manifest = crate::PersistentTreeManifest::decode(&payload)?;
+    if version != 4
+        || sha256(&payload) != manifest_hash
+        || manifest.database_id != database_id
+        || manifest.publication_revision != revision
+        || manifest.basis_t != basis_t
+        || manifest.tx_hash != tx_hash
+        || manifest.state_hash != state_hash
+        || state_hash != authoritative_state
+        || manifest.excision_generation != generation
+        || manifest.eidx_frontier != frontier
+    {
+        return Err(fault(
+            "postgres/tree-closure-manifest-mismatch",
+            "published tree manifest is not one canonical authoritative value",
+        ));
+    }
+    let root_rows = client
+        .query(
+            "SELECT index_order, history, root_hash, datom_count, encoded_bytes \
+               FROM atomic_tree_manifest_roots WHERE manifest_hash = $1",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("postgres/tree-closure-roots", error))?;
+    if root_rows.len() != manifest.trees.len() {
+        return Err(fault(
+            "postgres/tree-closure-root-count",
+            "published tree does not have exactly its eight relational root bindings",
+        ));
+    }
+    let mut relational_roots = BTreeMap::new();
+    for root in root_rows {
+        let order = match root.get::<_, i16>(0) {
+            value @ 0..=3 => value,
+            _ => {
+                return Err(fault(
+                    "postgres/tree-closure-root-order",
+                    "tree root binding has an invalid index order",
+                ));
+            }
+        };
+        let history: bool = root.get(1);
+        if relational_roots
+            .insert(
+                (order, history),
+                (
+                    digest(root.get(2), "closure root hash")?,
+                    pg_basis(root.get(3), "closure root count")?,
+                    pg_basis(root.get(4), "closure root bytes")?,
+                ),
+            )
+            .is_some()
+        {
+            return Err(fault(
+                "postgres/tree-closure-duplicate-root",
+                "tree manifest has a duplicate relational root binding",
+            ));
+        }
+    }
+    if !manifest.trees.iter().all(|tree| {
+        relational_roots.get(&(
+            match tree.descriptor.order {
+                crate::IndexOrder::Eavt => 0,
+                crate::IndexOrder::Aevt => 1,
+                crate::IndexOrder::Avet => 2,
+                crate::IndexOrder::Vaet => 3,
+            },
+            tree.descriptor.history,
+        )) == Some(&(
+            tree.descriptor.root_hash,
+            tree.descriptor.count,
+            tree.root_bytes,
+        ))
+    }) {
+        return Err(fault(
+            "postgres/tree-closure-root-mismatch",
+            "canonical tree manifest disagrees with its relational roots",
+        ));
+    }
+
+    let mut pending = manifest
+        .trees
+        .iter()
+        .map(|tree| tree.descriptor.root_hash)
+        .collect::<Vec<_>>();
+    let mut nodes = BTreeMap::new();
+    while let Some(hash) = pending.pop() {
+        if nodes.contains_key(&hash) {
+            continue;
+        }
+        let payload: Vec<u8> = client
+            .query_opt(
+                "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
+                &[&&hash[..]],
+            )
+            .map_err(|error| postgres_error("postgres/tree-closure-node", error))?
+            .ok_or_else(|| {
+                fault(
+                    "postgres/tree-closure-missing-node",
+                    "published tree references a missing immutable node",
+                )
+            })?
+            .get(0);
+        match decode_tree_node(&hash, &payload)? {
+            TreeNode::Root(root) => {
+                pending.extend(root.directories.into_iter().map(|child| child.hash));
+            }
+            TreeNode::Directory(directory) => {
+                pending.extend(directory.leaves.into_iter().map(|child| child.hash));
+            }
+            TreeNode::Leaf(_) => {}
+        }
+        nodes.insert(hash, payload);
+    }
+    let node_set = crate::persistent_tree::TreeNodeSet::from_nodes(nodes);
+    for tree in &manifest.trees {
+        crate::persistent_tree::validate_tree(&tree.descriptor, &node_set)?;
+    }
+    Ok(node_set.iter().map(|(hash, _)| *hash).collect())
 }
 
 fn reject_unsupported_populated_upgrade<C: GenericClient>(

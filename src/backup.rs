@@ -6,6 +6,13 @@
 //! node closure is copied as a recovery accelerator and rebound to the target
 //! timeline on restore. A missing tree is valid and restores by replaying the
 //! authoritative log; physical indexes never become backup authority.
+//!
+//! Live generation-zero envelopes still contain PostgreSQL catalog names.
+//! Backup canonicalizes those carriers onto the database's immutable random
+//! lineage, so rename does not recopy history or change a point root. Mutable
+//! named program aliases are operator configuration and are not database
+//! information; all program blobs reachable from temporal `:db/fn` history
+//! are included instead.
 
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
@@ -31,7 +38,9 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupPoint {
-    pub database_id: String,
+    /// Immutable database identity. Human catalog names are locators and are
+    /// deliberately absent from the canonical backup root.
+    pub lineage_id: String,
     pub basis_t: u64,
     pub manifest_hash: Digest,
     pub objects_written: usize,
@@ -61,15 +70,7 @@ struct ProgramRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct VersionRow {
-    name: String,
-    version: u64,
-    hash: Digest,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct Manifest {
-    database_id: String,
     lineage_id: String,
     basis: u64,
     genesis_hash: Digest,
@@ -77,8 +78,6 @@ struct Manifest {
     state_hashes: Vec<Digest>,
     requests: Vec<RequestRow>,
     programs: Vec<ProgramRow>,
-    versions: Vec<VersionRow>,
-    active: Vec<VersionRow>,
     tree: Option<TreeBackup>,
 }
 
@@ -90,7 +89,6 @@ struct TreeBackup {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BackupClaim {
-    database_id: String,
     lineage_id: String,
     genesis_hash: Digest,
 }
@@ -191,7 +189,6 @@ impl PortableBackup {
         ensure_claim(
             directory,
             &BackupClaim {
-                database_id: database_id.to_owned(),
                 lineage_id: lineage_id.clone(),
                 genesis_hash,
             },
@@ -222,10 +219,14 @@ impl PortableBackup {
                 "snapshot transaction chain is incomplete",
             ));
         }
-        let mut objects = BTreeMap::from([(genesis_hash, genesis)]);
+        let mut publisher = ObjectPublisher::new(directory, fault_at);
+        publisher.publish(genesis_hash, &genesis)?;
+        let mut source_transaction_hashes = Vec::with_capacity(tx_rows.len());
         let mut transactions = Vec::with_capacity(tx_rows.len());
+        let mut portable_frontiers = Vec::with_capacity(tx_rows.len());
         let mut state_hashes = Vec::with_capacity(tx_rows.len());
-        let mut previous = genesis_hash;
+        let mut source_previous = genesis_hash;
+        let mut portable_previous = genesis_hash;
         for (offset, row) in tx_rows.into_iter().enumerate() {
             let row_basis = unsigned(row.get(0), "transaction basis")?;
             let hash = digest(row.get(1), "transaction hash")?;
@@ -238,7 +239,7 @@ impl PortableBackup {
             if row_basis != offset as u64 + 1
                 || decoded.database_id != database_id
                 || decoded.basis_t != row_basis
-                || decoded.previous_hash != previous
+                || decoded.previous_hash != source_previous
                 || transaction_hash(&payload) != hash
             {
                 return Err(fault(
@@ -246,19 +247,38 @@ impl PortableBackup {
                     format!("invalid transaction {row_basis}"),
                 ));
             }
-            reconstructed = reconstructed.apply_committed(&decoded)?;
+            // PostgreSQL generations predating the lineage format bind their
+            // durable envelope to a mutable catalog name. The backup object
+            // graph canonicalizes only that carrier: datoms, tempids,
+            // frontier, and basis remain byte-for-byte semantic values, while
+            // identity and predecessor links use the immutable lineage. Thus
+            // a rename does not recopy the entire historical chain.
+            let portable = DurableTransaction {
+                database_id: lineage_id.clone(),
+                basis_t: decoded.basis_t,
+                previous_hash: portable_previous,
+                eidx_frontier: decoded.eidx_frontier,
+                tempids: decoded.tempids,
+                tx_data: decoded.tx_data,
+            };
+            let portable_payload = encode_transaction(&portable)?;
+            let portable_hash = transaction_hash(&portable_payload);
+            reconstructed = reconstructed.apply_committed(&portable)?;
             if checkpoint_state_hash(&reconstructed)? != state_hash {
                 return Err(fault(
                     "backup/state-commitment",
                     format!("transaction {row_basis} has an invalid state commitment"),
                 ));
             }
-            previous = hash;
-            transactions.push(hash);
+            source_previous = hash;
+            portable_previous = portable_hash;
+            source_transaction_hashes.push(hash);
+            transactions.push(portable_hash);
+            portable_frontiers.push(portable.eidx_frontier);
             state_hashes.push(state_hash);
-            insert_backup_object(&mut objects, hash, payload)?;
+            publisher.publish(portable_hash, &portable_payload)?;
         }
-        if head_hash != previous {
+        if head_hash != source_previous {
             return Err(fault(
                 "backup/head-mismatch",
                 "head does not match snapshot chain",
@@ -270,42 +290,47 @@ impl PortableBackup {
                 "semantically reconstructed snapshot does not reach its observed head",
             ));
         }
-        let requests = transaction
+        let request_rows = transaction
             .query(
                 "SELECT request_key, request_digest, basis_t, tx_hash FROM atomic_requests \
                  WHERE database_id = $1 AND basis_t <= $2 ORDER BY basis_t",
                 &[&database_id, &(basis as i64)],
             )
-            .map_err(|error| crate::postgres::postgres_error("backup/requests", error))?
-            .into_iter()
-            .map(|row| {
-                Ok(RequestRow {
-                    key: row.get(0),
-                    digest: digest(row.get(1), "request digest")?,
-                    basis: unsigned(row.get(2), "request basis")?,
-                    tx_hash: digest(row.get(3), "request transaction hash")?,
-                })
-            })
-            .collect::<Result<Vec<_>, SemanticError>>()?;
-        let program_rows = transaction
-            .query(
-                "SELECT DISTINCT p.program_hash, p.kind, p.arity, p.payload \
-                 FROM atomic_program_versions v JOIN atomic_programs p USING (program_hash) \
-                 WHERE v.database_id = $1 ORDER BY p.program_hash",
-                &[&database_id],
-            )
-            .map_err(|error| crate::postgres::postgres_error("backup/programs", error))?;
-        let mut program_objects = BTreeMap::new();
-        for row in program_rows {
-            let (program, payload) = validated_program_row(&row)?;
-            program_objects.insert(program.hash, (program, payload));
+            .map_err(|error| crate::postgres::postgres_error("backup/requests", error))?;
+        if request_rows.len() != transactions.len() {
+            return Err(fault(
+                "backup/incomplete-requests",
+                "snapshot does not contain exactly one request identity per transaction",
+            ));
         }
+        let mut requests = Vec::with_capacity(request_rows.len());
+        for (offset, row) in request_rows.into_iter().enumerate() {
+            let request_basis = unsigned(row.get(2), "request basis")?;
+            let source_hash = digest(row.get(3), "request transaction hash")?;
+            if request_basis != offset as u64 + 1
+                || source_transaction_hashes.get(offset) != Some(&source_hash)
+            {
+                return Err(fault(
+                    "backup/request-mismatch",
+                    "request identity does not name its authoritative source transaction",
+                ));
+            }
+            requests.push(RequestRow {
+                key: row.get(0),
+                digest: digest(row.get(1), "request digest")?,
+                basis: request_basis,
+                tx_hash: transactions[offset],
+            });
+        }
+        let mut program_rows = BTreeMap::new();
         // Database functions are temporal database information. Preserve
         // every content hash reachable from history, including superseded
-        // bindings needed by as-of values; legacy operator aliases are only
-        // an additional source, never the authority.
-        for hash in temporal_programs {
-            if program_objects.contains_key(&hash) {
+        // bindings needed by as-of values. Mutable named deployment/version
+        // aliases are operator configuration outside the immutable database
+        // value and therefore cannot be part of a point identified only by t.
+        let mut pending_programs = temporal_programs;
+        while let Some(hash) = pending_programs.pop_first() {
+            if program_rows.contains_key(&hash) {
                 continue;
             }
             let row = transaction
@@ -319,54 +344,22 @@ impl PortableBackup {
                     fault(
                         "backup/missing-program",
                         format!(
-                            "temporal :db/fn binding refers to missing program {}",
+                            "temporal :db/fn program graph refers to missing program {}",
                             hex(&hash)
                         ),
                     )
                 })?;
             let (program, payload) = validated_program_row(&row)?;
-            program_objects.insert(hash, (program, payload));
+            collect_program_dependencies(&decode_program(&payload)?, &mut pending_programs);
+            publisher.publish(hash, &payload)?;
+            program_rows.insert(hash, program);
         }
-        let mut programs = Vec::with_capacity(program_objects.len());
-        for (hash, (program, payload)) in program_objects {
+        let mut programs = Vec::with_capacity(program_rows.len());
+        for (hash, program) in program_rows {
             debug_assert_eq!(hash, program.hash);
             programs.push(program);
-            insert_backup_object(&mut objects, hash, payload)?;
         }
-        let versions = read_versions(&mut transaction, database_id, "atomic_program_versions")?;
-        let active = read_versions(&mut transaction, database_id, "atomic_active_programs")?;
-        let tree = capture_tree_backup(
-            &mut transaction,
-            database_id,
-            basis,
-            &transactions,
-            &state_hashes,
-            &mut objects,
-        )?;
-        transaction
-            .commit()
-            .map_err(|error| crate::postgres::postgres_error("backup/snapshot-commit", error))?;
-
-        let mut written = 0;
-        let mut reused = 0;
-        for (object_index, (hash, bytes)) in objects.into_iter().enumerate() {
-            let publication_fault =
-                if object_index == 0 && fault_at == BackupFault::AfterFirstObjectStaged {
-                    PublishFault::AfterStaged
-                } else {
-                    PublishFault::None
-                };
-            if write_object(directory, hash, &bytes, publication_fault)? {
-                written += 1;
-            } else {
-                reused += 1;
-            }
-        }
-        if fault_at == BackupFault::AfterObjects {
-            return Err(injected("backup/after-objects"));
-        }
-        let manifest = Manifest {
-            database_id: database_id.into(),
+        let mut manifest = Manifest {
             lineage_id,
             basis,
             genesis_hash,
@@ -374,10 +367,41 @@ impl PortableBackup {
             state_hashes,
             requests,
             programs,
-            versions,
-            active,
-            tree,
+            tree: None,
         };
+
+        // A backup point is a logical (lineage, t), not whichever replaceable
+        // physical index revision happened to be current during this retry.
+        // Goal 13 deliberately permits a repaired tree to be republished at
+        // the same logical basis. If a root already exists, authenticate it
+        // and prove the live snapshot has the same transaction information
+        // before reusing it. This check precedes physical-tree capture so a
+        // harmless repair does not even leave an unreferenced backup object.
+        if let Some(point) = reusable_existing_point(directory, &manifest)? {
+            transaction.commit().map_err(|error| {
+                crate::postgres::postgres_error("backup/snapshot-commit", error)
+            })?;
+            return Ok(point);
+        }
+        let tree = capture_tree_backup(
+            &mut transaction,
+            database_id,
+            &manifest.lineage_id,
+            basis,
+            &source_transaction_hashes,
+            &manifest.transactions,
+            &portable_frontiers,
+            &manifest.state_hashes,
+            &mut publisher,
+        )?;
+        manifest.tree = tree;
+        transaction
+            .commit()
+            .map_err(|error| crate::postgres::postgres_error("backup/snapshot-commit", error))?;
+
+        if fault_at == BackupFault::AfterObjects {
+            return Err(injected("backup/after-objects"));
+        }
         let encoded = encode_manifest(&manifest)?;
         let manifest_hash = sha256(&encoded);
         let snapshot_path = snapshots(directory).join(format!("{basis:020}.atbk"));
@@ -388,13 +412,24 @@ impl PortableBackup {
         } else {
             PublishFault::None
         };
-        publish_exact(&snapshot_path, &encoded, publication_fault)?;
+        if let Err(error) = publish_exact(&snapshot_path, &encoded, publication_fault) {
+            // A concurrent backup may have won publication with another
+            // valid physical revision for this same logical point. Resolve
+            // that race by the same semantic proof used by an ordinary
+            // retry, never by replacing its root.
+            if error.code == "backup/file-conflict"
+                && let Some(point) = reusable_existing_point(directory, &manifest)?
+            {
+                return Ok(point);
+            }
+            return Err(error);
+        }
         Ok(BackupPoint {
-            database_id: database_id.into(),
+            lineage_id: manifest.lineage_id.clone(),
             basis_t: basis,
             manifest_hash,
-            objects_written: written,
-            objects_reused: reused,
+            objects_written: publisher.written,
+            objects_reused: publisher.reused,
         })
     }
 
@@ -434,7 +469,7 @@ impl PortableBackup {
             ensure_object_present(directory, hash)?;
         }
         Ok(BackupPoint {
-            database_id: manifest.database_id,
+            lineage_id: manifest.lineage_id,
             basis_t: manifest.basis,
             manifest_hash,
             objects_written: 0,
@@ -475,7 +510,7 @@ impl PortableBackup {
             for datom in &transaction.tx_data {
                 collect_function_hashes(&datom.value, &mut required_programs);
             }
-            if transaction.database_id != manifest.database_id
+            if transaction.database_id != manifest.lineage_id
                 || transaction.basis_t != offset as u64 + 1
                 || transaction.previous_hash != previous
                 || transaction_hash(&payload) != *hash
@@ -518,8 +553,6 @@ impl PortableBackup {
             .iter()
             .map(|program| program.hash)
             .collect();
-        required_programs.extend(manifest.versions.iter().map(|version| version.hash));
-        required_programs.extend(manifest.active.iter().map(|version| version.hash));
         if let Some(missing) = required_programs.difference(&declared_programs).next() {
             return Err(fault(
                 "backup/missing-program",
@@ -539,6 +572,22 @@ impl PortableBackup {
                         "program metadata mismatch",
                     ));
                 }
+                collect_program_dependencies(&decoded, &mut required_programs);
+            }
+            if let Some(missing) = required_programs.difference(&declared_programs).next() {
+                return Err(fault(
+                    "backup/missing-program",
+                    format!("backup omits dependent program {}", hex(missing)),
+                ));
+            }
+            if let Some(extra) = declared_programs.difference(&required_programs).next() {
+                return Err(fault(
+                    "backup/extra-program",
+                    format!(
+                        "backup manifest includes unreachable program {}",
+                        hex(extra)
+                    ),
+                ));
             }
             if let Some(tree) = &manifest.tree {
                 objects_read += verify_tree_backup(directory, &manifest, tree)?;
@@ -546,7 +595,7 @@ impl PortableBackup {
         }
         Ok(BackupVerification {
             point: BackupPoint {
-                database_id: manifest.database_id.clone(),
+                lineage_id: manifest.lineage_id.clone(),
                 basis_t: manifest.basis,
                 manifest_hash,
                 objects_written: 0,
@@ -583,6 +632,12 @@ impl PortableBackup {
         let verification = Self::verify_backup(directory, basis, true)?;
         let manifest_bytes = fs::read(snapshots(directory).join(format!("{basis:020}.atbk")))
             .map_err(io_error("backup/manifest-read"))?;
+        if sha256(&manifest_bytes) != verification.point.manifest_hash {
+            return Err(fault(
+                "backup/root-changed",
+                "published backup root changed after verification",
+            ));
+        }
         let manifest = decode_manifest(&manifest_bytes)?;
         // Restore never provisions or upgrades its target. The deployment
         // must have run the explicit migrator before constructing this
@@ -780,33 +835,6 @@ impl PortableBackup {
                 }
             }
         }
-        for version in &manifest.versions {
-            let version_sql = version.version as i64;
-            transaction
-                .execute(
-                    "INSERT INTO atomic_program_versions (database_id, name, version, program_hash) \
-                     VALUES ($1, $2, $3, $4)",
-                    &[&target_database_id, &version.name, &version_sql, &&version.hash[..]],
-                )
-                .map_err(|error| crate::postgres::postgres_error("backup/restore-program-version", error))?;
-        }
-        for active in &manifest.active {
-            let version_sql = active.version as i64;
-            transaction
-                .execute(
-                    "INSERT INTO atomic_active_programs (database_id, name, version, program_hash) \
-                     VALUES ($1, $2, $3, $4)",
-                    &[
-                        &target_database_id,
-                        &active.name,
-                        &version_sql,
-                        &&active.hash[..],
-                    ],
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-active-program", error)
-                })?;
-        }
         if !target_matches_backup(&mut transaction, directory, &manifest, target_database_id)? {
             return Err(fault(
                 "backup/restore-postcondition",
@@ -966,8 +994,10 @@ fn insert_backup_object(
 fn capture_tree_backup<C: postgres::GenericClient>(
     client: &mut C,
     database_id: &str,
+    lineage_id: &str,
     backup_basis: u64,
-    transaction_hashes: &[Digest],
+    source_transaction_hashes: &[Digest],
+    portable_transaction_hashes: &[Digest],
     state_hashes: &[Digest],
     objects: &mut BTreeMap<Digest, Vec<u8>>,
 ) -> Result<Option<TreeBackup>, SemanticError> {
@@ -1018,7 +1048,7 @@ fn capture_tree_backup<C: postgres::GenericClient>(
             "published tree basis is not representable",
         )
     })?;
-    if transaction_hashes.get(offset) != Some(&tx_hash)
+    if source_transaction_hashes.get(offset) != Some(&tx_hash)
         || state_hashes.get(offset) != Some(&state_hash)
         || sha256(&payload) != manifest_hash
     {
@@ -1077,12 +1107,49 @@ fn capture_tree_backup<C: postgres::GenericClient>(
     }
     let nodes = node_set.into_nodes();
     let node_hashes = nodes.keys().copied().collect();
-    insert_backup_object(objects, manifest_hash, payload)?;
+    let portable_tx_hash = *portable_transaction_hashes.get(offset).ok_or_else(|| {
+        fault(
+            "backup/tree-basis",
+            "published tree basis is outside the portable transaction chain",
+        )
+    })?;
+    let portable_tx = objects
+        .get(&portable_tx_hash)
+        .ok_or_else(|| {
+            fault(
+                "backup/tree-transaction",
+                "portable tree transaction is absent",
+            )
+        })
+        .and_then(|payload| decode_transaction(payload))?;
+    if portable_tx.eidx_frontier != eidx_frontier {
+        return Err(fault(
+            "backup/tree-frontier",
+            "published tree entity frontier disagrees with its authoritative transaction",
+        ));
+    }
+    // Tree nodes are already identity-free content. Rebind only the native
+    // root envelope to the portable lineage transaction chain and normalize
+    // PostgreSQL's replaceable publication/generation coordinates. Those
+    // coordinates govern the live cache, not the logical backup point.
+    let portable = PersistentTreeManifest {
+        database_id: lineage_id.to_owned(),
+        publication_revision: 1,
+        basis_t,
+        tx_hash: portable_tx_hash,
+        state_hash,
+        excision_generation: 0,
+        eidx_frontier,
+        trees: decoded.trees,
+    };
+    let portable_payload = portable.encode()?;
+    let portable_manifest_hash = sha256(&portable_payload);
+    insert_backup_object(objects, portable_manifest_hash, portable_payload)?;
     for (hash, payload) in nodes {
         insert_backup_object(objects, hash, payload)?;
     }
     Ok(Some(TreeBackup {
-        manifest_hash,
+        manifest_hash: portable_manifest_hash,
         node_hashes,
     }))
 }
@@ -1161,10 +1228,20 @@ fn verify_tree_backup(
             "backed-up tree basis is not representable",
         )
     })?;
-    if manifest.database_id != backup.database_id
+    let transaction_hash = *backup.transactions.get(offset).ok_or_else(|| {
+        fault(
+            "backup/tree-basis",
+            "backed-up tree basis is outside the transaction chain",
+        )
+    })?;
+    let transaction = decode_transaction(&read_object(directory, transaction_hash)?)?;
+    if manifest.database_id != backup.lineage_id
+        || manifest.publication_revision != 1
         || manifest.basis_t > backup.basis
-        || backup.transactions.get(offset) != Some(&manifest.tx_hash)
+        || transaction_hash != manifest.tx_hash
         || backup.state_hashes.get(offset) != Some(&manifest.state_hash)
+        || manifest.excision_generation != 0
+        || manifest.eidx_frontier != transaction.eidx_frontier
         || manifest.hash()? != tree.manifest_hash
     {
         return Err(fault(
@@ -1314,11 +1391,6 @@ fn target_matches_backup<C: postgres::GenericClient>(
         }
     }
 
-    if read_versions(client, target_database_id, "atomic_program_versions")? != manifest.versions
-        || read_versions(client, target_database_id, "atomic_active_programs")? != manifest.active
-    {
-        return Ok(false);
-    }
     for program in &manifest.programs {
         let Some(row) = client
             .query_opt(
@@ -1347,28 +1419,6 @@ fn target_matches_backup<C: postgres::GenericClient>(
             crate::postgres::postgres_error("backup/restore-check-generation", error)
         })?;
     Ok(generation.is_some_and(|row| row.get::<_, i64>(0) == 0))
-}
-
-fn read_versions<C: postgres::GenericClient>(
-    client: &mut C,
-    database_id: &str,
-    table: &str,
-) -> Result<Vec<VersionRow>, SemanticError> {
-    let sql = format!(
-        "SELECT name, version, program_hash FROM {table} WHERE database_id = $1 ORDER BY name, version"
-    );
-    client
-        .query(&sql, &[&database_id])
-        .map_err(|error| crate::postgres::postgres_error("backup/program-versions", error))?
-        .into_iter()
-        .map(|row| {
-            Ok(VersionRow {
-                name: row.get(0),
-                version: unsigned(row.get(1), "program version")?,
-                hash: digest(row.get(2), "program version hash")?,
-            })
-        })
-        .collect()
 }
 
 fn prepare_directory(directory: &Path) -> Result<(), SemanticError> {
@@ -1543,6 +1593,58 @@ fn load_manifest(directory: &Path, basis: u64) -> Result<(Manifest, Digest), Sem
     Ok((manifest, hash))
 }
 
+/// Reuse an already-published root only after authenticating its full object
+/// graph and comparing every authoritative logical field captured from the
+/// live repeatable-read snapshot. The physical tree pointer is intentionally
+/// excluded: it is a replaceable derived representation of the same value.
+fn reusable_existing_point(
+    directory: &Path,
+    candidate: &Manifest,
+) -> Result<Option<BackupPoint>, SemanticError> {
+    let path = snapshots(directory).join(format!("{:020}.atbk", candidate.basis));
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(fault(
+                "backup/root-type",
+                "published backup root is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("backup/root-metadata")(error)),
+    }
+
+    let verified = PortableBackup::verify_backup(directory, candidate.basis, true)?;
+    let (existing, manifest_hash) = load_manifest(directory, candidate.basis)?;
+    if manifest_hash != verified.point.manifest_hash {
+        return Err(fault(
+            "backup/root-changed",
+            "published backup root changed while it was being verified",
+        ));
+    }
+    let same_logical_point = existing.lineage_id == candidate.lineage_id
+        && existing.basis == candidate.basis
+        && existing.genesis_hash == candidate.genesis_hash
+        && existing.transactions == candidate.transactions
+        && existing.state_hashes == candidate.state_hashes
+        && existing.requests == candidate.requests
+        && existing.programs == candidate.programs;
+    if !same_logical_point {
+        return Err(SemanticError::new(
+            ErrorCategory::Conflict,
+            "backup/point-conflict",
+            "backup root at this lineage and basis contains different logical information",
+        ));
+    }
+    Ok(Some(BackupPoint {
+        lineage_id: candidate.lineage_id.clone(),
+        basis_t: candidate.basis,
+        manifest_hash,
+        objects_written: 0,
+        objects_reused: manifest_object_hashes(&existing).len(),
+    }))
+}
+
 fn manifest_object_hashes(manifest: &Manifest) -> BTreeSet<Digest> {
     let mut hashes: BTreeSet<_> = std::iter::once(manifest.genesis_hash)
         .chain(manifest.transactions.iter().copied())
@@ -1571,7 +1673,6 @@ fn encode_claim(claim: &BackupClaim) -> Result<Vec<u8>, SemanticError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(CLAIM_MAGIC);
     bytes.extend_from_slice(&CLAIM_VERSION.to_be_bytes());
-    put_string(&mut bytes, &claim.database_id)?;
     put_string(&mut bytes, &claim.lineage_id)?;
     bytes.extend_from_slice(&claim.genesis_hash);
     let checksum = sha256(&bytes);
@@ -1580,7 +1681,7 @@ fn encode_claim(claim: &BackupClaim) -> Result<Vec<u8>, SemanticError> {
 }
 
 fn decode_claim(bytes: &[u8]) -> Result<BackupClaim, SemanticError> {
-    if bytes.len() < 114 || &bytes[..4] != CLAIM_MAGIC {
+    if bytes.len() < 110 || &bytes[..4] != CLAIM_MAGIC {
         return Err(fault(
             "backup/claim-header",
             "backup claim header is invalid",
@@ -1605,15 +1706,11 @@ fn decode_claim(bytes: &[u8]) -> Result<BackupClaim, SemanticError> {
     }
     let mut cursor = Cursor::new(&bytes[6..checksum_at]);
     let claim = BackupClaim {
-        database_id: cursor.string()?,
         lineage_id: cursor.string()?,
         genesis_hash: cursor.digest()?,
     };
     cursor.finish()?;
-    if claim.database_id.is_empty()
-        || !valid_lineage_id(&claim.lineage_id)
-        || encode_claim(&claim)? != bytes
-    {
+    if !valid_lineage_id(&claim.lineage_id) || encode_claim(&claim)? != bytes {
         return Err(fault(
             "backup/noncanonical-claim",
             "backup claim is not canonical",
@@ -1625,10 +1722,7 @@ fn decode_claim(bytes: &[u8]) -> Result<BackupClaim, SemanticError> {
 fn verify_claim(directory: &Path, manifest: &Manifest) -> Result<(), SemanticError> {
     let bytes = fs::read(directory.join("CLAIM")).map_err(io_error("backup/claim-read"))?;
     let claim = decode_claim(&bytes)?;
-    if claim.database_id != manifest.database_id
-        || claim.lineage_id != manifest.lineage_id
-        || claim.genesis_hash != manifest.genesis_hash
-    {
+    if claim.lineage_id != manifest.lineage_id || claim.genesis_hash != manifest.genesis_hash {
         return Err(SemanticError::new(
             ErrorCategory::Conflict,
             "backup/claim-mismatch",
@@ -1639,8 +1733,7 @@ fn verify_claim(directory: &Path, manifest: &Manifest) -> Result<(), SemanticErr
 }
 
 fn manifest_is_canonical(manifest: &Manifest) -> bool {
-    if manifest.database_id.is_empty()
-        || !valid_lineage_id(&manifest.lineage_id)
+    if !valid_lineage_id(&manifest.lineage_id)
         || manifest.state_hashes.iter().any(|hash| hash == &[0; 32])
         || manifest
             .requests
@@ -1662,8 +1755,6 @@ fn manifest_is_canonical(manifest: &Manifest) -> bool {
         || manifest.programs.iter().any(|row| {
             !(0..=3).contains(&row.kind) || !(0..=i16::from(u8::MAX)).contains(&row.arity)
         })
-        || !strictly_sorted_versions(&manifest.versions)
-        || !strictly_sorted_versions(&manifest.active)
         || manifest.tree.as_ref().is_some_and(|tree| {
             tree.node_hashes.is_empty()
                 || !strictly_sorted_by(&tree.node_hashes, |hash| *hash)
@@ -1672,37 +1763,17 @@ fn manifest_is_canonical(manifest: &Manifest) -> bool {
     {
         return false;
     }
-    let programs: BTreeSet<_> = manifest.programs.iter().map(|row| row.hash).collect();
-    let versions: BTreeSet<_> = manifest
-        .versions
-        .iter()
-        .map(|row| (row.name.as_str(), row.version, row.hash))
-        .collect();
-    manifest
-        .versions
-        .iter()
-        .all(|row| programs.contains(&row.hash))
-        && manifest.active.iter().all(|row| {
-            programs.contains(&row.hash)
-                && versions.contains(&(row.name.as_str(), row.version, row.hash))
-        })
+    true
 }
 
 fn strictly_sorted_by<T, K: Ord>(values: &[T], key: impl Fn(&T) -> K) -> bool {
     values.windows(2).all(|pair| key(&pair[0]) < key(&pair[1]))
 }
 
-fn strictly_sorted_versions(values: &[VersionRow]) -> bool {
-    values
-        .iter()
-        .all(|row| !row.name.is_empty() && row.version > 0)
-        && values
-            .windows(2)
-            .all(|pair| (&pair[0].name, pair[0].version) < (&pair[1].name, pair[1].version))
-}
-
 fn valid_lineage_id(value: &str) -> bool {
     value.len() == 36
+        && value.as_bytes()[14] == b'4'
+        && matches!(value.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
         && value.bytes().enumerate().all(|(index, byte)| match index {
             8 | 13 | 18 | 23 => byte == b'-',
             _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
@@ -1711,7 +1782,6 @@ fn valid_lineage_id(value: &str) -> bool {
 
 fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, SemanticError> {
     let mut body = Vec::new();
-    put_string(&mut body, &manifest.database_id)?;
     put_string(&mut body, &manifest.lineage_id)?;
     put_u64(&mut body, manifest.basis);
     body.extend_from_slice(&manifest.genesis_hash);
@@ -1730,8 +1800,6 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, SemanticError> {
         body.extend_from_slice(&program.kind.to_be_bytes());
         body.extend_from_slice(&program.arity.to_be_bytes());
     }
-    put_versions(&mut body, &manifest.versions)?;
-    put_versions(&mut body, &manifest.active)?;
     match &manifest.tree {
         None => body.push(0),
         Some(tree) => {
@@ -1791,7 +1859,6 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
         ));
     }
     let mut cursor = Cursor::new(&bytes[14..14 + len]);
-    let database_id = cursor.string()?;
     let lineage_id = cursor.string()?;
     let basis = cursor.u64()?;
     let genesis_hash = cursor.digest()?;
@@ -1816,8 +1883,6 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
             arity: cursor.i16()?,
         });
     }
-    let versions = cursor.versions()?;
-    let active = cursor.versions()?;
     let tree = match cursor.u8()? {
         0 => None,
         1 => Some(TreeBackup {
@@ -1833,7 +1898,6 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
     };
     cursor.finish()?;
     let manifest = Manifest {
-        database_id,
         lineage_id,
         basis,
         genesis_hash,
@@ -1841,8 +1905,6 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
         state_hashes,
         requests,
         programs,
-        versions,
-        active,
         tree,
     };
     let basis_len = usize::try_from(basis).map_err(|_| {
@@ -1863,16 +1925,6 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
         ));
     }
     Ok(manifest)
-}
-
-fn put_versions(output: &mut Vec<u8>, values: &[VersionRow]) -> Result<(), SemanticError> {
-    put_u32(output, values.len())?;
-    for value in values {
-        put_string(output, &value.name)?;
-        put_u64(output, value.version);
-        output.extend_from_slice(&value.hash);
-    }
-    Ok(())
 }
 
 fn put_hashes(output: &mut Vec<u8>, values: &[Digest]) -> Result<(), SemanticError> {
@@ -1957,18 +2009,6 @@ impl<'a> Cursor<'a> {
         let n = self.count_with_minimum(32)?;
         (0..n).map(|_| self.digest()).collect()
     }
-    fn versions(&mut self) -> Result<Vec<VersionRow>, SemanticError> {
-        let n = self.count_with_minimum(44)?;
-        (0..n)
-            .map(|_| {
-                Ok(VersionRow {
-                    name: self.string()?,
-                    version: self.u64()?,
-                    hash: self.digest()?,
-                })
-            })
-            .collect()
-    }
     fn finish(&self) -> Result<(), SemanticError> {
         if self.at == self.bytes.len() {
             Ok(())
@@ -2020,6 +2060,53 @@ fn collect_function_hashes(value: &crate::Value, output: &mut BTreeSet<Digest>) 
         }
         _ => {}
     }
+}
+
+fn collect_program_dependencies(program: &Program, output: &mut BTreeSet<Digest>) {
+    fn entity(entity: &crate::EntityRef, output: &mut BTreeSet<Digest>) {
+        if let crate::EntityRef::Lookup { value, .. } = entity {
+            collect_function_hashes(value, output);
+        }
+    }
+
+    fn term(term: &crate::QueryTerm, output: &mut BTreeSet<Digest>) {
+        if let crate::QueryTerm::Constant(value) = term {
+            collect_function_hashes(value, output);
+        }
+    }
+
+    fn instructions(values: &[crate::Instruction], output: &mut BTreeSet<Digest>) {
+        for instruction in values {
+            match instruction {
+                crate::Instruction::PushConstant(value) => collect_function_hashes(value, output),
+                crate::Instruction::PushEntity(value) => entity(value, output),
+                crate::Instruction::If {
+                    then_branch,
+                    else_branch,
+                } => {
+                    instructions(then_branch, output);
+                    instructions(else_branch, output);
+                }
+                crate::Instruction::ForEach { body } => instructions(body, output),
+                crate::Instruction::Query(query) => {
+                    for pattern in query.patterns() {
+                        term(&pattern.entity, output);
+                        term(&pattern.value, output);
+                    }
+                }
+                crate::Instruction::EmitCall { function, .. } => match function {
+                    crate::CallableRef::ExactHash(hash) => {
+                        output.insert(*hash);
+                    }
+                    crate::CallableRef::Database(entity_ref) => entity(entity_ref, output),
+                    crate::CallableRef::Local(_) => {}
+                },
+                _ => {}
+            }
+        }
+    }
+
+    instructions(&program.instructions, output);
 }
 
 fn digest(bytes: Vec<u8>, label: &str) -> Result<Digest, SemanticError> {
@@ -2127,15 +2214,14 @@ mod tests {
     }
 
     #[test]
-    fn binary_claim_binds_name_and_genesis_lineage_and_rejects_tampering() {
+    fn binary_claim_binds_durable_lineage_and_genesis_and_rejects_tampering() {
         let claim = BackupClaim {
-            database_id: "inventory".into(),
             lineage_id: "12345678-1234-4abc-8def-123456789abc".into(),
             genesis_hash: sha256(b"canonical-genesis"),
         };
         let encoded = encode_claim(&claim).unwrap();
         assert_eq!(decode_claim(&encoded).unwrap(), claim);
-        assert_ne!(&encoded, b"inventory");
+        assert_ne!(&encoded, claim.lineage_id.as_bytes());
         let mut damaged = encoded;
         damaged[10] ^= 1;
         assert_eq!(

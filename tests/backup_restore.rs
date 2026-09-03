@@ -1,8 +1,9 @@
 use atomic_core::{
     Attribute, BackupFault, CallableRef, Cardinality, DB_FN, DB_IDENT, EntityRef, ErrorCategory,
-    IndexOrder, Instruction, Keyword, Peer, PortableBackup, PostgresIndexer, PostgresStore,
-    Program, ProgramCall, ProgramKind, RestoreFault, Schema, TransactionRequest, TxOp, TxValue,
-    USER_PARTITION, Value, ValueType, View, make_eid, sha256,
+    IndexOrder, Instruction, Keyword, Peer, PersistentTreeManifest, PortableBackup,
+    PostgresIndexer, PostgresStore, PostgresTreeStore, Program, ProgramCall, ProgramKind,
+    RestoreFault, Schema, TransactionRequest, TreeManifestRecord, TxOp, TxValue, USER_PARTITION,
+    Value, ValueType, View, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::fs;
@@ -70,8 +71,6 @@ fn omit_first_program_from_manifest(path: &std::path::Path) {
     let checksum_at = 14 + body_len;
     bytes.truncate(checksum_at);
     let mut at = 14;
-    let string_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    at += 4 + string_len;
     let lineage_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
     at += 4 + lineage_len + 8 + 32;
     let transaction_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
@@ -144,18 +143,6 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     let service = common::start_service(&connection, &source);
     let basis1 =
         common::transact(&service, "one", created.basis_t(), &[add("one")], 1_000).db_after;
-    let program = Program {
-        kind: ProgramKind::Query,
-        arity: 0,
-        instructions: vec![
-            Instruction::PushConstant(Value::Long(42)),
-            Instruction::Return,
-        ],
-    };
-    store
-        .deploy_program(&source, "answer", 1, &program)
-        .unwrap();
-    store.activate_program(&source, "answer", None, 1).unwrap();
     let mut indexer = PostgresIndexer::connect(&connection, &source).unwrap();
     indexer.consolidate().unwrap();
 
@@ -171,6 +158,58 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     assert_eq!(
         PortableBackup::list_backups(&directory).unwrap(),
         vec![basis1.basis_t(), basis2]
+    );
+
+    // Named version/activation rows are mutable operator configuration, not
+    // temporal database information. Changing them without a transaction
+    // must not change the canonical backup at this t.
+    let operator_program = Program {
+        kind: ProgramKind::Query,
+        arity: 0,
+        instructions: vec![
+            Instruction::PushConstant(Value::Long(42)),
+            Instruction::Return,
+        ],
+    };
+    store
+        .deploy_program(&source, "operator-answer", 1, &operator_program)
+        .unwrap();
+    store
+        .activate_program(&source, "operator-answer", None, 1)
+        .unwrap();
+    let alias_retry = backup.backup_database(&source, &directory).unwrap();
+    assert_eq!(alias_retry.manifest_hash, second.manifest_hash);
+    assert_eq!(alias_retry.objects_written, 0);
+
+    // A physical repair can append a new root revision without inventing a
+    // logical transaction. Retrying backup at that same (lineage, t) must
+    // retain the already-published backup root, not conflict with or silently
+    // replace it merely because the live cache envelope changed.
+    let object_count_before = fs::read_dir(directory.join("objects")).unwrap().count();
+    let mut live_trees = PostgresTreeStore::connect(&connection).unwrap();
+    let current_revision = live_trees.current_publication_revision(&source).unwrap();
+    let current = live_trees
+        .load_manifest(&source, current_revision)
+        .unwrap()
+        .unwrap();
+    let mut successor_payload = PersistentTreeManifest::decode(&current.payload).unwrap();
+    successor_payload.publication_revision = current_revision + 1;
+    let successor_payload = successor_payload.encode().unwrap();
+    let successor = TreeManifestRecord {
+        publication_revision: current_revision + 1,
+        manifest_hash: sha256(&successor_payload),
+        payload: successor_payload,
+        ..current
+    };
+    live_trees
+        .publish_manifest(&successor, current_revision)
+        .unwrap();
+    let repaired_retry = backup.backup_database(&source, &directory).unwrap();
+    assert_eq!(repaired_retry.manifest_hash, second.manifest_hash);
+    assert_eq!(repaired_retry.objects_written, 0);
+    assert_eq!(
+        fs::read_dir(directory.join("objects")).unwrap().count(),
+        object_count_before
     );
 
     let mut physical_catalog = Client::connect(&connection, NoTls).unwrap();
@@ -218,11 +257,6 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
         .restore_backup(&directory, basis1.basis_t(), &target1)
         .unwrap();
     assert_same_information(&verified1.database, &restored1);
-    let mut target1_store = PostgresStore::connect(&target1_connection).unwrap();
-    let (_, _, restored_program) = target1_store
-        .resolve_active_program(&target1, "answer")
-        .unwrap();
-    assert_eq!(restored_program, program);
 
     let target2_connection = isolated_catalog(&connection, "restore_catalog_two");
     let target2 = unique("restore_two");
@@ -240,6 +274,31 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
         .unwrap()
         .get(0);
     assert_eq!(restored_tree_count, 1);
+    let source_lineage: String = physical_catalog
+        .query_one(
+            "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
+            &[&source],
+        )
+        .unwrap()
+        .get(0);
+    let target_lineage: String = catalog
+        .query_one(
+            "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
+            &[&target2],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(target_lineage, source_lineage);
+    let mut restored_operator = PostgresStore::connect(&target2_connection).unwrap();
+    let alias_error = restored_operator
+        .resolve_active_program(&target2, "operator-answer")
+        .unwrap_err();
+    assert_eq!(alias_error.code, "postgres/active-program-not-found");
+    let renamed_retry = target2_restore
+        .backup_database(&target2, &directory)
+        .unwrap();
+    assert_eq!(renamed_retry.manifest_hash, second.manifest_hash);
+    assert_eq!(renamed_retry.objects_written, 0);
     let restored_peer = Peer::connect(&target2_connection, &target2, 8).unwrap();
     assert_eq!(restored_peer.basis_t(), basis2);
     assert_eq!(restored_peer.durable_base_t(), basis2);
@@ -305,6 +364,21 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     .unwrap();
     assert!(replayed_request.replayed);
     assert_eq!(replayed_request.basis_t, basis2);
+    let continued = common::transact(
+        &target_service,
+        "after-rename",
+        basis2,
+        &[add("three")],
+        3_000,
+    );
+    let continued_backup = target2_restore
+        .backup_database(&target2, &directory)
+        .unwrap();
+    assert_eq!(continued_backup.basis_t, continued.basis_t);
+    assert!(continued_backup.objects_reused >= 3);
+    let continued_verified =
+        PortableBackup::verify_backup(&directory, continued.basis_t, true).unwrap();
+    assert_same_information(&continued.db_after, &continued_verified.database);
     target_service.shutdown();
 
     fs::remove_dir_all(&directory).unwrap();
@@ -359,6 +433,17 @@ fn interrupted_root_publication_never_exposes_a_partial_point_and_retry_converge
         (claim_error.category, claim_error.code),
         (ErrorCategory::Conflict, "backup/claim-conflict")
     );
+    let recreated_connection = isolated_catalog(&connection, "backup_recreated_catalog");
+    let mut recreated_store = PostgresStore::connect(&recreated_connection).unwrap();
+    recreated_store.create_database(&source, schema()).unwrap();
+    let mut recreated_backup = PortableBackup::connect(&recreated_connection).unwrap();
+    let recreated_error = recreated_backup
+        .backup_database(&source, &directory)
+        .unwrap_err();
+    assert_eq!(
+        (recreated_error.category, recreated_error.code),
+        (ErrorCategory::Conflict, "backup/claim-conflict")
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -394,8 +479,8 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
             committed.basis_t,
             &before_commit,
             RestoreFault::BeforeCommit,
-    )
-    .unwrap_err();
+        )
+        .unwrap_err();
     assert_eq!(error.category, ErrorCategory::Interrupted);
     let mut client = Client::connect(&before_connection, NoTls).unwrap();
     assert!(
@@ -421,8 +506,8 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
             committed.basis_t,
             &after_commit,
             RestoreFault::AfterCommitBeforeResponse,
-    )
-    .unwrap_err();
+        )
+        .unwrap_err();
     assert_eq!(error.category, ErrorCategory::Interrupted);
     let replay = after_restore
         .restore_backup(&directory, committed.basis_t, &after_commit)
@@ -491,7 +576,19 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
         ],
     };
     let old_hash = store.deploy_program_blob(&writer("old")).unwrap();
-    let current_hash = store.deploy_program_blob(&writer("current")).unwrap();
+    let nested_hash = store.deploy_program_blob(&writer("current")).unwrap();
+    let current_wrapper = Program {
+        kind: ProgramKind::Transaction,
+        arity: 0,
+        instructions: vec![
+            Instruction::EmitCall {
+                function: CallableRef::ExactHash(nested_hash),
+                argument_count: 0,
+            },
+            Instruction::Return,
+        ],
+    };
+    let current_hash = store.deploy_program_blob(&current_wrapper).unwrap();
     let function_ident = Keyword::new("backup", "writer");
     let service = common::start_service(&connection, &source);
     let installed = common::transact(
@@ -549,7 +646,7 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
     // catalog copies makes restoration depend on the backup object graph.
     let mut client = Client::connect(&connection, NoTls).unwrap();
     common::with_replica_triggers_disabled(&mut client, |client| {
-        for hash in [old_hash, current_hash] {
+        for hash in [old_hash, current_hash, nested_hash] {
             client.execute(
                 "DELETE FROM atomic_programs WHERE program_hash = $1",
                 &[&&hash[..]],
@@ -558,24 +655,30 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
         Ok(())
     })
     .unwrap();
-    let restored = backup
+    let target_connection = isolated_catalog(&connection, "restore_temporal_catalog");
+    let mut target_restore = PortableBackup::connect(&target_connection).unwrap();
+    let restored = target_restore
         .restore_backup(&directory, rebound.basis_t, &target)
         .unwrap();
     assert_eq!(
         restored.values(function, DB_FN as u32),
         vec![&Value::Function(current_hash)]
     );
-    let mut restored_store = PostgresStore::connect(&connection).unwrap();
+    let mut restored_store = PostgresStore::connect(&target_connection).unwrap();
     assert_eq!(
         restored_store.resolve_program(old_hash).unwrap(),
         writer("old")
     );
     assert_eq!(
         restored_store.resolve_program(current_hash).unwrap(),
+        current_wrapper
+    );
+    assert_eq!(
+        restored_store.resolve_program(nested_hash).unwrap(),
         writer("current")
     );
 
-    let target_service = common::start_service(&connection, &target);
+    let target_service = common::start_service(&target_connection, &target);
     let report = target_service
         .client()
         .transact(
