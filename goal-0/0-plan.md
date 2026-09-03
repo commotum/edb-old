@@ -77,7 +77,15 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 
 ### 4. Index and peer read architecture
 
-**Status:** Scaffolded in `goal-4/`; execution has not yet established this stage's completion signal.
+**Status:** Complete via `goal-4/`. PostgreSQL now stores immutable canonical
+content-addressed index leaves and transaction-anchored manifests;
+deterministic consolidation builds all current/history index orders over a
+base plus contiguous recent tail. Independent peers recover from verified
+roots, synchronize monotonically, retain old `Arc<Database>` snapshots, expose
+local temporal/index access and transaction reports, cache immutable segments,
+and fall back to the authoritative log on derived corruption. Concurrent
+builders/readers, interrupted publication, `noHistory`, multiple bases, cache
+pressure, and an actual PostgreSQL 15.11 restart are verified.
 
 **Outcome:** Independent Rust peers maintain immutable database snapshots and answer indexed reads locally while synchronizing monotonically through PostgreSQL.
 
@@ -87,6 +95,17 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 
 ### 5. Query, pull, and native API
 
+**Status:** Complete via `goal-5/`. The typed Rust query engine evaluates local
+immutable snapshots with relation/set semantics, every input/find shape,
+binding-aware index planning plus a full-scan oracle, logical joins, bounded
+fixed-point rules, predicates/functions, deterministic aggregates and `with`,
+native plan/stats, cancellation and resource limits. Pull/entity navigation
+supports wildcard, reverse refs, components, recursion/cycles, defaults,
+aliases and limits. The peer API composes expected-basis/idempotent transact,
+sync, query, pull and entities; PostgreSQL 15.11 and concurrent old-snapshot
+tests verify the integrated boundary. `goal-5/SUPPORTED_SURFACE.md` names
+intentional JVM host-language and peripheral omissions.
+
 **Outcome:** Applications can use an ergonomic Rust API to transact, navigate entities, pull graphs, and run the documented Datalog model locally at peers.
 
 **Focus:** Query inputs and relations; joins; rules and fixed-point recursion; negation and disjunction; predicates and functions; aggregates; bag behavior around `with`; pull recursion and components; cancellation; limits; and explainable execution.
@@ -95,6 +114,15 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 
 ### 6. Controlled programmability
 
+**Status:** Complete via `goal-6/`. Versioned canonical straight-line bytecode
+provides metered transaction functions, attribute predicates, and query
+extensions with no ambient authority. Immutable PostgreSQL deployment,
+conditional activation, exact-hash caching/idempotency, same-db-before batch
+composition, kernel revalidation, local Rust extension separation, restart and
+corruption behavior, and byte-identical independent execution are covered by
+focused tests and the 87-pass integrated real-PostgreSQL suite. The deliberately
+smaller-than-Clojure surface and threat model are explicit in the child docs.
+
 **Outcome:** Custom transaction and query behavior is expressive enough for application invariants without compromising determinism or transactor safety.
 
 **Focus:** Native built-ins; process-local Rust query extensions; sandboxed persisted functions; db-before and db-after evaluation rules; versioned ABI; resource metering; cancellation; deployment; and reproducibility.
@@ -102,6 +130,8 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 **Completion signal:** Persisted functions execute identically across nodes and restarts, reject forbidden effects, obey resource limits, and cannot bypass transaction validation.
 
 ### 7. Availability and production transaction service
+
+**Status:** Active via `goal-7/`; scaffolded after verified Goal 6 completion.
 
 **Outcome:** The serialized write service remains correct through concurrency, overload, timeout, process failure, and leader replacement.
 

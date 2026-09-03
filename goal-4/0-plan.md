@@ -46,6 +46,11 @@ manifests in place of a key/value-store root CAS.
 
 ### 2. Versioned persistent index artifacts
 
+**Status:** Complete. `ATMC` v1 kinds 4/5 canonically encode sorted
+`IndexSegment` leaves and `IndexManifest` roots; fixed SHA-256 golden values and
+malformed ordering/ordinal tests pin the format. Migration 2 adds immutable
+content-addressed segment rows and transaction-anchored manifest rows.
+
 **Outcome:** PostgreSQL can store and publish immutable, canonical, independently validated index segments and a rebuildable per-database index root/progress record.
 
 **Focus:** Native versioned encoding for sorted index entries, segment bounds and identity, schema/basis coverage, content hashes, root manifests, and recent-layer metadata; one concrete PostgreSQL migration with immutable rows, constraints, checksums, and conditional derived-root publication; no index data in generic opaque storage abstractions.
@@ -53,6 +58,13 @@ manifests in place of a key/value-store root CAS.
 **Completion signal:** Golden and malformed-format tests cover every index order and history form; real PostgreSQL tests prove immutable insertion, atomic root/progress publication, idempotent rebuild, and rejection or safe abandonment of corrupt and partial artifacts without changing the Goal 3 head.
 
 ### 3. Base, recent, and consolidation pipeline
+
+**Status:** Complete. `PostgresIndexer` deterministically builds all four
+current/history orders in 4,096-datom leaves (test-configurable), carries a
+valid prior base forward, applies only its contiguous hash-linked log tail,
+filters `noHistory` during consolidation, and atomically/idempotently publishes
+the resulting manifest. The in-memory recent layer is eagerly merged into the
+immutable kernel roots rather than retaining JVM `btset` node shapes.
 
 **Outcome:** Committed log datoms become a bounded recent layer and immutable persistent index bases, and consolidation can replace physical structure without changing logical results.
 
@@ -62,6 +74,14 @@ manifests in place of a key/value-store root CAS.
 
 ### 4. Independent peer snapshots and synchronization
 
+**Status:** Complete. `Peer` opens from the newest verified base plus a
+contiguous authoritative tail, owns an `Arc<Database>` current value, observes
+durable envelopes as transaction reports, waits for a requested basis by
+authoritative-head polling, and advances without mutating prior snapshots.
+`refresh_index` independently adopts a newer physical root at the same logical
+value, matching recovered `notify-index` semantics without making wake-ups
+correctness-bearing.
+
 **Outcome:** Multiple Rust peers can open a database, expose immutable snapshots, and advance monotonically to a requested committed basis through PostgreSQL alone.
 
 **Focus:** Peer connection/current-state ownership; open from the latest valid derived root plus authoritative log tail; head observation; gap-free transaction application; `sync`/await-basis semantics; transaction-report observation needed by later APIs; disconnection, retry, restart, stale root, and concurrent consolidation behavior; wake-up hints that never carry correctness.
@@ -70,6 +90,12 @@ manifests in place of a key/value-store root CAS.
 
 ### 5. Local index access and immutable caching
 
+**Status:** Complete. Peer snapshots expose kernel-identical EAVT/AEVT/AVET/
+VAET, prefix, forward seek, reverse seek, half-open AVET range, history,
+`as-of`, and `since` reads over immutable local slices. A bounded LRU admits
+only hash/checksum/canonical-validated immutable segments; hit, miss, eviction,
+reload, and physical-root adoption preserve old `Arc` values.
+
 **Outcome:** Readers traverse peer-local snapshot indexes with the documented raw access semantics while immutable durable values are cached safely and efficiently.
 
 **Focus:** Exact prefix, seek, reverse-seek, range, and lazy iteration over composite base/recent layers; current, history, `as-of`, and `since` database values; snapshot-local schema; content-addressed segment cache with bounded residency and permanent-safe reuse; concurrency and cancellation at reader boundaries, without query or pull logic.
@@ -77,6 +103,13 @@ manifests in place of a key/value-store root CAS.
 **Completion signal:** The peer surface returns the same ordered datoms as the kernel oracle for every supported view and index operation; reverse and boundary cases are correct; cache hits, misses, eviction, and reload are observationally invisible; and concurrent readers require no global write lock.
 
 ### 6. Multi-peer, restart, fault, and scale verification
+
+**Status:** Complete. `tests/postgres_peer.rs` covers independent lag/catch-up,
+waiting sync, concurrent readers and builders, multiple consolidations and old
+roots, interrupted publication, corrupt-segment fallback, bounded cache
+pressure, `noHistory`, transaction reports, and PostgreSQL restart across a
+31-transaction history. It differentially compares every current index with
+Goal 2 and validates reconstructed history invariants.
 
 **Outcome:** The index/peer boundary has real evidence that its semantic and performance structure survives independent progress, consolidation, restart, and damage.
 
@@ -87,3 +120,21 @@ manifests in place of a key/value-store root CAS.
 ## Index and peer exit condition
 
 Goal 4 is complete when independent Rust peers backed only by PostgreSQL can open and monotonically synchronize immutable database snapshots, answer complete raw index and temporal reads locally from a verified base-plus-recent representation, safely reuse and evict immutable cached artifacts, and survive restart or interrupted consolidation without gaps, forks, or result changes. The result must be demonstrated against real PostgreSQL and remain a derived read architecture over Goal 3's authoritative log; query/pull, HA transaction service, and lifecycle operations remain explicitly unclaimed.
+
+## Completion evidence
+
+Completed 2026-09-02 against PostgreSQL 15.11. The real-store suite ran with a
+temporary Unix-socket cluster and passed 17 library tests, 13 kernel tests, 6
+durability tests (plus one intentional subprocess-worker ignore), 4 peer/index
+tests, and 20 semantic tests. The peer suite itself performs an actual server
+restart. `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and
+`git diff --check` also pass. Derived corruption falls back to the log; the
+existing Goal 3 corruption tests continue to fail closed for authoritative
+damage.
+
+The deliberate performance deviation is eager Rust materialization of a
+verified base and its recent tail into compact immutable slice roots. It avoids
+JVM object/tree machinery and gives lock-free local iteration, but does not
+claim byte-compatible Datomic tree nodes or demand-paged queries. Persistent
+leaves and cache identity remain separate so later profiling can replace that
+physical merge without changing peer/query semantics.

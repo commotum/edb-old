@@ -284,14 +284,17 @@ impl Database {
             .last()
             .and_then(|chunk| {
                 chunk.iter().find_map(|datom| {
-                    (datom.entity == basis_t
+                    if datom.entity == basis_t
                         && datom.attribute == tx_instant_attribute
-                        && datom.added)
-                        .then(|| match datom.value {
+                        && datom.added
+                    {
+                        match datom.value {
                             Value::Instant(value) => Some(value),
                             _ => None,
-                        })
-                        .flatten()
+                        }
+                    } else {
+                        None
+                    }
                 })
             })
             .ok_or_else(|| {

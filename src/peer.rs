@@ -1,8 +1,10 @@
 use crate::postgres::{postgres_error, recover_to};
 use crate::{
-    Database, Datom, Digest, DurableTransaction, ErrorCategory, IndexManifest, IndexOrder,
-    IndexSegment, SegmentRef, SemanticError, View, decode_index_manifest, decode_index_segment,
-    decode_transaction, encode_index_manifest, encode_index_segment, sha256, transaction_hash,
+    CommitReceipt, Database, Datom, Digest, DurableTransaction, Entity, ErrorCategory,
+    IndexManifest, IndexOrder, IndexSegment, PullPattern, Query, QueryControl, QueryInput,
+    QueryOutcome, QueryValue, SegmentRef, SemanticError, TxOp, View, decode_index_manifest,
+    decode_index_segment, decode_transaction, encode_index_manifest, encode_index_segment, sha256,
+    transaction_hash,
 };
 use postgres::{Client, GenericClient, NoTls};
 use std::collections::{BTreeMap, VecDeque};
@@ -298,6 +300,7 @@ impl PostgresIndexer {
 /// `sync_to` remain immutable after the connection advances.
 pub struct Peer {
     client: Client,
+    writer: crate::PostgresStore,
     database_id: String,
     current: Arc<Database>,
     current_hash: Digest,
@@ -315,6 +318,7 @@ impl Peer {
         let database_id = database_id.into();
         let mut client = Client::connect(connection, NoTls)
             .map_err(|error| postgres_error("peer/connect", error))?;
+        let writer = crate::PostgresStore::connect(connection)?;
         let (head_basis, head_hash) = read_head(&mut client, &database_id)?;
         let mut cache = SegmentCache::new(cache_capacity);
         let (mut database, mut current_hash, durable_base_t) =
@@ -343,6 +347,7 @@ impl Peer {
         }
         Ok(Self {
             client,
+            writer,
             database_id,
             current: Arc::new(database),
             current_hash,
@@ -363,6 +368,43 @@ impl Peer {
     }
     pub fn cache_stats(&self) -> CacheStats {
         self.cache.stats
+    }
+
+    pub fn entity(&self, id: u64) -> Entity {
+        Entity::new(self.db(), id)
+    }
+
+    pub fn query(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.current.query(query, inputs, control)
+    }
+
+    pub fn pull(&self, pattern: &PullPattern, entity: u64) -> Result<QueryValue, SemanticError> {
+        self.current.pull(pattern, entity)
+    }
+
+    /// Submit through the same expected-basis/idempotency contract as the
+    /// concrete store, then monotonically advance this peer to the commit.
+    pub fn transact(
+        &mut self,
+        request_key: &str,
+        expected_basis_t: u64,
+        ops: &[TxOp],
+        tx_instant: i64,
+    ) -> Result<CommitReceipt, SemanticError> {
+        let receipt = self.writer.transact(
+            &self.database_id,
+            request_key,
+            expected_basis_t,
+            ops,
+            tx_instant,
+        )?;
+        self.sync_to(receipt.basis_t, Duration::from_secs(30))?;
+        Ok(receipt)
     }
 
     pub fn sync(&mut self) -> Result<Arc<Database>, SemanticError> {
@@ -394,6 +436,44 @@ impl Peer {
 
     pub fn take_tx_reports(&mut self) -> Vec<DurableTransaction> {
         self.reports.drain(..).collect()
+    }
+
+    /// Adopt a newly published physical base without changing the connection's
+    /// logical basis. This is the native counterpart of recovered
+    /// `notify-index`: it is optional for correctness and leaves old `Arc`
+    /// snapshots untouched.
+    pub fn refresh_index(&mut self) -> Result<bool, SemanticError> {
+        let through = self.current.basis_t();
+        let Some((mut candidate, mut hash, base_t)) = load_latest_base(
+            &mut self.client,
+            &self.database_id,
+            through,
+            &mut self.cache,
+        )?
+        else {
+            return Ok(false);
+        };
+        if base_t <= self.durable_base_t {
+            return Ok(false);
+        }
+        if candidate.basis_t() < through {
+            apply_tail(
+                &mut self.client,
+                &self.database_id,
+                &mut candidate,
+                &mut hash,
+                through,
+            )?;
+        }
+        if hash != self.current_hash || !same_current_value(&candidate, &self.current) {
+            return Err(fault(
+                "peer/index-adoption-divergence",
+                "new index base does not describe the connection's current database",
+            ));
+        }
+        self.current = Arc::new(candidate);
+        self.durable_base_t = base_t;
+        Ok(true)
     }
 
     fn advance_to(&mut self, target: u64) -> Result<Arc<Database>, SemanticError> {
@@ -623,6 +703,20 @@ fn index_member(database: &Database, datom: &Datom, order: IndexOrder) -> bool {
     }
 }
 
+fn same_current_value(left: &Database, right: &Database) -> bool {
+    left.basis_t() == right.basis_t()
+        && left.next_eid() == right.next_eid()
+        && crate::encode_schema(left.schema()).ok() == crate::encode_schema(right.schema()).ok()
+        && [
+            IndexOrder::Eavt,
+            IndexOrder::Aevt,
+            IndexOrder::Avet,
+            IndexOrder::Vaet,
+        ]
+        .into_iter()
+        .all(|order| left.datoms(View::Current, order) == right.datoms(View::Current, order))
+}
+
 fn read_head<C: GenericClient>(
     client: &mut C,
     database_id: &str,
@@ -749,8 +843,20 @@ mod tests {
             }],
         };
         let encoded = encode_index_manifest(&manifest).unwrap();
+        assert_eq!(
+            hex(&sha256(&bytes)),
+            "0cdfc38ca52d96e7230995075c5c3f41e8a9902954dd6dd375ccd19eb6284c06"
+        );
+        assert_eq!(
+            hex(&sha256(&encoded)),
+            "21d3896db5c43acf62a5d9963151a90477a874b9b6971a9f6953dea47bb9c7d9"
+        );
         let decoded = decode_index_manifest(&encoded).unwrap();
         assert_eq!(encode_index_manifest(&decoded).unwrap(), encoded);
+    }
+
+    fn hex(bytes: &Digest) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     #[test]
@@ -790,6 +896,46 @@ mod tests {
         assert_eq!(
             encode_index_manifest(&manifest).unwrap_err().code,
             "encoding/index-segment-gap"
+        );
+    }
+
+    #[test]
+    fn immutable_cache_hits_and_eviction_do_not_change_values() {
+        let first = Arc::new(IndexSegment {
+            order: IndexOrder::Eavt,
+            history: false,
+            datoms: vec![Datom {
+                entity: 1,
+                attribute: 2,
+                value: Value::Long(3),
+                tx: 1,
+                added: true,
+            }],
+        });
+        let second = Arc::new(IndexSegment {
+            order: IndexOrder::Eavt,
+            history: false,
+            datoms: vec![Datom {
+                entity: 2,
+                attribute: 2,
+                value: Value::Long(4),
+                tx: 1,
+                added: true,
+            }],
+        });
+        let mut cache = SegmentCache::new(1);
+        cache.insert([1; 32], Arc::clone(&first));
+        assert_eq!(cache.get(&[1; 32]).unwrap().datoms, first.datoms);
+        cache.insert([2; 32], Arc::clone(&second));
+        assert!(cache.get(&[1; 32]).is_none());
+        assert_eq!(cache.get(&[2; 32]).unwrap().datoms, second.datoms);
+        assert_eq!(
+            cache.stats,
+            CacheStats {
+                hits: 2,
+                misses: 1,
+                evictions: 1
+            }
         );
     }
 }

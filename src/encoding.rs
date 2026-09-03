@@ -1,6 +1,7 @@
 use crate::{
-    Attribute, Cardinality, Datom, EntityRef, ErrorCategory, IndexOrder, Keyword, Schema,
-    SchemaChange, SemanticError, Symbol, TupleSpec, TxOp, TxValue, Unique, Value, ValueType,
+    Attribute, Cardinality, Datom, EntityRef, ErrorCategory, IndexOrder, Instruction, Keyword,
+    Program, ProgramHash, ProgramKind, ProgramOutput, Schema, SchemaChange, SemanticError, Symbol,
+    TupleSpec, TxOp, TxValue, Unique, Value, ValueType,
 };
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
@@ -21,6 +22,9 @@ const KIND_TRANSACTION: u8 = 2;
 const KIND_REQUEST: u8 = 3;
 const KIND_INDEX_SEGMENT: u8 = 4;
 const KIND_INDEX_MANIFEST: u8 = 5;
+const KIND_PROGRAM: u8 = 6;
+const KIND_PROGRAM_REQUEST: u8 = 7;
+const KIND_PROGRAM_OUTPUT: u8 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableTransaction {
@@ -62,6 +66,137 @@ pub struct IndexManifest {
 
 pub fn sha256(bytes: &[u8]) -> Digest {
     Sha256::digest(bytes).into()
+}
+
+pub fn encode_program(program: &Program) -> Result<Vec<u8>, SemanticError> {
+    program.validate()?;
+    let mut body = Vec::new();
+    body.push(match program.kind {
+        ProgramKind::Transaction => 0,
+        ProgramKind::AttributePredicate => 1,
+        ProgramKind::Query => 2,
+    });
+    body.push(program.arity);
+    put_len(&mut body, program.instructions.len())?;
+    for instruction in &program.instructions {
+        encode_instruction(&mut body, instruction)?;
+    }
+    encode_blob(KIND_PROGRAM, &body)
+}
+
+pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
+    let body = decode_blob(bytes, KIND_PROGRAM)?;
+    let mut cursor = Cursor::new(body);
+    let kind = match cursor.u8()? {
+        0 => ProgramKind::Transaction,
+        1 => ProgramKind::AttributePredicate,
+        2 => ProgramKind::Query,
+        tag => return Err(invalid_tag("program kind", tag)),
+    };
+    let arity = cursor.u8()?;
+    let count = cursor.collection_len()?;
+    let mut instructions = Vec::with_capacity(count);
+    for _ in 0..count {
+        instructions.push(decode_instruction(&mut cursor)?);
+    }
+    cursor.finish()?;
+    let program = Program {
+        kind,
+        arity,
+        instructions,
+    };
+    program.validate().map_err(|error| {
+        fault(
+            "encoding/invalid-program",
+            format!("persisted program failed validation: {error}"),
+        )
+    })?;
+    if encode_program(&program)? != bytes {
+        return Err(fault(
+            "encoding/noncanonical-program",
+            "program payload is not canonical",
+        ));
+    }
+    Ok(program)
+}
+
+pub fn program_hash(program: &Program) -> Result<Digest, SemanticError> {
+    Ok(sha256(&encode_program(program)?))
+}
+
+pub fn program_request_digest(
+    hash: ProgramHash,
+    arguments: &[Value],
+    tx_instant: i64,
+    expected_basis_t: u64,
+    predicate_hashes: &[ProgramHash],
+) -> Result<Digest, SemanticError> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&hash);
+    put_u64(&mut body, expected_basis_t);
+    put_i64(&mut body, tx_instant);
+    put_len(&mut body, arguments.len())?;
+    for argument in arguments {
+        encode_value(&mut body, argument)?;
+    }
+    let mut predicate_hashes = predicate_hashes.to_vec();
+    predicate_hashes.sort();
+    predicate_hashes.dedup();
+    put_len(&mut body, predicate_hashes.len())?;
+    for predicate_hash in predicate_hashes {
+        body.extend_from_slice(&predicate_hash);
+    }
+    Ok(sha256(&encode_blob(KIND_PROGRAM_REQUEST, &body)?))
+}
+
+/// Canonical observation bytes for reproducibility checks. Transaction
+/// operations and relation rows are unordered, so their element encodings are
+/// sorted before the checked envelope is produced.
+pub fn encode_program_output(output: &ProgramOutput) -> Result<Vec<u8>, SemanticError> {
+    let mut body = Vec::new();
+    match output {
+        ProgramOutput::Transaction(operations) => {
+            body.push(0);
+            let mut operations = operations
+                .iter()
+                .map(|operation| {
+                    let mut bytes = Vec::new();
+                    encode_tx_op(&mut bytes, operation)?;
+                    Ok(bytes)
+                })
+                .collect::<Result<Vec<_>, SemanticError>>()?;
+            operations.sort();
+            put_len(&mut body, operations.len())?;
+            for operation in operations {
+                put_bytes(&mut body, &operation)?;
+            }
+        }
+        ProgramOutput::AttributePredicate(value) => {
+            body.push(1);
+            put_bool(&mut body, *value);
+        }
+        ProgramOutput::Query(rows) => {
+            body.push(2);
+            let mut rows = rows
+                .iter()
+                .map(|row| {
+                    let mut bytes = Vec::new();
+                    put_len(&mut bytes, row.len())?;
+                    for value in row {
+                        encode_value(&mut bytes, value)?;
+                    }
+                    Ok(bytes)
+                })
+                .collect::<Result<Vec<_>, SemanticError>>()?;
+            rows.sort();
+            rows.dedup();
+            put_len(&mut body, rows.len())?;
+            for row in rows {
+                put_bytes(&mut body, &row)?;
+            }
+        }
+    }
+    encode_blob(KIND_PROGRAM_OUTPUT, &body)
 }
 
 pub fn encode_schema(schema: &Schema) -> Result<Vec<u8>, SemanticError> {
@@ -559,6 +694,109 @@ fn decode_blob(bytes: &[u8], expected_kind: u8) -> Result<&[u8], SemanticError> 
         ));
     }
     Ok(&bytes[HEADER_LEN..checksum_at])
+}
+
+fn encode_instruction(
+    output: &mut Vec<u8>,
+    instruction: &Instruction,
+) -> Result<(), SemanticError> {
+    match instruction {
+        Instruction::PushArgument(index) => {
+            output.push(0);
+            output.push(*index);
+        }
+        Instruction::PushConstant(value) => {
+            output.push(1);
+            encode_value(output, value)?;
+        }
+        Instruction::Duplicate => output.push(2),
+        Instruction::Pop => output.push(3),
+        Instruction::LoadOne(attribute) => {
+            output.push(4);
+            put_u32(output, *attribute);
+        }
+        Instruction::Exists(attribute) => {
+            output.push(5);
+            put_u32(output, *attribute);
+        }
+        Instruction::Add => output.push(6),
+        Instruction::Subtract => output.push(7),
+        Instruction::Multiply => output.push(8),
+        Instruction::Divide => output.push(9),
+        Instruction::Equal => output.push(10),
+        Instruction::LessThan => output.push(11),
+        Instruction::GreaterThan => output.push(12),
+        Instruction::Not => output.push(13),
+        Instruction::And => output.push(14),
+        Instruction::Or => output.push(15),
+        Instruction::Require { category, message } => {
+            output.push(16);
+            output.push(match category {
+                ErrorCategory::Incorrect => 0,
+                ErrorCategory::Forbidden => 1,
+                ErrorCategory::Conflict => 2,
+                _ => {
+                    return Err(SemanticError::incorrect(
+                        "program/rejection-category",
+                        "program rejection category must be incorrect, conflict, or forbidden",
+                    ));
+                }
+            });
+            put_string(output, message)?;
+        }
+        Instruction::EmitAdd(attribute) => {
+            output.push(17);
+            put_u32(output, *attribute);
+        }
+        Instruction::EmitRetract(attribute) => {
+            output.push(18);
+            put_u32(output, *attribute);
+        }
+        Instruction::Return => output.push(19),
+        Instruction::EmitRow(width) => {
+            output.push(20);
+            output.push(*width);
+        }
+    }
+    Ok(())
+}
+
+fn decode_instruction(cursor: &mut Cursor<'_>) -> Result<Instruction, SemanticError> {
+    Ok(match cursor.u8()? {
+        0 => Instruction::PushArgument(cursor.u8()?),
+        1 => Instruction::PushConstant(decode_value(cursor, 0)?),
+        2 => Instruction::Duplicate,
+        3 => Instruction::Pop,
+        4 => Instruction::LoadOne(cursor.u32()?),
+        5 => Instruction::Exists(cursor.u32()?),
+        6 => Instruction::Add,
+        7 => Instruction::Subtract,
+        8 => Instruction::Multiply,
+        9 => Instruction::Divide,
+        10 => Instruction::Equal,
+        11 => Instruction::LessThan,
+        12 => Instruction::GreaterThan,
+        13 => Instruction::Not,
+        14 => Instruction::And,
+        15 => Instruction::Or,
+        16 => {
+            let category = match cursor.u8()? {
+                0 => ErrorCategory::Incorrect,
+                1 => ErrorCategory::Forbidden,
+                2 => ErrorCategory::Conflict,
+                tag => return Err(invalid_tag("program rejection category", tag)),
+            };
+            Instruction::Require {
+                category,
+                message: cursor.string()?,
+            }
+        }
+        17 => Instruction::EmitAdd(cursor.u32()?),
+        18 => Instruction::EmitRetract(cursor.u32()?),
+        19 => Instruction::Return,
+        20 => Instruction::EmitRow(cursor.u8()?),
+        tag => return Err(invalid_tag("program instruction", tag)),
+    })
 }
 
 fn encode_datom(output: &mut Vec<u8>, datom: &Datom) -> Result<(), SemanticError> {
