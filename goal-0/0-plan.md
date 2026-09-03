@@ -54,6 +54,8 @@ PostgreSQL is the only storage system this project will support. The design shou
 
 ### 3. PostgreSQL durability and recovery
 
+**Status:** Complete via `goal-3/`. The Rust kernel now has a versioned canonical format, one constraint-backed PostgreSQL schema, immutable chained history, expected-basis/hash publication, durable idempotency, fail-closed recovery, a verified current-value write cache, and real PostgreSQL 15.11 restart/concurrency/process-death/corruption evidence. Checkpoints were deliberately not introduced; the authoritative log is sufficient until Goal 4 owns persistent read indexes.
+
 **Outcome:** The kernel commits durable database history exclusively through PostgreSQL and reconstructs correct state after clean or abrupt restart.
 
 **Focus:** Concrete SQL schema and migrations; immutable records or blocks; transaction log; root publication; checksums; transaction idempotency; isolation and locking choices; atomic conditional commit; indexing checkpoints; corruption detection; and recovery.

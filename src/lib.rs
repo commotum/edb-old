@@ -6,8 +6,10 @@
 
 mod database;
 mod datom;
+mod encoding;
 mod error;
 mod index;
+mod postgres;
 mod schema;
 mod transaction;
 mod value;
@@ -16,8 +18,13 @@ pub use database::{
     Database, DatabaseView, EntityRef, SchemaChange, TxOp, TxReport, TxValue, View,
 };
 pub use datom::{Datom, IndexOrder};
+pub use encoding::{
+    Digest, DurableTransaction, decode_schema, decode_transaction, encode_schema,
+    encode_transaction, request_digest, sha256, transaction_hash,
+};
 pub use error::{ErrorCategory, SemanticError};
 pub use index::IndexPrefix;
+pub use postgres::{CommitFault, CommitReceipt, PostgresStore};
 pub use schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
 pub use value::{Keyword, Symbol, Value};

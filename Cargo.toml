@@ -9,4 +9,5 @@ publish = false
 bigdecimal = "0.4.8"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-
+postgres = "0.19.14"
+sha2 = "0.10.9"

@@ -239,6 +239,33 @@ impl Schema {
         self.attributes.values()
     }
 
+    pub(crate) fn ident_aliases(&self) -> impl Iterator<Item = (&Keyword, AttrId)> {
+        self.ident_aliases
+            .iter()
+            .map(|(ident, attribute)| (ident, *attribute))
+    }
+
+    pub(crate) fn install_ident_alias(
+        &mut self,
+        ident: Keyword,
+        attribute: AttrId,
+    ) -> Result<(), SemanticError> {
+        if !self.attributes.contains_key(&attribute) {
+            return Err(SemanticError::incorrect(
+                "schema/unknown-attribute",
+                format!("alias target attribute {attribute} is not installed"),
+            ));
+        }
+        if self.current_idents.contains_key(&ident) || self.ident_aliases.contains_key(&ident) {
+            return Err(SemanticError::conflict(
+                "schema/ident-exists",
+                format!("ident {} is already in use", ident.qualified_name()),
+            ));
+        }
+        self.ident_aliases.insert(ident, attribute);
+        Ok(())
+    }
+
     pub fn validate_value(
         &self,
         attribute: &Attribute,

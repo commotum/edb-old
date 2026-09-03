@@ -32,6 +32,8 @@ This goal realizes Stage 3 of `goal-0/0-plan.md`. It establishes the durable wri
 
 ### 1. Durable contract and recovered write spine
 
+**Status:** Complete. `goal-3/DURABILITY.md` maps the documented ACID/root model and recovered `log`/`kv-sql` revision guard to one PostgreSQL transaction, fixes authoritative records and invariants, and defines commit, unknown-outcome, recovery, and fault-test boundaries.
+
 **Outcome:** The exact durable invariants and PostgreSQL transaction boundary are settled before bytes or tables become commitments.
 
 **Focus:** Map documented atomicity, isolation, durability, total basis order, log visibility, and unknown outcomes to the relevant `1.0.7705` log/root/SQL control flow; define authoritative versus derived state; define commit states and retry outcomes; decide the PostgreSQL isolation/locking strategy and expected-basis conditional publication rule.
@@ -39,6 +41,8 @@ This goal realizes Stage 3 of `goal-0/0-plan.md`. It establishes the durable wri
 **Completion signal:** A concise contract names every durable record, invariant, commit point, recovery authority, and failure outcome, with significant deviations from the recovered design justified by PostgreSQL or Rust rather than convenience.
 
 ### 2. Canonical native encoding
+
+**Status:** Complete. `src/encoding.rs` defines the checked `ATMC` v1 schema, transaction, and request formats, including bootstrap ident aliases, all value variants, schema changes, material datoms, predecessor identity, next-eid state, and durable tempid outcomes. Golden, round-trip, order, stored-tie, malformed, truncated, oversized, version, kind, and checksum tests pass.
 
 **Outcome:** Every logical value needed for durable replay has stable, versioned, corruption-detectable bytes independent of process/compiler/database behavior.
 
@@ -48,6 +52,8 @@ This goal realizes Stage 3 of `goal-0/0-plan.md`. It establishes the durable wri
 
 ### 3. Concrete PostgreSQL schema and migrations
 
+**Status:** Complete. `migrations/0001_atomic.sql` is the only storage layout. It installs the catalog, head, immutable transaction log, and durable request outcomes, with checks, foreign keys, uniqueness, write validation, deferred publication enforcement, immutable-row triggers, privilege revocation, and a checksummed advisory-locked migration record. Real catalog and constraint tests pass.
+
 **Outcome:** A fresh PostgreSQL database can be migrated to one explicit storage layout that enforces the durable model instead of relying on application convention alone.
 
 **Focus:** Database catalog/identity; immutable transaction payloads or objects; per-database ordered transaction records and predecessor links; the single published head; schema/checkpoint metadata; idempotency key plus request digest and outcome; checksums, foreign keys, uniqueness, immutability protections, migration versioning, roles, and least-required privileges.
@@ -55,6 +61,8 @@ This goal realizes Stage 3 of `goal-0/0-plan.md`. It establishes the durable wri
 **Completion signal:** Migrations are repeatable from empty storage, schema constraints reject malformed chains and duplicate publications, ordinary runtime credentials cannot mutate immutable committed history, and integration tests inspect the actual PostgreSQL catalog and constraints.
 
 ### 4. Atomic commit and idempotent retry
+
+**Status:** Complete. `PostgresStore` locks one database head, resolves an existing request first, verifies the expected basis, uses the verified cached database value or exact recovery, calls pure `Database::with`, inserts the envelope and request outcome, conditionally advances basis plus hash, and acknowledges only after `COMMIT`. Matching retries reproduce the original result even after later commits; mismatched reuse and stale writers are conflicts.
 
 **Outcome:** The kernel successor and its durable transaction envelope are published exactly once at the expected basis or not published at all.
 
@@ -64,6 +72,8 @@ This goal realizes Stage 3 of `goal-0/0-plan.md`. It establishes the durable wri
 
 ### 5. Restart recovery and checkpoint discipline
 
+**Status:** Complete without a checkpoint format. Recovery verifies the bootstrap digest and format, reads only through the published head, checks contiguous bases, row/envelope hashes and predecessor links, applies committed material datoms and schema changes through the minimal recovery transition, and validates all kernel roots. Log replay is currently fast enough for this milestone, so no accepted checkpoint or speculative Goal 4 index structure was added.
+
 **Outcome:** Clean or abrupt startup reconstructs the latest valid immutable `Database` and detects damage instead of silently accepting it.
 
 **Focus:** Read the published head; validate database identity, encoding versions, checksums, predecessor chain, contiguous basis, transaction identity, and schema-change history; replay through the Goal 2 kernel representation; verify recovered roots and invariants; introduce only a derived atomic checkpoint mechanism needed to bound replay; ignore or diagnose unreachable writes without making them visible.
@@ -71,6 +81,8 @@ This goal realizes Stage 3 of `goal-0/0-plan.md`. It establishes the durable wri
 **Completion signal:** Recovery from log alone and from each accepted checkpoint yields the same basis, schema, history, and all four current/history index orders as the pre-restart kernel; missing/corrupt/reordered reachable records fail closed; unreachable partial objects never enter the recovered database.
 
 ### 6. Crash, concurrency, and durability verification
+
+**Status:** Complete against a fresh local PostgreSQL 15.11 cluster. `tests/postgres_durability.rs` covers repeated and concurrent migration, exact multi-transaction/schema/history recovery, two-writer serialization, every pre-commit publication kill point, actual client-process abort with an open transaction, post-commit acknowledgment loss and retry, server restart, malformed-chain constraints, runtime-role immutability, reachable-payload corruption, and a missing reachable transaction. The real-PostgreSQL run passed 6 acceptance tests (the seventh test is the crash-worker entry point); all 47 non-PostgreSQL tests, including the Goal 1/2 and encoding suites, pass and clippy is warning-free.
 
 **Outcome:** The PostgreSQL boundary has evidence for its guarantees under the failures that make durability difficult.
 
@@ -82,3 +94,4 @@ This goal realizes Stage 3 of `goal-0/0-plan.md`. It establishes the durable wri
 
 Goal 3 is complete when the Rust kernel can create and reopen a PostgreSQL-backed database, publish transactions through one conditional atomic head advance, resolve retries by durable idempotency identity, and recover exactly the last committed database value after clean shutdown, process death, or ambiguous acknowledgment. The result must be demonstrated against real PostgreSQL with fault injection and must leave peer synchronization, durable read-index architecture, HA leadership, and production service orchestration clearly unclaimed.
 
+**Exit status:** Complete. Acknowledged commits recover after PostgreSQL restart; process death and all injected pre-commit failures publish nothing; ambiguous committed requests resolve once by durable key and digest; reachable corruption fails closed; and recovery reproduces basis, next-eid allocation, schema and aliases, schema history, datom history, and all current/history EAVT, AEVT, AVET, and VAET roots.

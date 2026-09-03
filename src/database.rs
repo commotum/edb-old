@@ -216,6 +216,10 @@ impl Database {
         self.basis_t
     }
 
+    pub fn next_eid(&self) -> u64 {
+        self.next_eid
+    }
+
     /// Greatest transaction t whose transaction instant is at or before the
     /// supplied millisecond instant, or zero when the instant predates the DB.
     pub fn t_at_or_before_instant(&self, instant: i64) -> u64 {
@@ -522,6 +526,174 @@ impl Database {
     /// the same inputs always produce the same result.
     pub fn with(&self, ops: &[TxOp], tx_instant: i64) -> Result<TxReport, SemanticError> {
         self.with_context(ops, None, tx_instant)
+    }
+
+    /// Rebuild one already-assessed committed successor from its material
+    /// transaction record. Persistence uses this path during recovery; it
+    /// deliberately does not rerun transaction functions, tempid resolution,
+    /// or any other request-time behavior.
+    pub(crate) fn apply_committed(
+        &self,
+        transaction: &crate::DurableTransaction,
+    ) -> Result<Self, SemanticError> {
+        let tx = self.basis_t.checked_add(1).ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/basis-overflow",
+                "database basis cannot advance beyond u64",
+            )
+        })?;
+        if transaction.basis_t != tx {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/noncontiguous-basis",
+                format!(
+                    "expected transaction basis {tx}, got {}",
+                    transaction.basis_t
+                ),
+            ));
+        }
+
+        let expected_next_eid = transaction
+            .tempids
+            .values()
+            .copied()
+            .filter(|entity| *entity >= self.next_eid)
+            .max()
+            .map_or(Ok(self.next_eid), |entity| {
+                entity.checked_add(1).ok_or_else(|| {
+                    SemanticError::new(
+                        ErrorCategory::Fault,
+                        "recovery/entity-id-overflow",
+                        "committed tempid allocation overflows u64",
+                    )
+                })
+            })?;
+        if transaction.next_eid != expected_next_eid {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/next-eid-mismatch",
+                format!(
+                    "expected next entity id {expected_next_eid}, got {}",
+                    transaction.next_eid
+                ),
+            ));
+        }
+
+        let tx_instant_attribute = self.tx_instant_attribute.ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/missing-tx-instant",
+                "database has no transaction instant attribute",
+            )
+        })?;
+        let instants: Vec<_> = transaction
+            .tx_data
+            .iter()
+            .filter_map(|datom| {
+                (datom.entity == tx && datom.attribute == tx_instant_attribute && datom.added)
+                    .then_some(&datom.value)
+            })
+            .collect();
+        let tx_instant = match instants.as_slice() {
+            [Value::Instant(instant)] => *instant,
+            _ => {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "recovery/invalid-tx-instant",
+                    "committed transaction must contain exactly one own transaction instant",
+                ));
+            }
+        };
+        if self
+            .last_tx_instant
+            .is_some_and(|previous| tx_instant < previous)
+        {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/non-monotonic-instant",
+                "committed transaction instant precedes its predecessor",
+            ));
+        }
+
+        let schema_ops: Vec<_> = transaction
+            .schema_changes
+            .iter()
+            .map(|change| match change {
+                SchemaChange::Install(attribute) => TxOp::InstallAttribute(attribute.clone()),
+                SchemaChange::Alter(attribute) => TxOp::AlterAttribute(attribute.clone()),
+            })
+            .collect();
+        let (successor_schema, prepared_changes) = self.prepare_schema_changes(&schema_ops)?;
+        if prepared_changes != transaction.schema_changes {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/noncanonical-schema-changes",
+                "committed schema changes are duplicated or out of canonical order",
+            ));
+        }
+
+        let mut logical = Vec::with_capacity(transaction.tx_data.len());
+        for datom in &transaction.tx_data {
+            if datom.tx != tx {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "recovery/datom-transaction-mismatch",
+                    "committed datom does not name its enclosing transaction",
+                ));
+            }
+            let attribute = self.schema.attribute(datom.attribute)?;
+            self.schema.validate_value(attribute, &datom.value)?;
+            let existed = contains_fact(&self.current, datom.entity, datom.attribute, &datom.value);
+            if existed == datom.added {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "recovery/nonmaterial-datom",
+                    "committed datom is not a material change from db-before",
+                ));
+            }
+            if logical.iter().any(|prior: &LogicalDatom| {
+                prior.entity == datom.entity
+                    && prior.attribute == datom.attribute
+                    && prior.value.stored_eq(&datom.value)
+            }) {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "recovery/duplicate-datom",
+                    "committed transaction contains duplicate or contradictory datoms",
+                ));
+            }
+            logical.push(LogicalDatom {
+                entity: datom.entity,
+                attribute: datom.attribute,
+                value: datom.value.clone(),
+                added: datom.added,
+            });
+        }
+
+        let mut final_current = apply_logical(&self.current, &logical, tx);
+        validate_cardinality(&successor_schema, &final_current)?;
+        validate_uniqueness(&successor_schema, &final_current)?;
+        final_current.sort_by(compare_current);
+
+        let mut db_after = self.clone();
+        db_after.schema = successor_schema;
+        db_after.basis_t = tx;
+        db_after.next_eid = transaction.next_eid;
+        db_after.last_tx_instant = Some(tx_instant);
+        let current_datoms = facts_as_datoms(&final_current);
+        db_after.current = final_current.into();
+        let mut history_chunks: Vec<_> = self.history.iter().cloned().collect();
+        history_chunks.push(Arc::from(transaction.tx_data.clone()));
+        db_after.history = history_chunks.into();
+        let mut schema_chunks: Vec<_> = self.schema_history.iter().cloned().collect();
+        schema_chunks.push(Arc::from(transaction.schema_changes.clone()));
+        db_after.schema_history = schema_chunks.into();
+        db_after.current_indexes = IndexRoots::build(&db_after.schema, current_datoms);
+        db_after.history_indexes =
+            IndexRoots::build(&db_after.schema, db_after.history_datoms().cloned());
+        db_after.validate_invariants()?;
+        Ok(db_after)
     }
 
     pub(crate) fn with_function_context(
