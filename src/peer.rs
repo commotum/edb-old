@@ -6,7 +6,8 @@ use crate::persistent_tree::{
     decode_tree_node, merge_tree,
 };
 use crate::postgres::{
-    is_postgres_connection_error, postgres_error, recover_to, verify_schema_compatibility,
+    is_postgres_connection_error, postgres_error, read_authenticated_log_range, recover_to,
+    verify_schema_compatibility,
 };
 use crate::recent::{
     EndpointProjection, RecentCursor, RecentCursorStats, RecentLimits, RecentRange, RecentTier,
@@ -18,8 +19,7 @@ use crate::{
     PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, PullPattern, Query,
     QueryControl, QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
     TreeManifestRecord, TreePublicationDelta, TreePublishOutcome, TreeRootBinding, View,
-    decode_index_manifest, decode_index_segment, decode_transaction, encode_genesis, sha256,
-    transaction_hash, tx_to_t,
+    decode_index_manifest, decode_index_segment, encode_genesis, sha256, tx_to_t,
 };
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
@@ -555,18 +555,38 @@ impl PostgresIndexer {
             ));
         }
         let basis_sql = sql_basis(basis_t)?;
+        let excision_generation = read_excision_generation(&mut transaction, &self.database_id)?;
+        let generation_sql = sql_basis(excision_generation)?;
         let stored_state = digest(
-            transaction
-                .query_one(
+            (if excision_generation == 0 {
+                transaction.query_opt(
                     "SELECT state_hash FROM atomic_transactions \
                      WHERE database_id = $1 AND basis_t = $2 AND tx_hash = $3",
                     &[&self.database_id, &basis_sql, &&tx_hash[..]],
                 )
+            } else {
+                transaction.query_opt(
+                    "SELECT state_hash FROM atomic_generation_transactions \
+                     WHERE database_id = $1 AND generation = $2 \
+                       AND basis_t = $3 AND tx_hash = $4",
+                    &[
+                        &self.database_id,
+                        &generation_sql,
+                        &basis_sql,
+                        &&tx_hash[..],
+                    ],
+                )
+            })
                 .map_err(|error| postgres_error("tree/authoritative-state", error))?
+                .ok_or_else(|| {
+                    fault(
+                        "tree/missing-authoritative-state",
+                        "head has no transaction state commitment in its active generation",
+                    )
+                })?
                 .get(0),
             "authoritative tree state commitment",
         )?;
-        let excision_generation = read_excision_generation(&mut transaction, &self.database_id)?;
         let selection = load_latest_native_manifest(
             &mut transaction,
             &mut self.tree_store,
@@ -623,6 +643,7 @@ impl PostgresIndexer {
             let tail = load_authenticated_index_tail(
                 &mut transaction,
                 &self.database_id,
+                excision_generation,
                 previous.basis_t,
                 previous.tx_hash,
                 basis_t,
@@ -696,21 +717,41 @@ impl PostgresIndexer {
             payload: tree_manifest_payload,
             roots: tree_roots,
         };
-        for (hash, payload) in build.nodes.iter() {
-            self.tree_store.insert_node(*hash, payload)?;
-        }
-        if fault_point == IndexBuildFault::AfterSegments {
-            return Err(SemanticError::new(
-                ErrorCategory::Interrupted,
-                "index/injected-failure",
-                "injected failure after immutable tree-node insertion",
-            ));
-        }
-        let publication = self.tree_store.publish_manifest_with_delta(
-            &tree_record,
+        let upload_hashes = build.nodes.iter().map(|(hash, _)| *hash).collect();
+        self.tree_store.begin_build_intent(
+            &self.database_id,
             expected_publication_revision,
-            &build.publication_delta,
+            tree_manifest_hash,
+            &upload_hashes,
         )?;
+        let publication = (|| {
+            for (hash, payload) in build.nodes.iter() {
+                self.tree_store.insert_node(*hash, payload)?;
+            }
+            if fault_point == IndexBuildFault::AfterSegments {
+                return Err(SemanticError::new(
+                    ErrorCategory::Interrupted,
+                    "index/injected-failure",
+                    "injected failure after immutable tree-node insertion",
+                ));
+            }
+            self.tree_store.publish_manifest_with_delta(
+                &tree_record,
+                expected_publication_revision,
+                &build.publication_delta,
+            )
+        })();
+        let release = self.tree_store.release_build_intent();
+        let publication = match publication {
+            Ok(publication) => {
+                release?;
+                publication
+            }
+            Err(error) => {
+                release?;
+                return Err(error);
+            }
+        };
         let tree_store_stats = self.tree_store.stats();
         Ok(IndexBuildReceipt {
             publication_revision,
@@ -832,11 +873,19 @@ fn load_latest_native_manifest<C: GenericClient>(
                 AND m.publication_revision = p.publication_revision \
                 AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
                 AND m.manifest_hash = p.manifest_hash \
-               JOIN atomic_transactions t \
-                 ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
-                AND t.tx_hash = m.tx_hash AND t.state_hash = m.state_hash \
+                AND m.log_generation = p.log_generation \
+               LEFT JOIN atomic_transactions legacy \
+                 ON m.log_generation = 0 AND legacy.database_id = m.database_id \
+                AND legacy.basis_t = m.basis_t AND legacy.tx_hash = m.tx_hash \
+                AND legacy.state_hash = m.state_hash \
+               LEFT JOIN atomic_generation_transactions native \
+                 ON m.log_generation > 0 AND native.database_id = m.database_id \
+                AND native.generation = m.log_generation AND native.basis_t = m.basis_t \
+                AND native.tx_hash = m.tx_hash AND native.state_hash = m.state_hash \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
-                AND m.excision_generation = $3 \
+                AND m.log_generation = $3 \
+                AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
+                  OR (m.log_generation > 0 AND native.tx_hash IS NOT NULL)) \
               ORDER BY p.publication_revision DESC",
             &[
                 &database_id,
@@ -936,6 +985,7 @@ fn load_latest_native_manifest<C: GenericClient>(
 fn load_authenticated_index_tail<C: GenericClient>(
     client: &mut C,
     database_id: &str,
+    log_generation: u64,
     base_t: u64,
     base_hash: Digest,
     target_t: u64,
@@ -947,61 +997,22 @@ fn load_authenticated_index_tail<C: GenericClient>(
             "persistent tree base is ahead of the captured log head",
         ));
     }
-    let rows = client
-        .query(
-            "SELECT basis_t, previous_hash, tx_hash, payload \
-               FROM atomic_transactions \
-              WHERE database_id = $1 AND basis_t > $2 AND basis_t <= $3 \
-              ORDER BY basis_t",
-            &[&database_id, &sql_basis(base_t)?, &sql_basis(target_t)?],
-        )
-        .map_err(|error| postgres_error("index/log-tail", error))?;
-    if rows.len() != usize::try_from(target_t - base_t).unwrap_or(usize::MAX) {
-        return Err(fault(
-            "index/missing-tail",
-            "persistent tree log tail is not contiguous",
-        ));
-    }
-    let mut expected_t = base_t;
-    let mut expected_hash = base_hash;
-    let mut tail = Vec::with_capacity(rows.len());
-    for row in rows {
-        expected_t = expected_t
-            .checked_add(1)
-            .ok_or_else(|| fault("index/basis-overflow", "tree tail basis overflow"))?;
-        let basis_t = pg_basis(row.get(0), "tree tail basis")?;
-        let previous_hash = digest(row.get(1), "tree tail predecessor")?;
-        let tx_hash = digest(row.get(2), "tree tail transaction hash")?;
-        let payload: Vec<u8> = row.get(3);
-        if basis_t != expected_t
-            || previous_hash != expected_hash
-            || transaction_hash(&payload) != tx_hash
-        {
-            return Err(fault(
-                "index/invalid-tail-link",
-                "tree tail has a gap, predecessor mismatch, or corrupt payload",
-            ));
-        }
-        let transaction = decode_transaction(&payload)?;
-        if transaction.database_id != database_id
-            || transaction.basis_t != basis_t
-            || transaction.previous_hash != previous_hash
-        {
-            return Err(fault(
-                "index/tail-envelope-mismatch",
-                "tree tail envelope disagrees with its log row",
-            ));
-        }
-        expected_hash = tx_hash;
-        tail.push(transaction);
-    }
-    if expected_t != target_t || expected_hash != target_hash {
+    let rows = read_authenticated_log_range(
+        client,
+        database_id,
+        log_generation,
+        base_t,
+        target_t,
+        base_hash,
+    )?;
+    let end_hash = rows.last().map_or(base_hash, |row| row.tx_hash);
+    if end_hash != target_hash {
         return Err(fault(
             "index/tail-head-mismatch",
             "tree base plus authenticated tail does not reach the captured head",
         ));
     }
-    Ok(tail)
+    Ok(rows.into_iter().map(|row| row.transaction).collect())
 }
 
 #[derive(Clone)]
@@ -2016,6 +2027,9 @@ struct PeerState {
     durable_base_t: u64,
     tree_base: Option<Arc<TreeBase>>,
     _root_pin: Option<Arc<RootPin>>,
+    /// Protects the authoritative generation used by this immutable value,
+    /// including log-only values which have no physical tree root to pin.
+    _generation_pin: Arc<GenerationPin>,
     recent: Arc<RecentTier>,
     metadata: Arc<MetadataProjection>,
     /// Existing attributes whose AVET membership became true after the
@@ -2039,6 +2053,7 @@ struct PeerIo {
 struct RootPinState {
     client: Option<Client>,
     counts: BTreeMap<Digest, u64>,
+    generation_counts: BTreeMap<u64, u64>,
 }
 
 /// One PostgreSQL session per live PeerCore, regardless of how many immutable
@@ -2047,6 +2062,7 @@ struct RootPinState {
 /// state drop releases it.
 struct RootPinManager {
     connection: PostgresConnectionConfig,
+    database_id: String,
     application_name: String,
     state: Mutex<RootPinState>,
 }
@@ -2058,10 +2074,12 @@ impl RootPinManager {
     ) -> Result<Arc<Self>, SemanticError> {
         let manager = Arc::new(Self {
             connection: connection.clone(),
+            database_id: database_id.to_owned(),
             application_name: root_pin_application_name(database_id),
             state: Mutex::new(RootPinState {
                 client: None,
                 counts: BTreeMap::new(),
+                generation_counts: BTreeMap::new(),
             }),
         });
         {
@@ -2093,6 +2111,27 @@ impl RootPinManager {
             manager: Arc::clone(self),
             manifest_hash,
         })))
+    }
+
+    fn acquire_generation(
+        self: &Arc<Self>,
+        generation: u64,
+    ) -> Result<Arc<GenerationPin>, SemanticError> {
+        let mut state = lock(&self.state);
+        self.ensure_locked(&mut state)?;
+        if !state.generation_counts.contains_key(&generation) {
+            acquire_generation_pin(
+                state.client.as_mut().expect("root pin session was ensured"),
+                &self.database_id,
+                generation,
+            )?;
+        }
+        *state.generation_counts.entry(generation).or_default() += 1;
+        drop(state);
+        Ok(Arc::new(GenerationPin {
+            manager: Arc::clone(self),
+            generation,
+        }))
     }
 
     fn ensure(&self) -> Result<(), SemanticError> {
@@ -2136,10 +2175,13 @@ impl RootPinManager {
             .batch_execute("SET default_transaction_read_only = on")
             .map_err(|error| postgres_error("peer/root-pin-read-only", error))?;
         // PostgreSQL restart drops every advisory lock. Reacquire every live
-        // manifest before this manager is considered healthy. The mandatory
-        // grace period covers the unavoidable interval while the server was
-        // unavailable; if an operator nevertheless retired one, verification
-        // fails closed instead of serving a partial immutable value.
+        // generation and manifest before this manager is considered healthy.
+        // The operator-chosen GC grace covers unavailable intervals; a zero or
+        // short horizon deliberately accepts that risk, and reacquisition
+        // fails closed if collection already began.
+        for generation in state.generation_counts.keys() {
+            acquire_generation_pin(&mut client, &self.database_id, *generation)?;
+        }
         for hash in state.counts.keys() {
             acquire_root_pin(&mut client, *hash)?;
         }
@@ -2172,6 +2214,66 @@ impl RootPinManager {
             );
         }
     }
+
+    fn release_generation(&self, generation: u64) {
+        let mut state = lock(&self.state);
+        let Some(count) = state.generation_counts.get_mut(&generation) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count != 0 {
+            return;
+        }
+        state.generation_counts.remove(&generation);
+        if let Some(client) = state.client.as_mut()
+            && let Ok(row) = client.query_opt(
+                "SELECT atomic_log_generation_pin_key($1, $2)",
+                &[&self.database_id, &sql_basis(generation).unwrap_or(i64::MAX)],
+            )
+            && let Some(row) = row
+        {
+            let key: i64 = row.get(0);
+            let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
+        }
+    }
+}
+
+fn acquire_generation_pin(
+    client: &mut Client,
+    database_id: &str,
+    generation: u64,
+) -> Result<(), SemanticError> {
+    let generation_sql = sql_basis(generation)?;
+    let key: i64 = client
+        .query_opt(
+            "SELECT atomic_log_generation_pin_key($1, $2)",
+            &[&database_id, &generation_sql],
+        )
+        .map_err(|error| postgres_error("peer/generation-pin-key", error))?
+        .ok_or_else(|| fault("peer/generation-pin-database", "database no longer exists"))?
+        .get(0);
+    client
+        .query_one("SELECT pg_advisory_lock_shared($1)", &[&key])
+        .map_err(|error| postgres_error("peer/generation-pin-acquire", error))?;
+    let available: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_heads \
+                              WHERE database_id = $1 AND log_generation = $2) \
+                    OR EXISTS (SELECT 1 FROM atomic_log_generation_retirements \
+                                WHERE database_id = $1 AND generation = $2 \
+                                  AND collecting_at IS NULL)",
+            &[&database_id, &generation_sql],
+        )
+        .map_err(|error| postgres_error("peer/generation-pin-verify", error))?
+        .get(0);
+    if !available {
+        let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
+        return Err(fault(
+            "peer/generation-retired-during-load",
+            "log generation became unavailable before the immutable value was pinned",
+        ));
+    }
+    Ok(())
 }
 
 fn acquire_root_pin(client: &mut Client, manifest_hash: Digest) -> Result<(), SemanticError> {
@@ -2187,7 +2289,9 @@ fn acquire_root_pin(client: &mut Client, manifest_hash: Digest) -> Result<(), Se
     let published: bool = client
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications \
-                            WHERE manifest_hash = $1)",
+                            WHERE manifest_hash = $1) \
+                    AND NOT EXISTS (SELECT 1 FROM atomic_tree_retirement_progress \
+                                    WHERE manifest_hash = $1)",
             &[&&manifest_hash[..]],
         )
         .map_err(|error| postgres_error("peer/root-pin-verify", error))?
@@ -2217,6 +2321,17 @@ fn root_pin_application_name(database_id: &str) -> String {
 struct RootPin {
     manager: Arc<RootPinManager>,
     manifest_hash: Digest,
+}
+
+struct GenerationPin {
+    manager: Arc<RootPinManager>,
+    generation: u64,
+}
+
+impl Drop for GenerationPin {
+    fn drop(&mut self) {
+        self.manager.release_generation(self.generation);
+    }
 }
 
 impl Drop for RootPin {
@@ -2381,6 +2496,7 @@ impl Peer {
             let tail = read_authenticated_tail(
                 &mut client,
                 &database_id,
+                excision_generation,
                 base.manifest.basis_t,
                 base.manifest.tx_hash,
                 base.manifest.state_hash,
@@ -2427,8 +2543,13 @@ impl Peer {
             load_counters
                 .compatibility_materializations
                 .fetch_add(1, Ordering::Relaxed);
+            let legacy_base = if excision_generation == 0 {
+                load_latest_base(&mut client, &database_id, head_basis, &mut cache)?
+            } else {
+                None
+            };
             let (mut database, mut current_hash, durable_base_t) =
-                match load_latest_base(&mut client, &database_id, head_basis, &mut cache)? {
+                match legacy_base {
                     Some(base) => base,
                     None => {
                         let recovered =
@@ -2440,6 +2561,7 @@ impl Peer {
                 apply_tail(
                     &mut client,
                     &database_id,
+                    excision_generation,
                     &mut database,
                     &mut current_hash,
                     head_basis,
@@ -2451,7 +2573,12 @@ impl Peer {
                     "legacy peer open does not reach observed head",
                 ));
             }
-            let state_hash = read_state_hash(&mut client, &database_id, head_basis)?;
+            let state_hash = read_state_hash(
+                &mut client,
+                &database_id,
+                excision_generation,
+                head_basis,
+            )?;
             let metadata = Arc::new(MetadataProjection::from_database(&database)?);
             let recent = Arc::new(RecentTier::new(
                 &database_id,
@@ -2477,6 +2604,7 @@ impl Peer {
             )
         };
         let root_pins = RootPinManager::connect(connection, &database_id)?;
+        let generation_pin = root_pins.acquire_generation(excision_generation)?;
         let root_pin = root_pins.acquire(tree_base.as_deref())?;
         Ok(Self {
             core: Arc::new(PeerCore {
@@ -2501,6 +2629,7 @@ impl Peer {
                     durable_base_t,
                     tree_base,
                     _root_pin: root_pin,
+                    _generation_pin: generation_pin,
                     recent,
                     metadata,
                     avet_unready,
@@ -2853,6 +2982,7 @@ impl Peer {
         let tail = read_authenticated_tail(
             &mut io.client,
             &self.core.database_id,
+            state.excision_generation,
             tree_base.manifest.basis_t,
             tree_base.manifest.tx_hash,
             tree_base.manifest.state_hash,
@@ -2908,6 +3038,7 @@ impl Peer {
         let tail = read_authenticated_tail(
             &mut io.client,
             &self.core.database_id,
+            state.excision_generation,
             state.basis_t,
             state.current_hash,
             state.current_state_hash,
@@ -3015,12 +3146,17 @@ impl Peer {
         io: &mut PeerIo,
         state: &PeerState,
     ) -> Result<Arc<Database>, SemanticError> {
-        let (mut database, mut hash, _) = match load_latest_base(
-            &mut io.client,
-            &self.core.database_id,
-            state.basis_t,
-            &mut io.cache,
-        )? {
+        let legacy_base = if state.excision_generation == 0 {
+            load_latest_base(
+                &mut io.client,
+                &self.core.database_id,
+                state.basis_t,
+                &mut io.cache,
+            )?
+        } else {
+            None
+        };
+        let (mut database, mut hash, _) = match legacy_base {
             Some(base) => base,
             None => {
                 let recovered = recover_to(
@@ -3036,6 +3172,7 @@ impl Peer {
             apply_tail(
                 &mut io.client,
                 &self.core.database_id,
+                state.excision_generation,
                 &mut database,
                 &mut hash,
                 state.basis_t,
@@ -3088,6 +3225,7 @@ impl Peer {
             let tail = read_authenticated_tail(
                 &mut io.client,
                 &self.core.database_id,
+                generation,
                 base.manifest.basis_t,
                 base.manifest.tx_hash,
                 base.manifest.state_hash,
@@ -3111,6 +3249,7 @@ impl Peer {
                 self.core.recent_limits,
             )?);
             let root_pin = self.core.root_pins.acquire(Some(base))?;
+            let generation_pin = self.core.root_pins.acquire_generation(generation)?;
             PeerState {
                 basis_t: basis,
                 eidx_frontier: tail.eidx_frontier,
@@ -3120,6 +3259,7 @@ impl Peer {
                 durable_base_t: base.manifest.basis_t,
                 tree_base,
                 _root_pin: root_pin,
+                _generation_pin: generation_pin,
                 recent,
                 metadata,
                 avet_unready,
@@ -3145,15 +3285,22 @@ impl Peer {
             let compatibility = OnceLock::new();
             let recovered = Arc::new(recovered);
             let _ = compatibility.set(Arc::clone(&recovered));
+            let generation_pin = self.core.root_pins.acquire_generation(generation)?;
             PeerState {
                 basis_t: basis,
                 eidx_frontier: recovered.eidx_frontier(),
                 current_hash: hash,
-                current_state_hash: read_state_hash(&mut io.client, &self.core.database_id, basis)?,
+                current_state_hash: read_state_hash(
+                    &mut io.client,
+                    &self.core.database_id,
+                    generation,
+                    basis,
+                )?,
                 excision_generation: generation,
                 durable_base_t: 0,
                 tree_base: None,
                 _root_pin: None,
+                _generation_pin: generation_pin,
                 recent,
                 metadata,
                 avet_unready: Arc::new(BTreeSet::new()),
@@ -4068,11 +4215,19 @@ fn load_latest_tree_base<C: GenericClient>(
                 AND m.publication_revision = p.publication_revision \
                 AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
                 AND m.manifest_hash = p.manifest_hash \
-               JOIN atomic_transactions t \
-                 ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
-                AND t.tx_hash = m.tx_hash AND t.state_hash = m.state_hash \
+                AND m.log_generation = p.log_generation \
+               LEFT JOIN atomic_transactions legacy \
+                 ON m.log_generation = 0 AND legacy.database_id = m.database_id \
+                AND legacy.basis_t = m.basis_t AND legacy.tx_hash = m.tx_hash \
+                AND legacy.state_hash = m.state_hash \
+               LEFT JOIN atomic_generation_transactions native \
+                 ON m.log_generation > 0 AND native.database_id = m.database_id \
+                AND native.generation = m.log_generation AND native.basis_t = m.basis_t \
+                AND native.tx_hash = m.tx_hash AND native.state_hash = m.state_hash \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
-                AND m.excision_generation = $3 \
+                AND m.log_generation = $3 \
+                AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
+                  OR (m.log_generation > 0 AND native.tx_hash IS NOT NULL)) \
               ORDER BY p.publication_revision DESC",
             &[&database_id, &through_sql, &generation_sql],
         )
@@ -4224,6 +4379,7 @@ struct AuthenticatedTail {
 fn read_authenticated_tail<C: GenericClient>(
     client: &mut C,
     database_id: &str,
+    log_generation: u64,
     base_t: u64,
     base_hash: Digest,
     base_state_hash: Digest,
@@ -4236,60 +4392,27 @@ fn read_authenticated_tail<C: GenericClient>(
             "requested tail endpoint precedes its native base",
         ));
     }
-    let rows = client
-        .query(
-            "SELECT basis_t, previous_hash, tx_hash, payload, state_hash \
-               FROM atomic_transactions \
-              WHERE database_id = $1 AND basis_t > $2 AND basis_t <= $3 \
-              ORDER BY basis_t",
-            &[&database_id, &sql_basis(base_t)?, &sql_basis(target_t)?],
-        )
-        .map_err(|error| postgres_error("peer/native-tail", error))?;
-    if rows.len() != usize::try_from(target_t - base_t).unwrap_or(usize::MAX) {
-        return Err(fault(
-            "peer/missing-tail",
-            "native peer log tail is not contiguous",
-        ));
-    }
-    let mut expected_t = base_t;
     let mut end_hash = base_hash;
     let mut end_state_hash = base_state_hash;
     let mut eidx_frontier = base_eidx_frontier;
+    let rows = read_authenticated_log_range(
+        client,
+        database_id,
+        log_generation,
+        base_t,
+        target_t,
+        base_hash,
+    )?;
     let mut transactions = Vec::with_capacity(rows.len());
     for row in rows {
-        expected_t = expected_t
-            .checked_add(1)
-            .ok_or_else(|| fault("peer/tail-basis-overflow", "tail basis overflow"))?;
-        let basis_t = pg_basis(row.get(0), "native tail transaction")?;
-        let previous_hash = digest(row.get(1), "native tail predecessor")?;
-        let tx_hash = digest(row.get(2), "native tail transaction hash")?;
-        let payload: Vec<u8> = row.get(3);
-        let state_hash = digest(row.get(4), "native tail state commitment")?;
-        if basis_t != expected_t
-            || previous_hash != end_hash
-            || transaction_hash(&payload) != tx_hash
-        {
-            return Err(fault(
-                "peer/invalid-tail-link",
-                "native peer tail has a gap, predecessor mismatch, or payload hash mismatch",
-            ));
-        }
+        let state_hash = row.state_hash;
         if state_hash == [0; 32] {
             return Err(fault(
                 "peer/missing-state-commitment",
                 "native peer tail row has no semantic state commitment",
             ));
         }
-        let transaction = decode_transaction(&payload)?;
-        if transaction.database_id != database_id
-            || transaction.basis_t != basis_t
-            || transaction.previous_hash != previous_hash
-        {
-            return Err(fault(
-                "peer/tail-envelope-mismatch",
-                "native transaction envelope disagrees with its durable row",
-            ));
-        }
+        let transaction = row.transaction;
         if transaction.eidx_frontier < eidx_frontier {
             return Err(fault(
                 "peer/tail-frontier-regressed",
@@ -4297,7 +4420,7 @@ fn read_authenticated_tail<C: GenericClient>(
             ));
         }
         eidx_frontier = transaction.eidx_frontier;
-        end_hash = tx_hash;
+        end_hash = row.tx_hash;
         end_state_hash = state_hash;
         transactions.push(transaction);
     }
@@ -4312,17 +4435,29 @@ fn read_authenticated_tail<C: GenericClient>(
 fn read_state_hash<C: GenericClient>(
     client: &mut C,
     database_id: &str,
+    log_generation: u64,
     basis_t: u64,
 ) -> Result<Digest, SemanticError> {
     if basis_t == 0 {
         return Ok([0; 32]);
     }
-    let row = client
-        .query_opt(
+    let row = if log_generation == 0 {
+        client.query_opt(
             "SELECT state_hash FROM atomic_transactions \
               WHERE database_id = $1 AND basis_t = $2",
             &[&database_id, &sql_basis(basis_t)?],
         )
+    } else {
+        client.query_opt(
+            "SELECT state_hash FROM atomic_generation_transactions \
+              WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
+            &[
+                &database_id,
+                &sql_basis(log_generation)?,
+                &sql_basis(basis_t)?,
+            ],
+        )
+    }
         .map_err(|error| postgres_error("peer/state-hash", error))?
         .ok_or_else(|| {
             fault(
@@ -4405,8 +4540,12 @@ pub(crate) fn recover_transactor_state<C: GenericClient>(
     target_hash: Digest,
 ) -> Result<(Database, Digest, RecoveryStats), SemanticError> {
     let mut cache = SegmentCache::new(0);
-    let (base, rejected_manifests) =
-        load_latest_base_with_stats(client, database_id, target_t, &mut cache)?;
+    let log_generation = read_excision_generation(client, database_id)?;
+    let (base, rejected_manifests) = if log_generation == 0 {
+        load_latest_base_with_stats(client, database_id, target_t, &mut cache)?
+    } else {
+        (None, 0)
+    };
     let (mut database, mut hash, base_t) = match base {
         Some((database, hash, basis)) => (database, hash, basis),
         None => {
@@ -4430,7 +4569,14 @@ pub(crate) fn recover_transactor_state<C: GenericClient>(
         )
     })?;
     if tail_transactions > 0 {
-        apply_tail(client, database_id, &mut database, &mut hash, target_t)?;
+        apply_tail(
+            client,
+            database_id,
+            log_generation,
+            &mut database,
+            &mut hash,
+            target_t,
+        )?;
     }
     if database.basis_t() != target_t || hash != target_hash {
         return Err(fault(
@@ -4630,57 +4776,30 @@ fn load_manifest_database<C: GenericClient>(
 fn apply_tail<C: GenericClient>(
     client: &mut C,
     database_id: &str,
+    log_generation: u64,
     database: &mut Database,
     previous_hash: &mut Digest,
     target: u64,
 ) -> Result<Vec<DurableTransaction>, SemanticError> {
-    let after = sql_basis(database.basis_t())?;
-    let through = sql_basis(target)?;
-    let rows = client
-        .query(
-            "SELECT basis_t, previous_hash, tx_hash, payload, state_hash \
-             FROM atomic_transactions \
-             WHERE database_id = $1 AND basis_t > $2 AND basis_t <= $3 ORDER BY basis_t",
-            &[&database_id, &after, &through],
-        )
-        .map_err(|error| postgres_error("peer/log-tail", error))?;
-    if rows.len() != usize::try_from(target - database.basis_t()).unwrap_or(usize::MAX) {
-        return Err(fault(
-            "peer/missing-tail",
-            "peer log tail is not contiguous",
-        ));
-    }
+    let rows = read_authenticated_log_range(
+        client,
+        database_id,
+        log_generation,
+        database.basis_t(),
+        target,
+        *previous_hash,
+    )?;
     let mut reports = Vec::with_capacity(rows.len());
     let mut target_state = None;
     for row in rows {
-        let basis = pg_basis(row.get(0), "tail transaction")?;
-        let stored_previous = digest(row.get(1), "tail predecessor")?;
-        let stored_hash = digest(row.get(2), "tail transaction hash")?;
-        let payload: Vec<u8> = row.get(3);
-        let stored_state = digest(row.get(4), "tail state commitment")?;
-        if basis != database.basis_t() + 1
-            || stored_previous != *previous_hash
-            || transaction_hash(&payload) != stored_hash
-        {
-            return Err(fault(
-                "peer/invalid-tail-link",
-                "peer log tail has a gap or hash mismatch",
-            ));
-        }
-        let envelope = decode_transaction(&payload)?;
-        if envelope.database_id != database_id
-            || envelope.basis_t != basis
-            || envelope.previous_hash != stored_previous
-        {
-            return Err(fault(
-                "peer/tail-envelope-mismatch",
-                "tail envelope disagrees with its row",
-            ));
-        }
-        *database = database.apply_committed(&envelope)?;
-        target_state = Some(stored_state);
-        *previous_hash = stored_hash;
-        reports.push(envelope);
+        *database = if row.excision_replay {
+            database.apply_excised_committed(&row.transaction)?
+        } else {
+            database.apply_committed(&row.transaction)?
+        };
+        target_state = Some(row.state_hash);
+        *previous_hash = row.tx_hash;
+        reports.push(row.transaction);
     }
     // The canonical transaction hash chain authenticates every intermediate
     // tail delta; only the requested tail endpoint needs an O(N) state hash.

@@ -21,11 +21,15 @@
 //! ancestors or mutating already-published regular files.
 
 use crate::state_commitment::checkpoint_state_hash;
+use crate::log_generation::{
+    GenerationTransactionMembership, LineageTransactionContent,
+    encode_generation_transaction_membership, request_key_hash, tombstone_request_digest,
+};
 use crate::{
     Database, Digest, DurableTransaction, ErrorCategory, PostgresConnectionConfig, PostgresStore,
-    PostgresTreeStore, Program, SemanticError, TreeManifestRecord, TreeRootBinding, decode_genesis,
-    decode_program, decode_transaction, encode_genesis, encode_transaction, sha256,
-    transaction_hash,
+    PostgresTreeStore, Program, SemanticError, TreeManifestRecord, TreePublicationDelta,
+    TreeRootBinding, decode_genesis, decode_program, decode_transaction, encode_genesis,
+    sha256, transaction_hash,
 };
 use crate::{PersistentTreeManifest, persistent_tree};
 use postgres::{Client, IsolationLevel};
@@ -41,7 +45,10 @@ const LEGACY_VERSION: u16 = 3;
 const CLAIM_MAGIC: &[u8; 4] = b"ATCL";
 const CLAIM_VERSION: u16 = 1;
 const REQUEST_MAGIC: &[u8; 4] = b"ATRQ";
-const REQUEST_VERSION: u16 = 1;
+const REQUEST_VERSION: u16 = 2;
+const COMPLETED_EXCISION_MAGIC: &[u8; 4] = b"ATEX";
+const COMPLETED_EXCISION_VERSION: u16 = 1;
+const LEGACY_MEMBERSHIP_DOMAIN: &[u8] = b"atomic/backup-legacy-membership/v1\0";
 const MAX_BACKUP_ATTEMPTS: usize = 3;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -50,6 +57,9 @@ pub struct BackupPoint {
     /// Immutable database identity. Human catalog names are locators and are
     /// deliberately absent from the canonical backup root.
     pub lineage_id: String,
+    /// Physical information generation selected for this logical basis. A
+    /// privacy excision can publish a new value at the same `basis_t`.
+    pub log_generation: u64,
     pub basis_t: u64,
     pub manifest_hash: Digest,
     pub objects_written: usize,
@@ -82,11 +92,13 @@ struct ProgramRow {
 struct Manifest {
     version: u16,
     lineage_id: String,
+    log_generation: u64,
     basis: u64,
     genesis_hash: Digest,
     head_transaction_hash: Digest,
     head_state_hash: Digest,
     request_head_hash: Digest,
+    completed_excision_head_hash: Digest,
     // Read-only v3 compatibility. Version 4 roots leave these empty and name
     // bounded linked values instead of flattening history into the root.
     transactions: Vec<Digest>,
@@ -105,11 +117,38 @@ struct TreeBackup {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BackupRequestRecord {
     lineage_id: String,
+    log_generation: u64,
     basis: u64,
     transaction_hash: Digest,
     previous_hash: Digest,
-    key: String,
+    request_key_hash: Digest,
     digest: Digest,
+    request_kind: u8,
+    receipt_tempids: BTreeMap<String, u64>,
+}
+
+/// One immutable generation link. For positive generations its encoded bytes
+/// are exactly Atomic's live membership-hash preimage, so the backup object
+/// hash is the authoritative transaction hash. Generation zero is converted
+/// onto an equivalent lineage-bound backup domain without relabelling legacy
+/// alias-bound bytes as native generation content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BackupMembershipRecord {
+    lineage_id: String,
+    log_generation: u64,
+    basis: u64,
+    previous_hash: Digest,
+    content_hash: Digest,
+    state_hash: Digest,
+    eidx_frontier: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BackupCompletedExcision {
+    lineage_id: String,
+    request_t: u64,
+    request_entity: u64,
+    previous_hash: Digest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,8 +167,9 @@ type ParentContext = ManifestRoot;
 #[derive(Clone, Debug)]
 struct LoadedBackupEntry {
     transaction_hash: Digest,
+    content_hash: Option<Digest>,
     transaction: DurableTransaction,
-    request: RequestRow,
+    request: BackupRequestRecord,
     legacy_state_hash: Option<Digest>,
 }
 
@@ -201,6 +241,13 @@ impl PortableBackup {
         fault_at: BackupFault,
     ) -> Result<BackupPoint, SemanticError> {
         for attempt in 0..MAX_BACKUP_ATTEMPTS {
+            if attempt > 0 {
+                match self.connection.connect() {
+                    Ok(client) => self.client = client,
+                    Err(_error) if attempt + 1 < MAX_BACKUP_ATTEMPTS => continue,
+                    Err(error) => return Err(error),
+                }
+            }
             match self.backup_database_once(database_id, directory, fault_at) {
                 Ok(point) => return Ok(point),
                 Err(error)
@@ -208,7 +255,7 @@ impl PortableBackup {
                         && attempt + 1 < MAX_BACKUP_ATTEMPTS
                         && crate::postgres::is_postgres_connection_error(&error) =>
                 {
-                    self.client = self.connection.connect()?;
+                    continue;
                 }
                 Err(error) => return Err(error),
             }
@@ -263,19 +310,24 @@ impl PortableBackup {
         )?;
         let genesis_database = Database::from_genesis(decoded_genesis.clone())?;
         let genesis_state_hash = checkpoint_state_hash(&genesis_database)?;
+        let genesis_frontier = genesis_database.eidx_frontier();
         let head = transaction
             .query_one(
-                "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
+                "SELECT basis_t, tx_hash, \
+                        COALESCE((to_jsonb(atomic_heads)->>'log_generation')::bigint, 0) \
+                   FROM atomic_heads WHERE database_id = $1",
                 &[&database_id],
             )
             .map_err(|error| crate::postgres::postgres_error("backup/head", error))?;
         let basis = unsigned(head.get(0), "head basis")?;
         let head_hash = digest(head.get(1), "head hash")?;
+        let log_generation = unsigned(head.get(2), "head log generation")?;
         let parent = select_incremental_parent(
             directory,
             &lineage_id,
             genesis_hash,
             genesis_state_hash,
+            log_generation,
             basis,
         )?;
         let prefix_basis = parent.as_ref().map_or(0, |parent| parent.manifest.basis);
@@ -292,7 +344,7 @@ impl PortableBackup {
                     "incremental transaction tail is not representable",
                 )
             })?;
-        let (mut source_previous, mut portable_previous) = if let Some(parent) = &parent {
+        let (source_previous, portable_previous, prior_frontier) = if let Some(parent) = &parent {
             authenticate_source_parent(
                 &mut transaction,
                 directory,
@@ -300,12 +352,13 @@ impl PortableBackup {
                 &lineage_id,
                 genesis_hash,
                 genesis_state_hash,
+                genesis_frontier,
                 parent,
             )?
         } else {
-            (genesis_hash, genesis_hash)
+            (genesis_hash, genesis_hash, genesis_frontier)
         };
-        let mut request_previous = parent
+        let request_previous = parent
             .as_ref()
             .map_or(genesis_hash, |parent| parent.manifest.request_head_hash);
         let mut temporal_programs = BTreeSet::new();
@@ -329,88 +382,29 @@ impl PortableBackup {
                 "backup basis exceeds PostgreSQL bigint",
             )
         })?;
-        let tx_rows = transaction
-            .query(
-                "SELECT basis_t, tx_hash, payload, state_hash FROM atomic_transactions \
-                 WHERE database_id = $1 AND basis_t >= $2 AND basis_t <= $3 ORDER BY basis_t",
-                &[&database_id, &start_basis_sql, &basis_sql],
-            )
-            .map_err(|error| crate::postgres::postgres_error("backup/transactions", error))?;
-        if tx_rows.len() != expected_tail_len {
-            return Err(fault(
-                "backup/incomplete-chain",
-                "snapshot transaction tail is incomplete",
-            ));
-        }
         let mut publisher = ObjectPublisher::new(directory, fault_at);
         if parent.is_none() {
             publisher.publish(genesis_hash, &genesis)?;
         }
-        let mut source_transaction_hashes = Vec::with_capacity(tx_rows.len());
-        let mut transactions = Vec::with_capacity(tx_rows.len());
-        let mut portable_frontiers = Vec::with_capacity(tx_rows.len());
-        let mut state_hashes = Vec::with_capacity(tx_rows.len());
-        for (offset, row) in tx_rows.into_iter().enumerate() {
-            let row_basis = unsigned(row.get(0), "transaction basis")?;
-            let hash = digest(row.get(1), "transaction hash")?;
-            let payload: Vec<u8> = row.get(2);
-            let state_hash = digest(row.get(3), "transaction state hash")?;
-            let decoded = decode_transaction(&payload)?;
-            for datom in &decoded.tx_data {
-                collect_function_hashes(&datom.value, &mut temporal_programs);
-            }
-            if row_basis != start_basis + offset as u64
-                || (decoded.database_id != database_id && decoded.database_id != lineage_id)
-                || decoded.basis_t != row_basis
-                || decoded.previous_hash != source_previous
-                || transaction_hash(&payload) != hash
-            {
-                return Err(fault(
-                    "backup/invalid-chain",
-                    format!("invalid transaction {row_basis}"),
-                ));
-            }
-            // PostgreSQL generations predating the lineage format bind their
-            // durable envelope to a mutable catalog name. The backup object
-            // graph canonicalizes only that carrier: datoms, tempids,
-            // frontier, and basis remain byte-for-byte semantic values, while
-            // identity and predecessor links use the immutable lineage. Thus
-            // a rename does not recopy the entire historical chain.
-            let portable = DurableTransaction {
-                database_id: lineage_id.clone(),
-                basis_t: decoded.basis_t,
-                previous_hash: portable_previous,
-                eidx_frontier: decoded.eidx_frontier,
-                tempids: decoded.tempids,
-                tx_data: decoded.tx_data,
-            };
-            let portable_payload = encode_transaction(&portable)?;
-            let portable_hash = transaction_hash(&portable_payload);
-            if state_hash == [0; 32] {
-                return Err(fault(
-                    "backup/state-commitment",
-                    format!("transaction {row_basis} has a zero state commitment"),
-                ));
-            }
-            if let Some(database) = reconstructed.take() {
-                let database = database.apply_committed(&portable)?;
-                if checkpoint_state_hash(&database)? != state_hash {
-                    return Err(fault(
-                        "backup/state-commitment",
-                        format!("transaction {row_basis} has an invalid state commitment"),
-                    ));
-                }
-                reconstructed = Some(database);
-            }
-            source_previous = hash;
-            portable_previous = portable_hash;
-            source_transaction_hashes.push(hash);
-            transactions.push(portable_hash);
-            portable_frontiers.push(portable.eidx_frontier);
-            state_hashes.push(state_hash);
-            publisher.publish(portable_hash, &portable_payload)?;
-        }
-        if head_hash != source_previous {
+        let captured = capture_log_tail(
+            &mut transaction,
+            database_id,
+            &lineage_id,
+            log_generation,
+            start_basis,
+            basis,
+            start_basis_sql,
+            basis_sql,
+            expected_tail_len,
+            source_previous,
+            portable_previous,
+            request_previous,
+            prior_frontier,
+            &mut reconstructed,
+            &mut temporal_programs,
+            &mut publisher,
+        )?;
+        if head_hash != captured.source_head_hash {
             return Err(fault(
                 "backup/head-mismatch",
                 "head does not match snapshot chain",
@@ -425,42 +419,13 @@ impl PortableBackup {
                 "semantically reconstructed snapshot does not reach its observed head",
             ));
         }
-        let request_rows = transaction
-            .query(
-                "SELECT request_key, request_digest, basis_t, tx_hash FROM atomic_requests \
-                 WHERE database_id = $1 AND basis_t >= $2 AND basis_t <= $3 ORDER BY basis_t",
-                &[&database_id, &start_basis_sql, &basis_sql],
-            )
-            .map_err(|error| crate::postgres::postgres_error("backup/requests", error))?;
-        if request_rows.len() != transactions.len() {
-            return Err(fault(
-                "backup/incomplete-requests",
-                "snapshot does not contain exactly one request identity per transaction",
-            ));
-        }
-        for (offset, row) in request_rows.into_iter().enumerate() {
-            let request_basis = unsigned(row.get(2), "request basis")?;
-            let source_hash = digest(row.get(3), "request transaction hash")?;
-            if request_basis != start_basis + offset as u64
-                || source_transaction_hashes.get(offset) != Some(&source_hash)
-            {
-                return Err(fault(
-                    "backup/request-mismatch",
-                    "request identity does not name its authoritative source transaction",
-                ));
-            }
-            let request = BackupRequestRecord {
-                lineage_id: lineage_id.clone(),
-                basis: request_basis,
-                transaction_hash: transactions[offset],
-                previous_hash: request_previous,
-                key: row.get(0),
-                digest: digest(row.get(1), "request digest")?,
-            };
-            let payload = encode_request_record(&request)?;
-            request_previous = sha256(&payload);
-            publisher.publish(request_previous, &payload)?;
-        }
+        let completed_excision_head_hash = capture_completed_excisions(
+            &mut transaction,
+            database_id,
+            &lineage_id,
+            genesis_hash,
+            &mut publisher,
+        )?;
         let mut program_rows = BTreeMap::new();
         // Database functions are temporal database information. Preserve
         // every content hash reachable from history, including superseded
@@ -496,11 +461,17 @@ impl PortableBackup {
         let mut manifest = Manifest {
             version: VERSION,
             lineage_id,
+            log_generation,
             basis,
             genesis_hash,
-            head_transaction_hash: portable_previous,
-            head_state_hash: state_hashes.last().copied().unwrap_or(genesis_state_hash),
-            request_head_hash: request_previous,
+            head_transaction_hash: captured.portable_head_hash,
+            head_state_hash: captured
+                .state_hashes
+                .last()
+                .copied()
+                .unwrap_or(genesis_state_hash),
+            request_head_hash: captured.request_head_hash,
+            completed_excision_head_hash,
             transactions: Vec::new(),
             state_hashes: Vec::new(),
             requests: Vec::new(),
@@ -515,7 +486,9 @@ impl PortableBackup {
         // and prove the live snapshot has the same transaction information
         // before reusing it. This check precedes physical-tree capture so a
         // harmless repair does not even leave an unreferenced backup object.
-        if let Some(point) = reusable_existing_point(directory, &manifest)? {
+        if let Some(mut point) = reusable_existing_point(directory, &manifest)? {
+            point.objects_written = publisher.written;
+            point.objects_reused = publisher.reused;
             transaction.commit().map_err(|error| {
                 crate::postgres::postgres_error("backup/snapshot-commit", error)
             })?;
@@ -525,12 +498,13 @@ impl PortableBackup {
             &mut transaction,
             database_id,
             &manifest.lineage_id,
+            log_generation,
             start_basis,
             basis,
-            &source_transaction_hashes,
-            &transactions,
-            &portable_frontiers,
-            &state_hashes,
+            &captured.source_transaction_hashes,
+            &captured.portable_transaction_hashes,
+            &captured.portable_frontiers,
+            &captured.state_hashes,
             &mut publisher,
         )?;
         manifest.tree = tree;
@@ -543,7 +517,7 @@ impl PortableBackup {
         }
         let encoded = encode_manifest(&manifest)?;
         let manifest_hash = sha256(&encoded);
-        let snapshot_path = snapshots(directory).join(format!("{basis:020}.atbk"));
+        let snapshot_path = snapshot_path(directory, basis, manifest.log_generation);
         let publication_fault = if fault_at == BackupFault::AfterManifestStaged {
             PublishFault::AfterStaged
         } else if fault_at == BackupFault::AfterManifestPublished {
@@ -558,7 +532,11 @@ impl PortableBackup {
             // retry, never by replacing its root.
             if error.category != ErrorCategory::Interrupted {
                 match reusable_existing_point(directory, &manifest) {
-                    Ok(Some(point)) => return Ok(point),
+                    Ok(Some(mut point)) => {
+                        point.objects_written = publisher.written;
+                        point.objects_reused = publisher.reused;
+                        return Ok(point);
+                    }
                     Ok(None) => {}
                     Err(resolution) if error.code == "backup/file-conflict" => {
                         return Err(resolution);
@@ -570,6 +548,7 @@ impl PortableBackup {
         }
         Ok(BackupPoint {
             lineage_id: manifest.lineage_id.clone(),
+            log_generation: manifest.log_generation,
             basis_t: basis,
             manifest_hash,
             objects_written: publisher.written,
@@ -582,20 +561,20 @@ impl PortableBackup {
         let mut points = Vec::new();
         for entry in fs::read_dir(snapshots(directory)).map_err(io_error("backup/list"))? {
             let entry = entry.map_err(io_error("backup/list-entry"))?;
-            if entry.path().extension().and_then(|value| value.to_str()) == Some("atbk") {
-                require_regular_file(&entry.path(), "backup/root-type")?;
-                let bytes = fs::read(entry.path()).map_err(io_error("backup/list-read"))?;
-                let manifest = decode_manifest(&bytes)?;
-                let expected_name = format!("{:020}.atbk", manifest.basis);
-                if entry.file_name() != std::ffi::OsStr::new(&expected_name) {
-                    return Err(fault(
-                        "backup/root-name",
-                        "snapshot filename does not identify its manifest basis",
-                    ));
-                }
-                verify_claim(directory, &manifest)?;
-                points.push(manifest.basis);
+            let Some((basis, generation)) = parse_snapshot_name(&entry.file_name())? else {
+                continue;
+            };
+            require_regular_file(&entry.path(), "backup/root-type")?;
+            let bytes = fs::read(entry.path()).map_err(io_error("backup/list-read"))?;
+            let manifest = decode_manifest(&bytes)?;
+            if manifest.basis != basis || manifest.log_generation != generation {
+                return Err(fault(
+                    "backup/root-name",
+                    "snapshot filename does not identify its manifest generation and basis",
+                ));
             }
+            verify_claim(directory, &manifest)?;
+            points.push(manifest.basis);
         }
         points.sort_unstable();
         points.dedup();
@@ -614,14 +593,15 @@ impl PortableBackup {
         validate_backup_directory(directory, true)?;
         let (manifest, manifest_hash) = load_manifest(directory, basis)?;
         verify_claim(directory, &manifest)?;
-        ensure_object_present(directory, manifest.genesis_hash)?;
         let log = load_backup_log(directory, &manifest)?;
+        load_completed_excisions(directory, &manifest)?;
         verify_program_presence(directory, &manifest, &log)?;
         if let Some(tree) = &manifest.tree {
             verify_tree_presence(directory, &manifest, &log, tree)?;
         }
         Ok(BackupPoint {
             lineage_id: manifest.lineage_id,
+            log_generation: manifest.log_generation,
             basis_t: manifest.basis,
             manifest_hash,
             objects_written: 0,
@@ -634,8 +614,9 @@ impl PortableBackup {
         basis: u64,
         deep: bool,
     ) -> Result<BackupVerification, SemanticError> {
-        Self::verify_backup_presence(directory, basis)?;
+        validate_backup_directory(directory, true)?;
         let (manifest, manifest_hash) = load_manifest(directory, basis)?;
+        verify_claim(directory, &manifest)?;
         let genesis = read_object(directory, manifest.genesis_hash)?;
         let decoded_genesis = decode_genesis(&genesis)?;
         if encode_genesis(&decoded_genesis)? != genesis {
@@ -677,7 +658,11 @@ impl PortableBackup {
                 ));
             }
             previous = entry.transaction_hash;
-            database = database.apply_committed(&entry.transaction)?;
+            database = if manifest.version == VERSION && manifest.log_generation > 0 {
+                database.apply_excised_committed(&entry.transaction)?
+            } else {
+                database.apply_committed(&entry.transaction)?
+            };
             current_state_hash = checkpoint_state_hash(&database)?;
             if tree_basis == Some(entry.transaction.basis_t) {
                 tree_state_hash = Some(current_state_hash);
@@ -704,15 +689,37 @@ impl PortableBackup {
                 "backup reconstruction disagrees with its endpoint root",
             ));
         }
+        let completed_excisions = load_completed_excisions(directory, &manifest)?;
+        let request_identities = database
+            .pending_excision_requests_after(0)?
+            .into_iter()
+            .map(|request| (request.request_t, request.request_entity))
+            .collect::<BTreeSet<_>>();
+        if completed_excisions
+            .iter()
+            .any(|identity| !request_identities.contains(identity))
+        {
+            return Err(fault(
+                "backup/completed-excision-fact",
+                "completed excision identity has no protected A=15 request fact",
+            ));
+        }
+        objects_read = objects_read.saturating_add(completed_excisions.len());
         let programs = load_program_graph(directory, required_programs)?;
         objects_read += programs.len();
         verify_legacy_program_declarations(&manifest, &programs)?;
-        if deep && let Some(tree) = &manifest.tree {
-            objects_read += verify_tree_backup(directory, &manifest, &log, tree, tree_state_hash)?;
+        if let Some(tree) = &manifest.tree {
+            if deep {
+                objects_read +=
+                    verify_tree_backup(directory, &manifest, &log, tree, tree_state_hash)?;
+            } else {
+                verify_tree_presence(directory, &manifest, &log, tree)?;
+            }
         }
         Ok(BackupVerification {
             point: BackupPoint {
                 lineage_id: manifest.lineage_id.clone(),
+                log_generation: manifest.log_generation,
                 basis_t: manifest.basis,
                 manifest_hash,
                 objects_written: 0,
@@ -767,7 +774,13 @@ impl PortableBackup {
         for datom in &decoded_genesis {
             collect_function_hashes(&datom.value, &mut required_programs);
         }
-        let mut restored_database = Database::from_genesis(decoded_genesis)?;
+        for entry in &log.entries {
+            for datom in &entry.transaction.tx_data {
+                collect_function_hashes(&datom.value, &mut required_programs);
+            }
+        }
+        let restored_programs = load_program_graph(directory, required_programs)?;
+        let completed_excisions = load_completed_excisions(directory, &manifest)?;
         let mut transaction = self
             .client
             .transaction()
@@ -778,20 +791,32 @@ impl PortableBackup {
                 &[&target_database_id],
             )
             .map_err(|error| crate::postgres::postgres_error("backup/restore-lock", error))?;
-        if transaction
+        let target = transaction
             .query_opt(
-                "SELECT 1 FROM atomic_databases WHERE database_id = $1",
+                "SELECT lineage_id, genesis, genesis_hash FROM atomic_databases \
+                 WHERE database_id = $1",
                 &[&target_database_id],
             )
-            .map_err(|error| crate::postgres::postgres_error("backup/restore-target", error))?
-            .is_some()
-        {
+            .map_err(|error| crate::postgres::postgres_error("backup/restore-target", error))?;
+        if let Some(target) = &target {
+            if target.get::<_, String>(0) != manifest.lineage_id
+                || target.get::<_, Vec<u8>>(1) != genesis
+                || digest(target.get(2), "restore target genesis hash")? != genesis_hash
+            {
+                return Err(SemanticError::new(
+                    ErrorCategory::Conflict,
+                    "backup/target-lineage-conflict",
+                    "restore target belongs to another database lineage",
+                ));
+            }
             if target_matches_backup(
                 &mut transaction,
                 directory,
                 &manifest,
                 &log,
+                &completed_excisions,
                 target_database_id,
+                &verification.database,
             )? {
                 // Exact replay after an ambiguous acknowledgement is safe and
                 // leaves the already-published target untouched.
@@ -805,166 +830,36 @@ impl PortableBackup {
                     &verification.database,
                 );
             }
-            return Err(SemanticError::new(
-                ErrorCategory::Conflict,
-                "backup/target-exists",
-                "restore target exists but is not this exact backup point",
-            ));
+            restore_existing_lineage(
+                &mut transaction,
+                directory,
+                &manifest,
+                manifest_hash,
+                &log,
+                &completed_excisions,
+                target_database_id,
+            )?;
+        } else {
+            restore_new_lineage(
+                &mut transaction,
+                directory,
+                &manifest,
+                &log,
+                &completed_excisions,
+                target_database_id,
+                &genesis,
+                &decoded_genesis,
+            )?;
         }
-        transaction
-            .execute(
-                "INSERT INTO atomic_databases (database_id, lineage_id, genesis, genesis_hash) \
-                 VALUES ($1, $2, $3, $4)",
-                &[
-                    &target_database_id,
-                    &manifest.lineage_id,
-                    &&genesis[..],
-                    &&genesis_hash[..],
-                ],
-            )
-            .map_err(restore_catalog_error)?;
-        transaction
-            .execute(
-                "INSERT INTO atomic_heads (database_id, basis_t, tx_hash) VALUES ($1, 0, $2)",
-                &[&target_database_id, &&genesis_hash[..]],
-            )
-            .map_err(|error| crate::postgres::postgres_error("backup/restore-head", error))?;
-        transaction
-            .execute(
-                "INSERT INTO atomic_database_generations (database_id) VALUES ($1)",
-                &[&target_database_id],
-            )
-            .map_err(|error| crate::postgres::postgres_error("backup/restore-generation", error))?;
-        let mut previous = genesis_hash;
-        for entry in &log.entries {
-            let source = &entry.transaction;
-            let restored = DurableTransaction {
-                database_id: target_database_id.into(),
-                basis_t: source.basis_t,
-                previous_hash: previous,
-                eidx_frontier: source.eidx_frontier,
-                tempids: source.tempids.clone(),
-                tx_data: source.tx_data.clone(),
-            };
-            let payload = encode_transaction(&restored)?;
-            let hash = transaction_hash(&payload);
-            restored_database = restored_database.apply_committed(&restored)?;
-            let state_hash = checkpoint_state_hash(&restored_database)?;
-            if entry
-                .legacy_state_hash
-                .is_some_and(|expected| expected != state_hash)
-            {
-                return Err(fault(
-                    "backup/restore-state-commitment",
-                    format!(
-                        "restored state at basis {} differs from the backup",
-                        restored.basis_t
-                    ),
-                ));
-            }
-            let basis_sql = i64::try_from(restored.basis_t).map_err(|_| {
-                fault(
-                    "backup/restore-basis",
-                    "restored basis exceeds PostgreSQL bigint",
-                )
-            })?;
-            transaction
-                .execute(
-                    "INSERT INTO atomic_transactions \
-                     (database_id, basis_t, previous_hash, tx_hash, payload, state_hash) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                    &[
-                        &target_database_id,
-                        &basis_sql,
-                        &&previous[..],
-                        &&hash[..],
-                        &&payload[..],
-                        &&state_hash[..],
-                    ],
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-transaction", error)
-                })?;
-            let request = &entry.request;
-            transaction
-                .execute(
-                    "INSERT INTO atomic_requests \
-                     (database_id, request_key, request_digest, basis_t, tx_hash) \
-                     VALUES ($1, $2, $3, $4, $5)",
-                    &[
-                        &target_database_id,
-                        &request.key,
-                        &&request.digest[..],
-                        &basis_sql,
-                        &&hash[..],
-                    ],
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-request", error)
-                })?;
-            transaction
-                .execute(
-                    "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
-                     WHERE database_id = $1",
-                    &[&target_database_id, &basis_sql, &&hash[..]],
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-publish", error)
-                })?;
-            transaction
-                .batch_execute(
-                    "SET CONSTRAINTS atomic_transactions_require_publication IMMEDIATE; \
-                     SET CONSTRAINTS atomic_transactions_require_publication DEFERRED",
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-publication-check", error)
-                })?;
-            previous = hash;
-        }
-        for entry in &log.entries {
-            for datom in &entry.transaction.tx_data {
-                collect_function_hashes(&datom.value, &mut required_programs);
-            }
-        }
-        let restored_programs = load_program_graph(directory, required_programs)?;
-        for (program_hash, (program, payload)) in restored_programs {
-            let kind = program_kind(&program);
-            let arity = i16::from(program.arity);
-            let inserted = transaction
-                .execute(
-                    "INSERT INTO atomic_programs (program_hash, kind, arity, payload) \
-                     VALUES ($1, $2, $3, $4) ON CONFLICT (program_hash) DO NOTHING",
-                    &[&&program_hash[..], &kind, &arity, &&payload[..]],
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-program", error)
-                })?;
-            if inserted == 0 {
-                let existing = transaction
-                    .query_one(
-                        "SELECT kind, arity, payload FROM atomic_programs WHERE program_hash = $1",
-                        &[&&program_hash[..]],
-                    )
-                    .map_err(|error| {
-                        crate::postgres::postgres_error("backup/restore-existing-program", error)
-                    })?;
-                if existing.get::<_, i16>(0) != kind
-                    || existing.get::<_, i16>(1) != arity
-                    || existing.get::<_, Vec<u8>>(2) != payload
-                {
-                    return Err(fault(
-                        "backup/restore-program-conflict",
-                        "existing content-addressed program does not match its hash",
-                    ));
-                }
-            }
-        }
+        install_restored_programs(&mut transaction, &restored_programs)?;
         if !target_matches_backup(
             &mut transaction,
             directory,
             &manifest,
             &log,
+            &completed_excisions,
             target_database_id,
+            &verification.database,
         )? {
             return Err(fault(
                 "backup/restore-postcondition",
@@ -989,6 +884,851 @@ impl PortableBackup {
             &verification.database,
         )
     }
+}
+
+struct RestoredGenerationHead {
+    generation: u64,
+    head_hash: Digest,
+    state_hash: Digest,
+    eidx_frontier: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_new_lineage(
+    transaction: &mut postgres::Transaction<'_>,
+    directory: &Path,
+    manifest: &Manifest,
+    log: &LoadedBackupLog,
+    completed_excisions: &[(u64, u64)],
+    target_database_id: &str,
+    genesis: &[u8],
+    decoded_genesis: &[crate::Datom],
+) -> Result<(), SemanticError> {
+    transaction
+        .execute(
+            "INSERT INTO atomic_databases (database_id, lineage_id, genesis, genesis_hash) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &target_database_id,
+                &manifest.lineage_id,
+                &genesis,
+                &&manifest.genesis_hash[..],
+            ],
+        )
+        .map_err(restore_catalog_error)?;
+    let generation_i64: i64 = transaction
+        .query_one(
+            "INSERT INTO atomic_log_generations \
+                 (database_id, lineage_id, build_kind, request_count) \
+             VALUES ($1, $2, 0, 0) RETURNING generation",
+            &[&target_database_id, &manifest.lineage_id],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-generation", error))?
+        .get(0);
+    let generation = unsigned(generation_i64, "restored log generation")?;
+    let genesis_database = Database::from_genesis(decoded_genesis.to_vec())?;
+    let genesis_state_hash = checkpoint_state_hash(&genesis_database)?;
+    transaction
+        .execute(
+            "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) \
+             VALUES ($1, 0, $2, $3)",
+            &[
+                &target_database_id,
+                &&manifest.genesis_hash[..],
+                &generation_i64,
+            ],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-head", error))?;
+    transaction
+        .execute(
+            "INSERT INTO atomic_log_generation_activations \
+                 (database_id, generation, prior_generation, prior_basis_t, basis_t, \
+                  head_hash, state_hash, manifest_hash) \
+             VALUES ($1, $2, 0, 0, 0, $3, $4, NULL)",
+            &[
+                &target_database_id,
+                &generation_i64,
+                &&manifest.genesis_hash[..],
+                &&genesis_state_hash[..],
+            ],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-initial-activation", error)
+        })?;
+    let restored = restore_generation_rows(
+        transaction,
+        directory,
+        manifest,
+        log,
+        target_database_id,
+        generation,
+        genesis_database.eidx_frontier(),
+        true,
+    )?;
+    for &(request_t, request_entity) in completed_excisions {
+        transaction
+            .execute(
+                "INSERT INTO atomic_completed_excision_requests \
+                     (database_id, request_t, request_entity, generation) \
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &target_database_id,
+                    &sql_u64(request_t, "completed request t")?,
+                    &sql_u64(request_entity, "completed request entity")?,
+                    &generation_i64,
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-completed-excision", error)
+            })?;
+    }
+    if restored.state_hash != manifest.head_state_hash || restored.generation != generation {
+        return Err(fault(
+            "backup/restore-generation-state",
+            "new restore generation does not reproduce the backup endpoint",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_existing_lineage(
+    transaction: &mut postgres::Transaction<'_>,
+    directory: &Path,
+    manifest: &Manifest,
+    manifest_hash: Digest,
+    log: &LoadedBackupLog,
+    completed_excisions: &[(u64, u64)],
+    target_database_id: &str,
+) -> Result<(), SemanticError> {
+    let current = transaction
+        .query_one(
+            "SELECT basis_t, tx_hash, log_generation FROM atomic_heads \
+             WHERE database_id = $1 FOR UPDATE",
+            &[&target_database_id],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-current-head", error))?;
+    let current_basis_i64: i64 = current.get(0);
+    let current_hash = digest(current.get(1), "restore current head hash")?;
+    let current_generation_i64: i64 = current.get(2);
+    let generation_i64: i64 = transaction
+        .query_one(
+            "INSERT INTO atomic_log_generations \
+                 (database_id, lineage_id, build_kind, request_count) \
+             VALUES ($1, $2, 2, 0) RETURNING generation",
+            &[&target_database_id, &manifest.lineage_id],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-generation-stage", error)
+        })?
+        .get(0);
+    let generation = unsigned(generation_i64, "staged restore generation")?;
+    transaction
+        .execute(
+            "INSERT INTO atomic_log_generation_builds \
+                 (database_id, generation, source_generation, captured_basis_t, \
+                  captured_head_hash, restore_manifest_hash, restore_basis_t, \
+                  restore_head_hash) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &target_database_id,
+                &generation_i64,
+                &current_generation_i64,
+                &current_basis_i64,
+                &&current_hash[..],
+                &&manifest_hash[..],
+                &sql_u64(manifest.basis, "restore basis")?,
+                &&manifest.head_transaction_hash[..],
+            ],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-build-stage", error))?;
+    let genesis = read_object(directory, manifest.genesis_hash)?;
+    let genesis_database = Database::from_genesis(decode_genesis(&genesis)?)?;
+    let restored = restore_generation_rows(
+        transaction,
+        directory,
+        manifest,
+        log,
+        target_database_id,
+        generation,
+        genesis_database.eidx_frontier(),
+        false,
+    )?;
+    for &(request_t, request_entity) in completed_excisions {
+        transaction
+            .execute(
+                "INSERT INTO atomic_log_generation_completed_requests \
+                     (database_id, generation, request_t, request_entity) \
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &target_database_id,
+                    &generation_i64,
+                    &sql_u64(request_t, "completed request t")?,
+                    &sql_u64(request_entity, "completed request entity")?,
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-completion-stage", error)
+            })?;
+    }
+    transaction
+        .execute(
+            "INSERT INTO atomic_log_generation_checkpoints \
+                 (database_id, generation, through_basis_t, head_hash, state_hash, \
+                  source_head_hash, eidx_frontier, removed_datoms) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 0)",
+            &[
+                &target_database_id,
+                &generation_i64,
+                &sql_u64(manifest.basis, "restore checkpoint basis")?,
+                &&restored.head_hash[..],
+                &&restored.state_hash[..],
+                &&manifest.head_transaction_hash[..],
+                &sql_u64(restored.eidx_frontier, "restore checkpoint frontier")?,
+            ],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-checkpoint-stage", error)
+        })?;
+    transaction
+        .query_one(
+            "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, NULL)",
+            &[
+                &target_database_id,
+                &generation_i64,
+                &sql_u64(manifest.basis, "restore activation basis")?,
+                &&restored.head_hash[..],
+                &&restored.state_hash[..],
+            ],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-activate", error))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_generation_rows(
+    transaction: &mut postgres::Transaction<'_>,
+    directory: &Path,
+    manifest: &Manifest,
+    log: &LoadedBackupLog,
+    target_database_id: &str,
+    generation: u64,
+    mut prior_frontier: u64,
+    publish_each: bool,
+) -> Result<RestoredGenerationHead, SemanticError> {
+    let generation_sql = sql_u64(generation, "restored log generation")?;
+    let mut previous = manifest.genesis_hash;
+    let mut state_hash = checkpoint_state_hash(&Database::from_genesis(decode_genesis(
+        &read_object(directory, manifest.genesis_hash)?,
+    )?)?)?;
+    for entry in &log.entries {
+        let content = if let Some(content_hash) = entry.content_hash {
+            let payload = read_object(directory, content_hash)?;
+            let content = LineageTransactionContent::decode(&payload)?;
+            if sha256(&payload) != content_hash {
+                return Err(fault(
+                    "backup/restore-content-hash",
+                    "backup transaction content failed its digest during restore",
+                ));
+            }
+            (content_hash, payload, content)
+        } else {
+            let content = LineageTransactionContent::from_transaction(
+                &manifest.lineage_id,
+                prior_frontier,
+                &entry.transaction,
+            )?;
+            let payload = content.encode()?;
+            (sha256(&payload), payload, content)
+        };
+        let expected_state = entry.legacy_state_hash.ok_or_else(|| {
+            fault(
+                "backup/restore-state",
+                "backup transaction has no authenticated state commitment",
+            )
+        })?;
+        if content.2.lineage_id != manifest.lineage_id
+            || content.2.basis_t != entry.transaction.basis_t
+            || content.2.eidx_frontier != entry.transaction.eidx_frontier
+            || content.2.tx_data != entry.transaction.tx_data
+        {
+            return Err(fault(
+                "backup/restore-content-binding",
+                "backup content and reconstructed transaction disagree",
+            ));
+        }
+        let basis_sql = sql_u64(content.2.basis_t, "restored transaction basis")?;
+        transaction
+            .execute(
+                "INSERT INTO atomic_transaction_contents \
+                     (content_hash, lineage_id, basis_t, eidx_frontier, payload) \
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (content_hash) DO NOTHING",
+                &[
+                    &&content.0[..],
+                    &manifest.lineage_id,
+                    &basis_sql,
+                    &sql_u64(content.2.eidx_frontier, "restored content frontier")?,
+                    &&content.1[..],
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-content-insert", error)
+            })?;
+        let stored = transaction
+            .query_one(
+                "SELECT lineage_id, basis_t, eidx_frontier, envelope_version, payload \
+                 FROM atomic_transaction_contents WHERE content_hash = $1",
+                &[&&content.0[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-content-verify", error)
+            })?;
+        if stored.get::<_, String>(0) != manifest.lineage_id
+            || stored.get::<_, i64>(1) != basis_sql
+            || unsigned(stored.get(2), "stored content frontier")? != content.2.eidx_frontier
+            || stored.get::<_, i16>(3) != 1
+            || stored.get::<_, Vec<u8>>(4) != content.1
+        {
+            return Err(fault(
+                "backup/restore-content-conflict",
+                "content hash resolves to different immutable transaction information",
+            ));
+        }
+        let tx_hash = crate::log_generation::generation_transaction_hash(
+            &manifest.lineage_id,
+            generation,
+            content.2.basis_t,
+            previous,
+            content.0,
+            expected_state,
+            content.2.eidx_frontier,
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO atomic_generation_transactions \
+                     (database_id, generation, basis_t, previous_hash, tx_hash, \
+                      content_hash, state_hash, eidx_frontier) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[
+                    &target_database_id,
+                    &generation_sql,
+                    &basis_sql,
+                    &&previous[..],
+                    &&tx_hash[..],
+                    &&content.0[..],
+                    &&expected_state[..],
+                    &sql_u64(content.2.eidx_frontier, "restored transaction frontier")?,
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-generation-transaction", error)
+            })?;
+        let request_digest = if entry.request.request_kind == 0 {
+            tombstone_request_digest(
+                &manifest.lineage_id,
+                generation,
+                content.2.basis_t,
+                entry.request.request_key_hash,
+            )?
+        } else {
+            entry.request.digest
+        };
+        transaction
+            .execute(
+                "INSERT INTO atomic_generation_requests \
+                     (database_id, generation, request_key_hash, request_digest, request_kind, \
+                      basis_t, tx_hash) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &target_database_id,
+                    &generation_sql,
+                    &&entry.request.request_key_hash[..],
+                    &&request_digest[..],
+                    &i16::from(entry.request.request_kind),
+                    &basis_sql,
+                    &&tx_hash[..],
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-generation-request", error)
+            })?;
+        for (name, entity) in &entry.request.receipt_tempids {
+            transaction
+                .execute(
+                    "INSERT INTO atomic_generation_request_tempids \
+                         (database_id, generation, request_key_hash, tempid_name, entity_id) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &target_database_id,
+                        &generation_sql,
+                        &&entry.request.request_key_hash[..],
+                        &name,
+                        &sql_u64(*entity, "restored receipt entity")?,
+                    ],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-request-tempid", error)
+                })?;
+        }
+        if publish_each {
+            let updated = transaction
+                .execute(
+                    "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
+                     WHERE database_id = $1 AND log_generation = $4 \
+                       AND basis_t = $5 AND tx_hash = $6",
+                    &[
+                        &target_database_id,
+                        &basis_sql,
+                        &&tx_hash[..],
+                        &generation_sql,
+                        &sql_u64(content.2.basis_t - 1, "restored prior basis")?,
+                        &&previous[..],
+                    ],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-head-publish", error)
+                })?;
+            if updated != 1 {
+                return Err(SemanticError::conflict(
+                    "backup/restore-head-cas",
+                    "restored generation head no longer matches its predecessor",
+                ));
+            }
+            transaction
+                .batch_execute(
+                    "SET CONSTRAINTS atomic_generation_transactions_require_publication IMMEDIATE; \
+                     SET CONSTRAINTS atomic_generation_transactions_require_publication DEFERRED",
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-publication-check", error)
+                })?;
+        }
+        previous = tx_hash;
+        state_hash = expected_state;
+        prior_frontier = content.2.eidx_frontier;
+    }
+    Ok(RestoredGenerationHead {
+        generation,
+        head_hash: previous,
+        state_hash,
+        eidx_frontier: prior_frontier,
+    })
+}
+
+fn install_restored_programs(
+    transaction: &mut postgres::Transaction<'_>,
+    programs: &BTreeMap<Digest, (Program, Vec<u8>)>,
+) -> Result<(), SemanticError> {
+    for (program_hash, (program, payload)) in programs {
+        let kind = program_kind(program);
+        let arity = i16::from(program.arity);
+        transaction
+            .execute(
+                "INSERT INTO atomic_programs (program_hash, kind, arity, payload) \
+                 VALUES ($1, $2, $3, $4) ON CONFLICT (program_hash) DO NOTHING",
+                &[&&program_hash[..], &kind, &arity, &&payload[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-program", error)
+            })?;
+        let existing = transaction
+            .query_one(
+                "SELECT kind, arity, payload FROM atomic_programs WHERE program_hash = $1",
+                &[&&program_hash[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-existing-program", error)
+            })?;
+        if existing.get::<_, i16>(0) != kind
+            || existing.get::<_, i16>(1) != arity
+            || existing.get::<_, Vec<u8>>(2) != *payload
+        {
+            return Err(fault(
+                "backup/restore-program-conflict",
+                "existing content-addressed program does not match its hash",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sql_u64(value: u64, label: &str) -> Result<i64, SemanticError> {
+    i64::try_from(value).map_err(|_| {
+        SemanticError::incorrect(
+            "backup/postgres-integer",
+            format!("{label} exceeds PostgreSQL bigint"),
+        )
+    })
+}
+
+struct CapturedLogTail {
+    source_head_hash: Digest,
+    portable_head_hash: Digest,
+    request_head_hash: Digest,
+    source_transaction_hashes: Vec<Digest>,
+    portable_transaction_hashes: Vec<Digest>,
+    portable_frontiers: Vec<u64>,
+    state_hashes: Vec<Digest>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_log_tail<C: postgres::GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    lineage_id: &str,
+    log_generation: u64,
+    start_basis: u64,
+    _backup_basis: u64,
+    start_basis_sql: i64,
+    backup_basis_sql: i64,
+    expected_tail_len: usize,
+    mut source_previous: Digest,
+    mut portable_previous: Digest,
+    mut request_previous: Digest,
+    mut prior_frontier: u64,
+    reconstructed: &mut Option<Database>,
+    temporal_programs: &mut BTreeSet<Digest>,
+    publisher: &mut ObjectPublisher<'_>,
+) -> Result<CapturedLogTail, SemanticError> {
+    let mut source_transaction_hashes = Vec::with_capacity(expected_tail_len);
+    let mut portable_transaction_hashes = Vec::with_capacity(expected_tail_len);
+    let mut portable_frontiers = Vec::with_capacity(expected_tail_len);
+    let mut state_hashes = Vec::with_capacity(expected_tail_len);
+
+    if log_generation == 0 {
+        let rows = client
+            .query(
+                "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.payload, t.state_hash, \
+                        r.request_key, r.request_digest, r.tx_hash \
+                   FROM atomic_transactions t JOIN atomic_requests r \
+                     ON r.database_id = t.database_id AND r.basis_t = t.basis_t \
+                  WHERE t.database_id = $1 AND t.basis_t >= $2 AND t.basis_t <= $3 \
+                  ORDER BY t.basis_t",
+                &[&database_id, &start_basis_sql, &backup_basis_sql],
+            )
+            .map_err(|error| crate::postgres::postgres_error("backup/legacy-log", error))?;
+        if rows.len() != expected_tail_len {
+            return Err(fault(
+                "backup/incomplete-chain",
+                "legacy snapshot does not contain one transaction and request per basis",
+            ));
+        }
+        for (offset, row) in rows.into_iter().enumerate() {
+            let basis = unsigned(row.get(0), "legacy transaction basis")?;
+            let stored_previous = digest(row.get(1), "legacy predecessor hash")?;
+            let source_hash = digest(row.get(2), "legacy transaction hash")?;
+            let source_payload: Vec<u8> = row.get(3);
+            let state_hash = digest(row.get(4), "legacy transaction state hash")?;
+            let request_key: String = row.get(5);
+            let request_digest = digest(row.get(6), "legacy request digest")?;
+            let request_tx_hash = digest(row.get(7), "legacy request transaction hash")?;
+            let source = decode_transaction(&source_payload)?;
+            if basis != start_basis + offset as u64
+                || stored_previous != source_previous
+                || source_hash != transaction_hash(&source_payload)
+                || request_tx_hash != source_hash
+                || (source.database_id != database_id && source.database_id != lineage_id)
+                || source.basis_t != basis
+                || source.previous_hash != source_previous
+                || state_hash == [0; 32]
+            {
+                return Err(fault(
+                    "backup/invalid-chain",
+                    format!("legacy transaction {basis} is not canonical"),
+                ));
+            }
+
+            // Legacy ATIM values contain mutable catalog identity and caller
+            // tempid spellings. Convert their immutable information into ATLC;
+            // receipt names move to the request record where they belong.
+            let content =
+                LineageTransactionContent::from_transaction(lineage_id, prior_frontier, &source)?;
+            let content_payload = content.encode()?;
+            let content_hash = sha256(&content_payload);
+            let portable = content.to_transaction(portable_previous);
+            let membership = BackupMembershipRecord {
+                lineage_id: lineage_id.to_owned(),
+                log_generation,
+                basis,
+                previous_hash: portable_previous,
+                content_hash,
+                state_hash,
+                eidx_frontier: content.eidx_frontier,
+            };
+            let membership_payload = encode_backup_membership(&membership)?;
+            let portable_hash = sha256(&membership_payload);
+            for datom in &portable.tx_data {
+                collect_function_hashes(&datom.value, temporal_programs);
+            }
+            if let Some(database) = reconstructed.take() {
+                let database = database.apply_committed(&portable)?;
+                if checkpoint_state_hash(&database)? != state_hash {
+                    return Err(fault(
+                        "backup/state-commitment",
+                        format!("legacy transaction {basis} has an invalid state commitment"),
+                    ));
+                }
+                *reconstructed = Some(database);
+            }
+            let request = BackupRequestRecord {
+                lineage_id: lineage_id.to_owned(),
+                log_generation,
+                basis,
+                transaction_hash: portable_hash,
+                previous_hash: request_previous,
+                request_key_hash: request_key_hash(lineage_id, &request_key)?,
+                digest: request_digest,
+                request_kind: 1,
+                receipt_tempids: source.tempids.clone(),
+            };
+            let request_payload = encode_request_record(&request)?;
+            let request_hash = sha256(&request_payload);
+            publisher.publish(content_hash, &content_payload)?;
+            publisher.publish(portable_hash, &membership_payload)?;
+            publisher.publish(request_hash, &request_payload)?;
+
+            source_previous = source_hash;
+            portable_previous = portable_hash;
+            request_previous = request_hash;
+            prior_frontier = content.eidx_frontier;
+            source_transaction_hashes.push(source_hash);
+            portable_transaction_hashes.push(portable_hash);
+            portable_frontiers.push(content.eidx_frontier);
+            state_hashes.push(state_hash);
+        }
+    } else {
+        let generation_sql = i64::try_from(log_generation).map_err(|_| {
+            fault(
+                "backup/generation-overflow",
+                "active log generation exceeds PostgreSQL bigint",
+            )
+        })?;
+        let mut receipt_tempids: BTreeMap<u64, (Digest, BTreeMap<String, u64>)> =
+            BTreeMap::new();
+        for row in client
+            .query(
+                "SELECT r.basis_t, r.request_key_hash, x.tempid_name, x.entity_id \
+                   FROM atomic_generation_requests r \
+                   JOIN atomic_generation_request_tempids x \
+                     ON x.database_id = r.database_id AND x.generation = r.generation \
+                    AND x.request_key_hash = r.request_key_hash \
+                  WHERE r.database_id = $1 AND r.generation = $2 \
+                    AND r.basis_t >= $3 AND r.basis_t <= $4 \
+                  ORDER BY r.basis_t, x.tempid_name",
+                &[
+                    &database_id,
+                    &generation_sql,
+                    &start_basis_sql,
+                    &backup_basis_sql,
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/generation-request-tempids", error)
+            })?
+        {
+            let basis = unsigned(row.get(0), "request receipt basis")?;
+            let key_hash = digest(row.get(1), "request receipt key hash")?;
+            let name: String = row.get(2);
+            let entity = unsigned(row.get(3), "request receipt entity")?;
+            let entry = receipt_tempids
+                .entry(basis)
+                .or_insert_with(|| (key_hash, BTreeMap::new()));
+            if entry.0 != key_hash || name.is_empty() || entry.1.insert(name, entity).is_some() {
+                return Err(fault(
+                    "backup/request-receipt",
+                    "generation request receipt rows are not canonical",
+                ));
+            }
+        }
+
+        let rows = client
+            .query(
+                "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.content_hash, \
+                        t.state_hash, t.eidx_frontier, c.lineage_id, \
+                        c.basis_t, c.eidx_frontier, c.envelope_version, c.payload, \
+                        r.request_key_hash, r.request_digest, r.request_kind, r.tx_hash \
+                   FROM atomic_generation_transactions t \
+                   JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
+                   JOIN atomic_generation_requests r \
+                     ON r.database_id = t.database_id AND r.generation = t.generation \
+                    AND r.basis_t = t.basis_t \
+                  WHERE t.database_id = $1 AND t.generation = $2 \
+                    AND t.basis_t >= $3 AND t.basis_t <= $4 ORDER BY t.basis_t",
+                &[
+                    &database_id,
+                    &generation_sql,
+                    &start_basis_sql,
+                    &backup_basis_sql,
+                ],
+            )
+            .map_err(|error| crate::postgres::postgres_error("backup/generation-log", error))?;
+        if rows.len() != expected_tail_len {
+            return Err(fault(
+                "backup/incomplete-chain",
+                "active generation does not contain one transaction and request per basis",
+            ));
+        }
+        for (offset, row) in rows.into_iter().enumerate() {
+            let basis = unsigned(row.get(0), "generation transaction basis")?;
+            let stored_previous = digest(row.get(1), "generation predecessor hash")?;
+            let transaction_hash = digest(row.get(2), "generation transaction hash")?;
+            let content_hash = digest(row.get(3), "generation content hash")?;
+            let state_hash = digest(row.get(4), "generation state hash")?;
+            let eidx_frontier = unsigned(row.get(5), "generation entity frontier")?;
+            let content_lineage_id: String = row.get(6);
+            let content_basis = unsigned(row.get(7), "content basis")?;
+            let content_frontier = unsigned(row.get(8), "content entity frontier")?;
+            let content_version: i16 = row.get(9);
+            let content_payload: Vec<u8> = row.get(10);
+            let request_key_hash = digest(row.get(11), "generation request key hash")?;
+            let request_digest = digest(row.get(12), "generation request digest")?;
+            let request_kind_i16: i16 = row.get(13);
+            let request_tx_hash = digest(row.get(14), "generation request transaction hash")?;
+            let membership = BackupMembershipRecord {
+                lineage_id: lineage_id.to_owned(),
+                log_generation,
+                basis,
+                previous_hash: stored_previous,
+                content_hash,
+                state_hash,
+                eidx_frontier,
+            };
+            let membership_payload = encode_backup_membership(&membership)?;
+            let content = LineageTransactionContent::decode(&content_payload)?;
+            if basis != start_basis + offset as u64
+                || stored_previous != source_previous
+                || transaction_hash != sha256(&membership_payload)
+                || request_tx_hash != transaction_hash
+                || sha256(&content_payload) != content_hash
+                || content_lineage_id != lineage_id
+                || content.lineage_id != lineage_id
+                || content_basis != basis
+                || content.basis_t != basis
+                || content_frontier != eidx_frontier
+                || content.eidx_frontier != eidx_frontier
+                || content_version != 1
+                || state_hash == [0; 32]
+                || !matches!(request_kind_i16, 0 | 1)
+                || (request_kind_i16 == 0
+                    && request_digest
+                        != tombstone_request_digest(
+                            lineage_id,
+                            log_generation,
+                            basis,
+                            request_key_hash,
+                        )?)
+            {
+                return Err(fault(
+                    "backup/invalid-chain",
+                    format!("generation transaction {basis} is not canonical"),
+                ));
+            }
+            let transaction = content.to_transaction(stored_previous);
+            for datom in &transaction.tx_data {
+                collect_function_hashes(&datom.value, temporal_programs);
+            }
+            if let Some(database) = reconstructed.take() {
+                let database = database.apply_excised_committed(&transaction)?;
+                if checkpoint_state_hash(&database)? != state_hash {
+                    return Err(fault(
+                        "backup/state-commitment",
+                        format!("generation transaction {basis} has an invalid state commitment"),
+                    ));
+                }
+                *reconstructed = Some(database);
+            }
+            let (receipt_key, receipt) = receipt_tempids
+                .remove(&basis)
+                .unwrap_or((request_key_hash, BTreeMap::new()));
+            if receipt_key != request_key_hash || (request_kind_i16 == 0 && !receipt.is_empty()) {
+                return Err(fault(
+                    "backup/request-receipt",
+                    "generation request receipt disagrees with its request identity",
+                ));
+            }
+            let request = BackupRequestRecord {
+                lineage_id: lineage_id.to_owned(),
+                log_generation,
+                basis,
+                transaction_hash,
+                previous_hash: request_previous,
+                request_key_hash,
+                digest: request_digest,
+                request_kind: request_kind_i16 as u8,
+                receipt_tempids: receipt,
+            };
+            let request_payload = encode_request_record(&request)?;
+            let request_hash = sha256(&request_payload);
+            publisher.publish(content_hash, &content_payload)?;
+            publisher.publish(transaction_hash, &membership_payload)?;
+            publisher.publish(request_hash, &request_payload)?;
+
+            source_previous = transaction_hash;
+            portable_previous = transaction_hash;
+            request_previous = request_hash;
+            source_transaction_hashes.push(transaction_hash);
+            portable_transaction_hashes.push(transaction_hash);
+            portable_frontiers.push(eidx_frontier);
+            state_hashes.push(state_hash);
+        }
+        if !receipt_tempids.is_empty() {
+            return Err(fault(
+                "backup/request-receipt",
+                "generation has receipt tempids outside its transaction tail",
+            ));
+        }
+    }
+
+    Ok(CapturedLogTail {
+        source_head_hash: source_previous,
+        portable_head_hash: portable_previous,
+        request_head_hash: request_previous,
+        source_transaction_hashes,
+        portable_transaction_hashes,
+        portable_frontiers,
+        state_hashes,
+    })
+}
+
+fn capture_completed_excisions<C: postgres::GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    lineage_id: &str,
+    genesis_hash: Digest,
+    publisher: &mut ObjectPublisher<'_>,
+) -> Result<Digest, SemanticError> {
+    let rows = client
+        .query(
+            "SELECT request_t, request_entity FROM atomic_completed_excision_requests \
+             WHERE database_id = $1 ORDER BY request_t, request_entity",
+            &[&database_id],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/completed-excision-read", error)
+        })?;
+    let mut previous = genesis_hash;
+    let mut prior_coordinate = None;
+    for row in rows {
+        let request_t = unsigned(row.get(0), "completed excision request t")?;
+        let request_entity = unsigned(row.get(1), "completed excision request entity")?;
+        let coordinate = (request_t, request_entity);
+        if request_t == 0 || prior_coordinate.is_some_and(|prior| prior >= coordinate) {
+            return Err(fault(
+                "backup/completed-excision-order",
+                "completed excision identities are not canonical and distinct",
+            ));
+        }
+        let record = BackupCompletedExcision {
+            lineage_id: lineage_id.to_owned(),
+            request_t,
+            request_entity,
+            previous_hash: previous,
+        };
+        let payload = encode_completed_excision(&record)?;
+        previous = sha256(&payload);
+        publisher.publish(previous, &payload)?;
+        prior_coordinate = Some(coordinate);
+    }
+    Ok(previous)
 }
 
 fn complete_restored_target(
@@ -1082,33 +1822,55 @@ fn restore_tree_backup(
         roots,
     };
     let mut store = PostgresTreeStore::connect_configured(connection)?;
-    let mut legacy_reachable = tree.legacy_node_hashes.as_ref().map(|_| BTreeSet::new());
+    let mut reachable = BTreeSet::new();
     for tree_root in &target.trees {
+        let root_hash = tree_root.descriptor.root_hash;
+        let expected_root_bytes = tree_root.root_bytes;
         let validated = persistent_tree::validate_tree_streaming(&tree_root.descriptor, |hash| {
             let payload = read_object(directory, *hash)?;
-            store.insert_node(*hash, &payload)?;
+            if *hash == root_hash && payload.len() as u64 != expected_root_bytes {
+                return Err(fault(
+                    "backup/tree-root-bytes",
+                    "backed-up tree root size disagrees with its manifest",
+                ));
+            }
             Ok(payload)
         })?;
-        if let Some(reachable) = &mut legacy_reachable {
-            reachable.extend(validated.node_hashes);
-        }
+        reachable.extend(validated.node_hashes);
     }
-    if let (Some(expected), Some(reachable)) = (&tree.legacy_node_hashes, legacy_reachable)
-        && expected.as_slice() != reachable.into_iter().collect::<Vec<_>>()
+    if let Some(expected) = &tree.legacy_node_hashes
+        && expected.as_slice() != reachable.iter().copied().collect::<Vec<_>>()
     {
         return Err(fault(
             "backup/tree-node-set",
             "legacy tree node list is not its exact reachable closure",
         ));
     }
-    store.publish_manifest(&record, 0)?;
-    Ok(())
+    store.begin_build_intent(target_database_id, 0, manifest_hash, &reachable)?;
+    let publication = (|| {
+        for hash in &reachable {
+            let payload = read_object(directory, *hash)?;
+            store.insert_node(*hash, &payload)?;
+        }
+        let delta = TreePublicationDelta::Replace {
+            live_nodes: reachable,
+        };
+        store.publish_manifest_with_delta(&record, 0, &delta)?;
+        Ok(())
+    })();
+    let release = store.release_build_intent();
+    match (publication, release) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 fn capture_tree_backup<C: postgres::GenericClient>(
     client: &mut C,
     database_id: &str,
     lineage_id: &str,
+    log_generation: u64,
     start_basis: u64,
     backup_basis: u64,
     source_transaction_hashes: &[Digest],
@@ -1129,6 +1891,12 @@ fn capture_tree_backup<C: postgres::GenericClient>(
             "tree start basis exceeds PostgreSQL bigint",
         )
     })?;
+    let generation_sql = i64::try_from(log_generation).map_err(|_| {
+        SemanticError::incorrect(
+            "backup/generation-overflow",
+            "tree generation exceeds PostgreSQL bigint",
+        )
+    })?;
     let rows = client
         .query(
             "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
@@ -1140,12 +1908,19 @@ fn capture_tree_backup<C: postgres::GenericClient>(
                 AND m.basis_t = p.basis_t \
                 AND m.tx_hash = p.tx_hash \
                 AND m.manifest_hash = p.manifest_hash \
+                AND m.log_generation = p.log_generation \
               JOIN atomic_database_generations g \
                  ON g.database_id = m.database_id \
                 AND g.excision_generation = m.excision_generation \
-              WHERE p.database_id = $1 AND p.basis_t >= $2 AND p.basis_t <= $3 \
+              WHERE p.database_id = $1 AND p.log_generation = $2 \
+                AND p.basis_t >= $3 AND p.basis_t <= $4 \
               ORDER BY p.publication_revision DESC",
-            &[&database_id, &start_basis_sql, &backup_basis_sql],
+            &[
+                &database_id,
+                &generation_sql,
+                &start_basis_sql,
+                &backup_basis_sql,
+            ],
         )
         .map_err(|error| crate::postgres::postgres_error("backup/tree-publication", error))?;
     // Native trees are replaceable accelerators, never backup authority. Walk
@@ -1159,6 +1934,7 @@ fn capture_tree_backup<C: postgres::GenericClient>(
             &row,
             database_id,
             lineage_id,
+            log_generation,
             start_basis,
             source_transaction_hashes,
             portable_transaction_hashes,
@@ -1178,6 +1954,7 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
     row: &postgres::Row,
     database_id: &str,
     lineage_id: &str,
+    log_generation: u64,
     start_basis: u64,
     source_transaction_hashes: &[Digest],
     portable_transaction_hashes: &[Digest],
@@ -1232,11 +2009,24 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
         || decoded.tx_hash != tx_hash
         || decoded.state_hash != state_hash
         || decoded.excision_generation != excision_generation
+        || excision_generation != log_generation
         || decoded.eidx_frontier != eidx_frontier
         || decoded.hash().ok() != Some(manifest_hash)
     {
         return Ok(None);
     }
+    // Keep the selected immutable graph live until this repeatable-read
+    // snapshot has copied its last node. GC takes the matching exclusive
+    // transaction lock before removing an obsolete publication or any node
+    // reachable only through it.
+    client
+        .query_one(
+            "SELECT pg_advisory_xact_lock_shared($1)",
+            &[&crate::operations::tree_manifest_advisory_key(
+                &manifest_hash,
+            )],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/tree-root-pin", error))?;
     let root_rows = client
         .query(
             "SELECT index_order, history, root_hash, datom_count, encoded_bytes \
@@ -1277,6 +2067,8 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
     // only malformed/missing derived content is eligible for fallback.
     let mut node_hashes = BTreeSet::new();
     for tree in &decoded.trees {
+        let root_hash = tree.descriptor.root_hash;
+        let expected_root_bytes = tree.root_bytes;
         let mut read_error = None;
         let validation = persistent_tree::validate_tree_streaming(&tree.descriptor, |hash| {
             let row = match client.query_opt(
@@ -1296,7 +2088,14 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
                     format!("published tree node {} is missing", hex(hash)),
                 )
             })?;
-            Ok(row.get(0))
+            let payload: Vec<u8> = row.get(0);
+            if *hash == root_hash && payload.len() as u64 != expected_root_bytes {
+                return Err(fault(
+                    "backup/tree-root-bytes",
+                    "native tree root size disagrees with its manifest",
+                ));
+            }
+            Ok(payload)
         });
         if let Some(error) = read_error {
             return Err(error);
@@ -1340,7 +2139,7 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
         basis_t,
         tx_hash: portable_tx_hash,
         state_hash,
-        excision_generation: 0,
+        excision_generation: log_generation,
         eidx_frontier,
         trees: decoded.trees,
     };
@@ -1371,52 +2170,65 @@ fn load_backup_log(
     manifest: &Manifest,
 ) -> Result<LoadedBackupLog, SemanticError> {
     if manifest.version == VERSION {
-        let capacity = usize::try_from(manifest.basis).map_err(|_| {
-            fault(
-                "backup/log-size",
-                "backup basis is not representable in memory",
-            )
-        })?;
-        let mut entries = Vec::with_capacity(capacity);
+        // Do not trust a constant-size root's basis as an allocation size.
+        // A valid chain grows this vector one authenticated record at a time;
+        // a damaged huge basis therefore fails on its first bad link instead
+        // of attempting an attacker-sized eager allocation.
+        let mut entries = Vec::new();
         let mut current_transaction_hash = manifest.head_transaction_hash;
         let mut request_hash = manifest.request_head_hash;
         let mut request_keys = BTreeSet::new();
         for basis in (1..=manifest.basis).rev() {
-            let transaction_payload = read_object(directory, current_transaction_hash)?;
-            let transaction = decode_transaction(&transaction_payload)?;
-            if transaction.database_id != manifest.lineage_id
-                || transaction.basis_t != basis
-                || transaction_hash(&transaction_payload) != current_transaction_hash
+            let membership_payload = read_object(directory, current_transaction_hash)?;
+            let membership =
+                decode_backup_membership(&membership_payload, manifest.log_generation)?;
+            if membership.lineage_id != manifest.lineage_id
+                || membership.basis != basis
+                || sha256(&membership_payload) != current_transaction_hash
             {
                 return Err(fault(
                     "backup/invalid-chain",
-                    "portable transaction chain is invalid",
+                    "portable generation membership chain is invalid",
                 ));
             }
+            let content_payload = read_object(directory, membership.content_hash)?;
+            let content = LineageTransactionContent::decode(&content_payload)?;
+            if sha256(&content_payload) != membership.content_hash
+                || content.lineage_id != manifest.lineage_id
+                || content.basis_t != basis
+                || content.eidx_frontier != membership.eidx_frontier
+            {
+                return Err(fault(
+                    "backup/content-binding",
+                    "portable transaction content disagrees with its generation membership",
+                ));
+            }
+            let transaction = content.to_transaction(membership.previous_hash);
             let request_payload = read_object(directory, request_hash)?;
             let request = decode_request_record(&request_payload)?;
             if request.lineage_id != manifest.lineage_id
+                || request.log_generation != manifest.log_generation
                 || request.basis != basis
                 || request.transaction_hash != current_transaction_hash
-                || !request_keys.insert(request.key.clone())
+                || !request_keys.insert(request.request_key_hash)
+                || request
+                    .receipt_tempids
+                    .values()
+                    .any(|entity| !content.allocations.contains(entity))
             {
                 return Err(fault(
                     "backup/request-chain",
                     "portable request chain is invalid",
                 ));
             }
-            let previous_transaction_hash = transaction.previous_hash;
+            let previous_transaction_hash = membership.previous_hash;
             let previous_request_hash = request.previous_hash;
             entries.push(LoadedBackupEntry {
                 transaction_hash: current_transaction_hash,
+                content_hash: Some(membership.content_hash),
                 transaction,
-                request: RequestRow {
-                    key: request.key,
-                    digest: request.digest,
-                    basis,
-                    tx_hash: request.transaction_hash,
-                },
-                legacy_state_hash: None,
+                request,
+                legacy_state_hash: Some(membership.state_hash),
             });
             current_transaction_hash = previous_transaction_hash;
             request_hash = previous_request_hash;
@@ -1431,7 +2243,7 @@ fn load_backup_log(
         }
         entries.reverse();
         Ok(LoadedBackupLog {
-            objects_read: entries.len().saturating_mul(2),
+            objects_read: entries.len().saturating_mul(3),
             entries,
         })
     } else {
@@ -1455,8 +2267,19 @@ fn load_backup_log(
             previous = *hash;
             entries.push(LoadedBackupEntry {
                 transaction_hash: *hash,
+                content_hash: None,
                 transaction,
-                request: request.clone(),
+                request: BackupRequestRecord {
+                    lineage_id: manifest.lineage_id.clone(),
+                    log_generation: 0,
+                    basis: request.basis,
+                    transaction_hash: request.tx_hash,
+                    previous_hash: manifest.genesis_hash,
+                    request_key_hash: request_key_hash(&manifest.lineage_id, &request.key)?,
+                    digest: request.digest,
+                    request_kind: 1,
+                    receipt_tempids: BTreeMap::new(),
+                },
                 legacy_state_hash: Some(manifest.state_hashes[offset]),
             });
         }
@@ -1564,7 +2387,7 @@ fn decode_bound_tree_manifest(
         || manifest.basis_t > backup.basis
         || entry.transaction_hash != manifest.tx_hash
         || required_state.is_some_and(|state| state != manifest.state_hash)
-        || manifest.excision_generation != 0
+        || manifest.excision_generation != backup.log_generation
         || manifest.eidx_frontier != entry.transaction.eidx_frontier
         || manifest.hash()? != tree.manifest_hash
     {
@@ -1587,6 +2410,12 @@ fn verify_tree_presence(
     for tree_root in &manifest.trees {
         let root_hash = tree_root.descriptor.root_hash;
         let root_payload = read_object(directory, root_hash)?;
+        if root_payload.len() as u64 != tree_root.root_bytes {
+            return Err(fault(
+                "backup/tree-root-bytes",
+                "backed-up tree root size disagrees with its manifest",
+            ));
+        }
         let persistent_tree::TreeNode::Root(root) =
             persistent_tree::decode_tree_node(&root_hash, &root_payload)?
         else {
@@ -1653,8 +2482,17 @@ fn verify_tree_backup(
     let mut legacy_reachable = tree.legacy_node_hashes.as_ref().map(|_| BTreeSet::new());
     let mut objects_read: usize = 1;
     for tree_root in &manifest.trees {
+        let root_hash = tree_root.descriptor.root_hash;
+        let expected_root_bytes = tree_root.root_bytes;
         let validated = persistent_tree::validate_tree_streaming(&tree_root.descriptor, |hash| {
-            read_object(directory, *hash)
+            let payload = read_object(directory, *hash)?;
+            if *hash == root_hash && payload.len() as u64 != expected_root_bytes {
+                return Err(fault(
+                    "backup/tree-root-bytes",
+                    "backed-up tree root size disagrees with its manifest",
+                ));
+            }
+            Ok(payload)
         })?;
         objects_read = objects_read.saturating_add(validated.nodes_read as usize);
         if let Some(reachable) = &mut legacy_reachable {
@@ -1677,7 +2515,9 @@ fn target_matches_backup<C: postgres::GenericClient>(
     directory: &Path,
     manifest: &Manifest,
     log: &LoadedBackupLog,
+    completed_excisions: &[(u64, u64)],
     target_database_id: &str,
+    expected_database: &Database,
 ) -> Result<bool, SemanticError> {
     let Some(catalog) = client
         .query_opt(
@@ -1697,85 +2537,172 @@ fn target_matches_backup<C: postgres::GenericClient>(
     {
         return Ok(false);
     }
-    let decoded_genesis = decode_genesis(&genesis)?;
-    let mut expected_database = Database::from_genesis(decoded_genesis.clone())?;
-
+    let head = client
+        .query_one(
+            "SELECT basis_t, tx_hash, log_generation FROM atomic_heads WHERE database_id = $1",
+            &[&target_database_id],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-head", error))?;
+    let target_basis = unsigned(head.get(0), "restored head basis")?;
+    let target_head_hash = digest(head.get(1), "restored head hash")?;
+    let target_generation = unsigned(head.get(2), "restored log generation")?;
+    if target_generation == 0 || target_basis != manifest.basis {
+        return Ok(false);
+    }
+    let recovered = crate::postgres::recover_generation_to(
+        client,
+        target_database_id,
+        target_generation,
+        target_basis,
+        target_head_hash,
+    )?;
+    if !recovered.database.same_information_as(expected_database) {
+        return Ok(false);
+    }
+    let generation_sql = sql_u64(target_generation, "restored log generation")?;
     let rows = client
         .query(
-            "SELECT basis_t, previous_hash, tx_hash, payload, state_hash \
-             FROM atomic_transactions WHERE database_id = $1 ORDER BY basis_t",
-            &[&target_database_id],
+            "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.content_hash, t.state_hash, \
+                    t.eidx_frontier, c.lineage_id, c.basis_t, c.eidx_frontier, \
+                    c.envelope_version, c.payload, r.request_key_hash, r.request_digest, \
+                    r.request_kind, r.tx_hash \
+               FROM atomic_generation_transactions t \
+               JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
+               JOIN atomic_generation_requests r \
+                 ON r.database_id = t.database_id AND r.generation = t.generation \
+                AND r.basis_t = t.basis_t \
+              WHERE t.database_id = $1 AND t.generation = $2 ORDER BY t.basis_t",
+            &[&target_database_id, &generation_sql],
         )
         .map_err(|error| crate::postgres::postgres_error("backup/restore-check-log", error))?;
     if rows.len() != log.entries.len() {
         return Ok(false);
     }
-    let mut expected_hashes = Vec::with_capacity(rows.len());
+    let mut receipts: BTreeMap<u64, (Digest, BTreeMap<String, u64>)> = BTreeMap::new();
+    for row in client
+        .query(
+            "SELECT r.basis_t, r.request_key_hash, x.tempid_name, x.entity_id \
+               FROM atomic_generation_requests r \
+               JOIN atomic_generation_request_tempids x \
+                 ON x.database_id = r.database_id AND x.generation = r.generation \
+                AND x.request_key_hash = r.request_key_hash \
+              WHERE r.database_id = $1 AND r.generation = $2 \
+              ORDER BY r.basis_t, x.tempid_name",
+            &[&target_database_id, &generation_sql],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-check-tempids", error)
+        })?
+    {
+        let basis = unsigned(row.get(0), "restored receipt basis")?;
+        let key_hash = digest(row.get(1), "restored receipt key hash")?;
+        let entry = receipts
+            .entry(basis)
+            .or_insert_with(|| (key_hash, BTreeMap::new()));
+        if entry.0 != key_hash
+            || entry
+                .1
+                .insert(
+                    row.get::<_, String>(2),
+                    unsigned(row.get(3), "restored receipt entity")?,
+                )
+                .is_some()
+        {
+            return Ok(false);
+        }
+    }
     let mut previous = manifest.genesis_hash;
+    let mut prior_frontier = Database::from_genesis(decode_genesis(&genesis)?)?.eidx_frontier();
     for (row, entry) in rows.into_iter().zip(&log.entries) {
-        let source = &entry.transaction;
-        let expected = DurableTransaction {
-            database_id: target_database_id.to_owned(),
-            basis_t: source.basis_t,
-            previous_hash: previous,
-            eidx_frontier: source.eidx_frontier,
-            tempids: source.tempids.clone(),
-            tx_data: source.tx_data.clone(),
-        };
-        let expected_payload = encode_transaction(&expected)?;
-        let expected_hash = transaction_hash(&expected_payload);
-        expected_database = expected_database.apply_committed(&expected)?;
-        let expected_state_hash = checkpoint_state_hash(&expected_database)?;
         let row_basis = unsigned(row.get(0), "restored transaction basis")?;
         let row_previous = digest(row.get(1), "restored predecessor hash")?;
         let row_hash = digest(row.get(2), "restored transaction hash")?;
-        let row_payload: Vec<u8> = row.get(3);
+        let row_content_hash = digest(row.get(3), "restored content hash")?;
         let row_state_hash = digest(row.get(4), "restored state hash")?;
-        if row_basis != expected.basis_t
+        let row_frontier = unsigned(row.get(5), "restored transaction frontier")?;
+        let content_lineage: String = row.get(6);
+        let content_basis = unsigned(row.get(7), "restored content basis")?;
+        let content_frontier = unsigned(row.get(8), "restored content frontier")?;
+        let content_version: i16 = row.get(9);
+        let content_payload: Vec<u8> = row.get(10);
+        let request_key_hash = digest(row.get(11), "restored request key hash")?;
+        let request_digest = digest(row.get(12), "restored request digest")?;
+        let request_kind: i16 = row.get(13);
+        let request_tx_hash = digest(row.get(14), "restored request transaction hash")?;
+        let content = LineageTransactionContent::decode(&content_payload)?;
+        let expected_content = LineageTransactionContent::from_transaction(
+            &manifest.lineage_id,
+            prior_frontier,
+            &entry.transaction,
+        )?;
+        let membership_hash = crate::log_generation::generation_transaction_hash(
+            &manifest.lineage_id,
+            target_generation,
+            row_basis,
+            row_previous,
+            row_content_hash,
+            row_state_hash,
+            row_frontier,
+        )?;
+        let expected_request_digest = if entry.request.request_kind == 0 {
+            tombstone_request_digest(
+                &manifest.lineage_id,
+                target_generation,
+                row_basis,
+                entry.request.request_key_hash,
+            )?
+        } else {
+            entry.request.digest
+        };
+        let (_, receipt) = receipts
+            .remove(&row_basis)
+            .unwrap_or((request_key_hash, BTreeMap::new()));
+        if row_basis != entry.transaction.basis_t
             || row_previous != previous
-            || row_hash != expected_hash
-            || row_payload != expected_payload
-            || row_state_hash != expected_state_hash
+            || row_hash != membership_hash
+            || row_state_hash != entry.legacy_state_hash.unwrap_or([0; 32])
+            || sha256(&content_payload) != row_content_hash
+            || content_lineage != manifest.lineage_id
+            || content_basis != row_basis
+            || content_frontier != row_frontier
+            || content_version != 1
+            || content != expected_content
+            || request_key_hash != entry.request.request_key_hash
+            || request_digest != expected_request_digest
+            || request_kind != i16::from(entry.request.request_kind)
+            || request_tx_hash != row_hash
+            || receipt != entry.request.receipt_tempids
         {
             return Ok(false);
         }
-        previous = expected_hash;
-        expected_hashes.push(expected_hash);
+        previous = row_hash;
+        prior_frontier = row_frontier;
     }
-
-    let head = client
-        .query_one(
-            "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
-            &[&target_database_id],
-        )
-        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-head", error))?;
-    if unsigned(head.get(0), "restored head basis")? != manifest.basis
-        || digest(head.get(1), "restored head hash")? != previous
-    {
+    if !receipts.is_empty() || target_head_hash != previous {
         return Ok(false);
     }
-
-    let requests = client
+    let restored_completed = client
         .query(
-            "SELECT request_key, request_digest, basis_t, tx_hash FROM atomic_requests \
-             WHERE database_id = $1 ORDER BY basis_t",
+            "SELECT request_t, request_entity FROM atomic_completed_excision_requests \
+             WHERE database_id = $1 ORDER BY request_t, request_entity",
             &[&target_database_id],
         )
-        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-requests", error))?;
-    if requests.len() != log.entries.len() {
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-check-completions", error)
+        })?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                unsigned(row.get(0), "restored completed request t")?,
+                unsigned(row.get(1), "restored completed request entity")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, SemanticError>>()?;
+    if restored_completed != completed_excisions {
         return Ok(false);
     }
-    for (offset, (row, entry)) in requests.into_iter().zip(&log.entries).enumerate() {
-        let expected = &entry.request;
-        if row.get::<_, String>(0) != expected.key
-            || digest(row.get(1), "restored request digest")? != expected.digest
-            || unsigned(row.get(2), "restored request basis")? != expected.basis
-            || digest(row.get(3), "restored request transaction hash")? != expected_hashes[offset]
-        {
-            return Ok(false);
-        }
-    }
 
+    let decoded_genesis = decode_genesis(&genesis)?;
     let mut required_programs = BTreeSet::new();
     for datom in &decoded_genesis {
         collect_function_hashes(&datom.value, &mut required_programs);
@@ -1807,15 +2734,7 @@ fn target_matches_backup<C: postgres::GenericClient>(
             return Ok(false);
         }
     }
-    let generation = client
-        .query_opt(
-            "SELECT excision_generation FROM atomic_database_generations WHERE database_id = $1",
-            &[&target_database_id],
-        )
-        .map_err(|error| {
-            crate::postgres::postgres_error("backup/restore-check-generation", error)
-        })?;
-    Ok(generation.is_some_and(|row| row.get::<_, i64>(0) == 0))
+    Ok(true)
 }
 
 fn prepare_directory(directory: &Path) -> Result<(), SemanticError> {
@@ -2080,19 +2999,135 @@ fn snapshots(directory: &Path) -> PathBuf {
     directory.join("snapshots")
 }
 
-fn load_manifest(directory: &Path, basis: u64) -> Result<(Manifest, Digest), SemanticError> {
-    let path = snapshots(directory).join(format!("{basis:020}.atbk"));
-    require_regular_file(&path, "backup/root-type")?;
+fn snapshot_path(directory: &Path, basis: u64, log_generation: u64) -> PathBuf {
+    snapshots(directory).join(format!("{basis:020}-g{log_generation:020}.atbk"))
+}
+
+fn parse_snapshot_name(
+    name: &std::ffi::OsStr,
+) -> Result<Option<(u64, u64)>, SemanticError> {
+    let Some(name) = name.to_str() else {
+        if Path::new(name).extension() == Some(std::ffi::OsStr::new("atbk")) {
+            return Err(fault(
+                "backup/root-name",
+                "backup snapshot filename is not UTF-8",
+            ));
+        }
+        return Ok(None);
+    };
+    let Some(stem) = name.strip_suffix(".atbk") else {
+        return Ok(None);
+    };
+    let parse_coordinate = |value: &str, label: &str| {
+        if value.len() != 20 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(fault(
+                "backup/root-name",
+                format!("backup snapshot {label} is not a canonical 20-digit integer"),
+            ));
+        }
+        value.parse::<u64>().map_err(|_| {
+            fault(
+                "backup/root-name",
+                format!("backup snapshot {label} is out of range"),
+            )
+        })
+    };
+    if stem.len() == 20 {
+        return Ok(Some((parse_coordinate(stem, "basis")?, 0)));
+    }
+    let Some((basis, generation)) = stem.split_once("-g") else {
+        return Err(fault(
+            "backup/root-name",
+            "backup snapshot filename is not canonical",
+        ));
+    };
+    if generation.contains("-g") {
+        return Err(fault(
+            "backup/root-name",
+            "backup snapshot filename has more than one generation separator",
+        ));
+    }
+    Ok(Some((
+        parse_coordinate(basis, "basis")?,
+        parse_coordinate(generation, "generation")?,
+    )))
+}
+
+fn load_manifest_path(
+    path: &Path,
+    basis: u64,
+    log_generation: u64,
+) -> Result<(Manifest, Digest), SemanticError> {
+    require_regular_file(path, "backup/root-type")?;
     let bytes = fs::read(path).map_err(io_error("backup/manifest-read"))?;
     let hash = sha256(&bytes);
     let manifest = decode_manifest(&bytes)?;
-    if manifest.basis != basis {
+    if manifest.basis != basis || manifest.log_generation != log_generation {
         return Err(fault(
-            "backup/root-basis",
-            "requested basis does not match the snapshot manifest",
+            "backup/root-coordinate",
+            "snapshot filename does not match its manifest generation and basis",
         ));
     }
     Ok((manifest, hash))
+}
+
+fn load_manifest_generation(
+    directory: &Path,
+    basis: u64,
+    log_generation: u64,
+) -> Result<(Manifest, Digest), SemanticError> {
+    let mut selected: Option<(Manifest, Digest)> = None;
+    for entry in fs::read_dir(snapshots(directory)).map_err(io_error("backup/list-root"))? {
+        let entry = entry.map_err(io_error("backup/list-root-entry"))?;
+        if parse_snapshot_name(&entry.file_name())? != Some((basis, log_generation)) {
+            continue;
+        }
+        let candidate = load_manifest_path(&entry.path(), basis, log_generation)?;
+        if selected
+            .as_ref()
+            .is_some_and(|(_, hash)| *hash != candidate.1)
+        {
+            return Err(fault(
+                "backup/root-coordinate-conflict",
+                "one backup generation and basis names different immutable roots",
+            ));
+        }
+        selected = Some(candidate);
+    }
+    selected.ok_or_else(|| {
+        SemanticError::new(
+            ErrorCategory::NotFound,
+            "backup/root-not-found",
+            format!(
+                "no backup root exists at generation {log_generation}, basis {basis}"
+            ),
+        )
+    })
+}
+
+fn load_manifest(directory: &Path, basis: u64) -> Result<(Manifest, Digest), SemanticError> {
+    let mut generation = None;
+    for entry in fs::read_dir(snapshots(directory)).map_err(io_error("backup/list-root"))? {
+        let entry = entry.map_err(io_error("backup/list-root-entry"))?;
+        let Some((candidate_basis, candidate_generation)) =
+            parse_snapshot_name(&entry.file_name())?
+        else {
+            continue;
+        };
+        if candidate_basis == basis
+            && generation.is_none_or(|current| candidate_generation > current)
+        {
+            generation = Some(candidate_generation);
+        }
+    }
+    let generation = generation.ok_or_else(|| {
+        SemanticError::new(
+            ErrorCategory::NotFound,
+            "backup/root-not-found",
+            format!("no backup root exists at basis {basis}"),
+        )
+    })?;
+    load_manifest_generation(directory, basis, generation)
 }
 
 fn select_incremental_parent(
@@ -2100,41 +3135,30 @@ fn select_incremental_parent(
     lineage_id: &str,
     genesis_hash: Digest,
     genesis_state_hash: Digest,
+    log_generation: u64,
     basis: u64,
 ) -> Result<Option<ParentContext>, SemanticError> {
     let mut latest = None;
     for entry in fs::read_dir(snapshots(directory)).map_err(io_error("backup/list-parent"))? {
         let entry = entry.map_err(io_error("backup/list-parent-entry"))?;
-        let name = entry.file_name();
-        let name = name
-            .to_str()
-            .ok_or_else(|| fault("backup/root-name", "backup snapshot filename is not UTF-8"))?;
-        let Some(stem) = name.strip_suffix(".atbk") else {
+        let Some((point, generation)) = parse_snapshot_name(&entry.file_name())? else {
             continue;
         };
-        if stem.len() != 20 || !stem.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(fault(
-                "backup/root-name",
-                "backup snapshot filename is not a canonical basis",
-            ));
-        }
-        let point = stem.parse::<u64>().map_err(|_| {
-            fault(
-                "backup/root-name",
-                "backup snapshot filename basis is out of range",
-            )
-        })?;
-        if point < basis && latest.is_none_or(|current| point > current) {
+        if generation == log_generation
+            && point < basis
+            && latest.is_none_or(|current| point > current)
+        {
             latest = Some(point);
         }
     }
     let Some(latest) = latest else {
         return Ok(None);
     };
-    let (manifest, _) = load_manifest(directory, latest)?;
+    let (manifest, _) = load_manifest_generation(directory, latest, log_generation)?;
     verify_claim(directory, &manifest)?;
     let parent = ManifestRoot { manifest };
     if parent.manifest.lineage_id != lineage_id
+        || parent.manifest.log_generation != log_generation
         || parent.manifest.genesis_hash != genesis_hash
         || (parent.manifest.basis == 0
             && (parent.manifest.head_transaction_hash != genesis_hash
@@ -2163,8 +3187,9 @@ fn authenticate_source_parent<C: postgres::GenericClient>(
     lineage_id: &str,
     genesis_hash: Digest,
     genesis_state_hash: Digest,
+    genesis_frontier: u64,
     parent: &ParentContext,
-) -> Result<(Digest, Digest), SemanticError> {
+) -> Result<(Digest, Digest, u64), SemanticError> {
     if parent.manifest.basis == 0 {
         if parent.manifest.head_transaction_hash != genesis_hash
             || parent.manifest.head_state_hash != genesis_state_hash
@@ -2174,17 +3199,25 @@ fn authenticate_source_parent<C: postgres::GenericClient>(
                 "basis-zero parent has the wrong genesis anchor",
             ));
         }
-        return Ok((genesis_hash, genesis_hash));
+        return Ok((genesis_hash, genesis_hash, genesis_frontier));
     }
-    let portable_payload = read_object(directory, parent.manifest.head_transaction_hash)?;
-    let portable = decode_transaction(&portable_payload)?;
-    if portable.database_id != lineage_id
-        || portable.basis_t != parent.manifest.basis
-        || transaction_hash(&portable_payload) != parent.manifest.head_transaction_hash
+    let membership_payload = read_object(directory, parent.manifest.head_transaction_hash)?;
+    let membership =
+        decode_backup_membership(&membership_payload, parent.manifest.log_generation)?;
+    let content_payload = read_object(directory, membership.content_hash)?;
+    let content = LineageTransactionContent::decode(&content_payload)?;
+    if membership.lineage_id != lineage_id
+        || membership.basis != parent.manifest.basis
+        || membership.state_hash != parent.manifest.head_state_hash
+        || sha256(&membership_payload) != parent.manifest.head_transaction_hash
+        || sha256(&content_payload) != membership.content_hash
+        || content.lineage_id != lineage_id
+        || content.basis_t != membership.basis
+        || content.eidx_frontier != membership.eidx_frontier
     {
         return Err(fault(
             "backup/parent-anchor",
-            "parent portable transaction anchor is invalid",
+            "parent portable membership or content anchor is invalid",
         ));
     }
     let basis_sql = i64::try_from(parent.manifest.basis).map_err(|_| {
@@ -2193,51 +3226,95 @@ fn authenticate_source_parent<C: postgres::GenericClient>(
             "parent basis exceeds PostgreSQL bigint",
         )
     })?;
-    let row = client
-        .query_opt(
-            "SELECT tx_hash, payload, state_hash FROM atomic_transactions \
-             WHERE database_id = $1 AND basis_t = $2",
-            &[&database_id, &basis_sql],
-        )
-        .map_err(|error| crate::postgres::postgres_error("backup/parent-row", error))?
-        .ok_or_else(|| {
+    let source_hash = if parent.manifest.log_generation > 0 {
+        let generation_sql = i64::try_from(parent.manifest.log_generation).map_err(|_| {
             fault(
-                "backup/parent-row-missing",
-                "source database no longer contains the backup parent basis",
+                "backup/generation-overflow",
+                "parent generation exceeds PostgreSQL bigint",
             )
         })?;
-    let source_hash = digest(row.get(0), "parent source transaction hash")?;
-    let source_payload: Vec<u8> = row.get(1);
-    let source_state_hash = digest(row.get(2), "parent source state hash")?;
-    let source = decode_transaction(&source_payload)?;
-    if source.basis_t != parent.manifest.basis
-        || (source.database_id != database_id && source.database_id != lineage_id)
-        || transaction_hash(&source_payload) != source_hash
-        || source_state_hash != parent.manifest.head_state_hash
-    {
-        return Err(fault(
-            "backup/parent-source",
-            "source database does not match the backup parent anchor",
-        ));
-    }
-    let rebound = DurableTransaction {
-        database_id: lineage_id.to_owned(),
-        basis_t: source.basis_t,
-        previous_hash: portable.previous_hash,
-        eidx_frontier: source.eidx_frontier,
-        tempids: source.tempids,
-        tx_data: source.tx_data,
+        let row = client
+            .query_opt(
+                "SELECT t.previous_hash, t.tx_hash, t.content_hash, t.state_hash, \
+                        t.eidx_frontier, c.payload, c.lineage_id, c.basis_t, \
+                        c.eidx_frontier, c.envelope_version \
+                   FROM atomic_generation_transactions t \
+                   JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
+                  WHERE t.database_id = $1 AND t.generation = $2 AND t.basis_t = $3",
+                &[&database_id, &generation_sql, &basis_sql],
+            )
+            .map_err(|error| crate::postgres::postgres_error("backup/parent-generation", error))?
+            .ok_or_else(|| {
+                fault(
+                    "backup/parent-row-missing",
+                    "source generation no longer contains the backup parent basis",
+                )
+            })?;
+        let source_hash = digest(row.get(1), "parent source transaction hash")?;
+        if digest(row.get(0), "parent source predecessor")? != membership.previous_hash
+            || source_hash != parent.manifest.head_transaction_hash
+            || digest(row.get(2), "parent source content hash")? != membership.content_hash
+            || digest(row.get(3), "parent source state hash")? != membership.state_hash
+            || unsigned(row.get(4), "parent source frontier")? != membership.eidx_frontier
+            || row.get::<_, Vec<u8>>(5) != content_payload
+            || row.get::<_, String>(6) != lineage_id
+            || unsigned(row.get(7), "parent content basis")? != membership.basis
+            || unsigned(row.get(8), "parent content frontier")? != membership.eidx_frontier
+            || row.get::<_, i16>(9) != 1
+        {
+            return Err(fault(
+                "backup/parent-source",
+                "source generation differs from the backup parent",
+            ));
+        }
+        source_hash
+    } else {
+        let row = client
+            .query_opt(
+                "SELECT tx_hash, payload, state_hash FROM atomic_transactions \
+                 WHERE database_id = $1 AND basis_t = $2",
+                &[&database_id, &basis_sql],
+            )
+            .map_err(|error| crate::postgres::postgres_error("backup/parent-row", error))?
+            .ok_or_else(|| {
+                fault(
+                    "backup/parent-row-missing",
+                    "legacy source no longer contains the backup parent basis",
+                )
+            })?;
+        let source_hash = digest(row.get(0), "parent source transaction hash")?;
+        let source_payload: Vec<u8> = row.get(1);
+        let source_state_hash = digest(row.get(2), "parent source state hash")?;
+        let source = decode_transaction(&source_payload)?;
+        let prior_frontier = if membership.basis == 1 {
+            genesis_frontier
+        } else {
+            let previous_payload = read_object(directory, membership.previous_hash)?;
+            decode_backup_membership(&previous_payload, 0)?.eidx_frontier
+        };
+        let rebound = LineageTransactionContent::from_transaction(
+            lineage_id,
+            prior_frontier,
+            &source,
+        )?;
+        if source.basis_t != parent.manifest.basis
+            || (source.database_id != database_id && source.database_id != lineage_id)
+            || transaction_hash(&source_payload) != source_hash
+            || source_state_hash != membership.state_hash
+            || rebound != content
+        {
+            return Err(fault(
+                "backup/parent-source",
+                "legacy source information differs from the backup parent",
+            ));
+        }
+        source_hash
     };
-    let rebound_payload = encode_transaction(&rebound)?;
-    if transaction_hash(&rebound_payload) != parent.manifest.head_transaction_hash
-        || rebound_payload != portable_payload
-    {
-        return Err(fault(
-            "backup/parent-source",
-            "source transaction information differs from the backup parent",
-        ));
-    }
-    Ok((source_hash, parent.manifest.head_transaction_hash))
+    Ok((
+        source_hash,
+        parent.manifest.head_transaction_hash,
+        membership.eidx_frontier,
+    ))
 }
 
 /// Reuse an already-published root only after authenticating its full object
@@ -2248,7 +3325,7 @@ fn reusable_existing_point(
     directory: &Path,
     candidate: &Manifest,
 ) -> Result<Option<BackupPoint>, SemanticError> {
-    let path = snapshots(directory).join(format!("{:020}.atbk", candidate.basis));
+    let path = snapshot_path(directory, candidate.basis, candidate.log_generation);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => {
@@ -2270,11 +3347,13 @@ fn reusable_existing_point(
         ));
     }
     let same_logical_point = existing.lineage_id == candidate.lineage_id
+        && existing.log_generation == candidate.log_generation
         && existing.basis == candidate.basis
         && existing.genesis_hash == candidate.genesis_hash
         && existing.head_transaction_hash == candidate.head_transaction_hash
         && existing.head_state_hash == candidate.head_state_hash
         && existing.request_head_hash == candidate.request_head_hash
+        && existing.completed_excision_head_hash == candidate.completed_excision_head_hash
         && existing.transactions == candidate.transactions
         && existing.state_hashes == candidate.state_hashes
         && existing.requests == candidate.requests
@@ -2288,29 +3367,12 @@ fn reusable_existing_point(
     }
     Ok(Some(BackupPoint {
         lineage_id: candidate.lineage_id.clone(),
+        log_generation: candidate.log_generation,
         basis_t: candidate.basis,
         manifest_hash,
         objects_written: 0,
-        objects_reused: manifest_object_hashes(&existing, true).len(),
+        objects_reused: 0,
     }))
-}
-
-fn manifest_object_hashes(manifest: &Manifest, include_tree: bool) -> BTreeSet<Digest> {
-    let mut hashes = BTreeSet::from([manifest.genesis_hash]);
-    if manifest.version == VERSION {
-        hashes.insert(manifest.head_transaction_hash);
-        hashes.insert(manifest.request_head_hash);
-    } else {
-        hashes.extend(manifest.transactions.iter().copied());
-        hashes.extend(manifest.programs.iter().map(|program| program.hash));
-    }
-    if include_tree && let Some(tree) = &manifest.tree {
-        hashes.insert(tree.manifest_hash);
-        if let Some(nodes) = &tree.legacy_node_hashes {
-            hashes.extend(nodes.iter().copied());
-        }
-    }
-    hashes
 }
 
 fn ensure_object_present(directory: &Path, hash: Digest) -> Result<(), SemanticError> {
@@ -2336,29 +3398,134 @@ fn encode_claim(claim: &BackupClaim) -> Result<Vec<u8>, SemanticError> {
     Ok(bytes)
 }
 
+fn encode_backup_membership(
+    record: &BackupMembershipRecord,
+) -> Result<Vec<u8>, SemanticError> {
+    if record.log_generation > 0 {
+        return encode_generation_transaction_membership(
+            &record.lineage_id,
+            record.log_generation,
+            record.basis,
+            record.previous_hash,
+            record.content_hash,
+            record.state_hash,
+            record.eidx_frontier,
+        );
+    }
+    if !valid_lineage_id(&record.lineage_id)
+        || record.basis == 0
+        || record.content_hash == [0; 32]
+        || record.state_hash == [0; 32]
+    {
+        return Err(SemanticError::incorrect(
+            "backup/legacy-membership-coordinate",
+            "portable legacy membership has an invalid lineage, basis, content, or state",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(LEGACY_MEMBERSHIP_DOMAIN.len() + 156);
+    bytes.extend_from_slice(LEGACY_MEMBERSHIP_DOMAIN);
+    bytes.extend_from_slice(record.lineage_id.as_bytes());
+    put_u64(&mut bytes, 0);
+    put_u64(&mut bytes, record.basis);
+    bytes.extend_from_slice(&record.previous_hash);
+    bytes.extend_from_slice(&record.content_hash);
+    bytes.extend_from_slice(&record.state_hash);
+    put_u64(&mut bytes, record.eidx_frontier);
+    Ok(bytes)
+}
+
+fn decode_backup_membership(
+    bytes: &[u8],
+    log_generation: u64,
+) -> Result<BackupMembershipRecord, SemanticError> {
+    let record = if log_generation > 0 {
+        let decoded = GenerationTransactionMembership::decode(bytes)?;
+        BackupMembershipRecord {
+            lineage_id: decoded.lineage_id,
+            log_generation: decoded.generation,
+            basis: decoded.basis_t,
+            previous_hash: decoded.previous_hash,
+            content_hash: decoded.content_hash,
+            state_hash: decoded.state_hash,
+            eidx_frontier: decoded.eidx_frontier,
+        }
+    } else {
+        let expected_len = LEGACY_MEMBERSHIP_DOMAIN.len() + 156;
+        if bytes.len() != expected_len || !bytes.starts_with(LEGACY_MEMBERSHIP_DOMAIN) {
+            return Err(fault(
+                "backup/legacy-membership-encoding",
+                "portable legacy membership has an invalid encoding",
+            ));
+        }
+        let mut cursor = Cursor::new(&bytes[LEGACY_MEMBERSHIP_DOMAIN.len()..]);
+        let lineage_id = std::str::from_utf8(cursor.take(36)?)
+            .map_err(|_| {
+                fault(
+                    "backup/legacy-membership-lineage",
+                    "portable legacy membership lineage is not UTF-8",
+                )
+            })?
+            .to_owned();
+        let generation = cursor.u64()?;
+        let record = BackupMembershipRecord {
+            lineage_id,
+            log_generation: generation,
+            basis: cursor.u64()?,
+            previous_hash: cursor.digest()?,
+            content_hash: cursor.digest()?,
+            state_hash: cursor.digest()?,
+            eidx_frontier: cursor.u64()?,
+        };
+        cursor.finish()?;
+        record
+    };
+    if record.log_generation != log_generation || encode_backup_membership(&record)? != bytes {
+        return Err(fault(
+            "backup/noncanonical-membership",
+            "backup transaction membership is not canonical for its root generation",
+        ));
+    }
+    Ok(record)
+}
+
 fn encode_request_record(record: &BackupRequestRecord) -> Result<Vec<u8>, SemanticError> {
-    if !valid_lineage_id(&record.lineage_id) || record.basis == 0 || record.key.is_empty() {
+    if !valid_lineage_id(&record.lineage_id)
+        || record.basis == 0
+        || record.request_key_hash == [0; 32]
+        || !matches!(record.request_kind, 0 | 1)
+        || (record.request_kind == 0 && !record.receipt_tempids.is_empty())
+        || record.receipt_tempids.iter().any(|(name, entity)| {
+            name.is_empty() || *entity > i64::MAX as u64
+        })
+    {
         return Err(SemanticError::incorrect(
             "backup/request-record",
-            "request record identity, basis, or key is invalid",
+            "request record identity, basis, kind, or receipt is invalid",
         ));
     }
     let mut bytes = Vec::new();
     bytes.extend_from_slice(REQUEST_MAGIC);
     bytes.extend_from_slice(&REQUEST_VERSION.to_be_bytes());
     put_string(&mut bytes, &record.lineage_id)?;
+    put_u64(&mut bytes, record.log_generation);
     put_u64(&mut bytes, record.basis);
     bytes.extend_from_slice(&record.transaction_hash);
     bytes.extend_from_slice(&record.previous_hash);
-    put_string(&mut bytes, &record.key)?;
+    bytes.extend_from_slice(&record.request_key_hash);
     bytes.extend_from_slice(&record.digest);
+    bytes.push(record.request_kind);
+    put_u32(&mut bytes, record.receipt_tempids.len())?;
+    for (name, entity) in &record.receipt_tempids {
+        put_string(&mut bytes, name)?;
+        put_u64(&mut bytes, *entity);
+    }
     let checksum = sha256(&bytes);
     bytes.extend_from_slice(&checksum);
     Ok(bytes)
 }
 
 fn decode_request_record(bytes: &[u8]) -> Result<BackupRequestRecord, SemanticError> {
-    if bytes.len() < 187 || &bytes[..4] != REQUEST_MAGIC {
+    if bytes.len() < 223 || &bytes[..4] != REQUEST_MAGIC {
         return Err(fault(
             "backup/request-record-header",
             "backup request record header is invalid",
@@ -2379,18 +3546,40 @@ fn decode_request_record(bytes: &[u8]) -> Result<BackupRequestRecord, SemanticEr
         ));
     }
     let mut cursor = Cursor::new(&bytes[6..checksum_at]);
+    let lineage_id = cursor.string()?;
+    let log_generation = cursor.u64()?;
+    let basis = cursor.u64()?;
+    let transaction_hash = cursor.digest()?;
+    let previous_hash = cursor.digest()?;
+    let request_key_hash = cursor.digest()?;
+    let digest = cursor.digest()?;
+    let request_kind = cursor.u8()?;
+    let count = cursor.count_with_minimum(12)?;
+    let mut receipt_tempids = BTreeMap::new();
+    for _ in 0..count {
+        let name = cursor.string()?;
+        let entity = cursor.u64()?;
+        if receipt_tempids.insert(name, entity).is_some() {
+            return Err(fault(
+                "backup/request-record-receipt",
+                "backup request receipt contains duplicate tempid names",
+            ));
+        }
+    }
     let record = BackupRequestRecord {
-        lineage_id: cursor.string()?,
-        basis: cursor.u64()?,
-        transaction_hash: cursor.digest()?,
-        previous_hash: cursor.digest()?,
-        key: cursor.string()?,
-        digest: cursor.digest()?,
+        lineage_id,
+        log_generation,
+        basis,
+        transaction_hash,
+        previous_hash,
+        request_key_hash,
+        digest,
+        request_kind,
+        receipt_tempids,
     };
     cursor.finish()?;
     if !valid_lineage_id(&record.lineage_id)
         || record.basis == 0
-        || record.key.is_empty()
         || encode_request_record(&record)? != bytes
     {
         return Err(fault(
@@ -2399,6 +3588,103 @@ fn decode_request_record(bytes: &[u8]) -> Result<BackupRequestRecord, SemanticEr
         ));
     }
     Ok(record)
+}
+
+fn encode_completed_excision(
+    record: &BackupCompletedExcision,
+) -> Result<Vec<u8>, SemanticError> {
+    if !valid_lineage_id(&record.lineage_id) || record.request_t == 0 {
+        return Err(SemanticError::incorrect(
+            "backup/completed-excision-record",
+            "completed excision requires a canonical lineage and positive request t",
+        ));
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(COMPLETED_EXCISION_MAGIC);
+    bytes.extend_from_slice(&COMPLETED_EXCISION_VERSION.to_be_bytes());
+    put_string(&mut bytes, &record.lineage_id)?;
+    put_u64(&mut bytes, record.request_t);
+    put_u64(&mut bytes, record.request_entity);
+    bytes.extend_from_slice(&record.previous_hash);
+    let checksum = sha256(&bytes);
+    bytes.extend_from_slice(&checksum);
+    Ok(bytes)
+}
+
+fn decode_completed_excision(bytes: &[u8]) -> Result<BackupCompletedExcision, SemanticError> {
+    if bytes.len() < 118 || bytes.get(..4) != Some(COMPLETED_EXCISION_MAGIC.as_slice()) {
+        return Err(fault(
+            "backup/completed-excision-header",
+            "completed excision object has an invalid header",
+        ));
+    }
+    if u16::from_be_bytes([bytes[4], bytes[5]]) != COMPLETED_EXCISION_VERSION {
+        return Err(SemanticError::new(
+            ErrorCategory::Unsupported,
+            "backup/completed-excision-version",
+            "unsupported completed excision object version",
+        ));
+    }
+    let checksum_at = bytes.len() - 32;
+    if sha256(&bytes[..checksum_at]).as_slice() != &bytes[checksum_at..] {
+        return Err(fault(
+            "backup/completed-excision-checksum",
+            "completed excision object checksum is invalid",
+        ));
+    }
+    let mut cursor = Cursor::new(&bytes[6..checksum_at]);
+    let record = BackupCompletedExcision {
+        lineage_id: cursor.string()?,
+        request_t: cursor.u64()?,
+        request_entity: cursor.u64()?,
+        previous_hash: cursor.digest()?,
+    };
+    cursor.finish()?;
+    if encode_completed_excision(&record)? != bytes {
+        return Err(fault(
+            "backup/noncanonical-completed-excision",
+            "completed excision object is not canonical",
+        ));
+    }
+    Ok(record)
+}
+
+fn load_completed_excisions(
+    directory: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<(u64, u64)>, SemanticError> {
+    if manifest.version == LEGACY_VERSION {
+        return Ok(Vec::new());
+    }
+    let mut current = manifest.completed_excision_head_hash;
+    let mut reversed = Vec::new();
+    let mut seen_hashes = BTreeSet::new();
+    while current != manifest.genesis_hash {
+        if !seen_hashes.insert(current) {
+            return Err(fault(
+                "backup/completed-excision-cycle",
+                "completed excision chain contains a cycle",
+            ));
+        }
+        let payload = read_object(directory, current)?;
+        let record = decode_completed_excision(&payload)?;
+        if record.lineage_id != manifest.lineage_id || sha256(&payload) != current {
+            return Err(fault(
+                "backup/completed-excision-chain",
+                "completed excision chain is not bound to this lineage",
+            ));
+        }
+        reversed.push((record.request_t, record.request_entity));
+        current = record.previous_hash;
+    }
+    reversed.reverse();
+    if !reversed.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(fault(
+            "backup/completed-excision-order",
+            "completed excision chain is not in canonical identity order",
+        ));
+    }
+    Ok(reversed)
 }
 
 fn decode_claim(bytes: &[u8]) -> Result<BackupClaim, SemanticError> {
@@ -2464,7 +3750,9 @@ fn manifest_is_canonical(manifest: &Manifest) -> bool {
             let Ok(basis_len) = usize::try_from(manifest.basis) else {
                 return false;
             };
-            manifest.transactions.len() == basis_len
+            manifest.log_generation == 0
+                && manifest.completed_excision_head_hash == manifest.genesis_hash
+                && manifest.transactions.len() == basis_len
                 && manifest.state_hashes.len() == basis_len
                 && manifest.requests.len() == basis_len
                 && manifest.state_hashes.iter().all(|hash| hash != &[0; 32])
@@ -2509,6 +3797,7 @@ fn manifest_is_canonical(manifest: &Manifest) -> bool {
                 && if manifest.basis == 0 {
                     manifest.head_transaction_hash == manifest.genesis_hash
                         && manifest.request_head_hash == manifest.genesis_hash
+                        && manifest.completed_excision_head_hash == manifest.genesis_hash
                 } else {
                     manifest.head_transaction_hash != manifest.genesis_hash
                         && manifest.request_head_hash != manifest.genesis_hash
@@ -2535,12 +3824,21 @@ fn valid_lineage_id(value: &str) -> bool {
 fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, SemanticError> {
     let mut body = Vec::new();
     put_string(&mut body, &manifest.lineage_id)?;
+    if manifest.version == VERSION {
+        put_u64(&mut body, manifest.log_generation);
+    } else if manifest.log_generation != 0 {
+        return Err(SemanticError::incorrect(
+            "backup/legacy-generation",
+            "version 3 manifests have implicit generation zero",
+        ));
+    }
     put_u64(&mut body, manifest.basis);
     body.extend_from_slice(&manifest.genesis_hash);
     if manifest.version == VERSION {
         body.extend_from_slice(&manifest.head_transaction_hash);
         body.extend_from_slice(&manifest.head_state_hash);
         body.extend_from_slice(&manifest.request_head_hash);
+        body.extend_from_slice(&manifest.completed_excision_head_hash);
         match &manifest.tree {
             None => body.push(0),
             Some(tree) => {
@@ -2640,8 +3938,10 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
     }
     let mut cursor = Cursor::new(&bytes[14..14 + len]);
     let lineage_id = cursor.string()?;
+    let log_generation = if version == VERSION { cursor.u64()? } else { 0 };
     let basis = cursor.u64()?;
     let genesis_hash = cursor.digest()?;
+    let completed_excision_head_hash;
     let (
         head_transaction_hash,
         head_state_hash,
@@ -2655,6 +3955,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
         let head_transaction_hash = cursor.digest()?;
         let head_state_hash = cursor.digest()?;
         let request_head_hash = cursor.digest()?;
+        completed_excision_head_hash = cursor.digest()?;
         let tree = match cursor.u8()? {
             0 => None,
             1 => Some(TreeBackup {
@@ -2679,6 +3980,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
             tree,
         )
     } else {
+        completed_excision_head_hash = genesis_hash;
         let transactions = cursor.hashes()?;
         let state_hashes = cursor.hashes()?;
         let request_count = cursor.count_with_minimum(76)?;
@@ -2730,11 +4032,13 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
     let manifest = Manifest {
         version,
         lineage_id,
+        log_generation,
         basis,
         genesis_hash,
         head_transaction_hash,
         head_state_hash,
         request_head_hash,
+        completed_excision_head_hash,
         transactions,
         state_hashes,
         requests,
@@ -3051,5 +4355,120 @@ mod tests {
             decode_claim(&damaged).unwrap_err().code,
             "backup/claim-checksum"
         );
+    }
+
+    #[test]
+    fn v4_manifest_is_a_constant_size_endpoint_root() {
+        let genesis_hash = sha256(b"genesis");
+        let manifest = Manifest {
+            version: VERSION,
+            lineage_id: "12345678-1234-4abc-8def-123456789abc".into(),
+            log_generation: 42,
+            basis: u64::MAX,
+            genesis_hash,
+            head_transaction_hash: sha256(b"head transaction"),
+            head_state_hash: sha256(b"head state"),
+            request_head_hash: sha256(b"request head"),
+            completed_excision_head_hash: sha256(b"completed excisions"),
+            transactions: Vec::new(),
+            state_hashes: Vec::new(),
+            requests: Vec::new(),
+            programs: Vec::new(),
+            tree: Some(TreeBackup {
+                manifest_hash: sha256(b"tree manifest"),
+                legacy_node_hashes: None,
+            }),
+        };
+        let encoded = encode_manifest(&manifest).unwrap();
+        assert_eq!(encoded.len(), 295);
+        assert_eq!(decode_manifest(&encoded).unwrap(), manifest);
+
+        let mut no_tree = manifest;
+        no_tree.basis = 1;
+        no_tree.tree = None;
+        let encoded = encode_manifest(&no_tree).unwrap();
+        assert_eq!(encoded.len(), 263);
+        assert_eq!(decode_manifest(&encoded).unwrap(), no_tree);
+    }
+
+    #[test]
+    fn linked_request_record_is_canonical_and_tamper_evident() {
+        let record = BackupRequestRecord {
+            lineage_id: "12345678-1234-4abc-8def-123456789abc".into(),
+            log_generation: 42,
+            basis: 7,
+            transaction_hash: sha256(b"transaction"),
+            previous_hash: sha256(b"previous request"),
+            request_key_hash: sha256(b"client-request-7"),
+            digest: sha256(b"request payload"),
+            request_kind: 1,
+            receipt_tempids: BTreeMap::from([("new-entity".into(), 1234)]),
+        };
+        let encoded = encode_request_record(&record).unwrap();
+        assert_eq!(decode_request_record(&encoded).unwrap(), record);
+        let mut damaged = encoded;
+        damaged[80] ^= 1;
+        assert_eq!(
+            decode_request_record(&damaged).unwrap_err().code,
+            "backup/request-record-checksum"
+        );
+    }
+
+    #[test]
+    fn v3_manifest_remains_readable_without_becoming_the_write_format() {
+        let genesis_hash = sha256(b"legacy genesis");
+        let transaction_hash = sha256(b"legacy transaction");
+        let state_hash = sha256(b"legacy state");
+        let legacy = Manifest {
+            version: LEGACY_VERSION,
+            lineage_id: "12345678-1234-4abc-8def-123456789abc".into(),
+            log_generation: 0,
+            basis: 1,
+            genesis_hash,
+            head_transaction_hash: transaction_hash,
+            head_state_hash: state_hash,
+            request_head_hash: genesis_hash,
+            completed_excision_head_hash: genesis_hash,
+            transactions: vec![transaction_hash],
+            state_hashes: vec![state_hash],
+            requests: vec![RequestRow {
+                key: "legacy-request".into(),
+                digest: sha256(b"legacy request digest"),
+                basis: 1,
+                tx_hash: transaction_hash,
+            }],
+            programs: Vec::new(),
+            tree: None,
+        };
+        let encoded = encode_manifest(&legacy).unwrap();
+        assert_eq!(u16::from_be_bytes([encoded[4], encoded[5]]), LEGACY_VERSION);
+        assert_eq!(decode_manifest(&encoded).unwrap(), legacy);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_root_must_be_a_private_real_directory() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let writable = temporary_directory("world-writable");
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o777)).unwrap();
+        let error = prepare_directory(&writable).unwrap_err();
+        assert_eq!(
+            (error.category, error.code),
+            (ErrorCategory::Forbidden, "backup/directory-permissions")
+        );
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(writable).unwrap();
+
+        let real = temporary_directory("real-root");
+        let link = real.with_extension("symlink");
+        symlink(&real, &link).unwrap();
+        let error = prepare_directory(&link).unwrap_err();
+        assert_eq!(
+            (error.category, error.code),
+            (ErrorCategory::Forbidden, "backup/directory")
+        );
+        fs::remove_file(link).unwrap();
+        fs::remove_dir_all(real).unwrap();
     }
 }

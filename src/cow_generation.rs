@@ -6,9 +6,14 @@
 //! test and keeps `Database::with` free of operational state.
 
 use crate::excision::{ExcisionPlan, PlannedExcisionPredicate};
-use crate::log_generation::{LineageTransaction, request_key_hash, tombstone_request_digest};
+use crate::log_generation::{
+    LineageTransactionContent, generation_transaction_hash, request_key_hash,
+    tombstone_request_digest,
+};
 use crate::state_commitment::checkpoint_state_hash;
-use crate::{Database, Digest, DurableTransaction, ErrorCategory, SemanticError, sha256};
+use crate::{
+    Database, Digest, DurableTransaction, ErrorCategory, SemanticError, decode_transaction, sha256,
+};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,8 +31,22 @@ pub(crate) struct SourceRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceLogRow {
     pub(crate) tx_hash: Digest,
+    pub(crate) state_hash: Digest,
+    /// Exact bytes selected from the active source generation. Content and its
+    /// small membership commitment are authenticated before filtering.
+    pub(crate) encoding: SourceLogEncoding,
     pub(crate) transaction: DurableTransaction,
     pub(crate) request: SourceRequest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SourceLogEncoding {
+    Legacy(Vec<u8>),
+    Lineage {
+        generation: u64,
+        content_hash: Digest,
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,6 +54,7 @@ pub(crate) struct GenerationLogRow {
     pub(crate) basis_t: u64,
     pub(crate) previous_hash: Digest,
     pub(crate) tx_hash: Digest,
+    pub(crate) content_hash: Digest,
     pub(crate) state_hash: Digest,
     pub(crate) eidx_frontier: u64,
     pub(crate) payload: Vec<u8>,
@@ -64,6 +84,7 @@ pub(crate) struct GenerationRewriter {
     database: Database,
     plan: ExcisionPlan,
     previous_hash: Digest,
+    source_previous_hash: Digest,
     removed_datoms: u64,
 }
 
@@ -107,6 +128,7 @@ impl GenerationRewriter {
             database: Database::from_genesis(source_database.genesis_datoms().to_vec())?,
             plan,
             previous_hash: genesis_hash,
+            source_previous_hash: genesis_hash,
             removed_datoms: 0,
         })
     }
@@ -121,10 +143,59 @@ impl GenerationRewriter {
                 "source transaction basis overflows u64",
             )
         })?;
-        if source.transaction.basis_t != basis_t || source.tx_hash == [0; 32] {
+        if source.transaction.basis_t != basis_t
+            || source.transaction.previous_hash != self.source_previous_hash
+            || source.tx_hash == [0; 32]
+        {
             return Err(fault(
                 "excision/source-prefix",
                 "source transaction rows are not a canonical contiguous prefix",
+            ));
+        }
+        let authenticated_transaction = match &source.encoding {
+            SourceLogEncoding::Legacy(payload) => {
+                if sha256(payload) != source.tx_hash {
+                    return Err(fault(
+                        "excision/source-payload",
+                        "legacy source content hash does not match its transaction row",
+                    ));
+                }
+                decode_transaction(payload)?
+            }
+            SourceLogEncoding::Lineage {
+                generation,
+                content_hash,
+                payload,
+            } => {
+                if sha256(payload) != *content_hash {
+                    return Err(fault(
+                        "excision/source-payload",
+                        "lineage source content hash does not match its immutable value",
+                    ));
+                }
+                let content = LineageTransactionContent::decode(payload)?;
+                let expected_membership = generation_transaction_hash(
+                    &content.lineage_id,
+                    *generation,
+                    content.basis_t,
+                    source.transaction.previous_hash,
+                    *content_hash,
+                    source.state_hash,
+                    content.eidx_frontier,
+                )?;
+                if expected_membership != source.tx_hash {
+                    return Err(fault(
+                        "excision/source-membership",
+                        "lineage source membership commitment is invalid",
+                    ));
+                }
+                content.to_transaction(source.transaction.previous_hash)
+            }
+        };
+        if authenticated_transaction != source.transaction {
+            return Err(fault(
+                "excision/source-payload",
+                "source payload does not canonically encode the supplied transaction",
             ));
         }
         let before = source.transaction.tx_data.len();
@@ -133,22 +204,31 @@ impl GenerationRewriter {
             .removed_datoms
             .checked_add((before - filtered.tx_data.len()) as u64)
             .ok_or_else(|| fault("excision/removed-count", "removed datom count overflow"))?;
-        filtered.database_id.clone_from(&self.lineage_id);
-        filtered.previous_hash = self.previous_hash;
         // Tempid names and request keys are request/response conveniences, not
-        // database information. Historical copies can contain PII, so a COW
-        // privacy generation deliberately retains only issued entity ids in
-        // datoms and hashes the idempotency coordinate below.
-        filtered.tempids.clear();
-        let envelope = LineageTransaction {
-            lineage_id: self.lineage_id.clone(),
-            generation: self.generation,
-            transaction: filtered.clone(),
-        };
-        let payload = envelope.encode()?;
-        let tx_hash = sha256(&payload);
+        // database information. Content keeps only canonical numeric
+        // allocation witnesses, including one whose every datom was excised.
+        // Excluding generation and predecessor is what lets unaffected
+        // immutable content survive a COW rewrite by identity.
+        let current_frontier = self.database.eidx_frontier();
+        let content = LineageTransactionContent::from_transaction(
+            &self.lineage_id,
+            current_frontier,
+            &filtered,
+        )?;
+        let payload = content.encode()?;
+        let content_hash = sha256(&payload);
+        filtered = content.to_transaction(self.previous_hash);
         self.database = self.database.apply_excised_committed(&filtered)?;
         let state_hash = checkpoint_state_hash(&self.database)?;
+        let tx_hash = generation_transaction_hash(
+            &self.lineage_id,
+            self.generation,
+            basis_t,
+            self.previous_hash,
+            content_hash,
+            state_hash,
+            filtered.eidx_frontier,
+        )?;
         let request_key_hash = match source.request.key {
             SourceRequestKey::LegacyPlaintext(key) => request_key_hash(&self.lineage_id, &key)?,
             SourceRequestKey::Digest(hash) => hash,
@@ -159,6 +239,7 @@ impl GenerationRewriter {
             basis_t,
             previous_hash: self.previous_hash,
             tx_hash,
+            content_hash,
             state_hash,
             eidx_frontier: filtered.eidx_frontier,
             payload,
@@ -166,6 +247,7 @@ impl GenerationRewriter {
             request_digest,
         };
         self.previous_hash = tx_hash;
+        self.source_previous_hash = source.tx_hash;
         Ok(row)
     }
 
@@ -231,7 +313,7 @@ fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log_generation::LineageTransaction;
+    use crate::log_generation::LineageTransactionContent;
     use crate::{
         Attribute, Cardinality, DB_EXCISE, EntityRef, IndexOrder, Keyword, TxOp, TxReport, TxValue,
         Value, ValueType, View, encode_genesis, encode_transaction, transaction_hash,
@@ -252,6 +334,8 @@ mod tests {
         let payload = encode_transaction(&transaction).unwrap();
         SourceLogRow {
             tx_hash: transaction_hash(&payload),
+            state_hash: checkpoint_state_hash(&report.db_after).unwrap(),
+            encoding: SourceLogEncoding::Legacy(payload),
             transaction,
             request: SourceRequest {
                 key: SourceRequestKey::LegacyPlaintext(key.into()),
@@ -338,10 +422,15 @@ mod tests {
         assert_ne!(rewritten.request_set_hash, [0; 32]);
 
         for (source, destination) in rows.iter().zip(&rewritten.rows) {
-            let decoded = LineageTransaction::decode(&destination.payload).unwrap();
+            let decoded = LineageTransactionContent::decode(&destination.payload).unwrap();
             assert_eq!(decoded.lineage_id, LINEAGE);
-            assert_eq!(decoded.generation, 7);
-            assert!(decoded.transaction.tempids.is_empty());
+            let transaction = decoded.to_transaction(destination.previous_hash);
+            assert!(
+                transaction
+                    .tempids
+                    .keys()
+                    .all(|name| name.starts_with("allocation-"))
+            );
             assert_ne!(destination.request_digest, source.request.request_digest);
             assert!(
                 !destination
@@ -350,6 +439,29 @@ mod tests {
                     .any(|window| window == b"customer@example.test")
             );
         }
+
+        // A fresh process can replay only the rewritten bytes. The allocation
+        // whose sole user datom was removed remains issued and the next
+        // transaction cannot reuse its entity id.
+        let mut restarted = Database::from_genesis(source.genesis_datoms().to_vec()).unwrap();
+        for row in &rewritten.rows {
+            let transaction = LineageTransactionContent::decode(&row.payload)
+                .unwrap()
+                .to_transaction(row.previous_hash);
+            restarted = restarted.apply_excised_committed(&transaction).unwrap();
+        }
+        assert!(restarted.same_information_as(&rewritten.database));
+        let next = restarted
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("next".into()),
+                    attribute: SECRET,
+                    value: TxValue::Scalar(Value::String("still-here".into())),
+                }],
+                400,
+            )
+            .unwrap();
+        assert_ne!(next.tempids["next"], target);
     }
 
     #[test]
@@ -360,5 +472,117 @@ mod tests {
             rewrite_excision_generation(LINEAGE, 8, genesis_hash, &source, &rows, &completed)
                 .unwrap_err();
         assert_eq!(error.code, "excision/no-pending-requests");
+    }
+
+    #[test]
+    fn successor_generation_reuses_every_unaffected_content_value() {
+        let (source, genesis_hash, rows, _, first_request_entity) = source_with_request();
+        let first =
+            rewrite_excision_generation(LINEAGE, 7, genesis_hash, &source, &rows, &BTreeSet::new())
+                .unwrap();
+        assert_eq!(first.head_hash, first.rows.last().unwrap().tx_hash);
+        assert_eq!(first.state_hash, first.rows.last().unwrap().state_hash);
+
+        let protected_target = crate::make_eid(crate::DB_PARTITION, 500).unwrap();
+        let request = first
+            .database
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("do-not-copy-this-name".into()),
+                    attribute: DB_EXCISE as u32,
+                    value: TxValue::Entity(EntityRef::Id(protected_target)),
+                }],
+                400,
+            )
+            .unwrap();
+        let prior_frontier = first.database.eidx_frontier();
+        let raw = DurableTransaction {
+            database_id: LINEAGE.into(),
+            basis_t: request.db_after.basis_t(),
+            previous_hash: first.head_hash,
+            eidx_frontier: request.db_after.eidx_frontier(),
+            tempids: request.tempids.clone(),
+            tx_data: request.tx_data.clone(),
+        };
+        let content =
+            LineageTransactionContent::from_transaction(LINEAGE, prior_frontier, &raw).unwrap();
+        let payload = content.encode().unwrap();
+        let content_hash = sha256(&payload);
+        let state_hash = checkpoint_state_hash(&request.db_after).unwrap();
+        let tx_hash = generation_transaction_hash(
+            LINEAGE,
+            7,
+            raw.basis_t,
+            first.head_hash,
+            content_hash,
+            state_hash,
+            raw.eidx_frontier,
+        )
+        .unwrap();
+
+        let mut positive_rows = first
+            .rows
+            .iter()
+            .map(|row| SourceLogRow {
+                tx_hash: row.tx_hash,
+                state_hash: row.state_hash,
+                encoding: SourceLogEncoding::Lineage {
+                    generation: 7,
+                    content_hash: row.content_hash,
+                    payload: row.payload.clone(),
+                },
+                transaction: LineageTransactionContent::decode(&row.payload)
+                    .unwrap()
+                    .to_transaction(row.previous_hash),
+                request: SourceRequest {
+                    key: SourceRequestKey::Digest(row.request_key_hash),
+                    request_digest: row.request_digest,
+                },
+            })
+            .collect::<Vec<_>>();
+        positive_rows.push(SourceLogRow {
+            tx_hash,
+            state_hash,
+            encoding: SourceLogEncoding::Lineage {
+                generation: 7,
+                content_hash,
+                payload: payload.clone(),
+            },
+            transaction: content.to_transaction(first.head_hash),
+            request: SourceRequest {
+                key: SourceRequestKey::Digest(request_key_hash(LINEAGE, "protected").unwrap()),
+                request_digest: sha256(b"protected"),
+            },
+        });
+
+        let second = rewrite_excision_generation(
+            LINEAGE,
+            8,
+            genesis_hash,
+            &request.db_after,
+            &positive_rows,
+            &BTreeSet::from([(3, first_request_entity)]),
+        )
+        .unwrap();
+        assert_eq!(second.removed_datoms, 0);
+        assert_eq!(
+            second
+                .rows
+                .iter()
+                .map(|row| row.content_hash)
+                .collect::<Vec<_>>(),
+            positive_rows
+                .iter()
+                .map(|row| match &row.encoding {
+                    SourceLogEncoding::Lineage { content_hash, .. } => *content_hash,
+                    SourceLogEncoding::Legacy(_) => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        );
+        assert!(second.rows.iter().all(|row| {
+            !row.payload
+                .windows("do-not-copy-this-name".len())
+                .any(|window| window == b"do-not-copy-this-name")
+        }));
     }
 }

@@ -1,220 +1,461 @@
-//! Canonical envelopes for lineage-bound copy-on-write log generations.
+//! Canonical lineage transaction content and small physical-generation links.
 //!
-//! Format-3 `DurableTransaction` values predate stable database lineage and
-//! bind their `database_id` field to the operator-facing name.  Those bytes
-//! remain the exact generation-zero representation.  Every newly constructed
-//! generation instead stores a format-1 `ATLG` envelope which authenticates
-//! the immutable lineage and physical generation as well as one canonical
-//! format-3 transaction.  The nested transaction names the lineage too, so a
-//! decoder cannot accidentally expose a renamed alias as durable identity.
+//! Generation zero keeps the exact alias-bound format-3 transaction bytes.
+//! New writes store one lineage-bound `ATLC` content value without a mutable
+//! alias, physical generation, predecessor hash, or caller-chosen tempid
+//! names. A generation contains small membership rows which bind these shared
+//! values into an ordered chain. Excision therefore creates content only for
+//! transactions whose datoms changed; later predecessor changes do not force
+//! an otherwise identical payload to be copied.
 
-use crate::{Digest, DurableTransaction, ErrorCategory, SemanticError};
-use crate::{decode_transaction, encode_transaction, sha256};
+use crate::encoding::{
+    canonical_datom_bytes, decode_canonical_datoms, validate_transaction_content,
+};
+use crate::{
+    Datom, Digest, DurableTransaction, ErrorCategory, INITIAL_EIDX_FRONTIER, IndexOrder, MAX_EIDX,
+    SemanticError, USER_PARTITION, eid_to_eidx, eid_to_part, sha256,
+};
+use std::collections::{BTreeMap, BTreeSet};
 
-const MAGIC: &[u8; 4] = b"ATLG";
+const MAGIC: &[u8; 4] = b"ATLC";
 const VERSION: u16 = 1;
-const KIND_TRANSACTION: u8 = 1;
-const HEADER_LEN: usize = 20;
+const KIND_TRANSACTION_CONTENT: u8 = 1;
+const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
 const MAX_LINEAGE_BYTES: usize = 64;
-// The nested format accepts a 64 MiB body plus its 48-byte header/checksum.
-// The lineage wrapper adds at most 122 bytes. Keeping both terms explicit
-// prevents a generation cutover from imposing a smaller transaction limit.
-const MAX_CANONICAL_TRANSACTION_BYTES: usize = 64 * 1024 * 1024 + 16 + 32;
-const MAX_ENVELOPE_BYTES: usize =
-    MAX_CANONICAL_TRANSACTION_BYTES + HEADER_LEN + 2 + MAX_LINEAGE_BYTES + 4 + CHECKSUM_LEN;
+// The existing transaction codec accepts a 64 MiB body. The small allowance
+// covers the lineage and collection headers while avoiding a new lower limit.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024 + 1024;
+const MAX_ENVELOPE_BYTES: usize = HEADER_LEN + MAX_BODY_BYTES + CHECKSUM_LEN;
+const MEMBERSHIP_DOMAIN: &[u8] = b"atomic/generation-membership/v1\0";
 
+/// Immutable logical content shared by every physical generation that carries
+/// the same transaction information.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LineageTransaction {
+pub(crate) struct LineageTransactionContent {
     pub(crate) lineage_id: String,
-    pub(crate) generation: u64,
-    pub(crate) transaction: DurableTransaction,
+    pub(crate) basis_t: u64,
+    pub(crate) eidx_frontier: u64,
+    /// Distinct newly issued user entity ids. Names are deliberately absent.
+    pub(crate) allocations: Vec<u64>,
+    pub(crate) tx_data: Vec<Datom>,
 }
 
-impl LineageTransaction {
+impl LineageTransactionContent {
+    /// Convert an authenticated source transaction while retaining only the
+    /// numeric witnesses needed to prove frontier advancement.
+    pub(crate) fn from_transaction(
+        lineage_id: &str,
+        prior_eidx_frontier: u64,
+        transaction: &DurableTransaction,
+    ) -> Result<Self, SemanticError> {
+        let mut allocations = BTreeSet::new();
+        for entity in transaction.tempids.values().copied() {
+            let entity_index = eid_to_eidx(entity).map_err(|error| {
+                fault(
+                    "generation/invalid-allocation",
+                    format!("transaction allocation is invalid: {error}"),
+                )
+            })?;
+            if entity_index >= prior_eidx_frontier {
+                allocations.insert(entity);
+            }
+        }
+        let content = Self {
+            lineage_id: lineage_id.to_owned(),
+            basis_t: transaction.basis_t,
+            eidx_frontier: transaction.eidx_frontier,
+            allocations: allocations.into_iter().collect(),
+            tx_data: transaction.tx_data.clone(),
+        };
+        content.validate()?;
+        Ok(content)
+    }
+
+    /// Reconstruct the kernel recovery record. Synthetic names exist only to
+    /// reuse the strict allocation/frontier verifier; they are canonical and
+    /// contain no caller data.
+    pub(crate) fn to_transaction(&self, previous_hash: Digest) -> DurableTransaction {
+        DurableTransaction {
+            database_id: self.lineage_id.clone(),
+            basis_t: self.basis_t,
+            previous_hash,
+            eidx_frontier: self.eidx_frontier,
+            tempids: self
+                .allocations
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(ordinal, entity)| (format!("allocation-{ordinal}"), entity))
+                .collect::<BTreeMap<_, _>>(),
+            tx_data: self.tx_data.clone(),
+        }
+    }
+
     pub(crate) fn encode(&self) -> Result<Vec<u8>, SemanticError> {
-        validate(self)?;
-        let transaction = encode_transaction(&self.transaction)?;
+        self.validate()?;
         let lineage = self.lineage_id.as_bytes();
         let lineage_len = u16::try_from(lineage.len()).map_err(|_| {
             incorrect(
                 "generation/lineage-length",
-                "database lineage exceeds the canonical envelope limit",
+                "database lineage exceeds the canonical content limit",
             )
         })?;
-        let transaction_len = u32::try_from(transaction.len()).map_err(|_| {
+        let allocation_count = u32::try_from(self.allocations.len()).map_err(|_| {
             incorrect(
-                "generation/transaction-length",
-                "canonical transaction exceeds the generation envelope limit",
+                "generation/allocation-count",
+                "transaction allocation count exceeds u32",
             )
         })?;
-        let body_len = 6_usize
-            .checked_add(lineage.len())
-            .and_then(|length| length.checked_add(transaction.len()))
-            .ok_or_else(|| {
-                incorrect(
-                    "generation/envelope-length",
-                    "generation envelope length overflows usize",
-                )
-            })?;
-        let body_len = u32::try_from(body_len).map_err(|_| {
+        let mut datoms = self
+            .tx_data
+            .iter()
+            .map(|datom| Ok((datom, canonical_datom_bytes(datom)?)))
+            .collect::<Result<Vec<_>, SemanticError>>()?;
+        datoms.sort_by(|(left, left_bytes), (right, right_bytes)| {
+            left.cmp_in(right, IndexOrder::Eavt)
+                .then_with(|| left_bytes.cmp(right_bytes))
+        });
+        let datom_count = u32::try_from(datoms.len()).map_err(|_| {
             incorrect(
-                "generation/envelope-length",
-                "generation envelope body exceeds u32",
+                "generation/datom-count",
+                "transaction datom count exceeds u32",
             )
         })?;
 
-        let mut bytes = Vec::with_capacity(HEADER_LEN + body_len as usize + CHECKSUM_LEN);
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_be_bytes());
-        bytes.push(KIND_TRANSACTION);
-        bytes.push(0);
-        bytes.extend_from_slice(&self.generation.to_be_bytes());
-        bytes.extend_from_slice(&body_len.to_be_bytes());
-        bytes.extend_from_slice(&lineage_len.to_be_bytes());
-        bytes.extend_from_slice(lineage);
-        bytes.extend_from_slice(&transaction_len.to_be_bytes());
-        bytes.extend_from_slice(&transaction);
-        let checksum = sha256(&bytes);
-        bytes.extend_from_slice(&checksum);
-        if bytes.len() > MAX_ENVELOPE_BYTES {
+        let datom_bytes = datoms
+            .iter()
+            .try_fold(0_usize, |length, (_, bytes)| {
+                length.checked_add(bytes.len())
+            })
+            .ok_or_else(|| {
+                incorrect(
+                    "generation/content-length",
+                    "transaction content length overflows usize",
+                )
+            })?;
+        let allocation_bytes = self.allocations.len().checked_mul(8).ok_or_else(|| {
+            incorrect(
+                "generation/content-length",
+                "transaction allocation length overflows usize",
+            )
+        })?;
+        let body_len = 2_usize
+            .checked_add(lineage.len())
+            .and_then(|length| length.checked_add(8 + 8 + 4))
+            .and_then(|length| length.checked_add(allocation_bytes))
+            .and_then(|length| length.checked_add(4))
+            .and_then(|length| length.checked_add(datom_bytes))
+            .ok_or_else(|| {
+                incorrect(
+                    "generation/content-length",
+                    "transaction content length overflows usize",
+                )
+            })?;
+        if body_len > MAX_BODY_BYTES {
             return Err(incorrect(
-                "generation/envelope-length",
-                format!("generation envelope exceeds {MAX_ENVELOPE_BYTES} bytes"),
+                "generation/content-length",
+                format!("transaction content exceeds {MAX_BODY_BYTES} bytes"),
             ));
         }
+
+        let mut bytes = Vec::with_capacity(HEADER_LEN + body_len + CHECKSUM_LEN);
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&VERSION.to_be_bytes());
+        bytes.push(KIND_TRANSACTION_CONTENT);
+        bytes.push(0);
+        bytes.extend_from_slice(&(body_len as u64).to_be_bytes());
+        bytes.extend_from_slice(&lineage_len.to_be_bytes());
+        bytes.extend_from_slice(lineage);
+        bytes.extend_from_slice(&self.basis_t.to_be_bytes());
+        bytes.extend_from_slice(&self.eidx_frontier.to_be_bytes());
+        bytes.extend_from_slice(&allocation_count.to_be_bytes());
+        for entity in &self.allocations {
+            bytes.extend_from_slice(&entity.to_be_bytes());
+        }
+        bytes.extend_from_slice(&datom_count.to_be_bytes());
+        for (_, encoded) in datoms {
+            bytes.extend_from_slice(&encoded);
+        }
+        let checksum = sha256(&bytes);
+        bytes.extend_from_slice(&checksum);
         Ok(bytes)
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, SemanticError> {
-        if bytes.len() < HEADER_LEN + 2 + 4 + CHECKSUM_LEN || bytes.len() > MAX_ENVELOPE_BYTES {
+        if bytes.len() < HEADER_LEN + 2 + 8 + 8 + 4 + 4 + CHECKSUM_LEN
+            || bytes.len() > MAX_ENVELOPE_BYTES
+        {
             return Err(fault(
-                "generation/envelope-length",
-                "generation envelope has an invalid encoded size",
+                "generation/content-length",
+                "transaction content has an invalid encoded size",
             ));
         }
         if bytes.get(..4) != Some(MAGIC.as_slice()) {
             return Err(fault(
-                "generation/envelope-magic",
-                "generation envelope has the wrong magic",
+                "generation/content-magic",
+                "transaction content has the wrong magic",
             ));
         }
         let version = u16::from_be_bytes(bytes[4..6].try_into().expect("checked header"));
         if version != VERSION {
-            return Err(fault(
-                "generation/envelope-version",
-                format!("generation envelope version {version} is unsupported"),
+            return Err(SemanticError::new(
+                ErrorCategory::Unsupported,
+                "generation/content-version",
+                format!("transaction content version {version} is unsupported"),
             ));
         }
-        if bytes[6] != KIND_TRANSACTION || bytes[7] != 0 {
+        if bytes[6] != KIND_TRANSACTION_CONTENT || bytes[7] != 0 {
             return Err(fault(
-                "generation/envelope-header",
-                "generation envelope kind or reserved byte is invalid",
+                "generation/content-header",
+                "transaction content kind or reserved byte is invalid",
             ));
         }
-        let generation = u64::from_be_bytes(bytes[8..16].try_into().expect("checked header"));
-        let body_len = u32::from_be_bytes(bytes[16..20].try_into().expect("checked header"));
-        let checksum_at = 20_usize.checked_add(body_len as usize).ok_or_else(|| {
-            fault(
-                "generation/envelope-length",
-                "generation envelope length overflows usize",
-            )
-        })?;
-        if checksum_at.checked_add(CHECKSUM_LEN) != Some(bytes.len())
-            || sha256(&bytes[..checksum_at]) != bytes[checksum_at..]
+        let body_len = usize::try_from(u64::from_be_bytes(
+            bytes[8..16].try_into().expect("checked header"),
+        ))
+        .map_err(|_| fault("generation/content-length", "content length exceeds usize"))?;
+        if body_len > MAX_BODY_BYTES
+            || HEADER_LEN
+                .checked_add(body_len)
+                .and_then(|length| length.checked_add(CHECKSUM_LEN))
+                != Some(bytes.len())
         {
             return Err(fault(
-                "generation/envelope-checksum",
-                "generation envelope length or checksum is invalid",
+                "generation/content-length",
+                "transaction content length does not match its envelope",
+            ));
+        }
+        let checksum_at = HEADER_LEN + body_len;
+        if sha256(&bytes[..checksum_at]).as_slice() != &bytes[checksum_at..] {
+            return Err(fault(
+                "generation/content-checksum",
+                "transaction content checksum is invalid",
             ));
         }
 
-        let mut cursor = 20_usize;
-        let lineage_len = read_u16(bytes, &mut cursor, checksum_at)? as usize;
+        let body = &bytes[HEADER_LEN..checksum_at];
+        let mut cursor = 0_usize;
+        let lineage_len = read_u16(body, &mut cursor)? as usize;
         if lineage_len > MAX_LINEAGE_BYTES {
             return Err(fault(
                 "generation/lineage-length",
-                "database lineage exceeds the canonical envelope limit",
+                "database lineage exceeds the canonical content limit",
             ));
         }
-        let lineage_end = cursor.checked_add(lineage_len).ok_or_else(|| {
+        let lineage_id = read_string(body, &mut cursor, lineage_len)?;
+        let basis_t = read_u64(body, &mut cursor)?;
+        let eidx_frontier = read_u64(body, &mut cursor)?;
+        let allocation_count = read_u32(body, &mut cursor)? as usize;
+        let remaining = body.len().checked_sub(cursor).ok_or_else(|| {
             fault(
-                "generation/envelope-length",
-                "generation lineage length overflows usize",
+                "generation/content-length",
+                "transaction content cursor exceeds its body",
             )
         })?;
-        let lineage_bytes = bytes.get(cursor..lineage_end).ok_or_else(|| {
-            fault(
-                "generation/envelope-length",
-                "generation envelope ends inside its lineage",
-            )
-        })?;
-        let lineage_id = String::from_utf8(lineage_bytes.to_vec()).map_err(|_| {
-            fault(
-                "generation/lineage-encoding",
-                "database lineage is not UTF-8",
-            )
-        })?;
-        cursor = lineage_end;
-        let transaction_len = read_u32(bytes, &mut cursor, checksum_at)? as usize;
-        let transaction_end = cursor.checked_add(transaction_len).ok_or_else(|| {
-            fault(
-                "generation/envelope-length",
-                "nested transaction length overflows usize",
-            )
-        })?;
-        if transaction_end != checksum_at {
+        if remaining < 4 || allocation_count > (remaining - 4) / 8 {
             return Err(fault(
-                "generation/envelope-length",
-                "generation envelope contains trailing or truncated transaction bytes",
+                "generation/allocation-count",
+                "transaction allocation count cannot fit in the remaining content bytes",
             ));
         }
-        let transaction = decode_transaction(&bytes[cursor..transaction_end])?;
-        let envelope = Self {
+        let mut allocations = Vec::with_capacity(allocation_count);
+        for _ in 0..allocation_count {
+            allocations.push(read_u64(body, &mut cursor)?);
+        }
+        let datom_count = read_u32(body, &mut cursor)? as usize;
+        let tx_data = decode_canonical_datoms(&body[cursor..], datom_count)?;
+        let content = Self {
             lineage_id,
-            generation,
-            transaction,
+            basis_t,
+            eidx_frontier,
+            allocations,
+            tx_data,
         };
-        validate(&envelope).map_err(|error| {
+        content.validate().map_err(|error| {
             fault(
-                "generation/invalid-envelope",
-                format!("persisted generation envelope failed validation: {error}"),
+                "generation/invalid-content",
+                format!("persisted transaction content failed validation: {error}"),
             )
         })?;
-        if envelope.encode()? != bytes {
+        if content.encode()? != bytes {
             return Err(fault(
-                "generation/noncanonical-envelope",
-                "generation transaction does not have one canonical encoding",
+                "generation/noncanonical-content",
+                "transaction content does not have one canonical encoding",
             ));
         }
-        Ok(envelope)
+        Ok(content)
     }
 
     pub(crate) fn hash(&self) -> Result<Digest, SemanticError> {
         Ok(sha256(&self.encode()?))
     }
+
+    fn validate(&self) -> Result<(), SemanticError> {
+        if !is_canonical_lineage(&self.lineage_id) {
+            return Err(incorrect(
+                "generation/lineage",
+                "database lineage must be a lowercase RFC 4122 version-4 UUID",
+            ));
+        }
+        if self.basis_t == 0 {
+            return Err(incorrect(
+                "generation/content-basis",
+                "transaction content basis must be positive",
+            ));
+        }
+        if !(INITIAL_EIDX_FRONTIER..=MAX_EIDX + 1).contains(&self.eidx_frontier) {
+            return Err(incorrect(
+                "generation/content-frontier",
+                "transaction content has an invalid issued frontier",
+            ));
+        }
+        let mut prior = None;
+        for entity in &self.allocations {
+            if prior.is_some_and(|prior| prior >= *entity)
+                || eid_to_part(*entity).ok() != Some(USER_PARTITION)
+                || eid_to_eidx(*entity).is_err()
+                || eid_to_eidx(*entity).is_ok_and(|index| index >= self.eidx_frontier)
+            {
+                return Err(incorrect(
+                    "generation/content-allocations",
+                    "allocation witnesses must be sorted distinct issued user entities",
+                ));
+            }
+            prior = Some(*entity);
+        }
+
+        // Reuse the narrow kernel validator for datom/value, transaction-id,
+        // and frontier-local invariants without allocating a synthetic map.
+        // Exact frontier advancement is checked against db-before on replay.
+        validate_transaction_content(self.basis_t, self.eidx_frontier, &self.tx_data)?;
+        Ok(())
+    }
 }
 
-fn validate(envelope: &LineageTransaction) -> Result<(), SemanticError> {
-    if envelope.generation == 0 {
+/// Hash a small physical membership row. Content identity remains stable
+/// across generations; this commitment binds its placement and state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GenerationTransactionMembership {
+    pub(crate) lineage_id: String,
+    pub(crate) generation: u64,
+    pub(crate) basis_t: u64,
+    pub(crate) previous_hash: Digest,
+    pub(crate) content_hash: Digest,
+    pub(crate) state_hash: Digest,
+    pub(crate) eidx_frontier: u64,
+}
+
+impl GenerationTransactionMembership {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, SemanticError> {
+        encode_generation_transaction_membership(
+            &self.lineage_id,
+            self.generation,
+            self.basis_t,
+            self.previous_hash,
+            self.content_hash,
+            self.state_hash,
+            self.eidx_frontier,
+        )
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, SemanticError> {
+        let expected_len = MEMBERSHIP_DOMAIN.len() + 36 + 8 + 8 + 32 + 32 + 32 + 8;
+        if bytes.len() != expected_len || !bytes.starts_with(MEMBERSHIP_DOMAIN) {
+            return Err(fault(
+                "generation/membership-encoding",
+                "generation membership has an invalid canonical encoding",
+            ));
+        }
+        let mut cursor = MEMBERSHIP_DOMAIN.len();
+        let lineage_id = std::str::from_utf8(take(bytes, &mut cursor, 36)?)
+            .map_err(|_| fault("generation/membership-lineage", "membership lineage is not UTF-8"))?
+            .to_owned();
+        let generation = read_u64(bytes, &mut cursor)?;
+        let basis_t = read_u64(bytes, &mut cursor)?;
+        let previous_hash = take(bytes, &mut cursor, 32)?
+            .try_into()
+            .expect("checked digest length");
+        let content_hash = take(bytes, &mut cursor, 32)?
+            .try_into()
+            .expect("checked digest length");
+        let state_hash = take(bytes, &mut cursor, 32)?
+            .try_into()
+            .expect("checked digest length");
+        let eidx_frontier = read_u64(bytes, &mut cursor)?;
+        let membership = Self {
+            lineage_id,
+            generation,
+            basis_t,
+            previous_hash,
+            content_hash,
+            state_hash,
+            eidx_frontier,
+        };
+        if membership.encode()?.as_slice() != bytes {
+            return Err(fault(
+                "generation/membership-encoding",
+                "generation membership is not canonical",
+            ));
+        }
+        Ok(membership)
+    }
+}
+
+/// Canonical portable membership object. Its SHA-256 is exactly the live
+/// generation transaction hash, allowing backup to preserve one object
+/// representation instead of reconstructing an internal hash preimage.
+pub(crate) fn encode_generation_transaction_membership(
+    lineage_id: &str,
+    generation: u64,
+    basis_t: u64,
+    previous_hash: Digest,
+    content_hash: Digest,
+    state_hash: Digest,
+    eidx_frontier: u64,
+) -> Result<Vec<u8>, SemanticError> {
+    if !is_canonical_lineage(lineage_id)
+        || generation == 0
+        || basis_t == 0
+        || content_hash == [0; 32]
+        || state_hash == [0; 32]
+        || !(INITIAL_EIDX_FRONTIER..=MAX_EIDX + 1).contains(&eidx_frontier)
+    {
         return Err(incorrect(
-            "generation/zero",
-            "lineage-bound generations must be positive",
+            "generation/membership-coordinate",
+            "generation membership requires valid lineage, generation, basis, content, state, and frontier",
         ));
     }
-    if !is_canonical_lineage(&envelope.lineage_id) {
-        return Err(incorrect(
-            "generation/lineage",
-            "database lineage must be a lowercase RFC 4122 version-4 UUID",
-        ));
-    }
-    if envelope.transaction.database_id != envelope.lineage_id {
-        return Err(incorrect(
-            "generation/transaction-lineage",
-            "nested transaction must name the immutable database lineage",
-        ));
-    }
-    Ok(())
+    let mut bytes = Vec::with_capacity(MEMBERSHIP_DOMAIN.len() + 156);
+    bytes.extend_from_slice(MEMBERSHIP_DOMAIN);
+    bytes.extend_from_slice(lineage_id.as_bytes());
+    bytes.extend_from_slice(&generation.to_be_bytes());
+    bytes.extend_from_slice(&basis_t.to_be_bytes());
+    bytes.extend_from_slice(&previous_hash);
+    bytes.extend_from_slice(&content_hash);
+    bytes.extend_from_slice(&state_hash);
+    bytes.extend_from_slice(&eidx_frontier.to_be_bytes());
+    Ok(bytes)
+}
+
+pub(crate) fn generation_transaction_hash(
+    lineage_id: &str,
+    generation: u64,
+    basis_t: u64,
+    previous_hash: Digest,
+    content_hash: Digest,
+    state_hash: Digest,
+    eidx_frontier: u64,
+) -> Result<Digest, SemanticError> {
+    Ok(sha256(&encode_generation_transaction_membership(
+        lineage_id,
+        generation,
+        basis_t,
+        previous_hash,
+        content_hash,
+        state_hash,
+        eidx_frontier,
+    )?))
 }
 
 pub(crate) fn is_canonical_lineage(value: &str) -> bool {
@@ -287,44 +528,51 @@ pub(crate) fn tombstone_request_digest(
     Ok(sha256(&bytes))
 }
 
-fn read_u16(bytes: &[u8], cursor: &mut usize, end: usize) -> Result<u16, SemanticError> {
-    let next = cursor.checked_add(2).ok_or_else(|| {
+fn take<'a>(bytes: &'a [u8], cursor: &mut usize, length: usize) -> Result<&'a [u8], SemanticError> {
+    let end = cursor
+        .checked_add(length)
+        .ok_or_else(|| fault("generation/content-length", "content cursor overflow"))?;
+    let value = bytes.get(*cursor..end).ok_or_else(|| {
         fault(
-            "generation/envelope-length",
-            "generation envelope cursor overflow",
+            "generation/content-length",
+            "transaction content ended before its declared value",
         )
     })?;
-    let slice = bytes
-        .get(*cursor..next)
-        .filter(|_| next <= end)
-        .ok_or_else(|| {
-            fault(
-                "generation/envelope-length",
-                "generation envelope ends inside a u16",
-            )
-        })?;
-    *cursor = next;
-    Ok(u16::from_be_bytes(slice.try_into().expect("checked u16")))
+    *cursor = end;
+    Ok(value)
 }
 
-fn read_u32(bytes: &[u8], cursor: &mut usize, end: usize) -> Result<u32, SemanticError> {
-    let next = cursor.checked_add(4).ok_or_else(|| {
+fn read_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16, SemanticError> {
+    Ok(u16::from_be_bytes(
+        take(bytes, cursor, 2)?
+            .try_into()
+            .expect("checked u16 length"),
+    ))
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, SemanticError> {
+    Ok(u32::from_be_bytes(
+        take(bytes, cursor, 4)?
+            .try_into()
+            .expect("checked u32 length"),
+    ))
+}
+
+fn read_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, SemanticError> {
+    Ok(u64::from_be_bytes(
+        take(bytes, cursor, 8)?
+            .try_into()
+            .expect("checked u64 length"),
+    ))
+}
+
+fn read_string(bytes: &[u8], cursor: &mut usize, length: usize) -> Result<String, SemanticError> {
+    String::from_utf8(take(bytes, cursor, length)?.to_vec()).map_err(|_| {
         fault(
-            "generation/envelope-length",
-            "generation envelope cursor overflow",
+            "generation/lineage-encoding",
+            "database lineage is not valid UTF-8",
         )
-    })?;
-    let slice = bytes
-        .get(*cursor..next)
-        .filter(|_| next <= end)
-        .ok_or_else(|| {
-            fault(
-                "generation/envelope-length",
-                "generation envelope ends inside a u32",
-            )
-        })?;
-    *cursor = next;
-    Ok(u32::from_be_bytes(slice.try_into().expect("checked u32")))
+    })
 }
 
 fn incorrect(code: &'static str, message: impl Into<String>) -> SemanticError {
@@ -338,19 +586,18 @@ fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Datom, Value, make_eid, t_to_tx};
+    use crate::{Value, make_eid, t_to_tx};
 
     const LINEAGE: &str = "01234567-89ab-4def-8123-456789abcdef";
 
-    fn transaction() -> DurableTransaction {
-        DurableTransaction {
-            database_id: LINEAGE.to_owned(),
+    fn content() -> LineageTransactionContent {
+        LineageTransactionContent {
+            lineage_id: LINEAGE.to_owned(),
             basis_t: 1,
-            previous_hash: [7; 32],
-            eidx_frontier: 2,
-            tempids: Default::default(),
+            eidx_frontier: INITIAL_EIDX_FRONTIER + 1,
+            allocations: vec![make_eid(USER_PARTITION, INITIAL_EIDX_FRONTIER).unwrap()],
             tx_data: vec![Datom {
-                entity: make_eid(crate::USER_PARTITION, 1).unwrap(),
+                entity: make_eid(USER_PARTITION, INITIAL_EIDX_FRONTIER).unwrap(),
                 attribute: 50,
                 value: Value::Instant(1_000),
                 tx: t_to_tx(1).unwrap(),
@@ -360,50 +607,55 @@ mod tests {
     }
 
     #[test]
-    fn lineage_transaction_round_trips_canonically() {
-        let envelope = LineageTransaction {
-            lineage_id: LINEAGE.to_owned(),
-            generation: 41,
-            transaction: transaction(),
-        };
-        let encoded = envelope.encode().unwrap();
-        assert_eq!(LineageTransaction::decode(&encoded).unwrap(), envelope);
+    fn transaction_content_round_trips_without_generation_or_predecessor() {
+        let content = content();
+        let encoded = content.encode().unwrap();
         assert_eq!(
-            LineageTransaction::decode(&encoded)
-                .unwrap()
-                .encode()
-                .unwrap(),
-            encoded
+            LineageTransactionContent::decode(&encoded).unwrap(),
+            content
         );
-        assert_eq!(envelope.hash().unwrap(), sha256(&encoded));
+        assert!(!encoded.windows(32).any(|window| window == [7; 32]));
+        let first = generation_transaction_hash(
+            LINEAGE,
+            1,
+            1,
+            [7; 32],
+            content.hash().unwrap(),
+            [8; 32],
+            content.eidx_frontier,
+        )
+        .unwrap();
+        let second = generation_transaction_hash(
+            LINEAGE,
+            2,
+            1,
+            [9; 32],
+            content.hash().unwrap(),
+            [8; 32],
+            content.eidx_frontier,
+        )
+        .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(content.hash().unwrap(), sha256(&encoded));
     }
 
     #[test]
-    fn generation_and_lineage_are_authenticated() {
-        let envelope = LineageTransaction {
-            lineage_id: LINEAGE.to_owned(),
-            generation: 1,
-            transaction: transaction(),
-        };
-        let mut encoded = envelope.encode().unwrap();
-        encoded[15] ^= 1;
+    fn checksum_lineage_and_allocations_are_authenticated() {
+        let content = content();
+        let mut encoded = content.encode().unwrap();
+        encoded[20] ^= 1;
         assert_eq!(
-            LineageTransaction::decode(&encoded).unwrap_err().code,
-            "generation/envelope-checksum"
+            LineageTransactionContent::decode(&encoded)
+                .unwrap_err()
+                .code,
+            "generation/content-checksum"
         );
 
-        let mut wrong = transaction();
-        wrong.database_id = "11234567-89ab-4def-8123-456789abcdef".into();
+        let mut invalid = content;
+        invalid.allocations.push(invalid.allocations[0]);
         assert_eq!(
-            LineageTransaction {
-                lineage_id: LINEAGE.into(),
-                generation: 1,
-                transaction: wrong,
-            }
-            .encode()
-            .unwrap_err()
-            .code,
-            "generation/transaction-lineage"
+            invalid.encode().unwrap_err().code,
+            "generation/content-allocations"
         );
     }
 

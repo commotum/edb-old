@@ -2,8 +2,8 @@
 --
 -- Generation zero remains the exact alias-bound v3 payload representation in
 -- atomic_transactions/atomic_requests. Those bytes are never relabelled as a
--- lineage format. New databases and every excision/restore candidate use the
--- lineage-bound ATLG v1 envelope in the append-only tables below.
+-- lineage format. New databases and every excision/restore candidate use
+-- shared lineage-bound ATLC v1 content plus small generation memberships.
 
 DROP TABLE IF EXISTS atomic_active_programs;
 DROP TABLE IF EXISTS atomic_program_versions;
@@ -33,7 +33,6 @@ CREATE TABLE atomic_log_generations (
     lineage_id TEXT NOT NULL,
     -- 0=new database, 1=excision, 2=same-lineage point restore.
     build_kind SMALLINT NOT NULL CHECK (build_kind BETWEEN 0 AND 2),
-    request_set_hash BYTEA NOT NULL CHECK (octet_length(request_set_hash) = 32),
     request_count BIGINT NOT NULL CHECK (request_count >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (database_id, generation),
@@ -52,6 +51,12 @@ CREATE TABLE atomic_log_generation_builds (
     source_generation BIGINT CHECK (source_generation >= 0),
     captured_basis_t BIGINT NOT NULL CHECK (captured_basis_t >= 0),
     captured_head_hash BYTEA NOT NULL CHECK (octet_length(captured_head_hash) = 32),
+    -- This authenticates the frozen execution projection while the build is
+    -- resumable. It is deliberately deleted at activation: component closure
+    -- and schema-derived classifications are not permanent excision audit.
+    frozen_plan_hash BYTEA CHECK (
+        frozen_plan_hash IS NULL OR octet_length(frozen_plan_hash) = 32
+    ),
     restore_manifest_hash BYTEA CHECK (
         restore_manifest_hash IS NULL OR octet_length(restore_manifest_hash) = 32
     ),
@@ -71,38 +76,44 @@ CREATE TABLE atomic_log_generation_builds (
             AND restore_basis_t IS NOT NULL AND restore_head_hash IS NOT NULL))
 );
 
+-- Immutable logical transaction values are content-addressed independently
+-- of a physical generation. This is the SQL analogue of Datomic's immutable
+-- log values: an excision generation reuses every unaffected value instead of
+-- copying a generation-stamped envelope for every transaction.
+CREATE TABLE atomic_transaction_contents (
+    content_hash BYTEA PRIMARY KEY CHECK (octet_length(content_hash) = 32),
+    lineage_id TEXT NOT NULL,
+    basis_t BIGINT NOT NULL CHECK (basis_t > 0),
+    eidx_frontier BIGINT NOT NULL CHECK (eidx_frontier > 0),
+    envelope_version SMALLINT NOT NULL DEFAULT 1 CHECK (envelope_version = 1),
+    payload BYTEA NOT NULL CHECK (octet_length(payload) >= 58),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (lineage_id) REFERENCES atomic_databases(lineage_id)
+);
+
+-- Small immutable generation membership and chain commitments. The payload
+-- has no physical generation or predecessor, so downstream memberships may
+-- change without duplicating the logical content they name.
 CREATE TABLE atomic_generation_transactions (
     database_id TEXT NOT NULL,
     generation BIGINT NOT NULL CHECK (generation > 0),
-    lineage_id TEXT NOT NULL,
     basis_t BIGINT NOT NULL CHECK (basis_t > 0),
     previous_hash BYTEA NOT NULL CHECK (octet_length(previous_hash) = 32),
     tx_hash BYTEA NOT NULL CHECK (octet_length(tx_hash) = 32),
+    content_hash BYTEA NOT NULL CHECK (octet_length(content_hash) = 32),
     state_hash BYTEA NOT NULL CHECK (
         octet_length(state_hash) = 32
         AND state_hash <> decode(repeat('00', 32), 'hex')
     ),
     eidx_frontier BIGINT NOT NULL CHECK (eidx_frontier > 0),
-    envelope_version SMALLINT NOT NULL DEFAULT 1 CHECK (envelope_version = 1),
-    payload BYTEA NOT NULL CHECK (octet_length(payload) >= 58),
     committed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (database_id, generation, basis_t),
     UNIQUE (database_id, generation, tx_hash),
     UNIQUE (database_id, generation, basis_t, tx_hash),
     FOREIGN KEY (database_id, generation)
-        REFERENCES atomic_log_generations(database_id, generation)
-);
-
-CREATE TABLE atomic_generation_source_links (
-    database_id TEXT NOT NULL,
-    generation BIGINT NOT NULL CHECK (generation > 0),
-    basis_t BIGINT NOT NULL CHECK (basis_t > 0),
-    source_tx_hash BYTEA NOT NULL CHECK (octet_length(source_tx_hash) = 32),
-    PRIMARY KEY (database_id, generation, basis_t),
-    FOREIGN KEY (database_id, generation)
-        REFERENCES atomic_log_generation_builds(database_id, generation),
-    FOREIGN KEY (database_id, generation, basis_t)
-        REFERENCES atomic_generation_transactions(database_id, generation, basis_t)
+        REFERENCES atomic_log_generations(database_id, generation),
+    FOREIGN KEY (content_hash)
+        REFERENCES atomic_transaction_contents(content_hash)
 );
 
 -- The caller-supplied request key is deliberately absent. A lineage-scoped
@@ -121,6 +132,21 @@ CREATE TABLE atomic_generation_requests (
     UNIQUE (database_id, generation, basis_t),
     FOREIGN KEY (database_id, generation, basis_t, tx_hash)
         REFERENCES atomic_generation_transactions(database_id, generation, basis_t, tx_hash)
+);
+
+-- Original tempid spellings are part of an ordinary transaction receipt, not
+-- of canonical immutable transaction content. Keep them only with the active
+-- generation's idempotency row. COW replay writes a tombstone request and no
+-- receipt names, so retiring/collecting the old generation erases them.
+CREATE TABLE atomic_generation_request_tempids (
+    database_id TEXT NOT NULL,
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    request_key_hash BYTEA NOT NULL CHECK (octet_length(request_key_hash) = 32),
+    tempid_name TEXT NOT NULL,
+    entity_id BIGINT NOT NULL CHECK (entity_id >= 0),
+    PRIMARY KEY (database_id, generation, request_key_hash, tempid_name),
+    FOREIGN KEY (database_id, generation, request_key_hash)
+        REFERENCES atomic_generation_requests(database_id, generation, request_key_hash)
 );
 
 -- This is a frozen execution projection of ordinary A=15 request facts. The
@@ -185,20 +211,29 @@ CREATE TABLE atomic_log_generation_activations (
     CHECK (prior_generation <> generation)
 );
 
--- Exact immutable completion index for sync-excise. A physical generation
--- number alone cannot say which requests it incorporated.
+-- Exact immutable completion index for sync-excise. The only retained request
+-- identity is already present in the permanent A=15 audit facts. In
+-- particular, this table must not retain the frozen component extent or a
+-- dictionary-testable hash of that derived closure.
 CREATE TABLE atomic_completed_excision_requests (
     database_id TEXT NOT NULL,
     request_t BIGINT NOT NULL CHECK (request_t > 0),
     request_entity BIGINT NOT NULL CHECK (request_entity >= 0),
     generation BIGINT NOT NULL CHECK (generation > 0),
-    predicate_hash BYTEA NOT NULL CHECK (octet_length(predicate_hash) = 32),
     completed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (database_id, request_t, request_entity),
-    FOREIGN KEY (database_id, generation, request_t, request_entity)
-        REFERENCES atomic_generation_excision_predicates(
-            database_id, generation, request_t, request_entity
-        ),
+    PRIMARY KEY (database_id, generation, request_t, request_entity),
+    FOREIGN KEY (database_id, generation)
+        REFERENCES atomic_log_generations(database_id, generation)
+);
+
+-- Completion rows may be prepared while a candidate is inactive. This single
+-- marker is the root-last visibility point used by sync-excise; readers join
+-- it only through the active head generation.
+CREATE TABLE atomic_log_generation_completions (
+    database_id TEXT NOT NULL,
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (database_id, generation),
     FOREIGN KEY (database_id, generation)
         REFERENCES atomic_log_generation_activations(database_id, generation)
 );
@@ -208,12 +243,51 @@ CREATE TABLE atomic_log_generation_retirements (
     generation BIGINT NOT NULL CHECK (generation >= 0),
     successor_generation BIGINT NOT NULL CHECK (successor_generation > 0),
     retired_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    collecting_at TIMESTAMPTZ,
     PRIMARY KEY (database_id, generation),
     UNIQUE (database_id, successor_generation),
     CHECK (generation <> successor_generation),
     FOREIGN KEY (database_id, successor_generation)
         REFERENCES atomic_log_generation_activations(database_id, generation)
 );
+
+-- Bounded membership draining records the shared ATLC hashes it detached.
+-- A later bounded phase deletes only globally unreferenced content; reused
+-- content simply loses this candidate mark and remains immutable.
+CREATE TABLE atomic_log_generation_garbage_contents (
+    database_id TEXT NOT NULL,
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    content_hash BYTEA NOT NULL CHECK (octet_length(content_hash) = 32),
+    PRIMARY KEY (database_id, generation, content_hash),
+    FOREIGN KEY (content_hash)
+        REFERENCES atomic_transaction_contents(content_hash) ON DELETE CASCADE
+);
+
+-- One session-level lock coordinate per logical lineage/generation. Immutable
+-- peer values and active backups take SHARE before exposure; the collector
+-- takes EXCLUSIVE before permanently closing admission and draining rows.
+CREATE OR REPLACE FUNCTION atomic_log_generation_pin_key(
+    candidate_database_id TEXT,
+    candidate_generation BIGINT
+)
+RETURNS BIGINT
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+    SELECT pg_catalog.hashtextextended(
+               'atomic/log-generation-pin/v1/' || lineage_id || '/' ||
+               candidate_generation::text,
+               4707476001900298240::bigint
+           )
+      FROM atomic_databases
+     WHERE database_id = candidate_database_id
+       AND candidate_generation >= 0
+$$;
+
+REVOKE ALL ON FUNCTION atomic_log_generation_pin_key(TEXT, BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION atomic_log_generation_pin_key(TEXT, BIGINT) TO CURRENT_USER;
 
 CREATE OR REPLACE FUNCTION atomic_validate_generation_transaction_insert()
 RETURNS trigger
@@ -227,7 +301,13 @@ BEGIN
       FROM atomic_log_generations
      WHERE database_id = NEW.database_id
        AND generation = NEW.generation;
-    IF NOT FOUND OR NEW.lineage_id <> build_lineage THEN
+    IF NOT FOUND OR NOT EXISTS (
+        SELECT 1 FROM atomic_transaction_contents c
+         WHERE c.content_hash = NEW.content_hash
+           AND c.lineage_id = build_lineage
+           AND c.basis_t = NEW.basis_t
+           AND c.eidx_frontier = NEW.eidx_frontier
+    ) THEN
         RAISE EXCEPTION 'Atomic generation transaction has no matching lineage build'
             USING ERRCODE = '23503';
     END IF;
@@ -288,7 +368,6 @@ DECLARE
     terminal_hash BYTEA;
     terminal_state BYTEA;
     terminal_frontier BIGINT;
-    terminal_source BYTEA;
     source_hash BYTEA;
 BEGIN
     SELECT * INTO build_row
@@ -333,30 +412,15 @@ BEGIN
         RAISE EXCEPTION 'Atomic generation checkpoint has a noncontiguous transaction prefix'
             USING ERRCODE = '23503';
     END IF;
-    SELECT count(*) INTO stored_count
-      FROM atomic_generation_source_links
-     WHERE database_id = NEW.database_id
-       AND generation = NEW.generation
-       AND basis_t <= NEW.through_basis_t;
-    IF (generation_row.build_kind = 0 AND stored_count <> 0)
-       OR (generation_row.build_kind <> 0 AND stored_count <> NEW.through_basis_t) THEN
-        RAISE EXCEPTION 'Atomic generation checkpoint has incomplete source links'
-            USING ERRCODE = '23503';
-    END IF;
     IF NEW.through_basis_t = 0 THEN
         SELECT genesis_hash INTO terminal_hash
           FROM atomic_databases WHERE database_id = NEW.database_id;
         terminal_state := NEW.state_hash;
         terminal_frontier := NEW.eidx_frontier;
-        terminal_source := NULL;
     ELSE
-        SELECT t.tx_hash, t.state_hash, t.eidx_frontier, s.source_tx_hash
-          INTO terminal_hash, terminal_state, terminal_frontier, terminal_source
+        SELECT t.tx_hash, t.state_hash, t.eidx_frontier
+          INTO terminal_hash, terminal_state, terminal_frontier
           FROM atomic_generation_transactions t
-          LEFT JOIN atomic_generation_source_links s
-            ON s.database_id = t.database_id
-           AND s.generation = t.generation
-           AND s.basis_t = t.basis_t
          WHERE t.database_id = NEW.database_id
            AND t.generation = NEW.generation
            AND t.basis_t = NEW.through_basis_t;
@@ -384,19 +448,6 @@ BEGIN
                  WHERE database_id = NEW.database_id
                    AND basis_t = NEW.through_basis_t;
             END IF;
-            IF EXISTS (
-                SELECT 1
-                  FROM atomic_generation_source_links l
-                  LEFT JOIN atomic_transactions s
-                    ON s.database_id = l.database_id AND s.basis_t = l.basis_t
-                 WHERE l.database_id = NEW.database_id
-                   AND l.generation = NEW.generation
-                   AND l.basis_t <= NEW.through_basis_t
-                   AND s.tx_hash IS DISTINCT FROM l.source_tx_hash
-            ) THEN
-                RAISE EXCEPTION 'Atomic generation source links disagree with legacy history'
-                    USING ERRCODE = '23503';
-            END IF;
         ELSE
             IF NEW.through_basis_t = 0 THEN
                 SELECT genesis_hash INTO source_hash
@@ -408,24 +459,8 @@ BEGIN
                    AND generation = build_row.source_generation
                    AND basis_t = NEW.through_basis_t;
             END IF;
-            IF EXISTS (
-                SELECT 1
-                  FROM atomic_generation_source_links l
-                  LEFT JOIN atomic_generation_transactions s
-                    ON s.database_id = l.database_id
-                   AND s.generation = build_row.source_generation
-                   AND s.basis_t = l.basis_t
-                 WHERE l.database_id = NEW.database_id
-                   AND l.generation = NEW.generation
-                   AND l.basis_t <= NEW.through_basis_t
-                   AND s.tx_hash IS DISTINCT FROM l.source_tx_hash
-            ) THEN
-                RAISE EXCEPTION 'Atomic generation source links disagree with lineage history'
-                    USING ERRCODE = '23503';
-            END IF;
         END IF;
-        IF source_hash IS NULL OR source_hash <> NEW.source_head_hash
-                     OR (NEW.through_basis_t > 0 AND terminal_source <> source_hash) THEN
+        IF source_hash IS NULL OR source_hash <> NEW.source_head_hash THEN
             RAISE EXCEPTION 'Atomic generation checkpoint disagrees with its source prefix'
                 USING ERRCODE = '23503';
         END IF;
@@ -433,8 +468,7 @@ BEGIN
         -- Restore rows were authenticated against the portable manifest by
         -- Rust before staging. They intentionally need not exist on the
         -- target's current branch or at its current basis.
-        IF NEW.source_head_hash <> build_row.restore_head_hash
-           OR (NEW.through_basis_t > 0 AND terminal_source <> NEW.source_head_hash) THEN
+        IF NEW.source_head_hash <> build_row.restore_head_hash THEN
             RAISE EXCEPTION 'Atomic restore checkpoint disagrees with its portable source root'
                 USING ERRCODE = '23503';
         END IF;
@@ -595,20 +629,27 @@ FOR EACH ROW EXECUTE FUNCTION atomic_require_published_generation_transaction();
 CREATE TRIGGER atomic_log_generations_immutable
 BEFORE UPDATE OR DELETE ON atomic_log_generations
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
+CREATE TRIGGER atomic_transaction_contents_immutable
+BEFORE UPDATE OR DELETE ON atomic_transaction_contents
+FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
 CREATE TRIGGER atomic_generation_transactions_immutable
 BEFORE UPDATE OR DELETE ON atomic_generation_transactions
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
 CREATE TRIGGER atomic_generation_requests_immutable
 BEFORE UPDATE OR DELETE ON atomic_generation_requests
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
-CREATE TRIGGER atomic_generation_excision_predicates_immutable
-BEFORE UPDATE OR DELETE ON atomic_generation_excision_predicates
+CREATE TRIGGER atomic_generation_request_tempids_immutable
+BEFORE UPDATE OR DELETE ON atomic_generation_request_tempids
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
 CREATE TRIGGER atomic_log_generation_activations_immutable
 BEFORE UPDATE OR DELETE ON atomic_log_generation_activations
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
+
 CREATE TRIGGER atomic_completed_excision_requests_immutable
 BEFORE UPDATE OR DELETE ON atomic_completed_excision_requests
+FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
+CREATE TRIGGER atomic_log_generation_completions_immutable
+BEFORE UPDATE OR DELETE ON atomic_log_generation_completions
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_immutable_mutation();
 CREATE TRIGGER atomic_log_generation_retirements_immutable
 BEFORE UPDATE OR DELETE ON atomic_log_generation_retirements
@@ -636,8 +677,8 @@ $$;
 CREATE TRIGGER atomic_log_generation_builds_staging_immutable
 BEFORE UPDATE OR DELETE ON atomic_log_generation_builds
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_generation_staging_mutation();
-CREATE TRIGGER atomic_generation_source_links_staging_immutable
-BEFORE UPDATE OR DELETE ON atomic_generation_source_links
+CREATE TRIGGER atomic_generation_excision_predicates_staging_immutable
+BEFORE UPDATE OR DELETE ON atomic_generation_excision_predicates
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_generation_staging_mutation();
 CREATE TRIGGER atomic_log_generation_checkpoints_staging_immutable
 BEFORE UPDATE OR DELETE ON atomic_log_generation_checkpoints
@@ -697,13 +738,21 @@ BEGIN
            AND generation = NEW.log_generation
            AND basis_t = NEW.basis_t
            AND tx_hash = NEW.tx_hash;
-        IF NEW.lineage_id IS DISTINCT FROM durable_lineage OR NOT EXISTS (
-            SELECT 1 FROM atomic_log_generation_checkpoints c
-             WHERE c.database_id = NEW.database_id
-               AND c.generation = NEW.log_generation
-               AND c.through_basis_t = NEW.basis_t
-               AND c.head_hash = NEW.tx_hash
-               AND c.state_hash = NEW.state_hash
+        IF NEW.lineage_id IS DISTINCT FROM durable_lineage OR NOT (
+            EXISTS (
+                SELECT 1 FROM atomic_heads h
+                 WHERE h.database_id = NEW.database_id
+                   AND h.log_generation = NEW.log_generation
+                   AND h.basis_t >= NEW.basis_t
+            )
+            OR EXISTS (
+                SELECT 1 FROM atomic_log_generation_checkpoints c
+                 WHERE c.database_id = NEW.database_id
+                   AND c.generation = NEW.log_generation
+                   AND c.through_basis_t = NEW.basis_t
+                   AND c.head_hash = NEW.tx_hash
+                   AND c.state_hash = NEW.state_hash
+            )
         ) THEN
             RAISE EXCEPTION 'Atomic tree manifest does not identify a complete lineage build'
                 USING ERRCODE = '23503';
@@ -773,8 +822,9 @@ BEGIN
       INTO head_generation, head_basis, head_hash
       FROM atomic_heads WHERE database_id = NEW.database_id;
     IF NOT FOUND OR head_generation <> NEW.log_generation
-                 OR head_basis <> NEW.basis_t OR head_hash <> NEW.tx_hash THEN
-        RAISE EXCEPTION 'Atomic tree publication does not name the active log head'
+                 OR head_basis < NEW.basis_t
+                 OR (head_basis = NEW.basis_t AND head_hash <> NEW.tx_hash) THEN
+        RAISE EXCEPTION 'Atomic tree publication is not in the active log generation'
             USING ERRCODE = '40001';
     END IF;
 
@@ -841,6 +891,62 @@ CREATE TRIGGER atomic_tree_publication_states_scrub_excision_predecessor
 BEFORE INSERT ON atomic_tree_publication_states
 FOR EACH ROW EXECUTE FUNCTION atomic_scrub_excision_tree_predecessor();
 
+-- v13 conservatively retained programs named by mutable operator aliases.
+-- Those aliases are gone: authenticated per-generation temporal references
+-- (including fixed transitive program dependencies) are now the sole mark
+-- authority. The Rust v14 migration hook populates the mark set before it
+-- flips atomic_program_reference_state.complete.
+CREATE OR REPLACE FUNCTION atomic_collect_program_garbage(
+    older_than_millis BIGINT,
+    maximum_programs BIGINT
+)
+RETURNS SETOF BYTEA
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+BEGIN
+    IF older_than_millis < 0 OR maximum_programs < 1 OR maximum_programs > 4096 THEN
+        RAISE EXCEPTION 'Invalid Atomic program garbage boundary'
+            USING ERRCODE = '22023';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM atomic_program_reference_state
+         WHERE singleton AND complete AND problem_code IS NULL
+    ) THEN
+        RETURN;
+    END IF;
+
+    PERFORM set_config('atomic.tree_gc_active', 'v13', true);
+    RETURN QUERY
+    WITH candidates AS MATERIALIZED (
+        SELECT c.program_hash
+          FROM atomic_program_gc_candidates c
+         WHERE c.candidate_at < clock_timestamp()
+                                - older_than_millis * interval '1 millisecond'
+           AND NOT EXISTS (
+                   SELECT 1 FROM atomic_program_generation_refs r
+                    WHERE r.program_hash = c.program_hash
+               )
+         ORDER BY c.candidate_at, c.program_hash
+         LIMIT maximum_programs
+         FOR UPDATE OF c SKIP LOCKED
+    )
+    DELETE FROM atomic_programs p
+     USING candidates c
+     WHERE p.program_hash = c.program_hash
+       AND NOT EXISTS (
+               SELECT 1 FROM atomic_program_generation_refs r
+                WHERE r.program_hash = p.program_hash
+           )
+    RETURNING p.program_hash;
+    PERFORM set_config('atomic.tree_gc_active', 'off', true);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION atomic_collect_program_garbage(BIGINT, BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION atomic_collect_program_garbage(BIGINT, BIGINT) TO CURRENT_USER;
+
 CREATE OR REPLACE FUNCTION atomic_publish_tree(
     candidate_database_id TEXT,
     candidate_revision BIGINT,
@@ -870,9 +976,10 @@ BEGIN
 END;
 $$;
 
--- One bounded final transaction invokes this owner-only function. All large
--- log/tree values already exist; the row lock covers only source-head
--- comparison, generation publication, and root publication.
+-- The only write-fencing step is a small conditional root change. Tree
+-- membership application and excision completion happen separately after the
+-- new log is visible, so an O(delta) physical-index transition never extends
+-- transactor unavailability.
 CREATE OR REPLACE FUNCTION atomic_activate_log_generation(
     candidate_database_id TEXT,
     candidate_generation BIGINT,
@@ -893,6 +1000,7 @@ DECLARE
     current_basis BIGINT;
     current_hash BYTEA;
     candidate_revision BIGINT;
+    source_pin_key BIGINT;
 BEGIN
     SELECT * INTO build_row
       FROM atomic_log_generation_builds
@@ -922,13 +1030,29 @@ BEGIN
         RAISE EXCEPTION 'Atomic source head changed after generation capture'
             USING ERRCODE = '40001';
     END IF;
-    IF generation_row.build_kind = 2 AND EXISTS (
-        SELECT 1 FROM atomic_transactor_leases
-         WHERE lease_scope = candidate_database_id
-           AND expires_at > clock_timestamp()
-    ) THEN
-        RAISE EXCEPTION 'Atomic point restore requires the transactor to be stopped'
-            USING ERRCODE = '55006';
+    IF generation_row.build_kind = 2 THEN
+        IF EXISTS (
+            SELECT 1 FROM atomic_transactor_leases
+             WHERE lease_scope = candidate_database_id
+               AND expires_at > clock_timestamp()
+        ) OR EXISTS (
+            SELECT 1 FROM atomic_tree_build_intents
+             WHERE database_id = candidate_database_id
+        ) OR EXISTS (
+            SELECT 1 FROM atomic_log_generation_builds
+             WHERE database_id = candidate_database_id
+               AND generation <> candidate_generation
+        ) THEN
+            RAISE EXCEPTION 'Atomic point restore requires transactors and other builds to be stopped'
+                USING ERRCODE = '55006';
+        END IF;
+        SELECT atomic_log_generation_pin_key(candidate_database_id, current_generation)
+          INTO source_pin_key;
+        IF source_pin_key IS NULL
+           OR NOT pg_catalog.pg_try_advisory_xact_lock(source_pin_key) THEN
+            RAISE EXCEPTION 'Atomic point restore is blocked by a live peer or backup generation pin'
+                USING ERRCODE = '55006';
+        END IF;
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM atomic_log_generation_checkpoints c
@@ -943,28 +1067,33 @@ BEGIN
         RAISE EXCEPTION 'Atomic generation activation has no matching complete checkpoint'
             USING ERRCODE = '23503';
     END IF;
-    SELECT publication_revision INTO candidate_revision
-      FROM atomic_tree_manifests m
-     WHERE m.database_id = candidate_database_id
-       AND m.log_generation = candidate_generation
-       AND m.basis_t = candidate_basis
-       AND m.tx_hash = candidate_head_hash
-       AND m.state_hash = candidate_state_hash
-       AND m.manifest_hash = candidate_manifest_hash;
-    IF NOT FOUND OR NOT EXISTS (
-        SELECT 1 FROM atomic_tree_delta_headers
-         WHERE manifest_hash = candidate_manifest_hash
-    ) THEN
-        RAISE EXCEPTION 'Atomic generation activation requires a staged authenticated tree'
-            USING ERRCODE = '23503';
-    END IF;
-    IF candidate_revision <> COALESCE((
-        SELECT max(publication_revision) + 1
-          FROM atomic_tree_publications
-         WHERE database_id = candidate_database_id
-    ), 1) THEN
-        RAISE EXCEPTION 'Atomic staged tree lost its publication revision race'
-            USING ERRCODE = '40001';
+    IF generation_row.build_kind = 1 THEN
+        SELECT publication_revision INTO candidate_revision
+          FROM atomic_tree_manifests m
+         WHERE m.database_id = candidate_database_id
+           AND m.log_generation = candidate_generation
+           AND m.basis_t = candidate_basis
+           AND m.tx_hash = candidate_head_hash
+           AND m.state_hash = candidate_state_hash
+           AND m.manifest_hash = candidate_manifest_hash;
+        IF NOT FOUND OR NOT EXISTS (
+            SELECT 1 FROM atomic_tree_delta_headers
+             WHERE manifest_hash = candidate_manifest_hash
+        ) THEN
+            RAISE EXCEPTION 'Atomic excision activation requires a staged authenticated tree'
+                USING ERRCODE = '23503';
+        END IF;
+        IF candidate_revision <> COALESCE((
+            SELECT max(publication_revision) + 1
+              FROM atomic_tree_publications
+             WHERE database_id = candidate_database_id
+        ), 1) THEN
+            RAISE EXCEPTION 'Atomic staged tree lost its publication revision race'
+                USING ERRCODE = '40001';
+        END IF;
+    ELSIF candidate_manifest_hash IS NOT NULL THEN
+        RAISE EXCEPTION 'Atomic log-only restore must not claim a tree root'
+            USING ERRCODE = '23514';
     END IF;
 
     PERFORM set_config('atomic.log_generation_activation', 'v14', true);
@@ -982,22 +1111,97 @@ BEGIN
     INSERT INTO atomic_log_generation_retirements
            (database_id, generation, successor_generation)
     VALUES (candidate_database_id, current_generation, candidate_generation);
-    INSERT INTO atomic_completed_excision_requests
-           (database_id, request_t, request_entity, generation, predicate_hash)
-    SELECT database_id, request_t, request_entity, generation, predicate_hash
-      FROM atomic_generation_excision_predicates
+    IF generation_row.build_kind = 2 THEN
+        -- Restore prepared its exact completion set under the inactive
+        -- generation. One root marker makes that set active with the head.
+        INSERT INTO atomic_log_generation_completions(database_id, generation)
+        VALUES (candidate_database_id, candidate_generation);
+    END IF;
+    PERFORM set_config('atomic.log_generation_activation', 'off', true);
+END;
+$$;
+
+-- Publish the already-staged excision tree outside the transactor head fence,
+-- then expose sync-excise completion identities. A crash before this function
+-- leaves a visible excised log but no false completion; retry is idempotent.
+CREATE OR REPLACE FUNCTION atomic_complete_excision_generation(
+    candidate_database_id TEXT,
+    candidate_generation BIGINT,
+    candidate_manifest_hash BYTEA
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+    activation_row atomic_log_generation_activations%ROWTYPE;
+    generation_row atomic_log_generations%ROWTYPE;
+    candidate_revision BIGINT;
+BEGIN
+    SELECT * INTO activation_row
+      FROM atomic_log_generation_activations
      WHERE database_id = candidate_database_id
        AND generation = candidate_generation;
-    INSERT INTO atomic_tree_publications
-           (database_id, publication_revision, basis_t, tx_hash, manifest_hash,
-            log_generation)
-    VALUES (candidate_database_id, candidate_revision, candidate_basis,
-            candidate_head_hash, candidate_manifest_hash, candidate_generation);
-    DELETE FROM atomic_generation_source_links
-     WHERE database_id = candidate_database_id AND generation = candidate_generation;
-    DELETE FROM atomic_log_generation_checkpoints
-     WHERE database_id = candidate_database_id AND generation = candidate_generation;
-    DELETE FROM atomic_log_generation_builds
+    SELECT * INTO generation_row
+      FROM atomic_log_generations
+     WHERE database_id = candidate_database_id
+       AND generation = candidate_generation;
+    IF activation_row.generation IS NULL OR generation_row.build_kind <> 1
+       OR activation_row.manifest_hash IS DISTINCT FROM candidate_manifest_hash
+       OR NOT EXISTS (
+            SELECT 1 FROM atomic_heads
+             WHERE database_id = candidate_database_id
+               AND log_generation = candidate_generation
+       ) THEN
+        RAISE EXCEPTION 'Atomic excision generation is not the active staged completion'
+            USING ERRCODE = '40001';
+    END IF;
+    SELECT publication_revision INTO candidate_revision
+      FROM atomic_tree_manifests
+     WHERE database_id = candidate_database_id
+       AND log_generation = candidate_generation
+       AND basis_t = activation_row.basis_t
+       AND tx_hash = activation_row.head_hash
+       AND state_hash = activation_row.state_hash
+       AND manifest_hash = candidate_manifest_hash;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Atomic excision completion has no staged authenticated tree'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM atomic_tree_publications
+         WHERE database_id = candidate_database_id
+           AND publication_revision = candidate_revision
+           AND manifest_hash = candidate_manifest_hash
+           AND log_generation = candidate_generation
+    ) THEN
+        INSERT INTO atomic_tree_publications
+               (database_id, publication_revision, basis_t, tx_hash,
+                manifest_hash, log_generation)
+        VALUES (candidate_database_id, candidate_revision, activation_row.basis_t,
+                activation_row.head_hash, candidate_manifest_hash,
+                candidate_generation);
+    END IF;
+
+    PERFORM set_config('atomic.log_generation_activation', 'v14', true);
+    INSERT INTO atomic_completed_excision_requests
+           (database_id, request_t, request_entity, generation)
+    SELECT candidate_database_id, request_t, request_entity, candidate_generation
+      FROM atomic_completed_excision_requests
+     WHERE database_id = candidate_database_id
+       AND generation = activation_row.prior_generation
+    UNION
+    SELECT database_id, request_t, request_entity, candidate_generation
+      FROM atomic_generation_excision_predicates
+     WHERE database_id = candidate_database_id
+       AND generation = candidate_generation
+    ON CONFLICT (database_id, generation, request_t, request_entity) DO NOTHING;
+    INSERT INTO atomic_log_generation_completions(database_id, generation)
+    VALUES (candidate_database_id, candidate_generation)
+    ON CONFLICT DO NOTHING;
+    DELETE FROM atomic_generation_excision_predicates
      WHERE database_id = candidate_database_id AND generation = candidate_generation;
     PERFORM set_config('atomic.log_generation_activation', 'off', true);
 END;
@@ -1009,14 +1213,19 @@ REVOKE ALL ON FUNCTION atomic_activate_log_generation(
 GRANT EXECUTE ON FUNCTION atomic_activate_log_generation(
     TEXT, BIGINT, BIGINT, BYTEA, BYTEA, BYTEA
 ) TO CURRENT_USER;
+REVOKE ALL ON FUNCTION atomic_complete_excision_generation(TEXT, BIGINT, BYTEA) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION atomic_complete_excision_generation(TEXT, BIGINT, BYTEA)
+TO CURRENT_USER;
 
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generations FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_builds FROM PUBLIC;
+REVOKE UPDATE, DELETE, TRUNCATE ON atomic_transaction_contents FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_generation_transactions FROM PUBLIC;
-REVOKE UPDATE, DELETE, TRUNCATE ON atomic_generation_source_links FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_generation_requests FROM PUBLIC;
+REVOKE UPDATE, DELETE, TRUNCATE ON atomic_generation_request_tempids FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_generation_excision_predicates FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_checkpoints FROM PUBLIC;
+REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_completions FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_activations FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_completed_excision_requests FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_retirements FROM PUBLIC;

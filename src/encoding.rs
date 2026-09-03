@@ -300,6 +300,41 @@ pub(crate) fn canonical_datom_hash(datom: &Datom) -> Result<Digest, SemanticErro
     Ok(sha256(&encoded))
 }
 
+/// Canonical typed datom bytes used by lineage transaction-content values.
+/// Keeping this codec here prevents a second value representation from
+/// drifting away from the authoritative transaction/index encoding.
+pub(crate) fn canonical_datom_bytes(datom: &Datom) -> Result<Vec<u8>, SemanticError> {
+    validate_encoded_datom(datom)?;
+    let mut encoded = Vec::new();
+    encode_datom(&mut encoded, datom)?;
+    Ok(encoded)
+}
+
+/// Decode exactly `count` concatenated canonical datoms and reject trailing
+/// bytes or an allocation-amplifying count before constructing the vector.
+pub(crate) fn decode_canonical_datoms(
+    bytes: &[u8],
+    count: usize,
+) -> Result<Vec<Datom>, SemanticError> {
+    // The shortest possible datom is E(8)+A(4)+Bool value(2)+Tx(8)+op(1).
+    // Bound allocation by authenticated remaining bytes, not an arbitrary
+    // item-count policy that would reject otherwise legal content.
+    const MIN_ENCODED_DATOM_BYTES: usize = 23;
+    if count > bytes.len() / MIN_ENCODED_DATOM_BYTES {
+        return Err(fault(
+            "encoding/impossible-datom-count",
+            "encoded datom count cannot fit in the remaining content bytes",
+        ));
+    }
+    let mut cursor = Cursor::new(bytes);
+    let mut datoms = Vec::with_capacity(count);
+    for _ in 0..count {
+        datoms.push(decode_datom(&mut cursor)?);
+    }
+    cursor.finish()?;
+    Ok(datoms)
+}
+
 /// Canonical scalar bytes shared by the durable transaction codec and the
 /// persistent index-tree leaf codec. Tree nodes deliberately have their own
 /// envelope, kind, and version; only the already-authoritative value
@@ -722,30 +757,11 @@ fn validate_transaction(transaction: &DurableTransaction) -> Result<(), Semantic
             "durable transaction database id cannot be empty",
         ));
     }
-    if transaction.basis_t == 0 {
-        return Err(fault(
-            "encoding/invalid-basis",
-            "durable transaction basis must be positive",
-        ));
-    }
-    let tx = t_to_tx(transaction.basis_t).map_err(|error| {
-        fault(
-            "encoding/basis-out-of-range",
-            format!("durable transaction basis cannot be represented: {error}"),
-        )
-    })?;
-    validate_frontier(transaction.eidx_frontier).map_err(|error| {
-        fault(
-            "encoding/invalid-issued-frontier",
-            format!("durable transaction has an invalid issued frontier: {error}"),
-        )
-    })?;
-    if transaction.tx_data.iter().any(|datom| datom.tx != tx) {
-        return Err(fault(
-            "encoding/datom-transaction-mismatch",
-            "every datom must name the transaction entity for the envelope basis",
-        ));
-    }
+    let tx = validate_transaction_content(
+        transaction.basis_t,
+        transaction.eidx_frontier,
+        &transaction.tx_data,
+    )?;
     for entity in transaction.tempids.values().copied() {
         validate_issued_entity(
             entity,
@@ -754,15 +770,45 @@ fn validate_transaction(transaction: &DurableTransaction) -> Result<(), Semantic
             "tempid",
         )?;
     }
-    for datom in &transaction.tx_data {
+    debug_assert_eq!(tx, t_to_tx(transaction.basis_t).expect("validated basis"));
+    Ok(())
+}
+
+/// Validate the database-information portion shared by legacy transaction
+/// envelopes and lineage content without manufacturing a tempid-name map.
+pub(crate) fn validate_transaction_content(
+    basis_t: u64,
+    eidx_frontier: u64,
+    tx_data: &[Datom],
+) -> Result<u64, SemanticError> {
+    if basis_t == 0 {
+        return Err(fault(
+            "encoding/invalid-basis",
+            "durable transaction basis must be positive",
+        ));
+    }
+    let tx = t_to_tx(basis_t).map_err(|error| {
+        fault(
+            "encoding/basis-out-of-range",
+            format!("durable transaction basis cannot be represented: {error}"),
+        )
+    })?;
+    validate_frontier(eidx_frontier).map_err(|error| {
+        fault(
+            "encoding/invalid-issued-frontier",
+            format!("durable transaction has an invalid issued frontier: {error}"),
+        )
+    })?;
+    if tx_data.iter().any(|datom| datom.tx != tx) {
+        return Err(fault(
+            "encoding/datom-transaction-mismatch",
+            "every datom must name the transaction entity for the envelope basis",
+        ));
+    }
+    for datom in tx_data {
         validate_encoded_datom(datom)?;
-        validate_issued_entity(
-            datom.entity,
-            transaction.eidx_frontier,
-            transaction.basis_t,
-            "datom",
-        )?;
-        validate_issued_value_refs(&datom.value, transaction.eidx_frontier, transaction.basis_t)?;
+        validate_issued_entity(datom.entity, eidx_frontier, basis_t, "datom")?;
+        validate_issued_value_refs(&datom.value, eidx_frontier, basis_t)?;
         let datom_t = tx_to_t(datom.tx).expect("transaction equality was checked");
         if datom_t > MAX_EIDX {
             return Err(fault(
@@ -771,8 +817,8 @@ fn validate_transaction(transaction: &DurableTransaction) -> Result<(), Semantic
             ));
         }
     }
-    for (offset, datom) in transaction.tx_data.iter().enumerate() {
-        if transaction.tx_data[offset + 1..].iter().any(|other| {
+    for (offset, datom) in tx_data.iter().enumerate() {
+        if tx_data[offset + 1..].iter().any(|other| {
             datom.entity == other.entity
                 && datom.attribute == other.attribute
                 && datom.value.stored_eq(&other.value)
@@ -783,7 +829,7 @@ fn validate_transaction(transaction: &DurableTransaction) -> Result<(), Semantic
             ));
         }
     }
-    Ok(())
+    Ok(tx)
 }
 
 fn validate_genesis(datoms: &[Datom]) -> Result<(), SemanticError> {

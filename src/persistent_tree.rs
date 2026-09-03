@@ -5319,6 +5319,38 @@ mod tests {
             assert_eq!(first.stats.reused_leaf_refs, 7);
             assert_eq!(first.stats.reused_directory_refs, 63);
             assert!(first.stats.nodes_written * 100 < old.stats.unique_nodes);
+
+            // The post-CAS garbage witness is the replaced changed path, not
+            // every old node read to repair sparse routing boundaries.
+            let old_root = expect_root(
+                decode_tree_node(
+                    &old.descriptor.root_hash,
+                    old.nodes.get(&old.descriptor.root_hash).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let directory_ref =
+                &old_root.directories[floor_child(&old_root.directories, &removed, order)];
+            let directory = expect_directory(
+                decode_tree_node(
+                    &directory_ref.hash,
+                    old.nodes.get(&directory_ref.hash).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let leaf_ref = &directory.leaves[floor_child(&directory.leaves, &removed, order)];
+            assert_eq!(
+                first.retired_nodes,
+                BTreeSet::from([old.descriptor.root_hash, directory_ref.hash, leaf_ref.hash])
+            );
+            assert!(
+                first.retired_nodes.iter().all(
+                    |hash| old.nodes.get(hash).is_some() && first.new_nodes.get(hash).is_none()
+                )
+            );
+            assert!(first.stats.directory_reads + first.stats.leaf_reads > 2);
         }
     }
 
@@ -5443,5 +5475,6 @@ mod tests {
         assert_eq!(merged.stats.affected_directories, 1);
         assert_eq!(merged.stats.affected_leaves, 1);
         assert_eq!(merged.stats.reused_hashes, 3);
+        assert!(merged.retired_nodes.is_empty());
     }
 }

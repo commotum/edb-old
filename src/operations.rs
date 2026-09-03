@@ -11,22 +11,34 @@ use postgres::{Client, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-/// Smallest supported grace period for ordinary garbage collection.
+/// Recommended grace period for routine garbage collection.
 ///
-/// Datomic's operational guidance warns that a recent boundary can invalidate
-/// index values still held by long-running consumers and recommends at least a
-/// month outside initial import. Atomic has no separate import-mode GC API, so
-/// the public operator always enforces that production-safe floor. Tests make
-/// values old by backdating their PostgreSQL timestamps, never by weakening
-/// this boundary.
-pub const MIN_GARBAGE_COLLECTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// Datomic's capacity guidance recommends roughly a month outside an initial
+/// import, but its collector accepts the operator's chosen older-than boundary.
+/// Atomic does the same: [`PostgresOperator::garbage_inventory`] and
+/// [`PostgresOperator::collect_garbage`] accept shorter ages deliberately for
+/// imports and controlled maintenance. Snapshot pins and exact live-membership
+/// checks remain authoritative regardless of the chosen grace period.
+pub const RECOMMENDED_GARBAGE_COLLECTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// One operator call retires at most one oldest root per database and no more
-/// than this many roots globally. Repeated calls make deterministic progress.
-pub const MAX_TREE_RETIREMENTS_PER_GC: usize = 128;
+/// One operator call advances one oldest root globally.  Its potentially
+/// large retired-node ledger is drained separately by the bound below.
+pub const MAX_TREE_RETIREMENTS_PER_GC: usize = 1;
+
+/// Maximum changed-path rows moved from one claimed root per call.
+pub const MAX_TREE_RETIREMENT_NODES_PER_GC: usize = 512;
+
+/// One operator call advances one content-first intent globally.
+pub const MAX_TREE_BUILD_INTENTS_PER_GC: usize = 1;
+
+/// Maximum upload-ledger rows drained from that intent per call.
+pub const MAX_TREE_BUILD_INTENT_NODES_PER_GC: usize = 512;
 
 /// Maximum exact immutable values drained in one operator transaction.
 pub const MAX_TREE_NODES_PER_GC: usize = 512;
+
+/// Maximum detached program blobs drained in one operator transaction.
+pub const MAX_PROGRAMS_PER_GC: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegrityProblem {
@@ -84,6 +96,9 @@ pub struct GarbageInventory {
     /// becomes old when its successor was published, not when this root was
     /// first written.
     pub tree_publications: Vec<TreePublicationGarbage>,
+    /// Abandoned content-first upload intents whose session pin disappeared
+    /// and whose last heartbeat crossed the same grace boundary.
+    pub tree_build_intents: Vec<TreeBuildIntentGarbage>,
     /// Manifests removed with the superseded root publications above.
     pub tree_manifest_hashes: Vec<Digest>,
     /// Exact post-publication garbage marks drained after all current and
@@ -102,11 +117,23 @@ pub struct TreePublicationGarbage {
     pub garbage_complete: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TreeBuildIntentGarbage {
+    pub database_id: String,
+    pub expected_revision: u64,
+    pub manifest_hash: Digest,
+    /// True for an abandoned upload whose exact uploaded values become
+    /// garbage marks. False is bounded cleanup of a successfully consumed
+    /// publication ledger and never marks its values as garbage.
+    pub abandoned: bool,
+}
+
 #[derive(Default)]
 struct GarbageCandidates {
     segments: Vec<Digest>,
     programs: Vec<Digest>,
     tree_publications: Vec<TreePublicationGarbage>,
+    tree_build_intents: Vec<TreeBuildIntentGarbage>,
     tree_manifests: Vec<Digest>,
     tree_nodes: Vec<Digest>,
 }
@@ -117,6 +144,7 @@ impl GarbageCandidates {
             segment_hashes: self.segments,
             program_hashes: self.programs,
             tree_publications: self.tree_publications,
+            tree_build_intents: self.tree_build_intents,
             tree_manifest_hashes: self.tree_manifests,
             tree_node_hashes: self.tree_nodes,
             applied,
@@ -525,6 +553,12 @@ impl PostgresOperator {
         Ok(report)
     }
 
+    /// Preview physical values older than the caller-selected age horizon.
+    ///
+    /// Passing an age below [`RECOMMENDED_GARBAGE_COLLECTION_AGE`], including
+    /// zero, is an explicit operational choice for imports or controlled
+    /// maintenance; it is not rejected. Connected native snapshots are still
+    /// pinned, but the caller must account for disconnected/long-lived readers.
     pub fn garbage_inventory(
         &mut self,
         older_than: Duration,
@@ -543,6 +577,12 @@ impl PostgresOperator {
         Ok(candidates.inventory(false))
     }
 
+    /// Reclaim physical values older than the caller-selected age horizon.
+    ///
+    /// The horizon may deliberately be shorter than
+    /// [`RECOMMENDED_GARBAGE_COLLECTION_AGE`]. Exact references and connected
+    /// snapshot pins remain protected; a short horizon reduces the safety
+    /// margin for readers whose PostgreSQL pin session is unavailable.
     pub fn collect_garbage(
         &mut self,
         older_than: Duration,
@@ -558,22 +598,37 @@ impl PostgresOperator {
         for publication in &candidates.tree_publications {
             let collected: bool = transaction
                 .query_one(
-                    "SELECT atomic_collect_tree_retirement($1, $2, $3, $4)",
+                    "SELECT atomic_collect_tree_retirement($1, $2, $3, $4, $5)",
                     &[
                         &publication.database_id,
                         &sql_u64(publication.publication_revision, "publication revision")?,
                         &&publication.manifest_hash[..],
                         &millis,
+                        &(MAX_TREE_RETIREMENT_NODES_PER_GC as i64),
                     ],
                 )
                 .map_err(|error| operation_error("operations/gc-tree-publication", error))?
                 .get(0);
             require_gc_collected(collected, "tree publication")?;
         }
+        for intent in &candidates.tree_build_intents {
+            let collected: bool = transaction
+                .query_one(
+                    "SELECT atomic_collect_tree_build_intent($1, $2, $3)",
+                    &[
+                        &&intent.manifest_hash[..],
+                        &millis,
+                        &(MAX_TREE_BUILD_INTENT_NODES_PER_GC as i64),
+                    ],
+                )
+                .map_err(|error| operation_error("operations/gc-tree-build-intent", error))?
+                .get(0);
+            require_gc_collected(collected, "tree build intent")?;
+        }
         // Raw values are selected only from the durable exact-mark ledger by
         // the fixed-path owner function. Replace the dry prediction with the
         // hashes actually deleted under this same snapshot.
-        candidates.tree_nodes = transaction
+        let mut collected_nodes = transaction
             .query(
                 "SELECT node_hash FROM atomic_collect_tree_garbage($1) AS node_hash",
                 &[&(MAX_TREE_NODES_PER_GC as i64)],
@@ -582,6 +637,18 @@ impl PostgresOperator {
             .into_iter()
             .map(|row| digest(row.get(0), "collected tree node hash"))
             .collect::<Result<Vec<_>, _>>()?;
+        collected_nodes.sort_unstable();
+        candidates.tree_nodes = collected_nodes;
+        candidates.programs = transaction
+            .query(
+                "SELECT program_hash FROM atomic_collect_program_garbage($1, $2) AS program_hash",
+                &[&millis, &(MAX_PROGRAMS_PER_GC as i64)],
+            )
+            .map_err(|error| operation_error("operations/gc-programs", error))?
+            .into_iter()
+            .map(|row| digest(row.get(0), "collected program hash"))
+            .collect::<Result<Vec<_>, _>>()?;
+        candidates.programs.sort_unstable();
         transaction
             .commit()
             .map_err(|error| operation_error("operations/gc-commit", error))?;
@@ -1601,28 +1668,37 @@ fn garbage_candidates<C: postgres::GenericClient>(
     client: &mut C,
     older_than_millis: i64,
 ) -> Result<GarbageCandidates, SemanticError> {
-    // Retire only one oldest root per database in this call. This is a
-    // contiguous prefix by construction, bounds transaction work, and means a
-    // pin collision on an earlier root blocks every later root of that DB.
+    // Advance only one globally oldest root in this call. This is a contiguous
+    // per-database prefix by construction; a pin on an earlier root prevents
+    // a later root of that database from being selected out of order.
     let mut tree_publications = Vec::new();
+    let mut selected_retirement_nodes = Vec::new();
+    let mut finishing_retirements = Vec::new();
     for row in client
         .query(
             "SELECT r.database_id, r.publication_revision, r.manifest_hash, \
-                    r.garbage_complete \
+                    r.garbage_complete, \
+                    (SELECT count(*) FROM atomic_tree_retired_nodes n \
+                      WHERE n.database_id = r.database_id \
+                        AND n.publication_revision = r.publication_revision) \
                FROM atomic_tree_retirements r \
                JOIN atomic_tree_publications p \
                  ON p.database_id = r.database_id \
                 AND p.publication_revision = r.publication_revision \
                 AND p.manifest_hash = r.manifest_hash \
-              WHERE r.retired_at < clock_timestamp() - \
-                                   $1::bigint * interval '1 millisecond' \
+              WHERE (EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
+                              WHERE progress.database_id = r.database_id \
+                                AND progress.publication_revision = r.publication_revision \
+                                AND progress.manifest_hash = r.manifest_hash) \
+                     OR r.retired_at < clock_timestamp() - \
+                                       $1::bigint * interval '1 millisecond') \
                 AND EXISTS (SELECT 1 FROM atomic_tree_publications newer \
                             WHERE newer.database_id = r.database_id \
                               AND newer.publication_revision > r.publication_revision) \
                 AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications older \
                                 WHERE older.database_id = r.database_id \
                                   AND older.publication_revision < r.publication_revision) \
-              ORDER BY r.database_id, r.publication_revision \
+              ORDER BY r.retired_at, r.database_id, r.publication_revision \
               LIMIT $2",
             &[&older_than_millis, &(MAX_TREE_RETIREMENTS_PER_GC as i64)],
         )
@@ -1638,23 +1714,127 @@ fn garbage_candidates<C: postgres::GenericClient>(
         // lock. Advisory-key collisions only make this return false, retaining
         // extra data conservatively.
         if try_lock_tree_manifest_for_gc(client, publication.manifest_hash)? {
+            let retired_node_count = positive_or_zero(row.get(4), "retired tree node count")?;
+            for node in client
+                .query(
+                    "SELECT node_hash FROM atomic_tree_retired_nodes \
+                      WHERE database_id = $1 AND publication_revision = $2 \
+                      ORDER BY node_hash LIMIT $3",
+                    &[
+                        &publication.database_id,
+                        &sql_u64(publication.publication_revision, "publication revision")?,
+                        &(MAX_TREE_RETIREMENT_NODES_PER_GC as i64),
+                    ],
+                )
+                .map_err(|error| operation_error("operations/gc-retirement-node-batch", error))?
+            {
+                selected_retirement_nodes.push((
+                    publication.database_id.clone(),
+                    publication.publication_revision,
+                    digest(node.get(0), "retired tree node hash")?,
+                ));
+            }
+            if retired_node_count <= MAX_TREE_RETIREMENT_NODES_PER_GC as u64 {
+                finishing_retirements.push((
+                    publication.database_id.clone(),
+                    publication.publication_revision,
+                    publication.manifest_hash,
+                ));
+            }
             tree_publications.push(publication);
         }
     }
-    let tree_manifests = tree_publications
+    let tree_manifests = finishing_retirements
         .iter()
-        .map(|publication| publication.manifest_hash)
+        .map(|(_, _, manifest_hash)| *manifest_hash)
         .collect::<Vec<_>>();
-    let tree_nodes = predicted_tree_node_garbage(client, &tree_publications)?;
+    let mut tree_build_intents = Vec::new();
+    let mut selected_intent_nodes = Vec::new();
+    let mut marked_intent_nodes = Vec::new();
+    for row in client
+        .query(
+            "SELECT database_id, expected_revision, manifest_hash, intent_state \
+               FROM atomic_tree_build_intents i \
+              WHERE i.intent_state = 2 \
+                 OR i.intent_state = 3 \
+                 OR (i.intent_state IN (0, 1) \
+                     AND i.heartbeat_at < clock_timestamp() - \
+                                          $1::bigint * interval '1 millisecond' \
+                     AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications p \
+                                     WHERE p.manifest_hash = i.manifest_hash)) \
+              ORDER BY CASE WHEN i.intent_state IN (2, 3) THEN 0 ELSE 1 END, \
+                       i.heartbeat_at, i.manifest_hash \
+              LIMIT $2",
+            &[&older_than_millis, &(MAX_TREE_BUILD_INTENTS_PER_GC as i64)],
+        )
+        .map_err(|error| operation_error("operations/gc-tree-build-intents", error))?
+    {
+        let state: i16 = row.get(3);
+        let intent = TreeBuildIntentGarbage {
+            database_id: row.get(0),
+            expected_revision: positive_or_zero(row.get(1), "build expected revision")?,
+            manifest_hash: digest(row.get(2), "build intent manifest hash")?,
+            abandoned: state != 2,
+        };
+        if try_lock_tree_build_for_gc(client, intent.manifest_hash)? {
+            for node in client
+                .query(
+                    "SELECT node_hash, EXISTS (SELECT 1 FROM atomic_tree_nodes stored \
+                                               WHERE stored.node_hash = n.node_hash) \
+                       FROM atomic_tree_build_intent_nodes n \
+                      WHERE manifest_hash = $1 \
+                      ORDER BY node_hash LIMIT $2",
+                    &[
+                        &&intent.manifest_hash[..],
+                        &(MAX_TREE_BUILD_INTENT_NODES_PER_GC as i64),
+                    ],
+                )
+                .map_err(|error| operation_error("operations/gc-intent-node-batch", error))?
+            {
+                let hash = digest(node.get(0), "build intent node hash")?;
+                selected_intent_nodes.push((intent.manifest_hash, hash));
+                if intent.abandoned && node.get::<_, bool>(1) {
+                    marked_intent_nodes.push(hash);
+                }
+            }
+            tree_build_intents.push(intent);
+        }
+    }
+    let tree_nodes = predicted_tree_node_garbage(
+        client,
+        &selected_retirement_nodes,
+        &finishing_retirements,
+        &selected_intent_nodes,
+        &marked_intent_nodes,
+    )?;
 
-    // The legacy flat index and program formats have no exact post-CAS
-    // retirement witness. Age is not reachability, so they remain retained.
+    // The legacy flat index has no exact post-CAS retirement witness. Age is
+    // not reachability, so those segments remain retained. Program blobs have
+    // a separate complete per-log-generation reference ledger.
     let segments = Vec::new();
-    let programs = Vec::new();
+    let programs = client
+        .query(
+            "SELECT c.program_hash \
+               FROM atomic_program_gc_candidates c \
+              WHERE c.candidate_at < clock_timestamp() - \
+                                     $1::bigint * interval '1 millisecond' \
+                AND EXISTS (SELECT 1 FROM atomic_program_reference_state s \
+                            WHERE s.singleton AND s.complete AND s.problem_code IS NULL) \
+                AND NOT EXISTS (SELECT 1 FROM atomic_program_generation_refs r \
+                                WHERE r.program_hash = c.program_hash) \
+              ORDER BY c.candidate_at, c.program_hash \
+              LIMIT $2",
+            &[&older_than_millis, &(MAX_PROGRAMS_PER_GC as i64)],
+        )
+        .map_err(|error| operation_error("operations/gc-program-candidates", error))?
+        .into_iter()
+        .map(|row| digest(row.get(0), "program garbage hash"))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(GarbageCandidates {
         segments,
         programs,
         tree_publications,
+        tree_build_intents,
         tree_manifests,
         tree_nodes,
     })
@@ -1666,34 +1846,66 @@ fn garbage_candidates<C: postgres::GenericClient>(
 /// garbage.
 fn predicted_tree_node_garbage<C: postgres::GenericClient>(
     client: &mut C,
-    selected: &[TreePublicationGarbage],
+    selected_retirement_nodes: &[(String, u64, Digest)],
+    finishing_retirements: &[(String, u64, Digest)],
+    selected_intent_nodes: &[(Digest, Digest)],
+    marked_intent_nodes: &[Digest],
 ) -> Result<Vec<Digest>, SemanticError> {
-    let database_ids = selected
+    let retirement_databases = selected_retirement_nodes
         .iter()
-        .map(|publication| publication.database_id.clone())
+        .map(|(database_id, _, _)| database_id.clone())
         .collect::<Vec<_>>();
-    let revisions = selected
+    let retirement_revisions = selected_retirement_nodes
         .iter()
-        .map(|publication| sql_u64(publication.publication_revision, "publication revision"))
+        .map(|(_, revision, _)| sql_u64(*revision, "publication revision"))
         .collect::<Result<Vec<_>, _>>()?;
+    let retirement_nodes = selected_retirement_nodes
+        .iter()
+        .map(|(_, _, node_hash)| node_hash.to_vec())
+        .collect::<Vec<_>>();
+    let finishing_databases = finishing_retirements
+        .iter()
+        .map(|(database_id, _, _)| database_id.clone())
+        .collect::<Vec<_>>();
+    let finishing_revisions = finishing_retirements
+        .iter()
+        .map(|(_, revision, _)| sql_u64(*revision, "publication revision"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let finishing_manifests = finishing_retirements
+        .iter()
+        .map(|(_, _, manifest_hash)| manifest_hash.to_vec())
+        .collect::<Vec<_>>();
+    let intent_manifests = selected_intent_nodes
+        .iter()
+        .map(|(manifest_hash, _)| manifest_hash.to_vec())
+        .collect::<Vec<_>>();
+    let intent_nodes = selected_intent_nodes
+        .iter()
+        .map(|(_, node_hash)| node_hash.to_vec())
+        .collect::<Vec<_>>();
+    let marked_intent_nodes = marked_intent_nodes
+        .iter()
+        .map(|node_hash| node_hash.to_vec())
+        .collect::<Vec<_>>();
     client
         .query(
-            "WITH selected(database_id, publication_revision) AS ( \
-                 SELECT * FROM unnest($1::text[], $2::bigint[]) \
-             ), selected_roots AS ( \
-                 SELECT r.database_id, r.publication_revision, r.manifest_hash \
-                   FROM atomic_tree_retirements r \
-                   JOIN selected s USING (database_id, publication_revision) \
+            "WITH selected_retirement_nodes(database_id, publication_revision, node_hash) AS ( \
+                 SELECT * FROM unnest($1::text[], $2::bigint[], $3::bytea[]) \
+             ), finishing_retirements(database_id, publication_revision, manifest_hash) AS ( \
+                 SELECT * FROM unnest($4::text[], $5::bigint[], $6::bytea[]) \
+             ), selected_intent_nodes(manifest_hash, node_hash) AS ( \
+                 SELECT * FROM unnest($7::bytea[], $8::bytea[]) \
              ), pending(node_hash) AS ( \
                  SELECT node_hash FROM atomic_tree_garbage_nodes \
                  UNION \
-                 SELECT r.node_hash \
-                   FROM atomic_tree_retired_nodes r \
-                   JOIN selected s USING (database_id, publication_revision) \
+                 SELECT node_hash FROM selected_retirement_nodes \
+                 UNION \
+                 SELECT * FROM unnest($9::bytea[]) \
              ) \
              SELECT p.node_hash \
                FROM pending p \
-              WHERE NOT EXISTS ( \
+              WHERE EXISTS (SELECT 1 FROM atomic_tree_nodes n WHERE n.node_hash = p.node_hash) \
+                AND NOT EXISTS ( \
                         SELECT 1 FROM atomic_tree_live_nodes l \
                          WHERE l.node_hash = p.node_hash \
                     ) \
@@ -1701,9 +1913,10 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                         SELECT 1 FROM atomic_tree_retired_nodes r \
                          WHERE r.node_hash = p.node_hash \
                            AND NOT EXISTS ( \
-                               SELECT 1 FROM selected s \
-                                WHERE s.database_id = r.database_id \
-                                  AND s.publication_revision = r.publication_revision \
+                               SELECT 1 FROM selected_retirement_nodes selected \
+                                WHERE selected.database_id = r.database_id \
+                                  AND selected.publication_revision = r.publication_revision \
+                                  AND selected.node_hash = r.node_hash \
                            ) \
                     ) \
                 AND NOT EXISTS ( \
@@ -1711,11 +1924,20 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                          WHERE d.node_hash = p.node_hash \
                     ) \
                 AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_build_intent_nodes i \
+                         WHERE i.node_hash = p.node_hash \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM selected_intent_nodes selected \
+                                WHERE selected.manifest_hash = i.manifest_hash \
+                                  AND selected.node_hash = i.node_hash \
+                           ) \
+                    ) \
+                AND NOT EXISTS ( \
                         SELECT 1 FROM atomic_tree_manifest_roots r \
                          WHERE r.root_hash = p.node_hash \
                            AND NOT EXISTS ( \
-                               SELECT 1 FROM selected_roots s \
-                                WHERE s.manifest_hash = r.manifest_hash \
+                               SELECT 1 FROM finishing_retirements finishing \
+                                WHERE finishing.manifest_hash = r.manifest_hash \
                            ) \
                     ) \
                 AND NOT EXISTS ( \
@@ -1747,9 +1969,9 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                         SELECT 1 FROM atomic_tree_retirements r \
                          WHERE NOT r.garbage_complete \
                            AND NOT EXISTS ( \
-                               SELECT 1 FROM selected s \
-                                WHERE s.database_id = r.database_id \
-                                  AND s.publication_revision = r.publication_revision \
+                               SELECT 1 FROM finishing_retirements finishing \
+                                WHERE finishing.database_id = r.database_id \
+                                  AND finishing.publication_revision = r.publication_revision \
                            ) \
                     ) \
                 AND NOT EXISTS ( \
@@ -1760,9 +1982,9 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                                       AND newer.publication_revision > publication.publication_revision \
                                ) \
                            AND NOT EXISTS ( \
-                                   SELECT 1 FROM selected s \
-                                    WHERE s.database_id = publication.database_id \
-                                      AND s.publication_revision = publication.publication_revision \
+                                   SELECT 1 FROM finishing_retirements finishing \
+                                    WHERE finishing.database_id = publication.database_id \
+                                      AND finishing.publication_revision = publication.publication_revision \
                                ) \
                            AND NOT EXISTS ( \
                                    SELECT 1 FROM atomic_tree_retirements r \
@@ -1772,10 +1994,17 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                                ) \
                     ) \
               ORDER BY p.node_hash \
-              LIMIT $3",
+              LIMIT $10",
             &[
-                &database_ids,
-                &revisions,
+                &retirement_databases,
+                &retirement_revisions,
+                &retirement_nodes,
+                &finishing_databases,
+                &finishing_revisions,
+                &finishing_manifests,
+                &intent_manifests,
+                &intent_nodes,
+                &marked_intent_nodes,
                 &(MAX_TREE_NODES_PER_GC as i64),
             ],
         )
@@ -1795,6 +2024,19 @@ fn try_lock_tree_manifest_for_gc<C: postgres::GenericClient>(
             &[&tree_manifest_advisory_key(&manifest_hash)],
         )
         .map_err(|error| operation_error("operations/gc-root-pin", error))
+        .map(|row| row.get(0))
+}
+
+fn try_lock_tree_build_for_gc<C: postgres::GenericClient>(
+    client: &mut C,
+    manifest_hash: Digest,
+) -> Result<bool, SemanticError> {
+    client
+        .query_one(
+            "SELECT pg_try_advisory_xact_lock($1)",
+            &[&crate::tree_store::tree_build_advisory_key(&manifest_hash)],
+        )
+        .map_err(|error| operation_error("operations/gc-build-pin", error))
         .map(|row| row.get(0))
 }
 
@@ -1902,12 +2144,6 @@ fn collect_function_hashes(value: &Value, output: &mut BTreeSet<Digest>) {
 }
 
 fn garbage_age_millis(duration: Duration) -> Result<i64, SemanticError> {
-    if duration < MIN_GARBAGE_COLLECTION_AGE {
-        return Err(SemanticError::incorrect(
-            "operations/gc-boundary-too-recent",
-            "garbage collection requires an age boundary of at least 30 days",
-        ));
-    }
     i64::try_from(duration.as_millis()).map_err(|_| {
         SemanticError::incorrect("operations/duration-overflow", "duration is too large")
     })

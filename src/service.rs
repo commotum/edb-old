@@ -1,11 +1,13 @@
 use crate::postgres::{
     CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
-    is_postgres_connection_error, postgres_error, shared_program_cache_stats,
+    is_postgres_connection_error, postgres_error, read_authenticated_log_range,
+    shared_program_cache_stats,
 };
+use crate::log_generation::request_key_hash;
 use crate::{
     Database, Datom, Digest, ErrorCategory, IndexOrder, PersistentTreeManifest,
     PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
-    SemanticError, TxForm, TxOp, decode_transaction, sha256,
+    SemanticError, TxForm, TxOp, sha256,
 };
 use postgres::Client;
 use std::collections::{BTreeMap, VecDeque};
@@ -562,19 +564,57 @@ impl Shared {
             return Ok(());
         };
         let mut client = self.connection.connect_for("service/index-gate-connect")?;
-        let row = client
+        let head = client
             .query_opt(
-                "SELECT request_digest FROM atomic_requests \
+                "SELECT h.log_generation, d.lineage_id \
+                   FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
+                  WHERE h.database_id = $1",
+                &[&self.database_id],
+            )
+            .map_err(|error| postgres_error("service/index-gate-head", error))?
+            .ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::NotFound,
+                    "postgres/database-not-found",
+                    format!("database {} does not exist", self.database_id),
+                )
+            })?;
+        let generation = nonnegative_basis(head.get(0), "active log generation")?;
+        let lineage_id: String = head.get(1);
+        let generation_sql = i64::try_from(generation).map_err(|_| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "service/index-generation-overflow",
+                "active log generation exceeds PostgreSQL bigint",
+            )
+        })?;
+        let key_hash = request_key_hash(&lineage_id, request_key)?;
+        let row = if generation == 0 {
+            client.query_opt(
+                "SELECT request_digest, 1::smallint FROM atomic_requests \
                  WHERE database_id = $1 AND request_key = $2",
                 &[&self.database_id, &request_key],
             )
-            .map_err(|error| postgres_error("service/index-gate-read", error))?;
+        } else {
+            client.query_opt(
+                "SELECT request_digest, request_kind FROM atomic_generation_requests \
+                 WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3",
+                &[&self.database_id, &generation_sql, &&key_hash[..]],
+            )
+        }
+        .map_err(|error| postgres_error("service/index-gate-read", error))?;
         let Some(row) = row else {
             if limit.category == ErrorCategory::Busy {
                 self.indexing.record_backpressure_rejection();
             }
             return Err(limit);
         };
+        if row.get::<_, i16>(1) == 0 {
+            return Err(SemanticError::conflict(
+                "postgres/idempotency-predates-excision",
+                "request key was committed before excision, but its original receipt was deliberately erased",
+            ));
+        }
         let bytes: Vec<u8> = row.get(0);
         let stored: Digest = bytes.try_into().map_err(|_| {
             SemanticError::new(
@@ -1202,9 +1242,8 @@ fn load_indexing_seed(
     let mut client = connection.connect_for("service/index-seed-connect")?;
     let row = client
         .query_opt(
-            "SELECT h.basis_t, g.excision_generation \
-               FROM atomic_heads h \
-               JOIN atomic_database_generations g ON g.database_id = h.database_id \
+            "SELECT h.basis_t, h.log_generation, h.tx_hash, d.genesis_hash \
+               FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
               WHERE h.database_id = $1",
             &[&database_id],
         )
@@ -1218,6 +1257,20 @@ fn load_indexing_seed(
         })?;
     let target_basis_t = nonnegative_basis(row.get(0), "index target basis")?;
     let excision_generation = nonnegative_basis(row.get(1), "index excision generation")?;
+    let target_hash = candidate_digest(row.get(2)).ok_or_else(|| {
+        SemanticError::new(
+            ErrorCategory::Fault,
+            "service/index-seed-head-hash",
+            "index target head has an invalid transaction hash",
+        )
+    })?;
+    let genesis_hash = candidate_digest(row.get(3)).ok_or_else(|| {
+        SemanticError::new(
+            ErrorCategory::Fault,
+            "service/index-seed-genesis-hash",
+            "database genesis has an invalid hash",
+        )
+    })?;
     let newest_observed_revision = client
         .query_opt(
             "SELECT publication_revision FROM atomic_tree_publications \
@@ -1243,11 +1296,19 @@ fn load_indexing_seed(
                 AND m.publication_revision = p.publication_revision \
                 AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
                 AND m.manifest_hash = p.manifest_hash \
-               JOIN atomic_transactions t \
-                 ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
-                AND t.tx_hash = m.tx_hash AND t.state_hash = m.state_hash \
+                AND m.log_generation = p.log_generation \
+               LEFT JOIN atomic_transactions legacy \
+                 ON m.log_generation = 0 AND legacy.database_id = m.database_id \
+                AND legacy.basis_t = m.basis_t AND legacy.tx_hash = m.tx_hash \
+                AND legacy.state_hash = m.state_hash \
+               LEFT JOIN atomic_generation_transactions native \
+                 ON m.log_generation > 0 AND native.database_id = m.database_id \
+                AND native.generation = m.log_generation AND native.basis_t = m.basis_t \
+                AND native.tx_hash = m.tx_hash AND native.state_hash = m.state_hash \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
-                AND m.excision_generation = $3 \
+                AND m.log_generation = $3 \
+                AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
+                  OR (m.log_generation > 0 AND native.tx_hash IS NOT NULL)) \
               ORDER BY p.publication_revision DESC",
             &[
                 &database_id,
@@ -1258,16 +1319,18 @@ fn load_indexing_seed(
         .map_err(|error| postgres_error("service/index-seed-manifests", error))?;
     let mut published_revision = 0;
     let mut published_basis_t = 0;
+    let mut published_hash = genesis_hash;
     for row in candidate_rows {
         let publication_revision = nonnegative_basis(row.get(0), "usable publication revision")?;
         let basis_t = nonnegative_basis(row.get(1), "published index basis")?;
+        let tx_hash_bytes: Vec<u8> = row.get(2);
         if usable_native_publication(
             &mut client,
             database_id,
             excision_generation,
             publication_revision,
             basis_t,
-            row.get(2),
+            tx_hash_bytes.clone(),
             row.get(3),
             row.get(4),
             row.get(5),
@@ -1276,6 +1339,9 @@ fn load_indexing_seed(
         )? {
             published_revision = publication_revision;
             published_basis_t = basis_t;
+            published_hash = candidate_digest(tx_hash_bytes).expect(
+                "a usable native publication has an authenticated transaction hash",
+            );
             break;
         }
     }
@@ -1284,64 +1350,30 @@ fn load_indexing_seed(
     let needs_publication =
         published_revision == 0 || published_revision < newest_observed_revision;
 
-    let rows = client
-        .query(
-            "SELECT basis_t, payload FROM atomic_transactions \
-              WHERE database_id = $1 AND basis_t > $2 AND basis_t <= $3 \
-              ORDER BY basis_t",
-            &[
-                &database_id,
-                &i64::try_from(published_basis_t).map_err(|_| {
-                    SemanticError::incorrect(
-                        "service/index-basis-overflow",
-                        "published index basis is outside PostgreSQL bigint",
-                    )
-                })?,
-                &i64::try_from(target_basis_t).map_err(|_| {
-                    SemanticError::incorrect(
-                        "service/index-basis-overflow",
-                        "index target basis is outside PostgreSQL bigint",
-                    )
-                })?,
-            ],
-        )
-        .map_err(|error| postgres_error("service/index-seed-tail", error))?;
-    let expected_rows = target_basis_t.saturating_sub(published_basis_t);
-    if rows.len() as u64 != expected_rows {
-        return Err(SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-seed-gap",
-            "index backlog is not a contiguous authoritative log tail",
-        ));
-    }
+    let rows = read_authenticated_log_range(
+        &mut client,
+        database_id,
+        excision_generation,
+        published_basis_t,
+        target_basis_t,
+        published_hash,
+    )?;
+    let observed_tail_hash = rows.last().map_or(published_hash, |row| row.tx_hash);
     let mut pending = VecDeque::with_capacity(rows.len());
-    let mut expected_basis = published_basis_t;
     for row in rows {
-        expected_basis = expected_basis.checked_add(1).ok_or_else(|| {
-            SemanticError::new(
-                ErrorCategory::Fault,
-                "service/index-seed-overflow",
-                "index backlog basis overflowed",
-            )
-        })?;
-        let basis_t = nonnegative_basis(row.get(0), "index backlog basis")?;
-        let payload: Vec<u8> = row.get(1);
-        let transaction = decode_transaction(&payload)?;
-        if basis_t != expected_basis
-            || transaction.database_id != database_id
-            || transaction.basis_t != basis_t
-        {
-            return Err(SemanticError::new(
-                ErrorCategory::Fault,
-                "service/index-seed-envelope",
-                "index backlog row disagrees with its canonical transaction envelope",
-            ));
-        }
+        let transaction = row.transaction;
         pending.push_back(Novelty {
-            basis_t,
+            basis_t: transaction.basis_t,
             datoms: transaction.tx_data.len() as u64,
             bytes: accounted_novelty_bytes(&transaction.tx_data),
         });
+    }
+    if observed_tail_hash != target_hash {
+        return Err(SemanticError::new(
+            ErrorCategory::Fault,
+            "service/index-seed-head-mismatch",
+            "authenticated index backlog does not reach the captured head",
+        ));
     }
     Ok(IndexingSeed {
         published_revision,

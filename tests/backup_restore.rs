@@ -211,25 +211,27 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     );
 
     let mut physical_catalog = Client::connect(&connection, NoTls).unwrap();
-    let root_hash: Vec<u8> = physical_catalog
+    let leaf_hash: Vec<u8> = physical_catalog
         .query_one(
-            "SELECT r.root_hash FROM atomic_tree_publications p \
-             JOIN atomic_tree_manifest_roots r ON r.manifest_hash = p.manifest_hash \
-             WHERE p.database_id = $1 ORDER BY p.publication_revision DESC LIMIT 1",
+            "SELECT n.node_hash FROM atomic_tree_live_nodes l \
+             JOIN atomic_tree_nodes n ON n.node_hash = l.node_hash \
+             WHERE l.database_id = $1 AND get_byte(n.payload, 6) = 1 LIMIT 1",
             &[&source],
         )
         .unwrap()
         .get(0);
-    let root_hash: [u8; 32] = root_hash.try_into().unwrap();
-    let root_object = directory.join("objects").join(hex_digest(&root_hash));
-    let root_bytes = fs::read(&root_object).unwrap();
-    let mut damaged_root = root_bytes.clone();
-    damaged_root[0] ^= 1;
-    fs::write(&root_object, &damaged_root).unwrap();
+    let leaf_hash: [u8; 32] = leaf_hash.try_into().unwrap();
+    let leaf_object = directory.join("objects").join(hex_digest(&leaf_hash));
+    let leaf_bytes = fs::read(&leaf_object).unwrap();
+    let mut damaged_leaf = leaf_bytes.clone();
+    damaged_leaf[0] ^= 1;
+    fs::write(&leaf_object, &damaged_leaf).unwrap();
+    // Shallow verification reads routing nodes but only checks leaf presence;
+    // deep verification authenticates every leaf payload.
     PortableBackup::verify_backup_presence(&directory, basis2).unwrap();
     let error = PortableBackup::verify_backup(&directory, basis2, true).unwrap_err();
     assert_eq!(error.category, ErrorCategory::Fault);
-    fs::write(&root_object, root_bytes).unwrap();
+    fs::write(&leaf_object, leaf_bytes).unwrap();
 
     let verified1 = PortableBackup::verify_backup(&directory, basis1.basis_t(), true).unwrap();
     let verified2 = PortableBackup::verify_backup(&directory, basis2, true).unwrap();
@@ -731,11 +733,9 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
     let mut damaged_program = old_program_bytes.clone();
     damaged_program[0] ^= 1;
     fs::write(&old_program_object, &damaged_program).unwrap();
-    // Presence verification does not read content, while deep verification
-    // authenticates every referenced program object.
-    PortableBackup::verify_backup_presence(&directory, point.basis_t).unwrap();
-    PortableBackup::verify_backup(&directory, point.basis_t, false).unwrap();
-    let error = PortableBackup::verify_backup(&directory, point.basis_t, true).unwrap_err();
+    // Linked program values must be read even by presence verification: their
+    // immutable payloads are the routing metadata for transitive dependencies.
+    let error = PortableBackup::verify_backup_presence(&directory, point.basis_t).unwrap_err();
     assert_eq!(
         (error.category, error.code),
         (ErrorCategory::Fault, "backup/object-corrupt")

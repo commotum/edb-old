@@ -1,5 +1,8 @@
 use crate::database::{AssessedTransaction, PredicateRole};
 use crate::encoding::program_call_digest;
+use crate::log_generation::{
+    LineageTransactionContent, generation_transaction_hash, request_key_hash,
+};
 use crate::persistent_tree::{TreeNode, decode_tree_node};
 use crate::program::ValidatedProgram;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
@@ -190,12 +193,13 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         13,
         include_str!("../migrations/0013_lineage_and_tree_gc.sql"),
     ),
+    (14, include_str!("../migrations/0014_log_generations.sql")),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 13;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 14;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -216,9 +220,15 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_index_segments",
     "atomic_index_manifests",
     "atomic_programs",
-    "atomic_program_versions",
-    "atomic_active_programs",
     "atomic_database_generations",
+    "atomic_log_generations",
+    "atomic_transaction_contents",
+    "atomic_generation_transactions",
+    "atomic_generation_requests",
+    "atomic_log_generation_activations",
+    "atomic_completed_excision_requests",
+    "atomic_log_generation_completions",
+    "atomic_log_generation_retirements",
     "atomic_index_publications",
     "atomic_tree_nodes",
     "atomic_tree_manifests",
@@ -229,9 +239,16 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_tree_live_nodes",
     "atomic_tree_retirements",
     "atomic_tree_retired_nodes",
+    "atomic_tree_retirement_progress",
 ];
 
-const WRITER_RUNTIME_TABLES: &[&str] = &["atomic_transactor_leases"];
+const WRITER_RUNTIME_TABLES: &[&str] = &[
+    "atomic_transactor_leases",
+    "atomic_tree_build_intents",
+    "atomic_tree_build_intent_nodes",
+    "atomic_generation_request_tempids",
+    "atomic_program_generation_refs",
+];
 
 const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_transactions",
@@ -242,6 +259,13 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_tree_manifest_roots",
     "atomic_tree_delta_headers",
     "atomic_tree_delta_nodes",
+    "atomic_tree_build_intents",
+    "atomic_tree_build_intent_nodes",
+    "atomic_transaction_contents",
+    "atomic_generation_transactions",
+    "atomic_generation_requests",
+    "atomic_generation_request_tempids",
+    "atomic_program_generation_refs",
 ];
 
 /// Administrative PostgreSQL owner for schema installation and runtime-role
@@ -347,9 +371,235 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     if installed_version <= POSTGRES_SCHEMA_VERSION && POSTGRES_SCHEMA_VERSION >= 13 {
         backfill_tree_live_sets(&mut transaction)?;
     }
+    if POSTGRES_SCHEMA_VERSION >= 14 {
+        backfill_program_generation_refs(&mut transaction)?;
+    }
     transaction
         .commit()
         .map_err(|error| postgres_error("postgres/migration-commit", error))
+}
+
+/// Rebuild the exact per-generation temporal program roots and their fixed
+/// content dependencies. SQL cannot authenticate native values, so this is a
+/// Rust migration/repair boundary; any corrupt log or missing program aborts
+/// the migration and leaves GC fail-closed.
+fn backfill_program_generation_refs<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), SemanticError> {
+    client
+        .batch_execute(
+            "LOCK TABLE atomic_transactions IN SHARE MODE; \
+             LOCK TABLE atomic_generation_transactions IN SHARE MODE; \
+             LOCK TABLE atomic_log_generations IN SHARE MODE",
+        )
+        .map_err(|error| postgres_error("postgres/program-ref-lock", error))?;
+    client
+        .execute(
+            "UPDATE atomic_program_reference_state \
+                SET complete = false, problem_code = 'program/reference-rebuild', \
+                    updated_at = clock_timestamp() \
+              WHERE singleton",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/program-ref-incomplete", error))?;
+    client
+        .execute("DELETE FROM atomic_program_generation_refs", &[])
+        .map_err(|error| postgres_error("postgres/program-ref-clear", error))?;
+
+    let databases = client
+        .query(
+            "SELECT d.database_id, d.genesis_hash, h.log_generation \
+               FROM atomic_databases d JOIN atomic_heads h USING (database_id) \
+              ORDER BY d.database_id",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/program-ref-databases", error))?;
+    for row in databases {
+        let database_id: String = row.get(0);
+        let genesis_hash = digest(row.get(1), "program-reference genesis hash")?;
+        let active_generation = pg_basis(row.get(2), "program-reference active generation")?;
+        let mut generations = client
+            .query(
+                "SELECT generation FROM atomic_log_generations \
+                  WHERE database_id = $1 ORDER BY generation",
+                &[&database_id],
+            )
+            .map_err(|error| postgres_error("postgres/program-ref-generations", error))?
+            .into_iter()
+            .map(|row| pg_basis(row.get(0), "program-reference generation"))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let has_legacy: bool = client
+            .query_one(
+                "SELECT $2::bigint = 0 \
+                        OR EXISTS (SELECT 1 FROM atomic_transactions WHERE database_id = $1) \
+                        OR EXISTS (SELECT 1 FROM atomic_log_generation_retirements \
+                                    WHERE database_id = $1 AND generation = 0)",
+                &[&database_id, &sql_basis(active_generation)?],
+            )
+            .map_err(|error| postgres_error("postgres/program-ref-legacy", error))?
+            .get(0);
+        if has_legacy {
+            generations.insert(0);
+        }
+
+        for generation in generations {
+            let terminal = if generation == 0 {
+                client
+                    .query_opt(
+                        "SELECT basis_t, tx_hash FROM atomic_transactions \
+                          WHERE database_id = $1 ORDER BY basis_t DESC LIMIT 1",
+                        &[&database_id],
+                    )
+                    .map_err(|error| postgres_error("postgres/program-ref-legacy-head", error))?
+            } else {
+                client
+                    .query_opt(
+                        "SELECT basis_t, tx_hash FROM atomic_generation_transactions \
+                          WHERE database_id = $1 AND generation = $2 \
+                          ORDER BY basis_t DESC LIMIT 1",
+                        &[&database_id, &sql_basis(generation)?],
+                    )
+                    .map_err(|error| {
+                        postgres_error("postgres/program-ref-generation-head", error)
+                    })?
+            };
+            let (basis, hash) = match terminal {
+                Some(row) => (
+                    pg_basis(row.get(0), "program-reference terminal basis")?,
+                    digest(row.get(1), "program-reference terminal hash")?,
+                ),
+                None => (0, genesis_hash),
+            };
+            let recovered =
+                recover_generation_to(client, &database_id, generation, basis, hash)?;
+            let mut roots = BTreeSet::new();
+            for datom in recovered
+                .database
+                .datoms(crate::View::History, crate::IndexOrder::Eavt)
+            {
+                collect_program_hashes(&datom.value, &mut roots);
+            }
+            let reachable = authenticated_program_closure(client, roots)?;
+            let generation_sql = sql_basis(generation)?;
+            for hash in reachable {
+                client
+                    .execute(
+                        "INSERT INTO atomic_program_generation_refs \
+                             (database_id, log_generation, program_hash) \
+                         VALUES ($1, $2, $3)",
+                        &[&database_id, &generation_sql, &&hash[..]],
+                    )
+                    .map_err(|error| postgres_error("postgres/program-ref-write", error))?;
+            }
+        }
+    }
+    let updated = client
+        .execute(
+            "UPDATE atomic_program_reference_state \
+                SET complete = true, problem_code = NULL, updated_at = clock_timestamp() \
+              WHERE singleton",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/program-ref-complete", error))?;
+    if updated != 1 {
+        return Err(fault(
+            "postgres/program-ref-state",
+            "program reference completeness singleton is absent",
+        ));
+    }
+    Ok(())
+}
+
+fn authenticated_program_closure<C: GenericClient>(
+    client: &mut C,
+    roots: BTreeSet<Digest>,
+) -> Result<BTreeSet<Digest>, SemanticError> {
+    let mut pending = roots.into_iter().collect::<Vec<_>>();
+    let mut reachable = BTreeSet::new();
+    while let Some(hash) = pending.pop() {
+        if !reachable.insert(hash) {
+            continue;
+        }
+        let row = client
+            .query_opt(
+                "SELECT kind, arity, payload FROM atomic_programs WHERE program_hash = $1",
+                &[&&hash[..]],
+            )
+            .map_err(|error| postgres_error("postgres/program-ref-program", error))?
+            .ok_or_else(|| {
+                fault(
+                    "postgres/program-ref-missing-program",
+                    "temporal database information references an absent program blob",
+                )
+            })?;
+        let stored_kind: i16 = row.get(0);
+        let stored_arity: i16 = row.get(1);
+        let payload: Vec<u8> = row.get(2);
+        if sha256(&payload) != hash {
+            return Err(fault(
+                "postgres/program-ref-hash",
+                "temporal program blob does not match its content hash",
+            ));
+        }
+        let program = decode_program(&payload)?;
+        if program_kind_i16(program.kind) != stored_kind || i16::from(program.arity) != stored_arity {
+            return Err(fault(
+                "postgres/program-ref-metadata",
+                "temporal program metadata disagrees with canonical program bytes",
+            ));
+        }
+        collect_fixed_program_dependencies(&program.instructions, &mut pending);
+    }
+    Ok(reachable)
+}
+
+fn collect_fixed_program_dependencies(
+    instructions: &[crate::program::Instruction],
+    output: &mut Vec<Digest>,
+) {
+    use crate::program::{Instruction, QueryTerm};
+    for instruction in instructions {
+        match instruction {
+            Instruction::PushConstant(value) => collect_program_hashes_vec(value, output),
+            Instruction::PushEntity(crate::EntityRef::Lookup { value, .. }) => {
+                collect_program_hashes_vec(value, output)
+            }
+            Instruction::If {
+                then_branch,
+                else_branch,
+            } => {
+                collect_fixed_program_dependencies(then_branch, output);
+                collect_fixed_program_dependencies(else_branch, output);
+            }
+            Instruction::ForEach { body } => collect_fixed_program_dependencies(body, output),
+            Instruction::Query(query) => {
+                for pattern in query.patterns() {
+                    for term in [&pattern.entity, &pattern.value] {
+                        if let QueryTerm::Constant(value) = term {
+                            collect_program_hashes_vec(value, output);
+                        }
+                    }
+                }
+            }
+            Instruction::EmitCall {
+                function: CallableRef::ExactHash(hash),
+                ..
+            } => output.push(*hash),
+            _ => {}
+        }
+    }
+}
+
+fn collect_program_hashes_vec(value: &Value, output: &mut Vec<Digest>) {
+    match value {
+        Value::Function(hash) => output.push(*hash),
+        Value::Tuple(values) => {
+            for value in values.iter().flatten() {
+                collect_program_hashes_vec(value, output);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn state_commitment_backfill_required<C: GenericClient>(
@@ -491,17 +741,33 @@ fn backfill_state_commitments<C: GenericClient>(client: &mut C) -> Result<(), Se
 /// inferred node garbage; future incremental merges maintain this set by
 /// exact changed-path deltas.
 fn backfill_tree_live_sets<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
-    let manifests = client
+    let databases = client
         .query(
-            "SELECT DISTINCT ON (database_id) database_id, manifest_hash \
-               FROM atomic_tree_publications \
-              ORDER BY database_id, publication_revision DESC",
+            "SELECT DISTINCT database_id FROM atomic_tree_publications ORDER BY database_id",
             &[],
         )
         .map_err(|error| postgres_error("postgres/tree-live-publications", error))?;
-    for row in manifests {
+    for row in databases {
         let database_id: String = row.get(0);
-        let manifest_hash = digest(row.get(1), "live manifest hash")?;
+        client
+            .query_one(
+                "SELECT database_id FROM atomic_databases \
+                  WHERE database_id = $1 FOR UPDATE",
+                &[&database_id],
+            )
+            .map_err(|error| postgres_error("postgres/tree-live-database-lock", error))?;
+        let manifest_hash = digest(
+            client
+                .query_one(
+                    "SELECT manifest_hash FROM atomic_tree_publications \
+                      WHERE database_id = $1 \
+                      ORDER BY publication_revision DESC LIMIT 1",
+                    &[&database_id],
+                )
+                .map_err(|error| postgres_error("postgres/tree-live-current", error))?
+                .get(0),
+            "live manifest hash",
+        )?;
         let closure = authenticated_manifest_nodes(client, manifest_hash);
         client
             .execute(
@@ -560,17 +826,25 @@ fn authenticated_manifest_nodes<C: GenericClient>(
         .query_opt(
             "SELECT p.database_id, p.publication_revision, p.basis_t, p.tx_hash, \
                     m.state_hash, m.excision_generation, m.eidx_frontier, \
-                    m.manifest_version, m.payload, t.state_hash \
+                    m.manifest_version, m.payload, \
+                    COALESCE(legacy.state_hash, native.state_hash), \
+                    p.log_generation, m.log_generation \
                FROM atomic_tree_publications p \
                JOIN atomic_tree_manifests m \
                  ON m.database_id = p.database_id \
                 AND m.publication_revision = p.publication_revision \
                 AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
                 AND m.manifest_hash = p.manifest_hash \
-               JOIN atomic_transactions t \
-                 ON t.database_id = p.database_id AND t.basis_t = p.basis_t \
-                AND t.tx_hash = p.tx_hash \
-              WHERE p.manifest_hash = $1",
+               LEFT JOIN atomic_transactions legacy \
+                 ON p.log_generation = 0 AND legacy.database_id = p.database_id \
+                AND legacy.basis_t = p.basis_t AND legacy.tx_hash = p.tx_hash \
+               LEFT JOIN atomic_generation_transactions native \
+                 ON p.log_generation > 0 AND native.database_id = p.database_id \
+                AND native.generation = p.log_generation \
+                AND native.basis_t = p.basis_t AND native.tx_hash = p.tx_hash \
+              WHERE p.manifest_hash = $1 \
+                AND ((p.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
+                  OR (p.log_generation > 0 AND native.tx_hash IS NOT NULL))",
             &[&&manifest_hash[..]],
         )
         .map_err(|error| postgres_error("postgres/tree-closure-manifest", error))?
@@ -590,6 +864,8 @@ fn authenticated_manifest_nodes<C: GenericClient>(
     let version: i16 = row.get(7);
     let payload: Vec<u8> = row.get(8);
     let authoritative_state = digest(row.get(9), "closure authoritative state hash")?;
+    let publication_generation = pg_basis(row.get(10), "closure publication generation")?;
+    let manifest_generation = pg_basis(row.get(11), "closure manifest generation")?;
     let manifest = crate::PersistentTreeManifest::decode(&payload)?;
     if version != 4
         || sha256(&payload) != manifest_hash
@@ -600,6 +876,8 @@ fn authenticated_manifest_nodes<C: GenericClient>(
         || manifest.state_hash != state_hash
         || state_hash != authoritative_state
         || manifest.excision_generation != generation
+        || publication_generation != generation
+        || manifest_generation != generation
         || manifest.eidx_frontier != frontier
     {
         return Err(fault(
@@ -885,7 +1163,7 @@ fn grant_runtime_privileges(
                             COALESCE(c.relacl, acldefault('r', c.relowner))
                         ) a
                   WHERE n.nspname = $1
-                    AND c.relkind IN ('r', 'p')
+                    AND c.relkind IN ('r', 'p', 'v')
                     AND c.relname LIKE 'atomic\_%' ESCAPE '\'
                     AND a.grantee = 0
                  UNION ALL
@@ -895,7 +1173,7 @@ fn grant_runtime_privileges(
                    JOIN pg_attribute column_acl ON column_acl.attrelid = c.oid,
                         LATERAL aclexplode(column_acl.attacl) a
                   WHERE n.nspname = $1
-                    AND c.relkind IN ('r', 'p')
+                    AND c.relkind IN ('r', 'p', 'v')
                     AND c.relname LIKE 'atomic\_%' ESCAPE '\'
                     AND column_acl.attnum > 0
                     AND NOT column_acl.attisdropped
@@ -931,7 +1209,7 @@ fn grant_runtime_privileges(
                FROM pg_class c \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
               WHERE n.nspname = $1 \
-                AND c.relkind IN ('r', 'p') \
+                AND c.relkind IN ('r', 'p', 'v') \
                 AND c.relname LIKE 'atomic\\_%' ESCAPE '\\' \
               ORDER BY c.relname",
             &[&schema],
@@ -958,7 +1236,14 @@ fn grant_runtime_privileges(
             .batch_execute(&format!(
                 "REVOKE ALL PRIVILEGES ON TABLE {all_relations} FROM {role_ident}; \
                  REVOKE ALL ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_heartbeat_tree_build(bytea) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_finish_tree_build(bytea) FROM {role_ident}; \
                  REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_retirement(text, bigint, bytea, bigint) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_build_intent(bytea, bigint) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_garbage(bigint) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_orphans(bigint, bigint) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_program_garbage(bigint, bigint) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) FROM {role_ident}; \
                  REVOKE CREATE ON SCHEMA {schema_ident} FROM {role_ident}; \
                  GRANT CONNECT ON DATABASE {database_ident} TO {role_ident}; \
                  GRANT USAGE ON SCHEMA {schema_ident} TO {role_ident}"
@@ -980,7 +1265,11 @@ fn grant_runtime_privileges(
                                    {schema_ident}.\"atomic_heads\" TO {writer_ident}; \
              GRANT INSERT ON TABLE {} TO {writer_ident}; \
              GRANT UPDATE ON TABLE {schema_ident}.\"atomic_transactor_leases\" TO {writer_ident}; \
-             GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea) TO {writer_ident}",
+             GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea), \
+                                       {schema_ident}.atomic_heartbeat_tree_build(bytea), \
+                                       {schema_ident}.atomic_finish_tree_build(bytea), \
+                                       {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {writer_ident}; \
+             GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {peer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
             relation_list(&schema_ident, WRITER_INSERT_TABLES),
         ))
@@ -1021,7 +1310,7 @@ fn validate_runtime_role<C: GenericClient>(
                               JOIN pg_attribute column_acl ON column_acl.attrelid = c.oid, \
                                    LATERAL aclexplode(column_acl.attacl) a \
                              WHERE n.nspname = $2 \
-                               AND c.relkind IN ('r', 'p') \
+                               AND c.relkind IN ('r', 'p', 'v') \
                                AND c.relname LIKE 'atomic\\_%' ESCAPE '\\' \
                                AND column_acl.attnum > 0 \
                                AND NOT column_acl.attisdropped \
@@ -1507,6 +1796,45 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
     Ok(())
 }
 
+fn collect_program_hashes(value: &Value, output: &mut BTreeSet<Digest>) {
+    match value {
+        Value::Function(hash) => {
+            output.insert(*hash);
+        }
+        Value::Tuple(values) => {
+            for value in values.iter().flatten() {
+                collect_program_hashes(value, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn insert_program_generation_refs<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    datoms: &[Datom],
+) -> Result<(), SemanticError> {
+    let mut hashes = BTreeSet::new();
+    for datom in datoms {
+        collect_program_hashes(&datom.value, &mut hashes);
+    }
+    let hashes = authenticated_program_closure(client, hashes)?;
+    let generation = sql_basis(generation)?;
+    for hash in hashes {
+        client
+            .execute(
+                "INSERT INTO atomic_program_generation_refs \
+                     (database_id, log_generation, program_hash) \
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                &[&database_id, &generation, &&hash[..]],
+            )
+            .map_err(|error| postgres_error("postgres/program-generation-ref", error))?;
+    }
+    Ok(())
+}
+
 fn predicate_roles_in(
     database: &Database,
     names: &BTreeSet<String>,
@@ -1920,9 +2248,10 @@ impl PostgresStore {
             .map(TxOp::InstallAttribute)
             .collect();
         let database = Database::new(schema)?;
-        let encoded = encode_genesis(Database::bootstrap()?.genesis_datoms())?;
+        let bootstrap = Database::bootstrap()?;
+        let encoded = encode_genesis(bootstrap.genesis_datoms())?;
         let genesis_hash = sha256(&encoded);
-        let initial = if schema_ops.is_empty() {
+        let initial_envelope = if schema_ops.is_empty() {
             None
         } else {
             if database.basis_t() != 1 {
@@ -1944,63 +2273,145 @@ impl PostgresStore {
                     .filter(|datom| datom.tx == tx)
                     .collect(),
             };
-            let payload = encode_transaction(&envelope)?;
-            let tx_hash = transaction_hash(&payload);
             let request_hash = request_digest(&schema_ops, 0, 0)?;
             let state_hash = checkpoint_state_hash(&database)?;
-            Some((payload, tx_hash, request_hash, state_hash))
+            Some((envelope, request_hash, state_hash))
         };
+        let bootstrap_state_hash = checkpoint_state_hash(&bootstrap)?;
         let mut transaction = self
             .client
             .transaction()
             .map_err(|error| postgres_error("postgres/create-begin", error))?;
-        transaction
-            .execute(
+        let lineage_id: String = transaction
+            .query_one(
                 "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) \
-                 VALUES ($1, $2, $3)",
+                 VALUES ($1, $2, $3) RETURNING lineage_id",
                 &[&database_id, &&encoded[..], &&genesis_hash[..]],
             )
-            .map_err(|error| postgres_error("postgres/create-catalog", error))?;
+            .map_err(|error| postgres_error("postgres/create-catalog", error))?
+            .get(0);
+        let generation_i64: i64 = transaction
+            .query_one(
+                "INSERT INTO atomic_log_generations \
+                     (database_id, lineage_id, build_kind, request_count) \
+                 VALUES ($1, $2, 0, 0) RETURNING generation",
+                &[&database_id, &lineage_id],
+            )
+            .map_err(|error| postgres_error("postgres/create-generation", error))?
+            .get(0);
+        let generation = pg_basis(generation_i64, "initial log generation")?;
         transaction
             .execute(
-                "INSERT INTO atomic_heads (database_id, basis_t, tx_hash) VALUES ($1, 0, $2)",
-                &[&database_id, &&genesis_hash[..]],
+                "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) \
+                 VALUES ($1, 0, $2, $3)",
+                &[&database_id, &&genesis_hash[..], &generation_i64],
             )
             .map_err(|error| postgres_error("postgres/create-head", error))?;
+        // A build-kind-zero generation is born active; it never passed through
+        // COW staging and therefore has no retirement or source linkage.
         transaction
             .execute(
-                "INSERT INTO atomic_database_generations (database_id) VALUES ($1)",
-                &[&database_id],
+                "INSERT INTO atomic_log_generation_activations \
+                     (database_id, generation, prior_generation, prior_basis_t, \
+                      basis_t, head_hash, state_hash, manifest_hash) \
+                 VALUES ($1, $2, 0, 0, 0, $3, $4, NULL)",
+                &[
+                    &database_id,
+                    &generation_i64,
+                    &&genesis_hash[..],
+                    &&bootstrap_state_hash[..],
+                ],
             )
             .map_err(|error| postgres_error("postgres/create-generation", error))?;
-        let final_hash = if let Some((payload, tx_hash, request_hash, state_hash)) = &initial {
+        transaction
+            .execute(
+                "INSERT INTO atomic_log_generation_completions(database_id, generation) \
+                 VALUES ($1, $2)",
+                &[&database_id, &generation_i64],
+            )
+            .map_err(|error| postgres_error("postgres/create-generation-completion", error))?;
+        let final_hash = if let Some((envelope, request_hash, state_hash)) = &initial_envelope {
+            let content = LineageTransactionContent::from_transaction(
+                &lineage_id,
+                bootstrap.eidx_frontier(),
+                envelope,
+            )?;
+            let payload = content.encode()?;
+            if payload.len() > self.capacity_limits.max_transaction_bytes {
+                return Err(SemanticError::new(
+                    ErrorCategory::Busy,
+                    "postgres/transaction-byte-capacity",
+                    "initial schema transaction exceeds the configured encoded-byte limit",
+                ));
+            }
+            let content_hash = sha256(&payload);
+            let tx_hash = generation_transaction_hash(
+                &lineage_id,
+                generation,
+                1,
+                genesis_hash,
+                content_hash,
+                *state_hash,
+                envelope.eidx_frontier,
+            )?;
+            let idem_key = request_key_hash(&lineage_id, "__atomic/create-schema/v1")?;
             transaction
                 .execute(
-                    "INSERT INTO atomic_transactions \
-                     (database_id, basis_t, previous_hash, tx_hash, payload, state_hash) \
-                     VALUES ($1, 1, $2, $3, $4, $5)",
+                    "INSERT INTO atomic_transaction_contents \
+                         (content_hash, lineage_id, basis_t, \
+                          eidx_frontier, payload) \
+                     VALUES ($1, $2, 1, $3, $4)",
+                    &[
+                        &&content_hash[..],
+                        &lineage_id,
+                        &sql_basis(envelope.eidx_frontier)?,
+                        &&payload[..],
+                    ],
+                )
+                .map_err(|error| postgres_error("postgres/create-schema-content", error))?;
+            transaction
+                .execute(
+                    "INSERT INTO atomic_generation_transactions \
+                         (database_id, generation, basis_t, previous_hash, tx_hash, \
+                          content_hash, state_hash, eidx_frontier) \
+                     VALUES ($1, $2, 1, $3, $4, $5, $6, $7)",
                     &[
                         &database_id,
+                        &generation_i64,
                         &&genesis_hash[..],
                         &&tx_hash[..],
-                        &&payload[..],
+                        &&content_hash[..],
                         &&state_hash[..],
+                        &sql_basis(envelope.eidx_frontier)?,
                     ],
                 )
                 .map_err(|error| postgres_error("postgres/create-schema-transaction", error))?;
             transaction
                 .execute(
-                    "INSERT INTO atomic_requests \
-                     (database_id, request_key, request_digest, basis_t, tx_hash) \
-                     VALUES ($1, '__atomic/create-schema/v1', $2, 1, $3)",
-                    &[&database_id, &&request_hash[..], &&tx_hash[..]],
+                    "INSERT INTO atomic_generation_requests \
+                         (database_id, generation, request_key_hash, request_digest, \
+                          request_kind, basis_t, tx_hash) \
+                     VALUES ($1, $2, $3, $4, 1, 1, $5)",
+                    &[
+                        &database_id,
+                        &generation_i64,
+                        &&idem_key[..],
+                        &&request_hash[..],
+                        &&tx_hash[..],
+                    ],
                 )
                 .map_err(|error| postgres_error("postgres/create-schema-request", error))?;
             let updated = transaction
                 .execute(
                     "UPDATE atomic_heads SET basis_t = 1, tx_hash = $1 \
-                     WHERE database_id = $2 AND basis_t = 0 AND tx_hash = $3",
-                    &[&&tx_hash[..], &database_id, &&genesis_hash[..]],
+                     WHERE database_id = $2 AND log_generation = $3 \
+                       AND basis_t = 0 AND tx_hash = $4",
+                    &[
+                        &&tx_hash[..],
+                        &database_id,
+                        &generation_i64,
+                        &&genesis_hash[..],
+                    ],
                 )
                 .map_err(|error| postgres_error("postgres/create-schema-publication", error))?;
             if updated != 1 {
@@ -2009,7 +2420,7 @@ impl PostgresStore {
                     "new database head no longer identifies its exact genesis",
                 ));
             }
-            *tx_hash
+            tx_hash
         } else {
             genesis_hash
         };
@@ -2043,36 +2454,58 @@ impl PostgresStore {
         database_id: &str,
         basis_t: u64,
     ) -> Result<Database, SemanticError> {
+        let head = self
+            .client
+            .query_opt(
+                "SELECT h.log_generation, d.genesis_hash \
+                   FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
+                  WHERE h.database_id = $1",
+                &[&database_id],
+            )
+            .map_err(|error| postgres_error("postgres/recovery-catalog", error))?
+            .ok_or_else(|| not_found(database_id))?;
+        let generation = pg_basis(head.get(0), "head log generation")?;
         let hash = if basis_t == 0 {
-            let row = self
-                .client
-                .query_opt(
-                    "SELECT genesis_hash FROM atomic_databases WHERE database_id = $1",
-                    &[&database_id],
-                )
-                .map_err(|error| postgres_error("postgres/recovery-catalog", error))?
-                .ok_or_else(|| not_found(database_id))?;
-            digest(row.get::<_, Vec<u8>>(0), "genesis hash")?
+            digest(head.get::<_, Vec<u8>>(1), "genesis hash")?
         } else {
             let basis = sql_basis(basis_t)?;
-            let row = self
-                .client
-                .query_opt(
-                    "SELECT tx_hash FROM atomic_transactions \
-                     WHERE database_id = $1 AND basis_t = $2",
-                    &[&database_id, &basis],
-                )
-                .map_err(|error| postgres_error("postgres/recovery-basis-hash", error))?
-                .ok_or_else(|| {
-                    SemanticError::new(
-                        ErrorCategory::NotFound,
-                        "postgres/basis-not-found",
-                        format!("database {database_id} has no basis {basis_t}"),
+            let generation_sql = sql_basis(generation)?;
+            let row = if generation == 0 {
+                self.client
+                    .query_opt(
+                        "SELECT tx_hash FROM atomic_transactions \
+                         WHERE database_id = $1 AND basis_t = $2",
+                        &[&database_id, &basis],
                     )
-                })?;
+                    .map_err(|error| postgres_error("postgres/recovery-basis-hash", error))?
+            } else {
+                self.client
+                    .query_opt(
+                        "SELECT tx_hash FROM atomic_generation_transactions \
+                         WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
+                        &[&database_id, &generation_sql, &basis],
+                    )
+                    .map_err(|error| {
+                        postgres_error("postgres/recovery-generation-basis-hash", error)
+                    })?
+            }
+            .ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::NotFound,
+                    "postgres/basis-not-found",
+                    format!("database {database_id} has no basis {basis_t}"),
+                )
+            })?;
             digest(row.get::<_, Vec<u8>>(0), "basis transaction hash")?
         };
-        Ok(recover_to(&mut self.client, database_id, basis_t, hash)?.database)
+        Ok(recover_generation_to(
+            &mut self.client,
+            database_id,
+            generation,
+            basis_t,
+            hash,
+        )?
+        .database)
     }
 
     /// Resolve the durable decision for one admitted request without
@@ -2102,33 +2535,59 @@ impl PostgresStore {
             .read_only(true)
             .start()
             .map_err(|error| postgres_error("postgres/request-outcome-begin", error))?;
-        let row = transaction
+        let head = transaction
             .query_opt(
-                "SELECT basis_t, tx_hash FROM atomic_requests \
-                 WHERE database_id = $1 AND request_key = $2",
-                &[&database_id, &request_key],
+                "SELECT h.log_generation, d.lineage_id \
+                   FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
+                  WHERE h.database_id = $1",
+                &[&database_id],
             )
-            .map_err(|error| postgres_error("postgres/request-outcome-read", error))?;
-        let Some(row) = row else {
-            let database_exists = transaction
-                .query_opt(
-                    "SELECT 1 FROM atomic_heads WHERE database_id = $1",
-                    &[&database_id],
-                )
-                .map_err(|error| postgres_error("postgres/request-outcome-database", error))?
-                .is_some();
+            .map_err(|error| postgres_error("postgres/request-outcome-database", error))?;
+        let Some(head) = head else {
             transaction
                 .commit()
                 .map_err(|error| postgres_error("postgres/request-outcome-commit", error))?;
-            return if database_exists {
-                Ok(None)
-            } else {
-                Err(not_found(database_id))
-            };
+            return Err(not_found(database_id));
         };
+        let generation = pg_basis(head.get(0), "head log generation")?;
+        let lineage_id: String = head.get(1);
+        let generation_sql = sql_basis(generation)?;
+        let key_hash = request_key_hash(&lineage_id, request_key)?;
+        let row = if generation == 0 {
+            transaction.query_opt(
+                "SELECT basis_t, tx_hash, 1::smallint FROM atomic_requests \
+                 WHERE database_id = $1 AND request_key = $2",
+                &[&database_id, &request_key],
+            )
+        } else {
+            transaction.query_opt(
+                "SELECT basis_t, tx_hash, request_kind FROM atomic_generation_requests \
+                 WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3",
+                &[&database_id, &generation_sql, &&key_hash[..]],
+            )
+        }
+            .map_err(|error| postgres_error("postgres/request-outcome-read", error))?;
+        let Some(row) = row else {
+            transaction
+                .commit()
+                .map_err(|error| postgres_error("postgres/request-outcome-commit", error))?;
+            return Ok(None);
+        };
+        if row.get::<_, i16>(2) == 0 {
+            return Err(SemanticError::conflict(
+                "postgres/idempotency-predates-excision",
+                "request key was committed before excision, but its original receipt was deliberately erased",
+            ));
+        }
         let basis = pg_basis(row.get::<_, i64>(0), "request outcome")?;
         let hash = digest(row.get::<_, Vec<u8>>(1), "request transaction hash")?;
-        let recovered = recover_to(&mut transaction, database_id, basis, hash)?;
+        let recovered = recover_generation_to(
+            &mut transaction,
+            database_id,
+            generation,
+            basis,
+            hash,
+        )?;
         let previous_hash = recovered
             .final_transaction
             .as_ref()
@@ -2145,12 +2604,33 @@ impl PostgresStore {
                 "durable request does not identify a positive transaction",
             )
         })?;
-        let db_before =
-            recover_to(&mut transaction, database_id, previous_basis, previous_hash)?.database;
+        let db_before = recover_generation_to(
+            &mut transaction,
+            database_id,
+            generation,
+            previous_basis,
+            previous_hash,
+        )?
+        .database;
+        let receipt_tempids = if generation == 0 {
+            None
+        } else {
+            Some(load_request_tempids(
+                &mut transaction,
+                database_id,
+                generation,
+                key_hash,
+            )?)
+        };
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/request-outcome-commit", error))?;
-        Ok(Some(receipt(recovered, db_before, true)))
+        Ok(Some(receipt_with_tempids(
+            recovered,
+            db_before,
+            true,
+            receipt_tempids,
+        )))
     }
 
     /// Upload immutable native program content. This is preparation only:
@@ -2485,13 +2965,17 @@ impl PostgresStore {
         // reference or completes before this attempt validates the blob. The
         // mode remains compatible with writers for other databases.
         transaction
-            .batch_execute("LOCK TABLE atomic_transactions IN ROW EXCLUSIVE MODE")
+            .batch_execute(
+                "LOCK TABLE atomic_transactions IN ROW EXCLUSIVE MODE; \
+                 LOCK TABLE atomic_generation_transactions IN ROW EXCLUSIVE MODE",
+            )
             .map_err(|error| postgres_error("postgres/transact-log-lock", error))?;
 
         let head = transaction
             .query_opt(
-                "SELECT basis_t, tx_hash FROM atomic_heads \
-                 WHERE database_id = $1 FOR UPDATE",
+                "SELECT h.basis_t, h.tx_hash, h.log_generation, d.lineage_id \
+                   FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
+                  WHERE h.database_id = $1 FOR UPDATE OF h",
                 &[&database_id],
             )
             .map_err(|error| postgres_error("postgres/transact-lock-head", error))?
@@ -2499,15 +2983,40 @@ impl PostgresStore {
         let head_basis_i64: i64 = head.get(0);
         let head_basis = pg_basis(head_basis_i64, "head")?;
         let head_hash = digest(head.get::<_, Vec<u8>>(1), "head transaction hash")?;
+        let log_generation_i64: i64 = head.get(2);
+        let log_generation = pg_basis(log_generation_i64, "head log generation")?;
+        let lineage_id: String = head.get(3);
+        let idem_key_hash = request_key_hash(&lineage_id, request_key)?;
 
-        if let Some(row) = transaction
-            .query_opt(
-                "SELECT request_digest, basis_t, tx_hash FROM atomic_requests \
-                 WHERE database_id = $1 AND request_key = $2",
+        let existing_request = if log_generation == 0 {
+            transaction.query_opt(
+                "SELECT request_digest, basis_t, tx_hash, 1::smallint \
+                   FROM atomic_requests \
+                  WHERE database_id = $1 AND request_key = $2",
                 &[&database_id, &request_key],
             )
+        } else {
+            transaction.query_opt(
+                "SELECT request_digest, basis_t, tx_hash, request_kind \
+                   FROM atomic_generation_requests \
+                  WHERE database_id = $1 AND generation = $2 \
+                    AND request_key_hash = $3",
+                &[
+                    &database_id,
+                    &log_generation_i64,
+                    &&idem_key_hash[..],
+                ],
+            )
+        }
             .map_err(|error| postgres_error("postgres/idempotency-read", error))?
-        {
+        ;
+        if let Some(row) = existing_request {
+            if row.get::<_, i16>(3) == 0 {
+                return Err(SemanticError::conflict(
+                    "postgres/idempotency-predates-excision",
+                    "request key was committed before excision, but its original request digest and receipt were deliberately erased",
+                ));
+            }
             let stored_request = digest(row.get::<_, Vec<u8>>(0), "request digest")?;
             if stored_request != request_hash {
                 return Err(SemanticError::conflict(
@@ -2517,23 +3026,45 @@ impl PostgresStore {
             }
             let basis = pg_basis(row.get::<_, i64>(1), "request outcome")?;
             let hash = digest(row.get::<_, Vec<u8>>(2), "request transaction hash")?;
-            let recovered = recover_to(&mut transaction, database_id, basis, hash)?;
+            let recovered = recover_generation_to(
+                &mut transaction,
+                database_id,
+                log_generation,
+                basis,
+                hash,
+            )?;
             let previous_hash = recovered
                 .final_transaction
                 .as_ref()
                 .expect("durable requests always name a positive transaction")
                 .previous_hash;
-            let db_before = recover_to(
+            let db_before = recover_generation_to(
                 &mut transaction,
                 database_id,
+                log_generation,
                 basis.saturating_sub(1),
                 previous_hash,
             )?
             .database;
+            let receipt_tempids = if log_generation == 0 {
+                None
+            } else {
+                Some(load_request_tempids(
+                    &mut transaction,
+                    database_id,
+                    log_generation,
+                    idem_key_hash,
+                )?)
+            };
             transaction
                 .commit()
                 .map_err(|error| unknown_outcome(request_key, error.to_string()))?;
-            let receipt = receipt(recovered, db_before, true);
+            let receipt = receipt_with_tempids(
+                recovered,
+                db_before,
+                true,
+                receipt_tempids,
+            );
             if basis == head_basis && hash == head_hash {
                 self.current
                     .insert(database_id.to_owned(), (hash, receipt.database.clone()));
@@ -2603,7 +3134,30 @@ impl PostgresStore {
             tempids: report.tempids.clone(),
             tx_data: report.tx_data.clone(),
         };
-        let payload = encode_transaction(&envelope)?;
+        let (payload, content_hash, tx_hash) = if log_generation == 0 {
+            let payload = encode_transaction(&envelope)?;
+            let tx_hash = transaction_hash(&payload);
+            (payload, None, tx_hash)
+        } else {
+            let content = LineageTransactionContent::from_transaction(
+                &lineage_id,
+                db_before.eidx_frontier(),
+                &envelope,
+            )?;
+            let payload = content.encode()?;
+            let content_hash = sha256(&payload);
+            let state_hash = checkpoint_state_hash(&report.db_after)?;
+            let tx_hash = generation_transaction_hash(
+                &lineage_id,
+                log_generation,
+                envelope.basis_t,
+                head_hash,
+                content_hash,
+                state_hash,
+                envelope.eidx_frontier,
+            )?;
+            (payload, Some(content_hash), tx_hash)
+        };
         if payload.len() > self.capacity_limits.max_transaction_bytes {
             return Err(SemanticError::new(
                 ErrorCategory::Busy,
@@ -2611,53 +3165,153 @@ impl PostgresStore {
                 "transaction exceeds the configured encoded-byte limit",
             ));
         }
-        let tx_hash = transaction_hash(&payload);
         let state_hash = checkpoint_state_hash(&report.db_after)?;
         let next_basis = sql_basis(envelope.basis_t)?;
 
         if fault_point == CommitFault::BeforeTransactionInsert {
             return Err(injected("before transaction insert"));
         }
-        transaction
-            .execute(
-                "INSERT INTO atomic_transactions \
-                 (database_id, basis_t, previous_hash, tx_hash, payload, state_hash) \
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-                &[
-                    &database_id,
-                    &next_basis,
-                    &&head_hash[..],
-                    &&tx_hash[..],
-                    &&payload[..],
-                    &&state_hash[..],
-                ],
-            )
-            .map_err(|error| postgres_error("postgres/transaction-insert", error))?;
+        if log_generation == 0 {
+            transaction
+                .execute(
+                    "INSERT INTO atomic_transactions \
+                     (database_id, basis_t, previous_hash, tx_hash, payload, state_hash) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                    &[
+                        &database_id,
+                        &next_basis,
+                        &&head_hash[..],
+                        &&tx_hash[..],
+                        &&payload[..],
+                        &&state_hash[..],
+                    ],
+                )
+                .map_err(|error| postgres_error("postgres/transaction-insert", error))?;
+        } else {
+            let content_hash = content_hash.expect("positive generation has canonical content");
+            transaction
+                .execute(
+                    "INSERT INTO atomic_transaction_contents \
+                         (content_hash, lineage_id, basis_t, \
+                          eidx_frontier, payload) \
+                     VALUES ($1, $2, $3, $4, $5) \
+                     ON CONFLICT (content_hash) DO NOTHING",
+                    &[
+                        &&content_hash[..],
+                        &lineage_id,
+                        &next_basis,
+                        &sql_basis(envelope.eidx_frontier)?,
+                        &&payload[..],
+                    ],
+                )
+                .map_err(|error| postgres_error("postgres/transaction-content-insert", error))?;
+            let stored = transaction
+                .query_one(
+                    "SELECT lineage_id, basis_t, eidx_frontier, \
+                            envelope_version, payload \
+                       FROM atomic_transaction_contents WHERE content_hash = $1",
+                    &[&&content_hash[..]],
+                )
+                .map_err(|error| postgres_error("postgres/transaction-content-verify", error))?;
+            if stored.get::<_, String>(0) != lineage_id
+                || stored.get::<_, i64>(1) != next_basis
+                || pg_basis(stored.get(2), "stored content frontier")?
+                    != envelope.eidx_frontier
+                || stored.get::<_, i16>(3) != 1
+                || stored.get::<_, Vec<u8>>(4) != payload
+            {
+                return Err(fault(
+                    "postgres/transaction-content-collision",
+                    "content hash resolves to different transaction metadata or bytes",
+                ));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO atomic_generation_transactions \
+                         (database_id, generation, basis_t, previous_hash, tx_hash, \
+                          content_hash, state_hash, eidx_frontier) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    &[
+                        &database_id,
+                        &log_generation_i64,
+                        &next_basis,
+                        &&head_hash[..],
+                        &&tx_hash[..],
+                        &&content_hash[..],
+                        &&state_hash[..],
+                        &sql_basis(envelope.eidx_frontier)?,
+                    ],
+                )
+                .map_err(|error| postgres_error("postgres/generation-transaction-insert", error))?;
+        }
         if fault_point == CommitFault::AfterTransactionInsert {
             return Err(injected("after transaction insert"));
         }
-        transaction
-            .execute(
-                "INSERT INTO atomic_requests \
-                 (database_id, request_key, request_digest, basis_t, tx_hash) \
-                 VALUES ($1, $2, $3, $4, $5)",
-                &[
-                    &database_id,
-                    &request_key,
-                    &&request_hash[..],
-                    &next_basis,
-                    &&tx_hash[..],
-                ],
-            )
-            .map_err(|error| postgres_error("postgres/idempotency-insert", error))?;
+        if log_generation == 0 {
+            transaction
+                .execute(
+                    "INSERT INTO atomic_requests \
+                     (database_id, request_key, request_digest, basis_t, tx_hash) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &database_id,
+                        &request_key,
+                        &&request_hash[..],
+                        &next_basis,
+                        &&tx_hash[..],
+                    ],
+                )
+                .map_err(|error| postgres_error("postgres/idempotency-insert", error))?;
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO atomic_generation_requests \
+                         (database_id, generation, request_key_hash, request_digest, \
+                          request_kind, basis_t, tx_hash) \
+                     VALUES ($1, $2, $3, $4, 1, $5, $6)",
+                    &[
+                        &database_id,
+                        &log_generation_i64,
+                        &&idem_key_hash[..],
+                        &&request_hash[..],
+                        &next_basis,
+                        &&tx_hash[..],
+                    ],
+                )
+                .map_err(|error| postgres_error("postgres/generation-idempotency-insert", error))?;
+            for (name, entity) in &envelope.tempids {
+                transaction
+                    .execute(
+                        "INSERT INTO atomic_generation_request_tempids \
+                             (database_id, generation, request_key_hash, tempid_name, entity_id) \
+                         VALUES ($1, $2, $3, $4, $5)",
+                        &[
+                            &database_id,
+                            &log_generation_i64,
+                            &&idem_key_hash[..],
+                            name,
+                            &sql_basis(*entity)?,
+                        ],
+                    )
+                    .map_err(|error| postgres_error("postgres/request-tempid-insert", error))?;
+            }
+            insert_program_generation_refs(
+                &mut transaction,
+                database_id,
+                log_generation,
+                &envelope.tx_data,
+            )?;
+        }
         let updated = transaction
             .execute(
                 "UPDATE atomic_heads SET basis_t = $1, tx_hash = $2 \
-                 WHERE database_id = $3 AND basis_t = $4 AND tx_hash = $5",
+                 WHERE database_id = $3 AND log_generation = $4 \
+                   AND basis_t = $5 AND tx_hash = $6",
                 &[
                     &next_basis,
                     &&tx_hash[..],
                     &database_id,
+                    &log_generation_i64,
                     &head_basis_i64,
                     &&head_hash[..],
                 ],
@@ -2706,6 +3360,176 @@ pub(crate) struct Recovered {
     pub(crate) database: Database,
     pub(crate) final_transaction: Option<DurableTransaction>,
     pub(crate) final_hash: Digest,
+    pub(crate) log_generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AuthenticatedLogTransaction {
+    pub(crate) transaction: DurableTransaction,
+    pub(crate) tx_hash: Digest,
+    pub(crate) state_hash: Digest,
+    /// Only COW tombstones may require replay with a removed predecessor
+    /// assertion. Ordinary commits remain strict even in a positive generation.
+    pub(crate) excision_replay: bool,
+}
+
+/// Authenticate one contiguous range in an explicitly named log generation.
+/// This is the shared reader for peer, indexer, recovery, backup, and
+/// operations paths; consumers should not reinterpret ATLC as a legacy ATMC
+/// envelope or reproduce membership hashing locally.
+pub(crate) fn read_authenticated_log_range<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    after_basis: u64,
+    through_basis: u64,
+    predecessor_hash: Digest,
+) -> Result<Vec<AuthenticatedLogTransaction>, SemanticError> {
+    if through_basis < after_basis {
+        return Err(fault(
+            "recovery/range-order",
+            "transaction range ends before its starting basis",
+        ));
+    }
+    let lineage_id: String = client
+        .query_opt(
+            "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
+            &[&database_id],
+        )
+        .map_err(|error| postgres_error("postgres/log-range-catalog", error))?
+        .ok_or_else(|| not_found(database_id))?
+        .get(0);
+    let after = sql_basis(after_basis)?;
+    let through = sql_basis(through_basis)?;
+    let generation_sql = sql_basis(generation)?;
+    let rows = if generation == 0 {
+        client
+            .query(
+                "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.payload, \
+                        t.state_hash, NULL::bytea, NULL::bigint, NULL::text, \
+                        1::smallint \
+                   FROM atomic_transactions t \
+                   JOIN atomic_requests r \
+                     ON r.database_id = t.database_id AND r.basis_t = t.basis_t \
+                    AND r.tx_hash = t.tx_hash \
+                  WHERE t.database_id = $1 AND t.basis_t > $2 AND t.basis_t <= $3 \
+                  ORDER BY t.basis_t",
+                &[&database_id, &after, &through],
+            )
+            .map_err(|error| postgres_error("postgres/log-range-legacy", error))?
+    } else {
+        client
+            .query(
+                "SELECT t.basis_t, t.previous_hash, t.tx_hash, c.payload, \
+                        t.state_hash, t.content_hash, t.eidx_frontier, c.lineage_id, \
+                        r.request_kind \
+                   FROM atomic_generation_transactions t \
+                   JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
+                   JOIN atomic_generation_requests r \
+                     ON r.database_id = t.database_id AND r.generation = t.generation \
+                    AND r.basis_t = t.basis_t AND r.tx_hash = t.tx_hash \
+                  WHERE t.database_id = $1 AND t.generation = $2 \
+                    AND t.basis_t > $3 AND t.basis_t <= $4 ORDER BY t.basis_t",
+                &[&database_id, &generation_sql, &after, &through],
+            )
+            .map_err(|error| postgres_error("postgres/log-range-generation", error))?
+    };
+    if rows.len() != usize::try_from(through_basis - after_basis).unwrap_or(usize::MAX) {
+        return Err(fault(
+            "recovery/missing-transaction",
+            "transaction range is incomplete or lacks its exact request record",
+        ));
+    }
+    let mut expected_basis = after_basis;
+    let mut expected_previous = predecessor_hash;
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        expected_basis = expected_basis
+            .checked_add(1)
+            .ok_or_else(|| fault("recovery/basis-overflow", "transaction basis overflow"))?;
+        let basis = pg_basis(row.get(0), "transaction range basis")?;
+        let stored_previous = digest(row.get(1), "transaction range predecessor")?;
+        let tx_hash = digest(row.get(2), "transaction range hash")?;
+        let payload: Vec<u8> = row.get(3);
+        let state_hash = digest(row.get(4), "transaction range state hash")?;
+        let request_kind: i16 = row.get(8);
+        if basis != expected_basis || stored_previous != expected_previous {
+            return Err(fault(
+                "recovery/invalid-log-link",
+                "transaction range is noncontiguous or has a predecessor mismatch",
+            ));
+        }
+        let transaction = if generation == 0 {
+            if transaction_hash(&payload) != tx_hash {
+                return Err(fault(
+                    "recovery/transaction-checksum-mismatch",
+                    "legacy transaction payload does not match its hash",
+                ));
+            }
+            let transaction = decode_transaction(&payload)?;
+            if transaction.database_id != database_id
+                || transaction.basis_t != basis
+                || transaction.previous_hash != stored_previous
+            {
+                return Err(fault(
+                    "recovery/envelope-mismatch",
+                    "legacy transaction envelope disagrees with its row",
+                ));
+            }
+            transaction
+        } else {
+            let content_hash = digest(row.get(5), "transaction content hash")?;
+            let frontier = pg_basis(row.get(6), "transaction content frontier")?;
+            let content_lineage: String = row.get(7);
+            if sha256(&payload) != content_hash {
+                return Err(fault(
+                    "recovery/content-checksum-mismatch",
+                    "lineage transaction content does not match its hash",
+                ));
+            }
+            let content = LineageTransactionContent::decode(&payload)?;
+            if content_lineage != lineage_id
+                || content.lineage_id != lineage_id
+                || content.basis_t != basis
+                || content.eidx_frontier != frontier
+            {
+                return Err(fault(
+                    "recovery/content-coordinate-mismatch",
+                    "lineage transaction content disagrees with its membership row",
+                ));
+            }
+            if generation_transaction_hash(
+                &lineage_id,
+                generation,
+                basis,
+                stored_previous,
+                content_hash,
+                state_hash,
+                frontier,
+            )? != tx_hash
+            {
+                return Err(fault(
+                    "recovery/generation-membership-mismatch",
+                    "lineage transaction membership commitment is invalid",
+                ));
+            }
+            content.to_transaction(stored_previous)
+        };
+        if !matches!(request_kind, 0 | 1) || (generation == 0 && request_kind != 1) {
+            return Err(fault(
+                "recovery/request-kind",
+                "transaction request record has an invalid kind",
+            ));
+        }
+        output.push(AuthenticatedLogTransaction {
+            transaction,
+            tx_hash,
+            state_hash,
+            excision_replay: request_kind == 0,
+        });
+        expected_previous = tx_hash;
+    }
+    Ok(output)
 }
 
 pub(crate) fn recover_to<C: GenericClient>(
@@ -2714,16 +3538,39 @@ pub(crate) fn recover_to<C: GenericClient>(
     target_basis: u64,
     target_hash: Digest,
 ) -> Result<Recovered, SemanticError> {
+    let generation = client
+        .query_opt(
+            "SELECT log_generation FROM atomic_heads WHERE database_id = $1",
+            &[&database_id],
+        )
+        .map_err(|error| postgres_error("postgres/recovery-generation", error))?
+        .ok_or_else(|| not_found(database_id))?;
+    let generation = pg_basis(generation.get(0), "head log generation")?;
+    recover_generation_to(client, database_id, generation, target_basis, target_hash)
+}
+
+/// Replay one explicitly named immutable log generation. Ordinary callers use
+/// `recover_to`, which resolves the currently active generation once. COW and
+/// same-lineage restore code use this form so an inactive candidate can be
+/// authenticated without confusing it with the published head.
+pub(crate) fn recover_generation_to<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    target_basis: u64,
+    target_hash: Digest,
+) -> Result<Recovered, SemanticError> {
     let catalog = client
         .query_opt(
-            "SELECT genesis, genesis_hash FROM atomic_databases \
+            "SELECT lineage_id, genesis, genesis_hash FROM atomic_databases \
              WHERE database_id = $1",
             &[&database_id],
         )
         .map_err(|error| postgres_error("postgres/recovery-catalog", error))?
         .ok_or_else(|| not_found(database_id))?;
-    let genesis: Vec<u8> = catalog.get(0);
-    let genesis_hash = digest(catalog.get::<_, Vec<u8>>(1), "genesis hash")?;
+    let lineage_id: String = catalog.get(0);
+    let genesis: Vec<u8> = catalog.get(1);
+    let genesis_hash = digest(catalog.get::<_, Vec<u8>>(2), "genesis hash")?;
     if sha256(&genesis) != genesis_hash {
         return Err(fault(
             "recovery/genesis-checksum-mismatch",
@@ -2732,14 +3579,41 @@ pub(crate) fn recover_to<C: GenericClient>(
     }
     let mut database = Database::from_genesis(decode_genesis(&genesis)?)?;
     let target_basis_sql = sql_basis(target_basis)?;
-    let rows = client
-        .query(
-            "SELECT basis_t, previous_hash, tx_hash, payload, state_hash \
-             FROM atomic_transactions \
-             WHERE database_id = $1 AND basis_t <= $2 ORDER BY basis_t",
-            &[&database_id, &target_basis_sql],
-        )
-        .map_err(|error| postgres_error("postgres/recovery-log", error))?;
+    let generation_sql = sql_basis(generation)?;
+    let rows = if generation == 0 {
+        client
+            .query(
+                "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.payload, \
+                        t.state_hash, NULL::bytea, NULL::bigint, NULL::text, \
+                        1::smallint \
+                   FROM atomic_transactions t \
+                   JOIN atomic_requests r \
+                     ON r.database_id = t.database_id AND r.basis_t = t.basis_t \
+                    AND r.tx_hash = t.tx_hash \
+                  WHERE t.database_id = $1 AND t.basis_t <= $2 \
+                  ORDER BY t.basis_t",
+                &[&database_id, &target_basis_sql],
+            )
+            .map_err(|error| postgres_error("postgres/recovery-log", error))?
+    } else {
+        client
+            .query(
+                "SELECT t.basis_t, t.previous_hash, t.tx_hash, c.payload, \
+                        t.state_hash, t.content_hash, t.eidx_frontier, c.lineage_id, \
+                        r.request_kind \
+                   FROM atomic_generation_transactions t \
+                   JOIN atomic_transaction_contents c \
+                     ON c.content_hash = t.content_hash \
+                   JOIN atomic_generation_requests r \
+                     ON r.database_id = t.database_id \
+                    AND r.generation = t.generation AND r.basis_t = t.basis_t \
+                    AND r.tx_hash = t.tx_hash \
+                  WHERE t.database_id = $1 AND t.generation = $2 \
+                    AND t.basis_t <= $3 ORDER BY t.basis_t",
+                &[&database_id, &generation_sql, &target_basis_sql],
+            )
+            .map_err(|error| postgres_error("postgres/recovery-generation-log", error))?
+    };
     if rows.len() != usize::try_from(target_basis).unwrap_or(usize::MAX) {
         return Err(fault(
             "recovery/missing-transaction",
@@ -2769,23 +3643,73 @@ pub(crate) fn recover_to<C: GenericClient>(
                 format!("transaction {basis} does not link to its predecessor"),
             ));
         }
-        if transaction_hash(&payload) != stored_hash {
+        let envelope = if generation == 0 {
+            if transaction_hash(&payload) != stored_hash {
+                return Err(fault(
+                    "recovery/transaction-checksum-mismatch",
+                    format!("transaction {basis} row does not match its digest"),
+                ));
+            }
+            let envelope = decode_transaction(&payload)?;
+            if envelope.database_id != database_id
+                || envelope.basis_t != basis
+                || envelope.previous_hash != previous_hash
+            {
+                return Err(fault(
+                    "recovery/envelope-mismatch",
+                    format!("transaction {basis} envelope disagrees with its row"),
+                ));
+            }
+            envelope
+        } else {
+            let content_hash = digest(row.get::<_, Vec<u8>>(5), "content hash")?;
+            let frontier = pg_basis(row.get::<_, i64>(6), "transaction frontier")?;
+            let stored_lineage: String = row.get(7);
+            if sha256(&payload) != content_hash {
+                return Err(fault(
+                    "recovery/content-checksum-mismatch",
+                    format!("transaction {basis} content does not match its digest"),
+                ));
+            }
+            let content = LineageTransactionContent::decode(&payload)?;
+            if stored_lineage != lineage_id
+                || content.lineage_id != lineage_id
+                || content.basis_t != basis
+                || content.eidx_frontier != frontier
+            {
+                return Err(fault(
+                    "recovery/content-coordinate-mismatch",
+                    format!("transaction {basis} content disagrees with its generation row"),
+                ));
+            }
+            let expected_hash = generation_transaction_hash(
+                &lineage_id,
+                generation,
+                basis,
+                previous_hash,
+                content_hash,
+                stored_state_hash,
+                frontier,
+            )?;
+            if expected_hash != stored_hash {
+                return Err(fault(
+                    "recovery/generation-membership-mismatch",
+                    format!("transaction {basis} membership commitment is invalid"),
+                ));
+            }
+            content.to_transaction(previous_hash)
+        };
+        let request_kind: i16 = row.get(8);
+        database = if generation == 0 || request_kind == 1 {
+            database.apply_committed(&envelope)?
+        } else if request_kind == 0 {
+            database.apply_excised_committed(&envelope)?
+        } else {
             return Err(fault(
-                "recovery/transaction-checksum-mismatch",
-                format!("transaction {basis} row does not match its digest"),
+                "recovery/request-kind",
+                format!("transaction {basis} has an invalid request kind"),
             ));
-        }
-        let envelope = decode_transaction(&payload)?;
-        if envelope.database_id != database_id
-            || envelope.basis_t != basis
-            || envelope.previous_hash != previous_hash
-        {
-            return Err(fault(
-                "recovery/envelope-mismatch",
-                format!("transaction {basis} envelope disagrees with its row"),
-            ));
-        }
-        database = database.apply_committed(&envelope)?;
+        };
         target_state_hash = stored_state_hash;
         previous_hash = stored_hash;
         final_transaction = Some(envelope);
@@ -2815,10 +3739,40 @@ pub(crate) fn recover_to<C: GenericClient>(
         database,
         final_transaction,
         final_hash: previous_hash,
+        log_generation: generation,
     })
 }
 
-fn receipt(recovered: Recovered, db_before: Database, replayed: bool) -> CommitReceipt {
+fn load_request_tempids<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    request_key_hash: Digest,
+) -> Result<BTreeMap<String, u64>, SemanticError> {
+    let generation = sql_basis(generation)?;
+    client
+        .query(
+            "SELECT tempid_name, entity_id FROM atomic_generation_request_tempids \
+             WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3 \
+             ORDER BY tempid_name",
+            &[&database_id, &generation, &&request_key_hash[..]],
+        )
+        .map_err(|error| postgres_error("postgres/request-tempids-read", error))?
+        .into_iter()
+        .map(|row| {
+            let name: String = row.get(0);
+            let entity = pg_basis(row.get(1), "request tempid entity")?;
+            Ok((name, entity))
+        })
+        .collect()
+}
+
+fn receipt_with_tempids(
+    recovered: Recovered,
+    db_before: Database,
+    replayed: bool,
+    tempids: Option<BTreeMap<String, u64>>,
+) -> CommitReceipt {
     let basis_t = recovered.database.basis_t();
     let transaction = recovered
         .final_transaction
@@ -2828,10 +3782,14 @@ fn receipt(recovered: Recovered, db_before: Database, replayed: bool) -> CommitR
         database: recovered.database,
         basis_t,
         tx_hash: recovered.final_hash,
-        tempids: transaction.tempids,
+        tempids: tempids.unwrap_or(transaction.tempids),
         tx_data: transaction.tx_data,
         replayed,
     }
+}
+
+fn receipt(recovered: Recovered, db_before: Database, replayed: bool) -> CommitReceipt {
+    receipt_with_tempids(recovered, db_before, replayed, None)
 }
 
 fn postgres_now_millis<C: GenericClient>(client: &mut C) -> Result<i64, SemanticError> {
@@ -3021,14 +3979,15 @@ fn unknown_outcome(request_key: &str, message: impl Into<String>) -> SemanticErr
 }
 
 pub(crate) fn postgres_error(code: &'static str, error: postgres::Error) -> SemanticError {
-    let database_error = error.as_db_error().map(|error| error.code().code());
+    let database_error = error.as_db_error();
+    let sqlstate = database_error.map(|error| error.code().code());
     // PostgreSQL can report restart/failover as a server SQLSTATE before the
     // socket disappears. Those are transport availability, not corrupt SQL.
-    let transport = database_error.is_none()
-        || database_error.is_some_and(|state| {
+    let transport = sqlstate.is_none()
+        || sqlstate.is_some_and(|state| {
             state.starts_with("08") || matches!(state, "57P01" | "57P02" | "57P03")
         });
-    let category = match database_error {
+    let category = match sqlstate {
         Some("23505" | "40001" | "40P01") => ErrorCategory::Conflict,
         Some("42501") => ErrorCategory::Forbidden,
         Some(state) if state.starts_with("08") || matches!(state, "57P01" | "57P02" | "57P03") => {
@@ -3037,11 +3996,75 @@ pub(crate) fn postgres_error(code: &'static str, error: postgres::Error) -> Sema
         Some(_) => ErrorCategory::Fault,
         None => ErrorCategory::Unavailable,
     };
-    let semantic = SemanticError::new(category, code, error.to_string());
-    if transport {
-        semantic.detail("postgres_transport", "true")
-    } else {
+    let mut semantic = if let Some(database_error) = database_error {
+        let mut semantic = SemanticError::new(
+            category,
+            code,
+            sanitize_postgres_message(database_error.message()),
+        )
+        .detail("postgres_sqlstate", database_error.code().code());
+        for (name, value) in [
+            ("postgres_constraint", database_error.constraint()),
+            ("postgres_schema", database_error.schema()),
+            ("postgres_table", database_error.table()),
+            ("postgres_column", database_error.column()),
+            ("postgres_routine", database_error.routine()),
+        ] {
+            if let Some(value) = value {
+                semantic = semantic.detail(name, sanitize_postgres_identifier(value));
+            }
+        }
         semantic
+    } else {
+        // Driver/transport Display strings can contain connection locators.
+        // The stable operation code and transport marker retain actionable
+        // structure without echoing credentials or DSNs.
+        SemanticError::new(category, code, "PostgreSQL transport error")
+    };
+    if transport {
+        semantic = semantic.detail("postgres_transport", "true");
+    }
+    semantic
+}
+
+fn sanitize_postgres_identifier(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect()
+}
+
+fn sanitize_postgres_message(value: &str) -> String {
+    let mut output = String::with_capacity(value.len().min(512));
+    let mut quoted = None;
+    for character in value.chars() {
+        if output.len() >= 512 {
+            break;
+        }
+        if let Some(delimiter) = quoted {
+            if character == delimiter {
+                quoted = None;
+                output.push_str("<redacted>");
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quoted = Some(character);
+        } else if character.is_control() {
+            output.push(' ');
+        } else {
+            output.push(character);
+        }
+    }
+    if quoted.is_some() {
+        output.push_str("<redacted>");
+    }
+    let output = output.trim();
+    if output.is_empty() {
+        "PostgreSQL server error".to_owned()
+    } else {
+        output.to_owned()
     }
 }
 
@@ -3103,5 +4126,17 @@ mod migration_compatibility_tests {
             quote_identifier("").unwrap_err().code,
             "postgres/invalid-role-name"
         );
+    }
+
+    #[test]
+    fn postgres_diagnostics_redact_quoted_values_and_control_text() {
+        assert_eq!(
+            sanitize_postgres_message(
+                "duplicate key value violates unique constraint \"secret@example.com\"\n"
+            ),
+            "duplicate key value violates unique constraint <redacted>"
+        );
+        assert_eq!(sanitize_postgres_identifier("safe\nname"), "safename");
+        assert_eq!(sanitize_postgres_message("\"unterminated"), "<redacted>");
     }
 }

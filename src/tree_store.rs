@@ -6,10 +6,7 @@
 //! does not define a storage trait; PostgreSQL is the only durable boundary.
 
 use crate::postgres::{postgres_error, verify_schema_compatibility};
-use crate::{
-    Digest, ErrorCategory, IndexOrder, PersistentTreeManifest, PostgresConnectionConfig,
-    SemanticError, sha256,
-};
+use crate::{Digest, ErrorCategory, IndexOrder, PostgresConnectionConfig, SemanticError, sha256};
 use postgres::Client;
 use std::collections::BTreeSet;
 
@@ -105,6 +102,7 @@ pub struct PostgresTreeStore {
     client: Client,
     connection: PostgresConnectionConfig,
     stats: TreeStoreStats,
+    active_build_intent: Option<Digest>,
 }
 
 impl PostgresTreeStore {
@@ -121,6 +119,7 @@ impl PostgresTreeStore {
             client,
             connection: connection.clone(),
             stats: TreeStoreStats::default(),
+            active_build_intent: None,
         })
     }
 
@@ -143,6 +142,124 @@ impl PostgresTreeStore {
         let mut client = self.connection.connect_for("tree/reconnect")?;
         verify_schema_compatibility(&mut client)?;
         self.client = client;
+        self.active_build_intent = None;
+        Ok(())
+    }
+
+    /// Record the exact content-first upload set before uploading any value
+    /// and pin the intent to this PostgreSQL session. A crash releases the pin
+    /// while retaining the durable heartbeat/ledger for age-gated GC.
+    pub fn begin_build_intent(
+        &mut self,
+        database_id: &str,
+        expected_revision: u64,
+        manifest_hash: Digest,
+        node_hashes: &BTreeSet<Digest>,
+    ) -> Result<(), SemanticError> {
+        if self.active_build_intent.is_some() {
+            return Err(SemanticError::conflict(
+                "tree/build-intent-already-active",
+                "one tree-store session can pin only one content-first build at a time",
+            ));
+        }
+        let lock_key = tree_build_advisory_key(&manifest_hash);
+        self.client
+            .query_one("SELECT pg_advisory_lock_shared($1)", &[&lock_key])
+            .map_err(|error| postgres_error("tree/build-intent-pin", error))?;
+        let result = (|| {
+            let expected_revision = sql_u64(expected_revision, "expected publication revision")?;
+            let mut transaction = self
+                .client
+                .transaction()
+                .map_err(|error| postgres_error("tree/build-intent-begin", error))?;
+            transaction
+                .execute(
+                    "INSERT INTO atomic_tree_build_intents \
+                           (manifest_hash, database_id, expected_revision) \
+                     VALUES ($1, $2, $3) ON CONFLICT (manifest_hash) DO NOTHING",
+                    &[&&manifest_hash[..], &database_id, &expected_revision],
+                )
+                .map_err(|error| postgres_error("tree/build-intent-insert", error))?;
+            let row = transaction
+                .query_one(
+                    "SELECT database_id, expected_revision \
+                       FROM atomic_tree_build_intents WHERE manifest_hash = $1",
+                    &[&&manifest_hash[..]],
+                )
+                .map_err(|error| postgres_error("tree/build-intent-verify", error))?;
+            if row.get::<_, String>(0) != database_id || row.get::<_, i64>(1) != expected_revision {
+                return Err(fault(
+                    "tree/build-intent-conflict",
+                    "manifest hash is already bound to a different build intent",
+                ));
+            }
+            let hashes = node_hashes.iter().collect::<Vec<_>>();
+            for chunk in hashes.chunks(DELTA_INSERT_BATCH) {
+                let batch = chunk.iter().map(|hash| hash.to_vec()).collect::<Vec<_>>();
+                transaction
+                    .execute(
+                        "INSERT INTO atomic_tree_build_intent_nodes \
+                               (manifest_hash, node_hash) \
+                         SELECT $1, node_hash FROM unnest($2::bytea[]) AS node_hash \
+                         ON CONFLICT DO NOTHING",
+                        &[&&manifest_hash[..], &batch],
+                    )
+                    .map_err(|error| postgres_error("tree/build-intent-node-insert", error))?;
+            }
+            let stored_count: i64 = transaction
+                .query_one(
+                    "SELECT count(*) FROM atomic_tree_build_intent_nodes \
+                      WHERE manifest_hash = $1",
+                    &[&&manifest_hash[..]],
+                )
+                .map_err(|error| postgres_error("tree/build-intent-node-verify", error))?
+                .get(0);
+            if usize::try_from(stored_count).ok() != Some(node_hashes.len()) {
+                return Err(fault(
+                    "tree/build-intent-node-conflict",
+                    "manifest build intent is bound to a different upload set",
+                ));
+            }
+            transaction
+                .query_one(
+                    "SELECT atomic_heartbeat_tree_build($1)",
+                    &[&&manifest_hash[..]],
+                )
+                .map_err(|error| postgres_error("tree/build-intent-heartbeat", error))?;
+            transaction
+                .commit()
+                .map_err(|error| postgres_error("tree/build-intent-commit", error))
+        })();
+        if let Err(error) = result {
+            let _ = self
+                .client
+                .query_one("SELECT pg_advisory_unlock_shared($1)", &[&lock_key]);
+            return Err(error);
+        }
+        self.active_build_intent = Some(manifest_hash);
+        Ok(())
+    }
+
+    /// Release the session liveness pin. The durable intent remains after a
+    /// failed build and is consumed atomically by a successful root publish.
+    pub fn release_build_intent(&mut self) -> Result<(), SemanticError> {
+        let Some(manifest_hash) = self.active_build_intent.take() else {
+            return Ok(());
+        };
+        let unlocked: bool = self
+            .client
+            .query_one(
+                "SELECT pg_advisory_unlock_shared($1)",
+                &[&tree_build_advisory_key(&manifest_hash)],
+            )
+            .map_err(|error| postgres_error("tree/build-intent-unpin", error))?
+            .get(0);
+        if !unlocked {
+            return Err(fault(
+                "tree/build-intent-pin-lost",
+                "tree build session no longer holds its liveness pin",
+            ));
+        }
         Ok(())
     }
 
@@ -241,6 +358,22 @@ impl PostgresTreeStore {
         self.stats.manifest_write_attempts = self.stats.manifest_write_attempts.saturating_add(1);
         validate_manifest(manifest)?;
         validate_publication_delta(manifest, expected_revision, delta)?;
+        if !matches!(delta, TreePublicationDelta::Unknown)
+            && self.active_build_intent != Some(manifest.manifest_hash)
+        {
+            return Err(SemanticError::incorrect(
+                "tree/missing-build-intent",
+                "complete tree publication requires a pinned pre-upload build intent",
+            ));
+        }
+        if self.active_build_intent == Some(manifest.manifest_hash) {
+            self.client
+                .query_one(
+                    "SELECT atomic_heartbeat_tree_build($1)",
+                    &[&&manifest.manifest_hash[..]],
+                )
+                .map_err(|error| postgres_error("tree/build-intent-heartbeat", error))?;
+        }
         let required_revision = expected_revision.checked_add(1).ok_or_else(|| {
             SemanticError::new(
                 ErrorCategory::Unsupported,
@@ -322,6 +455,14 @@ impl PostgresTreeStore {
                 verify_root_row(&mut transaction, manifest.manifest_hash, root)?;
             }
             verify_published_delta(&mut transaction, manifest, delta)?;
+            if self.active_build_intent == Some(manifest.manifest_hash) {
+                transaction
+                    .query_one(
+                        "SELECT atomic_finish_tree_build($1)",
+                        &[&&manifest.manifest_hash[..]],
+                    )
+                    .map_err(|error| postgres_error("tree/build-intent-finish", error))?;
+            }
             transaction
                 .commit()
                 .map_err(|error| postgres_error("tree/publication-retry-commit", error))?;
@@ -590,6 +731,13 @@ impl PostgresTreeStore {
             .saturating_add(manifest.payload.len() as u64);
         Ok(Some(manifest))
     }
+}
+
+/// Separate advisory namespace for active content-first build intents.
+pub(crate) fn tree_build_advisory_key(manifest_hash: &Digest) -> i64 {
+    let mut key = [0_u8; 8];
+    key.copy_from_slice(&manifest_hash[..8]);
+    i64::from_be_bytes(key) ^ 0x4154_4249_0000_0000_i64
 }
 
 fn validate_publication_delta(

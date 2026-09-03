@@ -143,6 +143,14 @@ fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, 
     assert_eq!(copied, 8);
     transaction
         .execute(
+            "INSERT INTO atomic_tree_delta_headers \
+                   (manifest_hash, predecessor_manifest_hash, delta_mode) \
+             VALUES ($1, $2, 0)",
+            &[&&poison_hash[..], &source_manifest_hash],
+        )
+        .unwrap();
+    transaction
+        .execute(
             "INSERT INTO atomic_tree_publications \
                (database_id, publication_revision, basis_t, tx_hash, manifest_hash) \
              VALUES ($1, $2, $3, $4, $5)",
@@ -538,6 +546,14 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
         )
         .unwrap();
     assert_eq!(copied, 8);
+    poison
+        .execute(
+            "INSERT INTO atomic_tree_delta_headers \
+                   (manifest_hash, predecessor_manifest_hash, delta_mode) \
+             VALUES ($1, $2, 0)",
+            &[&&poison_hash[..], &source_manifest_hash],
+        )
+        .unwrap();
     poison
         .execute(
             "INSERT INTO atomic_tree_publications \

@@ -1,7 +1,7 @@
 use atomic_core::{
     Attribute, Cardinality, EntityRef, ErrorCategory, ExcisionSpec, ExcisionTarget, Keyword,
-    MIN_GARBAGE_COLLECTION_AGE, PortableBackup, PostgresIndexer, PostgresMigrator,
-    PostgresOperator, PostgresStore, Schema, TxOp, TxValue, USER_PARTITION, Value, ValueType,
+    PortableBackup, PostgresIndexer, PostgresMigrator, PostgresOperator, PostgresStore,
+    RECOMMENDED_GARBAGE_COLLECTION_AGE, Schema, TxOp, TxValue, USER_PARTITION, Value, ValueType,
     make_eid, sha256,
 };
 use postgres::{Client, NoTls};
@@ -260,7 +260,7 @@ fn corrupt_tree_in_a_is_scoped_and_makes_shared_reclamation_conservative() {
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     let report_b = operator.inspect_database(&database_b, true);
     let report_a = operator.inspect_database(&database_a, true);
-    let garbage = operator.garbage_inventory(MIN_GARBAGE_COLLECTION_AGE);
+    let garbage = operator.garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE);
     let excision = operator.excise_database(
         &database_b,
         &ExcisionSpec {
