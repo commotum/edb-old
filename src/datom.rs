@@ -1,5 +1,6 @@
 use crate::Value;
 use std::cmp::Ordering;
+use std::mem::size_of;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Datom {
@@ -19,26 +20,33 @@ pub enum IndexOrder {
 }
 
 impl Datom {
+    /// Deterministic account of the inline datom plus recursively owned value
+    /// storage. It intentionally excludes allocator headers and shared index
+    /// locators, which callers add according to their representation.
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        (size_of::<Self>() as u64).saturating_add(self.value.retained_heap_bytes())
+    }
+
     pub fn cmp_in(&self, other: &Self, index: IndexOrder) -> Ordering {
         let ordering = match index {
             IndexOrder::Eavt => self
                 .entity
                 .cmp(&other.entity)
                 .then(self.attribute.cmp(&other.attribute))
-                .then_with(|| self.value.index_cmp(&other.value)),
+                .then_with(|| self.value.stored_cmp(&other.value)),
             IndexOrder::Aevt => self
                 .attribute
                 .cmp(&other.attribute)
                 .then(self.entity.cmp(&other.entity))
-                .then_with(|| self.value.index_cmp(&other.value)),
+                .then_with(|| self.value.stored_cmp(&other.value)),
             IndexOrder::Avet => self
                 .attribute
                 .cmp(&other.attribute)
-                .then_with(|| self.value.index_cmp(&other.value))
+                .then_with(|| self.value.stored_cmp(&other.value))
                 .then(self.entity.cmp(&other.entity)),
             IndexOrder::Vaet => self
                 .value
-                .index_cmp(&other.value)
+                .stored_cmp(&other.value)
                 .then(self.attribute.cmp(&other.attribute))
                 .then(self.entity.cmp(&other.entity)),
         };
@@ -51,6 +59,7 @@ impl Datom {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::t_to_tx;
 
     #[test]
     fn transaction_sorts_descending_and_assertion_first() {
@@ -58,11 +67,11 @@ mod tests {
             entity: 1,
             attribute: 2,
             value: Value::Long(3),
-            tx: 4,
+            tx: t_to_tx(4).unwrap(),
             added: true,
         };
         let mut newer = older.clone();
-        newer.tx = 5;
+        newer.tx = t_to_tx(5).unwrap();
         assert_eq!(newer.cmp_in(&older, IndexOrder::Eavt), Ordering::Less);
 
         let mut retraction = newer.clone();

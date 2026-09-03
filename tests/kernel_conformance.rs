@@ -1,15 +1,18 @@
 use atomic_core::{
     Attribute, AttributeRef, Cardinality, Database, EntityMap, EntityRef, ErrorCategory,
-    IndexOrder, IndexPrefix, Keyword, MapValue, Schema, SchemaChange, TxCall, TxForm, TxFunctions,
-    TxOp, TxValue, Unique, Value, ValueType, View,
+    IndexOrder, IndexPrefix, Keyword, MapValue, Schema, TxCall, TxForm, TxFunctions, TxOp, TxValue,
+    Unique, Value, ValueType, View,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-const TX_INSTANT: u32 = 1;
-const EMAIL: u32 = 10;
-const NAME: u32 = 11;
-const ALIAS: u32 = 12;
-const LINK: u32 = 13;
-const BALANCE: u32 = 14;
+const DB_TX_INSTANT: u32 = 50;
+const EMAIL: u32 = 1_000;
+const NAME: u32 = 1_001;
+const ALIAS: u32 = 1_002;
+const LINK: u32 = 1_003;
+const BALANCE: u32 = 1_004;
+const AGE: u32 = 1_005;
 
 fn attr(
     id: u32,
@@ -23,15 +26,6 @@ fn attr(
 
 fn database() -> Database {
     let mut schema = Schema::new();
-    schema
-        .install(attr(
-            TX_INSTANT,
-            "db",
-            "txInstant",
-            ValueType::Instant,
-            Cardinality::One,
-        ))
-        .unwrap();
     schema
         .install(
             attr(
@@ -117,15 +111,29 @@ fn immutable_indexes_have_documented_membership_and_prefix_access() {
         .unwrap();
 
     let db = &report.db_after;
-    assert_eq!(db.datoms(View::Current, IndexOrder::Eavt).len(), 5);
-    assert_eq!(db.datoms(View::Current, IndexOrder::Aevt).len(), 5);
-    let avet = db.datoms(View::Current, IndexOrder::Avet);
+    assert_eq!(
+        db.datoms(View::Current, IndexOrder::Eavt).len(),
+        before.datoms(View::Current, IndexOrder::Eavt).len() + 5
+    );
+    assert_eq!(
+        db.datoms(View::Current, IndexOrder::Aevt).len(),
+        before.datoms(View::Current, IndexOrder::Aevt).len() + 5
+    );
+    let avet: Vec<_> = db
+        .datoms(View::Current, IndexOrder::Avet)
+        .into_iter()
+        .filter(|datom| datom.attribute == EMAIL || datom.attribute == NAME)
+        .collect();
     assert_eq!(avet.len(), 2);
     assert!(
         avet.iter()
             .all(|d| d.attribute == EMAIL || d.attribute == NAME)
     );
-    let vaet = db.datoms(View::Current, IndexOrder::Vaet);
+    let vaet: Vec<_> = db
+        .datoms(View::Current, IndexOrder::Vaet)
+        .into_iter()
+        .filter(|datom| datom.attribute == LINK)
+        .collect();
     assert_eq!(vaet.len(), 1);
     assert_eq!(vaet[0].value, Value::Ref(200));
 
@@ -163,7 +171,12 @@ fn immutable_indexes_have_documented_membership_and_prefix_access() {
     );
 
     // Producing a successor cannot alter any root observed from db-before.
-    assert!(before.datoms(View::Current, IndexOrder::Eavt).is_empty());
+    assert!(
+        before
+            .datoms(View::Current, IndexOrder::Eavt)
+            .iter()
+            .all(|datom| ![EMAIL, NAME, ALIAS, LINK].contains(&datom.attribute))
+    );
 }
 
 #[test]
@@ -213,45 +226,45 @@ fn history_roots_keep_assertions_and_retractions_while_old_snapshots_stay_valid(
 #[test]
 fn schema_changes_are_atomic_synchronous_and_use_db_before_for_domain_data() {
     let db = database();
-    let age = attr(20, "person", "age", ValueType::Long, Cardinality::One);
+    let age = attr(AGE, "person", "age", ValueType::Long, Cardinality::One);
     let failure = db
         .with(
             &[
                 TxOp::InstallAttribute(age.clone()),
-                add(EntityRef::Id(100), 20, scalar(Value::Long(36))),
+                add(EntityRef::Id(100), AGE, scalar(Value::Long(36))),
             ],
             1_000,
         )
         .unwrap_err();
     assert_eq!(failure.code, "schema/unknown-attribute");
-    assert_eq!(db.basis_t(), 0);
+    assert_eq!(db.basis_t(), 1);
 
     let installed = db
         .with(&[TxOp::InstallAttribute(age.clone())], 1_000)
         .unwrap();
-    assert_eq!(
-        installed.schema_changes,
-        vec![SchemaChange::Install(age.clone())]
-    );
-    assert_eq!(
-        installed
-            .db_after
-            .schema_changes()
-            .map(|(tx, change)| (tx, change.clone()))
-            .collect::<Vec<_>>(),
-        vec![(1, SchemaChange::Install(age.clone()))]
-    );
+    assert!(installed.tx_data.iter().any(|datom| {
+        datom.entity == u64::from(AGE)
+            && datom.attribute == 10
+            && datom.value == Value::Keyword(Keyword::new("person", "age"))
+            && datom.added
+    }));
+    assert!(installed.tx_data.iter().any(|datom| {
+        datom.entity == 0
+            && datom.attribute == 13
+            && datom.value == Value::Ref(u64::from(AGE))
+            && datom.added
+    }));
     assert_eq!(
         installed
             .db_after
             .schema()
             .resolve_ident(&Keyword::new("person", "age")),
-        Some(20)
+        Some(AGE)
     );
     installed
         .db_after
         .with(
-            &[add(EntityRef::Id(100), 20, scalar(Value::Long(36)))],
+            &[add(EntityRef::Id(100), AGE, scalar(Value::Long(36)))],
             2_000,
         )
         .unwrap();
@@ -267,14 +280,14 @@ fn schema_changes_are_atomic_synchronous_and_use_db_before_for_domain_data() {
             .db_after
             .schema()
             .resolve_ident(&Keyword::new("person", "age")),
-        Some(20)
+        Some(AGE)
     );
     assert_eq!(
         altered
             .db_after
             .schema()
             .resolve_ident(&Keyword::new("person", "years")),
-        Some(20)
+        Some(AGE)
     );
 }
 
@@ -476,21 +489,28 @@ fn custom_and_time_filters_compose_before_retraction_collapse() {
     let corrected = fixed
         .db_after
         .view(View::Current)
-        .filter(|_, datom| datom.tx != 2)
+        .filter(|_, datom| datom.tx != atomic_core::t_to_tx(3).unwrap())
         .datoms_with_prefix(&IndexPrefix::Eavt {
             entity: 100,
             attribute: Some(NAME),
             value: None,
         })
         .unwrap();
-    assert_eq!(corrected.len(), 1);
-    assert_eq!(corrected[0].value, Value::String("Ada".into()));
+    // Removing the intervening transaction exposes both surviving assertion
+    // events. Recovered `filter-retractions` does not deduplicate equal E/A/V
+    // assertions that no longer have a visible retraction between them.
+    assert_eq!(corrected.len(), 2);
+    assert!(
+        corrected
+            .iter()
+            .all(|datom| datom.value == Value::String("Ada".into()))
+    );
 
     let interval = fixed
         .db_after
         .view(View::Current)
-        .since(1)
-        .as_of(2)
+        .since(2)
+        .as_of(3)
         .datoms_with_prefix(&IndexPrefix::Eavt {
             entity: 100,
             attribute: Some(NAME),
@@ -503,7 +523,7 @@ fn custom_and_time_filters_compose_before_retraction_collapse() {
     let raw = fixed
         .db_after
         .view(View::Current)
-        .as_of(2)
+        .as_of(3)
         .history()
         .datoms_with_prefix(&IndexPrefix::Eavt {
             entity: 100,
@@ -537,7 +557,9 @@ fn idents_resolve_as_entities_against_db_before() {
 fn attribute_predicates_start_on_the_transaction_after_installation() {
     let db = database();
     let mut balance = db.schema().attribute(BALANCE).unwrap().clone();
-    balance.predicates.push("non-negative".into());
+    balance
+        .predicates
+        .push("test.predicates/non-negative".into());
     let installed = db
         .with(
             &[
@@ -552,26 +574,55 @@ fn attribute_predicates_start_on_the_transaction_after_installation() {
         vec![&Value::Long(-1)]
     );
 
+    // Predicate resolution follows the assessed assertion stream, not the
+    // set of every predicate installed in the database. An unrelated write
+    // and a redundant guarded assertion therefore need no predicate context.
+    let unrelated = installed
+        .db_after
+        .with(
+            &[add(
+                EntityRef::Id(7),
+                NAME,
+                scalar(Value::String("Ada".into())),
+            )],
+            2_000,
+        )
+        .unwrap();
+    let redundant = unrelated
+        .db_after
+        .with(
+            &[add(EntityRef::Id(7), BALANCE, scalar(Value::Long(-1)))],
+            3_000,
+        )
+        .unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
     let mut functions = TxFunctions::new();
-    functions.register_attribute_predicate("non-negative", |value| {
+    let predicate_calls = Arc::clone(&calls);
+    functions.register_attribute_predicate("test.predicates/non-negative", move |value| {
+        predicate_calls.fetch_add(1, AtomicOrdering::SeqCst);
         Ok(matches!(value, Value::Long(value) if *value >= 0))
     });
-    let rejected = installed.db_after.with_forms(
+    let rejected = redundant.db_after.with_forms(
         &[TxForm::Op(add(
             EntityRef::Id(7),
             BALANCE,
             scalar(Value::Long(-2)),
         ))],
         &functions,
-        2_000,
+        4_000,
     );
-    assert_eq!(
-        rejected.unwrap_err().code,
-        "transaction/attribute-predicate"
-    );
-    assert_eq!(installed.db_after.basis_t(), 1);
+    let error = rejected.unwrap_err();
+    assert_eq!(error.code, "transaction/attribute-predicate");
+    assert_eq!(error.details["entity"], "7");
+    assert_eq!(error.details["attribute"], "account/balance");
+    assert_eq!(error.details["value"], "Long(-2)");
+    assert_eq!(error.details["predicate"], "test.predicates/non-negative");
+    assert_eq!(error.details["pred_return"], "Scalar(Bool(false))");
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(redundant.db_after.basis_t(), 4);
 
-    let accepted = installed
+    let accepted = redundant
         .db_after
         .with_forms(
             &[TxForm::Op(add(
@@ -580,7 +631,7 @@ fn attribute_predicates_start_on_the_transaction_after_installation() {
                 scalar(Value::Long(0)),
             ))],
             &functions,
-            2_000,
+            4_000,
         )
         .unwrap();
     assert_eq!(accepted.db_after.values(7, BALANCE), vec![&Value::Long(0)]);
@@ -694,17 +745,18 @@ fn transaction_instants_resolve_to_stable_time_boundaries() {
     let third = second.db_after.with(&[], 2_000).unwrap();
     let db = third.db_after;
 
-    assert_eq!(db.t_at_or_before_instant(999), 0);
-    assert_eq!(db.t_at_or_before_instant(1_500), 1);
-    assert_eq!(db.t_at_or_before_instant(2_000), 3);
-    assert_eq!(db.t_at_or_after_instant(1_500), 2);
-    assert_eq!(db.t_at_or_after_instant(2_001), 4);
+    assert_eq!(db.t_at_or_before_instant(999), 1);
+    assert_eq!(db.t_at_or_before_instant(1_500), 2);
+    assert_eq!(db.t_at_or_before_instant(2_000), 4);
+    assert_eq!(db.t_at_or_after_instant(1_500), 3);
+    assert_eq!(db.t_at_or_after_instant(2_001), 5);
     assert_eq!(
         db.as_of_instant(1_500)
             .datoms(IndexOrder::Eavt)
+            .unwrap()
             .iter()
-            .filter(|datom| datom.attribute == TX_INSTANT)
+            .filter(|datom| datom.attribute == DB_TX_INSTANT)
             .count(),
-        1
+        2
     );
 }

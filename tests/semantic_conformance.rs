@@ -1,19 +1,26 @@
 use atomic_core::{
-    Attribute, Cardinality, Database, EntityRef, ErrorCategory, IndexOrder, Keyword, Schema,
-    TupleSpec, TxOp, TxValue, Unique, Value, ValueType, View,
+    Attribute, Cardinality, DB_ENSURE, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_IDENT, Database,
+    EntityRef, ErrorCategory, IndexOrder, Keyword, Schema, Symbol, TupleSpec, TxForm, TxFunctions,
+    TxOp, TxValue, USER_PARTITION, Unique, Value, ValueType, View, make_eid, t_to_tx,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-const TX_INSTANT: u32 = 1;
-const EMAIL: u32 = 10;
-const NAME: u32 = 11;
-const ALIAS: u32 = 12;
-const MANAGES: u32 = 13;
-const PART_A: u32 = 14;
-const PART_B: u32 = 15;
-const COMPOSITE: u32 = 16;
+const DB_TX_INSTANT: u32 = 50;
+const EMAIL: u32 = 1_000;
+const NAME: u32 = 1_001;
+const ALIAS: u32 = 1_002;
+const MANAGES: u32 = 1_003;
+const PART_A: u32 = 1_004;
+const PART_B: u32 = 1_005;
+const COMPOSITE: u32 = 1_006;
 
 fn keyword(namespace: &str, name: &str) -> Keyword {
     Keyword::new(namespace, name)
+}
+
+fn user(eidx: u64) -> u64 {
+    make_eid(USER_PARTITION, eidx).unwrap()
 }
 
 fn attribute(
@@ -28,15 +35,6 @@ fn attribute(
 
 fn schema() -> Schema {
     let mut schema = Schema::new();
-    schema
-        .install(attribute(
-            TX_INSTANT,
-            "db",
-            "txInstant",
-            ValueType::Instant,
-            Cardinality::One,
-        ))
-        .unwrap();
     schema
         .install(
             attribute(
@@ -140,11 +138,18 @@ fn database_values_are_immutable_and_every_transaction_is_reified() {
         )
         .unwrap();
 
-    assert_eq!(before.basis_t(), 0);
-    assert!(before.datoms(View::Current, IndexOrder::Eavt).is_empty());
-    assert_eq!(report.db_after.basis_t(), 1);
+    assert_eq!(before.basis_t(), 1);
+    assert!(
+        before
+            .datoms(View::Current, IndexOrder::Eavt)
+            .iter()
+            .all(|datom| datom.attribute != NAME)
+    );
+    assert_eq!(report.db_after.basis_t(), 2);
     assert!(report.tx_data.iter().any(|datom| {
-        datom.entity == 1 && datom.attribute == TX_INSTANT && datom.value == Value::Instant(1_000)
+        datom.entity == t_to_tx(2).unwrap()
+            && datom.attribute == DB_TX_INSTANT
+            && datom.value == Value::Instant(1_000)
     }));
 }
 
@@ -258,7 +263,7 @@ fn same_eav_add_and_retract_conflict_atomically() {
     let error = result.unwrap_err();
     assert_eq!(error.category, ErrorCategory::Conflict);
     assert_eq!(error.code, "transaction/datoms-conflict");
-    assert_eq!(before.basis_t(), 0);
+    assert_eq!(before.basis_t(), 1);
 }
 
 #[test]
@@ -370,30 +375,151 @@ fn cas_observes_db_before() {
 
 #[test]
 fn entity_ensure_validates_db_after() {
-    let report = empty_db()
+    let spec_ident = keyword("person", "validation");
+    let spec = empty_db()
         .with(
             &[
-                add(EntityRef::Id(42), NAME, Value::String("Ada".into())),
-                TxOp::Ensure {
-                    entity: EntityRef::Id(42),
-                    required: vec![NAME],
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_IDENT as u32,
+                    value: Value::Keyword(spec_ident.clone()).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_ENTITY_ATTRS as u32,
+                    value: Value::Keyword(keyword("person", "name")).into(),
                 },
             ],
             1_000,
         )
         .unwrap();
-    assert_eq!(report.db_after.basis_t(), 1);
 
-    let error = empty_db()
+    let report = spec
+        .db_after
+        .with(
+            &[
+                add(EntityRef::Id(42), NAME, Value::String("Ada".into())),
+                TxOp::Add {
+                    entity: EntityRef::Id(42),
+                    attribute: DB_ENSURE as u32,
+                    value: TxValue::Entity(EntityRef::Ident(spec_ident.clone())),
+                },
+            ],
+            2_000,
+        )
+        .unwrap();
+    assert_eq!(report.db_after.basis_t(), 3);
+    assert!(
+        report
+            .db_after
+            .datoms(View::History, IndexOrder::Eavt)
+            .iter()
+            .all(|datom| datom.attribute != DB_ENSURE as u32)
+    );
+
+    let error = spec
+        .db_after
         .with(
             &[TxOp::Ensure {
                 entity: EntityRef::Id(42),
-                required: vec![NAME],
+                spec: EntityRef::Ident(spec_ident),
+            }],
+            2_000,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "transaction/entity-spec");
+}
+
+#[test]
+fn entity_predicate_reads_the_complete_db_after() {
+    let spec_ident = keyword("person", "name-length");
+    let spec = empty_db()
+        .with(
+            &[
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_IDENT as u32,
+                    value: Value::Keyword(spec_ident.clone()).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_ENTITY_ATTRS as u32,
+                    value: Value::Keyword(keyword("person", "name")).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_ENTITY_ATTRS as u32,
+                    value: Value::Keyword(keyword("item", "part-a")).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_ENTITY_PREDS as u32,
+                    value: Value::Symbol(Symbol::new("person", "name-length-matches?")).into(),
+                },
+            ],
+            1_000,
+        )
+        .unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let predicate_calls = Arc::clone(&calls);
+    let mut functions = TxFunctions::new();
+    functions.register_entity_predicate("person/name-length-matches?", move |db, entity| {
+        predicate_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        let name = match db.values(entity, NAME).as_slice() {
+            [Value::String(name)] => name,
+            _ => return Ok(false),
+        };
+        let length = match db.values(entity, PART_A).as_slice() {
+            [Value::Long(length)] => *length,
+            _ => return Ok(false),
+        };
+        Ok(i64::try_from(name.len()).ok() == Some(length))
+    });
+    let ensure = |length| {
+        vec![
+            TxForm::Op(add(EntityRef::Id(42), NAME, Value::String("Ada".into()))),
+            TxForm::Op(add(EntityRef::Id(42), PART_A, Value::Long(length))),
+            TxForm::Op(TxOp::Ensure {
+                entity: EntityRef::Id(42),
+                spec: EntityRef::Ident(spec_ident.clone()),
+            }),
+        ]
+    };
+
+    let error = spec
+        .db_after
+        .with_forms(&ensure(4), &functions, 2_000)
+        .unwrap_err();
+    assert_eq!(error.code, "transaction/entity-predicate");
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+
+    let mut duplicate_ensure = ensure(3);
+    duplicate_ensure.push(TxForm::Op(TxOp::Ensure {
+        entity: EntityRef::Id(42),
+        spec: EntityRef::Ident(spec_ident.clone()),
+    }));
+    let report = spec
+        .db_after
+        .with_forms(&duplicate_ensure, &functions, 2_000)
+        .unwrap();
+    assert_eq!(report.db_after.values(42, PART_A), vec![&Value::Long(3)]);
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+}
+
+#[test]
+fn entity_predicate_names_must_be_fully_qualified_at_the_source_transaction() {
+    let error = empty_db()
+        .with(
+            &[TxOp::Add {
+                entity: EntityRef::Temp("spec".into()),
+                attribute: DB_ENTITY_PREDS as u32,
+                value: Value::Symbol(Symbol::unqualified("predicate")).into(),
             }],
             1_000,
         )
         .unwrap_err();
-    assert_eq!(error.code, "transaction/entity-spec");
+    assert_eq!(error.code, "transaction/unqualified-entity-predicate");
 }
 
 #[test]
@@ -401,23 +527,27 @@ fn retract_entity_recurses_through_components() {
     let initial = empty_db()
         .with(
             &[
-                add(EntityRef::Id(1_000), NAME, Value::String("Parent".into())),
+                add(
+                    EntityRef::Id(user(42)),
+                    NAME,
+                    Value::String("Parent".into()),
+                ),
                 TxOp::Add {
-                    entity: EntityRef::Id(1_000),
+                    entity: EntityRef::Id(user(42)),
                     attribute: MANAGES,
-                    value: TxValue::Entity(EntityRef::Id(1_001)),
+                    value: TxValue::Entity(EntityRef::Id(user(43))),
                 },
-                add(EntityRef::Id(1_001), NAME, Value::String("Child".into())),
+                add(EntityRef::Id(user(43)), NAME, Value::String("Child".into())),
             ],
             1_000,
         )
         .unwrap();
     let retracted = initial
         .db_after
-        .with(&[TxOp::RetractEntity(EntityRef::Id(1_000))], 2_000)
+        .with(&[TxOp::RetractEntity(EntityRef::Id(user(42)))], 2_000)
         .unwrap();
-    assert!(retracted.db_after.values(1_000, NAME).is_empty());
-    assert!(retracted.db_after.values(1_001, NAME).is_empty());
+    assert!(retracted.db_after.values(user(42), NAME).is_empty());
+    assert!(retracted.db_after.values(user(43), NAME).is_empty());
 }
 
 #[test]
@@ -535,8 +665,8 @@ fn time_views_distinguish_current_as_of_since_and_history() {
         .unwrap();
 
     let current = second.db_after.datoms(View::Current, IndexOrder::Eavt);
-    let as_of = second.db_after.datoms(View::AsOf(1), IndexOrder::Eavt);
-    let since = second.db_after.datoms(View::Since(1), IndexOrder::Eavt);
+    let as_of = second.db_after.datoms(View::AsOf(2), IndexOrder::Eavt);
+    let since = second.db_after.datoms(View::Since(2), IndexOrder::Eavt);
     let history = second.db_after.datoms(View::History, IndexOrder::Eavt);
 
     assert!(

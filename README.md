@@ -5,16 +5,29 @@ reference corpora are organized by release. Historical plans, one-off runners,
 generated reports, packaged resources, and build products have been removed
 from the active tree.
 
-The current job is to learn the system embodied by recovered Datomic Pro Peer
-and Transactor releases, express its durable ideas as language-neutral
-contracts, and implement those contracts in Rust.
+The repository contains a substantial PostgreSQL-only Rust reconstruction: a
+pure transactional kernel, durable log/recovery, peer indexes and snapshots,
+local query/pull, constrained persisted programs, a transaction service, and
+operational tooling. A source-backed corrective program is still replacing
+prototype shortcuts in the transactor, persistent indexes, query evaluator,
+and lifecycle boundary; the project is not yet claiming the full Goal 0
+production outcome.
 
 ## Start here
 
 - [`goal-0/0-plan.md`](goal-0/0-plan.md) is the full PostgreSQL-only Rust reconstruction roadmap.
+- [`goal-9/0-plan.md`](goal-9/0-plan.md) is the active source-backed corrective
+  parent loop, with [`goal-9/EVIDENCE_LEDGER.md`](goal-9/EVIDENCE_LEDGER.md)
+  tying each repair to documentation and recovered 1.0.7705 code.
+- [`goal-11/0-plan.md`](goal-11/0-plan.md) records the completed
+  schema/ident-as-information correction and its real PostgreSQL evidence.
 - [`goal-1/0-plan.md`](goal-1/0-plan.md) is the semantic-foundation milestone.
 - [`goal-1/SEMANTICS.md`](goal-1/SEMANTICS.md) is the native semantic contract now implemented by the kernel in [`src/`](src/) and checked in [`tests/`](tests/).
 - [`goal-2/0-plan.md`](goal-2/0-plan.md) records the completed single-process Rust transactional kernel and its deliberate boundaries.
+- [`goal-8/RUNBOOK.md`](goal-8/RUNBOOK.md) is the deployment, recovery, GC,
+  excision, incident and retirement runbook.
+- [`goal-8/COMPATIBILITY_AND_SECURITY.md`](goal-8/COMPATIBILITY_AND_SECURITY.md)
+  states the durable compatibility and authority boundaries.
 - [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and
   Transactor reference corpus.
 - [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference
@@ -32,10 +45,19 @@ being rebuilt in small, Rust-facing pieces as concrete porting questions arise.
 Do not restore the old workflow wholesale: that would reintroduce thousands of
 historical requirements unrelated to the port.
 
-The semantic and kernel conformance suites now run with:
+The pure suite runs with:
 
 ```sh
 cargo test --offline
+```
+
+The complete PostgreSQL acceptance suite requires a migrated disposable
+PostgreSQL database and runs serially because restart/corruption fixtures share
+server state:
+
+```sh
+ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
+  cargo test --all-targets -- --test-threads=1
 ```
 
 ## Working boundary

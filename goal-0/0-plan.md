@@ -6,6 +6,33 @@ Build a production-quality database in Rust that preserves the central benefits 
 
 PostgreSQL is the only storage system this project will support. The design should use PostgreSQL directly and well; portability to other storage backends is not an objective.
 
+## Corrective status — reopened 2026-09-03
+
+Goal 0 is **not achieved**. A source-backed acceptance audit found that several
+child goals established useful prototypes but weakened or missed the original
+completion conditions. In particular: entity and transaction identity can
+alias; a schema alteration can acknowledge state that recovery rejects;
+schema/idents are not authoritative datoms; the peer/index path eagerly
+materializes and rebuilds whole databases; the fenced service, peer writes,
+and persisted functions are disconnected write paths; temporal query
+expressions can observe a different database value from their patterns; and
+several lifecycle guarantees are either bypassable or not production-bounded.
+
+`goal-9/` is the corrective parent loop. Its evidence ledger distinguishes
+documented Datomic semantics, recovered `1.0.7705` implementation evidence,
+and PostgreSQL/Rust-specific safety requirements. The historical descriptions
+below remain useful records of what was built, but every stage status is
+reopened until the matching `goal-9` repair stage and the final integrated
+acceptance gate demonstrate the original outcome without narrowing it.
+
+Goals 10 through 12 have since closed identity/successor validity,
+schema/ident authority, the competing write paths, transaction time,
+acknowledgement, controlled behavior, and verified-base adoption with real
+PostgreSQL/restart evidence. Goal 13 is now the first unfinished corrective
+child; the eager peer/index, query, lifecycle, and eager production-transactor
+findings remain open. Goal 16 owns the latter after Goal 14 establishes the
+shared lazy access seam, and Goal 17 owns integrated acceptance.
+
 ## Constraints
 
 - Implement the system and its public/runtime-facing components in Rust; do not require a JVM or Clojure.
@@ -47,7 +74,11 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 
 ### 1. Semantic foundation
 
-**Status:** Complete via `goal-1/`. The semantic contract, pure Rust reference transition, structured errors, and conformance suite establish the acceptance boundary for Stage 2.
+**Status:** Corrective acceptance established 2026-09-03 by Goals 10 and 11.
+Identity namespaces/frontiers, tuple rules, structural ordering, exact native
+genesis, schema/idents as ordinary information, current-basis temporal schema,
+and transaction-time representation now have source-backed executable and real
+PostgreSQL/restart evidence. Final integrated Goal 0 acceptance remains open.
 
 **Outcome:** A precise, testable native contract for values, datoms, schema, identity, transactions, database views, errors, and ordering, including explicit decisions for behavior the source material leaves ambiguous.
 
@@ -57,7 +88,12 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 
 ### 2. Single-process transactional kernel
 
-**Status:** Complete via `goal-2/`. The Rust kernel now provides immutable indexed database values, the declarative transaction pipeline, schema/identity evolution, typed map and native function expansion, temporal/filtered reads, and invariant/permutation verification. PostgreSQL remains absent as required by this stage.
+**Status:** Corrective acceptance established 2026-09-03 by Goals 10 and 11.
+The pure kernel now validates complete successors, uses collision-free issued
+identity and structural normalization, lowers schema to ordinary history with
+material recovered hooks, and round-trips every accepted transition through
+the same recovery boundary. Production submission/runtime integration remains
+owned by Goal 12, not this pure-stage completion.
 
 **Outcome:** A correct in-memory database kernel can apply complete unordered transactions to immutable database values.
 
@@ -67,7 +103,12 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 
 ### 3. PostgreSQL durability and recovery
 
-**Status:** Complete via `goal-3/`. The Rust kernel now has a versioned canonical format, one constraint-backed PostgreSQL schema, immutable chained history, expected-basis/hash publication, durable idempotency, fail-closed recovery, a verified current-value write cache, and real PostgreSQL 15.11 restart/concurrency/process-death/corruption evidence. Checkpoints were deliberately not introduced; the authoritative log is sufficient until Goal 4 owns persistent read indexes.
+**Status:** Corrective acceptance established 2026-09-03 by Goals 10–12.
+PostgreSQL publication, durable idempotency, exact kernel recovery,
+database-bound fencing, acknowledged/unknown decisions, authoritative state
+commitments, coherent-base rejection, verified-base adoption, and exact log
+tail replay pass real crash/restart tests. Eager base representation and
+full-state commitment cost remain explicitly owned by Goal 13.
 
 **Outcome:** The kernel commits durable database history exclusively through PostgreSQL and reconstructs correct state after clean or abrupt restart.
 
@@ -77,15 +118,15 @@ Only one child goal is active at a time. If its scaffold already exists but is i
 
 ### 4. Index and peer read architecture
 
-**Status:** Complete via `goal-4/`. PostgreSQL now stores immutable canonical
-content-addressed index leaves and transaction-anchored manifests;
-deterministic consolidation builds all current/history index orders over a
-base plus contiguous recent tail. Independent peers recover from verified
-roots, synchronize monotonically, retain old `Arc<Database>` snapshots, expose
-local temporal/index access and transaction reports, cache immutable segments,
-and fall back to the authoritative log on derived corruption. Concurrent
-builders/readers, interrupted publication, `noHistory`, multiple bases, cache
-pressure, and an actual PostgreSQL 15.11 restart are verified.
+**Status:** Corrective acceptance established 2026-09-03 by Goal 13. Production
+peer values now use canonical shallow immutable trees, a persistent bounded
+recent tier, affected-range root-last consolidation, lazy cursors, byte-bounded
+shared caches, atomic shared-connection advancement, immutable old snapshots,
+and independent physical root revisions. Focused real-PostgreSQL concurrency,
+corruption, same-basis repair, and actual-restart witnesses pass. The eager
+`Database` remains an explicit oracle/compatibility path; Goal 14 moves
+query/pull/entity consumers to the lazy value and Goal 16 removes it from the
+production writer.
 
 **Outcome:** Independent Rust peers maintain immutable database snapshots and answer indexed reads locally while synchronizing monotonically through PostgreSQL.
 
@@ -95,16 +136,9 @@ pressure, and an actual PostgreSQL 15.11 restart are verified.
 
 ### 5. Query, pull, and native API
 
-**Status:** Complete via `goal-5/`. The typed Rust query engine evaluates local
-immutable snapshots with relation/set semantics, every input/find shape,
-binding-aware index planning plus a full-scan oracle, logical joins, bounded
-fixed-point rules, predicates/functions, deterministic aggregates and `with`,
-native plan/stats, cancellation and resource limits. Pull/entity navigation
-supports wildcard, reverse refs, components, recursion/cycles, defaults,
-aliases and limits. The peer API composes expected-basis/idempotent transact,
-sync, query, pull and entities; PostgreSQL 15.11 and concurrent old-snapshot
-tests verify the integrated boundary. `goal-5/SUPPORTED_SURFACE.md` names
-intentional JVM host-language and peripheral omissions.
+**Status:** Reopened via `goal-9/`. Temporal source propagation, ident aliases,
+tuple nils, aggregate multiplicity, rule evaluation, and several documented
+function/pull boundaries need independent witness fixtures and correction.
 
 **Outcome:** Applications can use an ergonomic Rust API to transact, navigate entities, pull graphs, and run the documented Datalog model locally at peers.
 
@@ -114,14 +148,12 @@ intentional JVM host-language and peripheral omissions.
 
 ### 6. Controlled programmability
 
-**Status:** Complete via `goal-6/`. Versioned canonical straight-line bytecode
-provides metered transaction functions, attribute predicates, and query
-extensions with no ambient authority. Immutable PostgreSQL deployment,
-conditional activation, exact-hash caching/idempotency, same-db-before batch
-composition, kernel revalidation, local Rust extension separation, restart and
-corruption behavior, and byte-identical independent execution are covered by
-focused tests and the 87-pass integrated real-PostgreSQL suite. The deliberately
-smaller-than-Clojure surface and threat model are explicit in the child docs.
+**Status:** Corrective acceptance established 2026-09-03 by Goal 12. Temporal
+`:db/fn` bindings, immutable cached program content, structured bounded
+control/data/query forms, recursive same-db-before expansion, assessed
+attribute predicates, complete db-after entity predicates, typed cancellation,
+and shared resource accounting all run through the fenced service. The compact
+IR remains an intentional sufficient subset rather than a JVM language port.
 
 **Outcome:** Custom transaction and query behavior is expressive enough for application invariants without compromising determinism or transactor safety.
 
@@ -131,7 +163,12 @@ smaller-than-Clojure surface and threat model are explicit in the child docs.
 
 ### 7. Availability and production transaction service
 
-**Status:** Active via `goal-7/`; scaffolded after verified Goal 6 completion.
+**Status:** Corrective acceptance established 2026-09-03 by Goal 12. Ordinary
+requests no longer require basis/time; one database-bound fenced worker owns
+serialization, durable decisions, exact assessed reports, nonblocking lossless
+report delivery, bounded admission, process-fault handling, and standby
+takeover. Real concurrent, unknown/retry, process-death, and failover tests
+pass without an unfenced application publication API.
 
 **Outcome:** The serialized write service remains correct through concurrency, overload, timeout, process failure, and leader replacement.
 
@@ -140,6 +177,10 @@ smaller-than-Clojure surface and threat model are explicit in the child docs.
 **Completion signal:** At most one leader epoch can publish, failover never forks history, retry behavior is explicit, and stress/fault tests preserve serializable outcomes.
 
 ### 8. Lifecycle and operational completion
+
+**Status:** Reopened via `goal-9/`. Migration/startup privilege separation,
+TLS configurability, superseded-index collection, backup publication/restore,
+coherent inspection, and excision identity/privacy behavior remain unfinished.
 
 **Outcome:** The system can be operated, protected, upgraded, diagnosed, and retired responsibly in production.
 
@@ -150,3 +191,9 @@ smaller-than-Clojure surface and threat model are explicit in the child docs.
 ## Success condition
 
 Goal 0 is complete when the Rust transactor and peers, backed only by PostgreSQL, deliver the documented core benefits as one coherent, tested, recoverable system; the major guarantees hold under concurrency and injected failure; and remaining differences from Datomic are intentional and documented rather than accidental.
+
+**Status:** Reopened. The prior 102-pass headline can also be produced with no
+PostgreSQL process because integration tests return successfully when their
+environment is absent. `goal-9/` owns repair and a new acceptance gate that
+must prove the coherent original objective, including explicit PostgreSQL
+execution, long-history behavior, and source-witness semantic fixtures.

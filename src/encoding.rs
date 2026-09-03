@@ -1,7 +1,11 @@
+use crate::identity::{validate_frontier, validate_supported_eid};
 use crate::{
-    Attribute, Cardinality, Datom, EntityRef, ErrorCategory, IndexOrder, Instruction, Keyword,
-    Program, ProgramHash, ProgramKind, ProgramOutput, Schema, SchemaChange, SemanticError, Symbol,
-    TupleSpec, TxOp, TxValue, Unique, Value, ValueType,
+    Attribute, AttributeRef, CallableRef, Cardinality, Datom, EntityMap, EntityRef, ErrorCategory,
+    IndexOrder, Instruction, Keyword, MAX_EIDX, MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, MapValue,
+    PROGRAM_ABI_VERSION, Program, ProgramCall, ProgramHash, ProgramKind, ProgramOutput,
+    QUERY_TEMPLATE_VERSION, QueryPattern, QueryTemplate, QueryTerm, RuntimeValue, SemanticError,
+    Symbol, TupleSpec, TxForm, TxOp, TxValue, Unique, Value, ValueType, eid_to_eidx, t_to_tx,
+    tx_to_t,
 };
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
@@ -11,13 +15,21 @@ use std::collections::BTreeMap;
 pub type Digest = [u8; 32];
 
 const MAGIC: &[u8; 4] = b"ATMC";
-const FORMAT_VERSION: u16 = 1;
+// Version 3 makes genesis/schema ordinary immutable information and removes
+// typed SchemaChange side channels from durable transactions and manifests.
+// Older mixed-authority payloads fail closed rather than being reinterpreted.
+const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
 const MAX_BLOB_LEN: usize = 64 * 1024 * 1024;
 const MAX_VALUE_LEN: usize = 16 * 1024 * 1024;
+/// Total checked canonical blob size accepted for executable database code.
+/// Programs are serialized-pipeline inputs, so they receive a deliberately
+/// tighter ceiling than generic durable/index blobs.
+pub(crate) const MAX_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COLLECTION_LEN: usize = 1_000_000;
-const KIND_SCHEMA: u8 = 1;
+const MAX_PROGRAM_INSTRUCTIONS: usize = 4_096;
+const MAX_PROGRAM_BLOCK_DEPTH: usize = 32;
 const KIND_TRANSACTION: u8 = 2;
 const KIND_REQUEST: u8 = 3;
 const KIND_INDEX_SEGMENT: u8 = 4;
@@ -25,16 +37,18 @@ const KIND_INDEX_MANIFEST: u8 = 5;
 const KIND_PROGRAM: u8 = 6;
 const KIND_PROGRAM_REQUEST: u8 = 7;
 const KIND_PROGRAM_OUTPUT: u8 = 8;
+const KIND_GENESIS: u8 = 9;
+const KIND_SUBMISSION_REQUEST: u8 = 10;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableTransaction {
     pub database_id: String,
     pub basis_t: u64,
     pub previous_hash: Digest,
-    pub next_eid: u64,
+    /// Exclusive low-42-bit entity-index issuance frontier.
+    pub eidx_frontier: u64,
     pub tempids: BTreeMap<String, u64>,
     pub tx_data: Vec<Datom>,
-    pub schema_changes: Vec<SchemaChange>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,9 +72,8 @@ pub struct IndexManifest {
     pub database_id: String,
     pub basis_t: u64,
     pub tx_hash: Digest,
-    pub next_eid: u64,
-    pub schema: Schema,
-    pub schema_history: Vec<Vec<SchemaChange>>,
+    /// Exclusive low-42-bit entity-index issuance frontier.
+    pub eidx_frontier: u64,
     pub segments: Vec<SegmentRef>,
 }
 
@@ -71,34 +84,56 @@ pub fn sha256(bytes: &[u8]) -> Digest {
 pub fn encode_program(program: &Program) -> Result<Vec<u8>, SemanticError> {
     program.validate()?;
     let mut body = Vec::new();
+    body.extend_from_slice(&PROGRAM_ABI_VERSION.to_be_bytes());
     body.push(match program.kind {
         ProgramKind::Transaction => 0,
         ProgramKind::AttributePredicate => 1,
         ProgramKind::Query => 2,
+        ProgramKind::EntityPredicate => 3,
     });
     body.push(program.arity);
     put_len(&mut body, program.instructions.len())?;
     for instruction in &program.instructions {
         encode_instruction(&mut body, instruction)?;
     }
-    encode_blob(KIND_PROGRAM, &body)
+    let encoded = encode_blob(KIND_PROGRAM, &body)?;
+    if encoded.len() > MAX_PROGRAM_BYTES {
+        return Err(SemanticError::incorrect(
+            "program/payload-limit",
+            format!("canonical program exceeds the {MAX_PROGRAM_BYTES}-byte limit"),
+        ));
+    }
+    Ok(encoded)
 }
 
 pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
+    // Check before envelope parsing or instruction allocation. A correctly
+    // checksummed oversized payload is still invalid executable content.
+    if bytes.len() > MAX_PROGRAM_BYTES {
+        return Err(fault(
+            "encoding/program-payload-limit",
+            format!("canonical program exceeds the {MAX_PROGRAM_BYTES}-byte limit"),
+        ));
+    }
     let body = decode_blob(bytes, KIND_PROGRAM)?;
     let mut cursor = Cursor::new(body);
+    let abi_version = cursor.u16()?;
+    if abi_version != PROGRAM_ABI_VERSION {
+        return Err(fault(
+            "encoding/unsupported-program-abi",
+            format!("program ABI {abi_version} is unsupported; expected {PROGRAM_ABI_VERSION}"),
+        ));
+    }
     let kind = match cursor.u8()? {
         0 => ProgramKind::Transaction,
         1 => ProgramKind::AttributePredicate,
         2 => ProgramKind::Query,
+        3 => ProgramKind::EntityPredicate,
         tag => return Err(invalid_tag("program kind", tag)),
     };
     let arity = cursor.u8()?;
-    let count = cursor.collection_len()?;
-    let mut instructions = Vec::with_capacity(count);
-    for _ in 0..count {
-        instructions.push(decode_instruction(&mut cursor)?);
-    }
+    let mut instruction_count = 0usize;
+    let instructions = decode_instruction_block(&mut cursor, 0, &mut instruction_count)?;
     cursor.finish()?;
     let program = Program {
         kind,
@@ -155,25 +190,25 @@ pub fn program_request_digest(
 pub fn encode_program_output(output: &ProgramOutput) -> Result<Vec<u8>, SemanticError> {
     let mut body = Vec::new();
     match output {
-        ProgramOutput::Transaction(operations) => {
+        ProgramOutput::Transaction(forms) => {
             body.push(0);
-            let mut operations = operations
+            let mut forms = forms
                 .iter()
-                .map(|operation| {
+                .map(|form| {
                     let mut bytes = Vec::new();
-                    encode_tx_op(&mut bytes, operation)?;
+                    encode_persistent_tx_form(&mut bytes, form)?;
                     Ok(bytes)
                 })
                 .collect::<Result<Vec<_>, SemanticError>>()?;
-            operations.sort();
-            put_len(&mut body, operations.len())?;
-            for operation in operations {
-                put_bytes(&mut body, &operation)?;
+            forms.sort();
+            put_len(&mut body, forms.len())?;
+            for form in forms {
+                put_bytes(&mut body, &form)?;
             }
         }
         ProgramOutput::AttributePredicate(value) => {
             body.push(1);
-            put_bool(&mut body, *value);
+            encode_runtime_value(&mut body, value, 0)?;
         }
         ProgramOutput::Query(rows) => {
             body.push(2);
@@ -195,37 +230,12 @@ pub fn encode_program_output(output: &ProgramOutput) -> Result<Vec<u8>, Semantic
                 put_bytes(&mut body, &row)?;
             }
         }
+        ProgramOutput::EntityPredicate(value) => {
+            body.push(3);
+            encode_runtime_value(&mut body, value, 0)?;
+        }
     }
     encode_blob(KIND_PROGRAM_OUTPUT, &body)
-}
-
-pub fn encode_schema(schema: &Schema) -> Result<Vec<u8>, SemanticError> {
-    let body = schema_body(schema)?;
-    encode_blob(KIND_SCHEMA, &body)
-}
-
-pub fn decode_schema(bytes: &[u8]) -> Result<Schema, SemanticError> {
-    let body = decode_blob(bytes, KIND_SCHEMA)?;
-    let mut cursor = Cursor::new(body);
-    let count = cursor.collection_len()?;
-    let mut schema = Schema::new();
-    for _ in 0..count {
-        schema.install(decode_attribute(&mut cursor)?)?;
-    }
-    let alias_count = cursor.collection_len()?;
-    for _ in 0..alias_count {
-        let ident = decode_keyword(&mut cursor)?;
-        let attribute = cursor.u32()?;
-        schema.install_ident_alias(ident, attribute)?;
-    }
-    cursor.finish()?;
-    if schema_body(&schema)? != body {
-        return Err(fault(
-            "encoding/noncanonical-schema",
-            "schema payload is not in canonical order or representation",
-        ));
-    }
-    Ok(schema)
 }
 
 pub fn encode_transaction(transaction: &DurableTransaction) -> Result<Vec<u8>, SemanticError> {
@@ -240,7 +250,7 @@ pub fn decode_transaction(bytes: &[u8]) -> Result<DurableTransaction, SemanticEr
     let database_id = cursor.string()?;
     let basis_t = cursor.u64()?;
     let previous_hash = cursor.digest()?;
-    let next_eid = cursor.u64()?;
+    let eidx_frontier = cursor.u64()?;
     let tempid_count = cursor.collection_len()?;
     let mut tempids = BTreeMap::new();
     for _ in 0..tempid_count {
@@ -258,20 +268,14 @@ pub fn decode_transaction(bytes: &[u8]) -> Result<DurableTransaction, SemanticEr
     for _ in 0..datom_count {
         tx_data.push(decode_datom(&mut cursor)?);
     }
-    let change_count = cursor.collection_len()?;
-    let mut schema_changes = Vec::with_capacity(change_count);
-    for _ in 0..change_count {
-        schema_changes.push(decode_schema_change(&mut cursor)?);
-    }
     cursor.finish()?;
     let transaction = DurableTransaction {
         database_id,
         basis_t,
         previous_hash,
-        next_eid,
+        eidx_frontier,
         tempids,
         tx_data,
-        schema_changes,
     };
     validate_transaction(&transaction)?;
     if transaction_body(&transaction)? != body {
@@ -285,6 +289,83 @@ pub fn decode_transaction(bytes: &[u8]) -> Result<DurableTransaction, SemanticEr
 
 pub fn transaction_hash(encoded_transaction: &[u8]) -> Digest {
     sha256(encoded_transaction)
+}
+
+/// Hash one datom's canonical typed representation without wrapping it in a
+/// size-capped durable blob. State commitments use this per-datom boundary so
+/// many large legal values cannot overflow a physical segment limit.
+pub(crate) fn canonical_datom_hash(datom: &Datom) -> Result<Digest, SemanticError> {
+    let mut encoded = Vec::new();
+    encode_datom(&mut encoded, datom)?;
+    Ok(sha256(&encoded))
+}
+
+/// Canonical scalar bytes shared by the durable transaction codec and the
+/// persistent index-tree leaf codec. Tree nodes deliberately have their own
+/// envelope, kind, and version; only the already-authoritative value
+/// representation is shared here.
+pub(crate) fn encode_canonical_value(value: &Value) -> Result<Vec<u8>, SemanticError> {
+    let mut encoded = Vec::new();
+    encode_value(&mut encoded, value)?;
+    Ok(encoded)
+}
+
+/// Decode exactly one canonical scalar value (without a durable-blob
+/// envelope). Rejecting trailing bytes and checking a byte-for-byte re-encode
+/// keeps callers from creating a second, looser canonicalization boundary.
+pub(crate) fn decode_canonical_value(bytes: &[u8]) -> Result<Value, SemanticError> {
+    let mut cursor = Cursor::new(bytes);
+    let value = decode_value(&mut cursor, 0)?;
+    cursor.finish()?;
+    if encode_canonical_value(&value)? != bytes {
+        return Err(fault(
+            "encoding/noncanonical-value",
+            "value payload is not in canonical representation",
+        ));
+    }
+    Ok(value)
+}
+
+/// Validate datoms at a derived index boundary without forcing a caller to
+/// wrap them in the legacy flat-segment format. This remains the same semantic
+/// validation used by that format while allowing the new tree codec to own a
+/// distinct envelope.
+pub(crate) fn validate_persistent_index_datoms(
+    order: IndexOrder,
+    datoms: &[Datom],
+) -> Result<(), SemanticError> {
+    validate_index_datoms(order, datoms)
+}
+
+/// Encode the authoritative t=0 information set. Genesis has its own checked
+/// kind because ordinary durable transactions must always have positive t.
+pub fn encode_genesis(datoms: &[Datom]) -> Result<Vec<u8>, SemanticError> {
+    validate_genesis(datoms)?;
+    let mut body = Vec::new();
+    put_len(&mut body, datoms.len())?;
+    for datom in datoms {
+        encode_datom(&mut body, datom)?;
+    }
+    encode_blob(KIND_GENESIS, &body)
+}
+
+pub fn decode_genesis(bytes: &[u8]) -> Result<Vec<Datom>, SemanticError> {
+    let body = decode_blob(bytes, KIND_GENESIS)?;
+    let mut cursor = Cursor::new(body);
+    let count = cursor.collection_len()?;
+    let mut datoms = Vec::with_capacity(count);
+    for _ in 0..count {
+        datoms.push(decode_datom(&mut cursor)?);
+    }
+    cursor.finish()?;
+    validate_genesis(&datoms)?;
+    if encode_genesis(&datoms)? != bytes {
+        return Err(fault(
+            "encoding/noncanonical-genesis",
+            "genesis payload is not canonical",
+        ));
+    }
+    Ok(datoms)
 }
 
 pub fn encode_index_segment(segment: &IndexSegment) -> Result<Vec<u8>, SemanticError> {
@@ -331,15 +412,7 @@ pub fn encode_index_manifest(manifest: &IndexManifest) -> Result<Vec<u8>, Semant
     put_string(&mut body, &manifest.database_id)?;
     put_u64(&mut body, manifest.basis_t);
     body.extend_from_slice(&manifest.tx_hash);
-    put_u64(&mut body, manifest.next_eid);
-    put_bytes(&mut body, &encode_schema(&manifest.schema)?)?;
-    put_len(&mut body, manifest.schema_history.len())?;
-    for changes in &manifest.schema_history {
-        put_len(&mut body, changes.len())?;
-        for change in changes {
-            encode_schema_change(&mut body, change)?;
-        }
-    }
+    put_u64(&mut body, manifest.eidx_frontier);
     put_len(&mut body, manifest.segments.len())?;
     for reference in &manifest.segments {
         body.push(index_order_tag(reference.order));
@@ -357,18 +430,7 @@ pub fn decode_index_manifest(bytes: &[u8]) -> Result<IndexManifest, SemanticErro
     let database_id = cursor.string()?;
     let basis_t = cursor.u64()?;
     let tx_hash = cursor.digest()?;
-    let next_eid = cursor.u64()?;
-    let schema = decode_schema(cursor.bytes()?)?;
-    let history_len = cursor.collection_len()?;
-    let mut schema_history = Vec::with_capacity(history_len);
-    for _ in 0..history_len {
-        let count = cursor.collection_len()?;
-        let mut changes = Vec::with_capacity(count);
-        for _ in 0..count {
-            changes.push(decode_schema_change(&mut cursor)?);
-        }
-        schema_history.push(changes);
-    }
+    let eidx_frontier = cursor.u64()?;
     let count = cursor.collection_len()?;
     let mut segments = Vec::with_capacity(count);
     for _ in 0..count {
@@ -385,9 +447,7 @@ pub fn decode_index_manifest(bytes: &[u8]) -> Result<IndexManifest, SemanticErro
         database_id,
         basis_t,
         tx_hash,
-        next_eid,
-        schema,
-        schema_history,
+        eidx_frontier,
         segments,
     };
     validate_index_manifest(&manifest)?;
@@ -407,15 +467,43 @@ fn validate_index_segment(segment: &IndexSegment) -> Result<(), SemanticError> {
             "index segments cannot be empty",
         ));
     }
-    if segment
-        .datoms
+    validate_index_datoms(segment.order, &segment.datoms)
+}
+
+fn validate_index_datoms(order: IndexOrder, datoms: &[Datom]) -> Result<(), SemanticError> {
+    if datoms
         .windows(2)
-        .any(|pair| pair[0].cmp_in(&pair[1], segment.order).is_gt())
+        .any(|pair| pair[0].cmp_in(&pair[1], order).is_gt())
     {
         return Err(fault(
             "encoding/unsorted-index-segment",
             "index segment datoms must be ordered",
         ));
+    }
+    for datom in datoms {
+        let datom_t = tx_to_t(datom.tx).map_err(|error| {
+            fault(
+                "encoding/invalid-index-datom-transaction",
+                format!("index datom transaction is invalid: {error}"),
+            )
+        })?;
+        if datom_t == 0 {
+            if !datom.added {
+                return Err(fault(
+                    "encoding/invalid-index-genesis-datom",
+                    "t=0 index datoms must be genesis assertions",
+                ));
+            }
+            validate_supported_eid(datom.entity).map_err(|error| {
+                fault(
+                    "encoding/invalid-index-datom-entity",
+                    format!("index datom entity id is invalid: {error}"),
+                )
+            })?;
+            validate_encoded_value_refs(&datom.value)?;
+        } else {
+            validate_encoded_datom(datom)?;
+        }
     }
     Ok(())
 }
@@ -427,12 +515,18 @@ fn validate_index_manifest(manifest: &IndexManifest) -> Result<(), SemanticError
             "index manifest needs a database id and positive basis",
         ));
     }
-    if manifest.schema_history.len() != usize::try_from(manifest.basis_t).unwrap_or(usize::MAX) {
-        return Err(fault(
-            "encoding/index-schema-history-basis",
-            "manifest schema history must have one chunk per basis",
-        ));
-    }
+    t_to_tx(manifest.basis_t).map_err(|error| {
+        fault(
+            "encoding/index-basis-out-of-range",
+            format!("index manifest basis cannot be represented: {error}"),
+        )
+    })?;
+    validate_frontier(manifest.eidx_frontier).map_err(|error| {
+        fault(
+            "encoding/invalid-index-frontier",
+            format!("index manifest has an invalid issued frontier: {error}"),
+        )
+    })?;
     let mut expected = std::collections::BTreeMap::<(bool, u8), u32>::new();
     let mut last_key = None;
     for reference in &manifest.segments {
@@ -510,21 +604,84 @@ pub fn request_digest(
     Ok(sha256(&encode_blob(KIND_REQUEST, &body)?))
 }
 
-fn schema_body(schema: &Schema) -> Result<Vec<u8>, SemanticError> {
-    let mut attributes: Vec<_> = schema.attributes().cloned().collect();
-    attributes.sort_by_key(|attribute| attribute.id);
+/// Canonical identity of an authoritative declarative submission.
+///
+/// The basis and instant are absent for an ordinary request because the
+/// transactor selects both after locking the actual db-before.  Explicit
+/// compare-basis and import-time constraints remain part of request identity.
+pub fn submission_request_digest(
+    forms: &[TxForm],
+    compare_basis_t: Option<u64>,
+    tx_instant_override: Option<i64>,
+) -> Result<Digest, SemanticError> {
+    Ok(canonical_submission_request(
+        forms,
+        compare_basis_t,
+        tx_instant_override,
+        MAX_BLOB_LEN + HEADER_LEN + CHECKSUM_LEN,
+    )?
+    .0)
+}
+
+/// Encode an authoritative declarative submission once before queue
+/// admission, returning its stable digest and exact canonical byte footprint.
+/// Dynamic db-before, selected time, and resolved function hashes are absent.
+pub(crate) fn canonical_submission_request(
+    forms: &[TxForm],
+    compare_basis_t: Option<u64>,
+    tx_instant_override: Option<i64>,
+    max_bytes: usize,
+) -> Result<(Digest, usize), SemanticError> {
+    let mut encoded_forms = Vec::with_capacity(forms.len());
+    let mut form_bytes = 0usize;
+    for form in forms {
+        let mut bytes = Vec::new();
+        encode_persistent_tx_form(&mut bytes, form)?;
+        form_bytes = form_bytes
+            .checked_add(bytes.len().saturating_add(4))
+            .ok_or_else(|| submission_too_large(max_bytes))?;
+        if form_bytes > max_bytes {
+            return Err(submission_too_large(max_bytes));
+        }
+        encoded_forms.push(bytes);
+    }
+    encoded_forms.sort();
+
     let mut body = Vec::new();
-    put_len(&mut body, attributes.len())?;
-    for attribute in &attributes {
-        encode_attribute(&mut body, attribute)?;
+    // Submission identity has its own grammar version because these bytes are
+    // hashed for idempotency but are not durable database values.
+    body.push(2);
+    match compare_basis_t {
+        Some(basis) => {
+            body.push(1);
+            put_u64(&mut body, basis);
+        }
+        None => body.push(0),
     }
-    let aliases: Vec<_> = schema.ident_aliases().collect();
-    put_len(&mut body, aliases.len())?;
-    for (ident, attribute) in aliases {
-        encode_keyword(&mut body, ident)?;
-        put_u32(&mut body, attribute);
+    match tx_instant_override {
+        Some(instant) => {
+            body.push(1);
+            put_i64(&mut body, instant);
+        }
+        None => body.push(0),
     }
-    Ok(body)
+    put_len(&mut body, encoded_forms.len())?;
+    for encoded in encoded_forms {
+        put_bytes(&mut body, &encoded)?;
+    }
+    let encoded = encode_blob(KIND_SUBMISSION_REQUEST, &body)?;
+    if encoded.len() > max_bytes {
+        return Err(submission_too_large(max_bytes));
+    }
+    Ok((sha256(&encoded), encoded.len()))
+}
+
+fn submission_too_large(max_bytes: usize) -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Busy,
+        "service/request-byte-capacity",
+        format!("canonical transaction request exceeds the {max_bytes}-byte admission limit"),
+    )
 }
 
 fn transaction_body(transaction: &DurableTransaction) -> Result<Vec<u8>, SemanticError> {
@@ -541,13 +698,11 @@ fn transaction_body(transaction: &DurableTransaction) -> Result<Vec<u8>, Semanti
         left.cmp_in(right, crate::IndexOrder::Eavt)
             .then_with(|| left_bytes.cmp(right_bytes))
     });
-    let mut changes = transaction.schema_changes.clone();
-    changes.sort_by_key(schema_change_key);
     let mut body = Vec::new();
     put_string(&mut body, &transaction.database_id)?;
     put_u64(&mut body, transaction.basis_t);
     body.extend_from_slice(&transaction.previous_hash);
-    put_u64(&mut body, transaction.next_eid);
+    put_u64(&mut body, transaction.eidx_frontier);
     put_len(&mut body, transaction.tempids.len())?;
     for (name, entity) in &transaction.tempids {
         put_string(&mut body, name)?;
@@ -556,10 +711,6 @@ fn transaction_body(transaction: &DurableTransaction) -> Result<Vec<u8>, Semanti
     put_len(&mut body, datoms.len())?;
     for (_, encoded) in datoms {
         body.extend_from_slice(&encoded);
-    }
-    put_len(&mut body, changes.len())?;
-    for change in &changes {
-        encode_schema_change(&mut body, change)?;
     }
     Ok(body)
 }
@@ -577,15 +728,48 @@ fn validate_transaction(transaction: &DurableTransaction) -> Result<(), Semantic
             "durable transaction basis must be positive",
         ));
     }
-    if transaction
-        .tx_data
-        .iter()
-        .any(|datom| datom.tx != transaction.basis_t)
-    {
+    let tx = t_to_tx(transaction.basis_t).map_err(|error| {
+        fault(
+            "encoding/basis-out-of-range",
+            format!("durable transaction basis cannot be represented: {error}"),
+        )
+    })?;
+    validate_frontier(transaction.eidx_frontier).map_err(|error| {
+        fault(
+            "encoding/invalid-issued-frontier",
+            format!("durable transaction has an invalid issued frontier: {error}"),
+        )
+    })?;
+    if transaction.tx_data.iter().any(|datom| datom.tx != tx) {
         return Err(fault(
             "encoding/datom-transaction-mismatch",
-            "every datom must name the transaction envelope basis",
+            "every datom must name the transaction entity for the envelope basis",
         ));
+    }
+    for entity in transaction.tempids.values().copied() {
+        validate_issued_entity(
+            entity,
+            transaction.eidx_frontier,
+            transaction.basis_t,
+            "tempid",
+        )?;
+    }
+    for datom in &transaction.tx_data {
+        validate_encoded_datom(datom)?;
+        validate_issued_entity(
+            datom.entity,
+            transaction.eidx_frontier,
+            transaction.basis_t,
+            "datom",
+        )?;
+        validate_issued_value_refs(&datom.value, transaction.eidx_frontier, transaction.basis_t)?;
+        let datom_t = tx_to_t(datom.tx).expect("transaction equality was checked");
+        if datom_t > MAX_EIDX {
+            return Err(fault(
+                "encoding/datom-transaction-out-of-range",
+                "datom transaction time exceeds the recovered entity-index width",
+            ));
+        }
     }
     for (offset, datom) in transaction.tx_data.iter().enumerate() {
         if transaction.tx_data[offset + 1..].iter().any(|other| {
@@ -599,19 +783,129 @@ fn validate_transaction(transaction: &DurableTransaction) -> Result<(), Semantic
             ));
         }
     }
-    let mut changed_attributes = std::collections::BTreeSet::new();
-    for change in &transaction.schema_changes {
-        let attribute = match change {
-            SchemaChange::Install(attribute) | SchemaChange::Alter(attribute) => attribute.id,
-        };
-        if !changed_attributes.insert(attribute) {
+    Ok(())
+}
+
+fn validate_genesis(datoms: &[Datom]) -> Result<(), SemanticError> {
+    let tx = t_to_tx(0).expect("genesis t is representable");
+    if datoms.is_empty() {
+        return Err(fault(
+            "encoding/empty-genesis",
+            "genesis information cannot be empty",
+        ));
+    }
+    if datoms.iter().any(|datom| datom.tx != tx || !datom.added) {
+        return Err(fault(
+            "encoding/invalid-genesis-datom",
+            "genesis contains only t=0 assertions",
+        ));
+    }
+    if datoms
+        .windows(2)
+        .any(|pair| !pair[0].cmp_in(&pair[1], IndexOrder::Eavt).is_lt())
+    {
+        return Err(fault(
+            "encoding/noncanonical-genesis",
+            "genesis datoms must be strictly ordered in EAVT order",
+        ));
+    }
+    for datom in datoms {
+        validate_supported_eid(datom.entity).map_err(|error| {
+            fault(
+                "encoding/invalid-genesis-entity",
+                format!("genesis entity id is invalid: {error}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_encoded_datom(datom: &Datom) -> Result<(), SemanticError> {
+    validate_supported_eid(datom.entity).map_err(|error| {
+        fault(
+            "encoding/invalid-datom-entity",
+            format!("datom entity id is invalid: {error}"),
+        )
+    })?;
+    let t = tx_to_t(datom.tx).map_err(|error| {
+        fault(
+            "encoding/invalid-datom-transaction",
+            format!("datom transaction is not a transaction entity id: {error}"),
+        )
+    })?;
+    if t == 0 {
+        return Err(fault(
+            "encoding/invalid-datom-transaction",
+            "persisted datoms must belong to a positive transaction",
+        ));
+    }
+    validate_encoded_value_refs(&datom.value)
+}
+
+fn validate_encoded_value_refs(value: &Value) -> Result<(), SemanticError> {
+    match value {
+        Value::Ref(entity) => validate_supported_eid(*entity).map_err(|error| {
+            fault(
+                "encoding/invalid-ref-entity",
+                format!("reference value contains an invalid entity id: {error}"),
+            )
+        }),
+        Value::Tuple(slots) => {
+            for value in slots.iter().flatten() {
+                validate_encoded_value_refs(value)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_issued_entity(
+    entity: u64,
+    frontier: u64,
+    basis_t: u64,
+    context: &str,
+) -> Result<(), SemanticError> {
+    validate_supported_eid(entity).map_err(|error| {
+        fault(
+            "encoding/invalid-issued-entity",
+            format!("{context} contains an invalid entity id: {error}"),
+        )
+    })?;
+    let eidx = eid_to_eidx(entity).expect("supported entity id was checked");
+    if eidx >= frontier {
+        return Err(fault(
+            "encoding/unissued-entity",
+            format!("{context} entity index {eidx} is not below issued frontier {frontier}"),
+        ));
+    }
+    if crate::eid_to_part(entity).expect("supported entity id was checked") == crate::TX_PARTITION {
+        let t = tx_to_t(entity).expect("transaction partition was checked");
+        if t == 0 || t > basis_t {
             return Err(fault(
-                "encoding/duplicate-schema-change",
-                "durable transaction changes one attribute more than once",
+                "encoding/transaction-entity-out-of-range",
+                format!("{context} references transaction t={t} beyond basis {basis_t}"),
             ));
         }
     }
     Ok(())
+}
+
+fn validate_issued_value_refs(
+    value: &Value,
+    frontier: u64,
+    basis_t: u64,
+) -> Result<(), SemanticError> {
+    match value {
+        Value::Ref(entity) => validate_issued_entity(*entity, frontier, basis_t, "reference"),
+        Value::Tuple(slots) => {
+            for value in slots.iter().flatten() {
+                validate_issued_value_refs(value, frontier, basis_t)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn encode_blob(kind: u8, body: &[u8]) -> Result<Vec<u8>, SemanticError> {
@@ -709,8 +1003,41 @@ fn encode_instruction(
             output.push(1);
             encode_value(output, value)?;
         }
+        Instruction::PushEntity(entity) => {
+            output.push(22);
+            encode_entity_ref(output, entity)?;
+        }
+        Instruction::PushNull => output.push(23),
         Instruction::Duplicate => output.push(2),
         Instruction::Pop => output.push(3),
+        Instruction::Swap => output.push(24),
+        Instruction::MakeVector(width) => {
+            output.push(25);
+            output.push(*width);
+        }
+        Instruction::MakeMap(pair_count) => {
+            output.push(26);
+            output.push(*pair_count);
+        }
+        Instruction::Get => output.push(27),
+        Instruction::ContainsKey => output.push(28),
+        Instruction::Length => output.push(29),
+        Instruction::Unpack(width) => {
+            output.push(30);
+            output.push(*width);
+        }
+        Instruction::If {
+            then_branch,
+            else_branch,
+        } => {
+            output.push(31);
+            encode_instruction_block(output, then_branch)?;
+            encode_instruction_block(output, else_branch)?;
+        }
+        Instruction::ForEach { body } => {
+            output.push(32);
+            encode_instruction_block(output, body)?;
+        }
         Instruction::LoadOne(attribute) => {
             output.push(4);
             put_u32(output, *attribute);
@@ -718,6 +1045,14 @@ fn encode_instruction(
         Instruction::Exists(attribute) => {
             output.push(5);
             put_u32(output, *attribute);
+        }
+        Instruction::LoadMany(attribute) => {
+            output.push(33);
+            put_u32(output, *attribute);
+        }
+        Instruction::Query(template) => {
+            output.push(37);
+            encode_query_template(output, template)?;
         }
         Instruction::Add => output.push(6),
         Instruction::Subtract => output.push(7),
@@ -733,17 +1068,17 @@ fn encode_instruction(
             output.push(16);
             output.push(match category {
                 ErrorCategory::Incorrect => 0,
-                ErrorCategory::Forbidden => 1,
                 ErrorCategory::Conflict => 2,
                 _ => {
                     return Err(SemanticError::incorrect(
                         "program/rejection-category",
-                        "program rejection category must be incorrect, conflict, or forbidden",
+                        "program rejection category must be incorrect or conflict",
                     ));
                 }
             });
             put_string(output, message)?;
         }
+        Instruction::RequireAnomaly => output.push(40),
         Instruction::EmitAdd(attribute) => {
             output.push(17);
             put_u32(output, *attribute);
@@ -752,16 +1087,64 @@ fn encode_instruction(
             output.push(18);
             put_u32(output, *attribute);
         }
+        Instruction::EmitRetractAll(attribute) => {
+            output.push(38);
+            put_u32(output, *attribute);
+        }
+        Instruction::EmitCas(attribute) => {
+            output.push(34);
+            put_u32(output, *attribute);
+        }
+        Instruction::EmitRetractEntity => output.push(35),
+        Instruction::EmitEnsure => output.push(36),
+        Instruction::EmitEntityMap => output.push(39),
         Instruction::Return => output.push(19),
         Instruction::EmitRow(width) => {
             output.push(20);
             output.push(*width);
         }
+        Instruction::EmitCall {
+            function,
+            argument_count,
+        } => {
+            output.push(21);
+            match function {
+                CallableRef::Database(entity) => {
+                    output.push(0);
+                    encode_entity_ref(output, entity)?;
+                }
+                CallableRef::ExactHash(hash) => {
+                    output.push(1);
+                    output.extend_from_slice(hash);
+                }
+                CallableRef::Local(symbol) => {
+                    output.push(2);
+                    encode_symbol(output, symbol)?;
+                }
+            }
+            output.push(*argument_count);
+        }
     }
     Ok(())
 }
 
-fn decode_instruction(cursor: &mut Cursor<'_>) -> Result<Instruction, SemanticError> {
+fn decode_instruction(
+    cursor: &mut Cursor<'_>,
+    block_depth: usize,
+    instruction_count: &mut usize,
+) -> Result<Instruction, SemanticError> {
+    *instruction_count = instruction_count.checked_add(1).ok_or_else(|| {
+        fault(
+            "encoding/program-instruction-limit",
+            "program instruction count overflowed",
+        )
+    })?;
+    if *instruction_count > MAX_PROGRAM_INSTRUCTIONS {
+        return Err(fault(
+            "encoding/program-instruction-limit",
+            format!("program contains more than {MAX_PROGRAM_INSTRUCTIONS} instructions"),
+        ));
+    }
     Ok(match cursor.u8()? {
         0 => Instruction::PushArgument(cursor.u8()?),
         1 => Instruction::PushConstant(decode_value(cursor, 0)?),
@@ -782,7 +1165,6 @@ fn decode_instruction(cursor: &mut Cursor<'_>) -> Result<Instruction, SemanticEr
         16 => {
             let category = match cursor.u8()? {
                 0 => ErrorCategory::Incorrect,
-                1 => ErrorCategory::Forbidden,
                 2 => ErrorCategory::Conflict,
                 tag => return Err(invalid_tag("program rejection category", tag)),
             };
@@ -793,9 +1175,167 @@ fn decode_instruction(cursor: &mut Cursor<'_>) -> Result<Instruction, SemanticEr
         }
         17 => Instruction::EmitAdd(cursor.u32()?),
         18 => Instruction::EmitRetract(cursor.u32()?),
+        38 => Instruction::EmitRetractAll(cursor.u32()?),
         19 => Instruction::Return,
         20 => Instruction::EmitRow(cursor.u8()?),
+        21 => {
+            let function = match cursor.u8()? {
+                0 => CallableRef::Database(decode_entity_ref(cursor)?),
+                1 => CallableRef::ExactHash(cursor.digest()?),
+                2 => CallableRef::Local(decode_symbol(cursor)?),
+                tag => return Err(invalid_tag("program callable", tag)),
+            };
+            Instruction::EmitCall {
+                function,
+                argument_count: cursor.u8()?,
+            }
+        }
+        22 => Instruction::PushEntity(decode_entity_ref(cursor)?),
+        23 => Instruction::PushNull,
+        24 => Instruction::Swap,
+        25 => Instruction::MakeVector(cursor.u8()?),
+        26 => Instruction::MakeMap(cursor.u8()?),
+        27 => Instruction::Get,
+        28 => Instruction::ContainsKey,
+        29 => Instruction::Length,
+        30 => Instruction::Unpack(cursor.u8()?),
+        31 => Instruction::If {
+            then_branch: decode_instruction_block(cursor, block_depth + 1, instruction_count)?,
+            else_branch: decode_instruction_block(cursor, block_depth + 1, instruction_count)?,
+        },
+        32 => Instruction::ForEach {
+            body: decode_instruction_block(cursor, block_depth + 1, instruction_count)?,
+        },
+        33 => Instruction::LoadMany(cursor.u32()?),
+        34 => Instruction::EmitCas(cursor.u32()?),
+        35 => Instruction::EmitRetractEntity,
+        36 => Instruction::EmitEnsure,
+        37 => Instruction::Query(decode_query_template(cursor)?),
+        39 => Instruction::EmitEntityMap,
+        40 => Instruction::RequireAnomaly,
         tag => return Err(invalid_tag("program instruction", tag)),
+    })
+}
+
+fn encode_instruction_block(
+    output: &mut Vec<u8>,
+    instructions: &[Instruction],
+) -> Result<(), SemanticError> {
+    put_len(output, instructions.len())?;
+    for instruction in instructions {
+        encode_instruction(output, instruction)?;
+    }
+    Ok(())
+}
+
+fn decode_instruction_block(
+    cursor: &mut Cursor<'_>,
+    block_depth: usize,
+    instruction_count: &mut usize,
+) -> Result<Vec<Instruction>, SemanticError> {
+    if block_depth > MAX_PROGRAM_BLOCK_DEPTH {
+        return Err(fault(
+            "encoding/program-block-depth",
+            format!("program blocks nest beyond {MAX_PROGRAM_BLOCK_DEPTH} levels"),
+        ));
+    }
+    let count = cursor.collection_len()?;
+    if count > MAX_PROGRAM_INSTRUCTIONS.saturating_sub(*instruction_count) {
+        return Err(fault(
+            "encoding/program-instruction-limit",
+            format!("program contains more than {MAX_PROGRAM_INSTRUCTIONS} instructions"),
+        ));
+    }
+    let mut instructions = Vec::with_capacity(count);
+    for _ in 0..count {
+        instructions.push(decode_instruction(cursor, block_depth, instruction_count)?);
+    }
+    Ok(instructions)
+}
+
+fn encode_query_template(
+    output: &mut Vec<u8>,
+    template: &QueryTemplate,
+) -> Result<(), SemanticError> {
+    output.extend_from_slice(&template.version().to_be_bytes());
+    put_len(output, template.find().len())?;
+    output.extend_from_slice(template.find());
+    put_len(output, template.patterns().len())?;
+    for pattern in template.patterns() {
+        encode_query_term(output, &pattern.entity)?;
+        put_u32(output, pattern.attribute);
+        encode_query_term(output, &pattern.value)?;
+    }
+    Ok(())
+}
+
+fn encode_query_term(output: &mut Vec<u8>, term: &QueryTerm) -> Result<(), SemanticError> {
+    match term {
+        QueryTerm::Variable(variable) => {
+            output.push(0);
+            output.push(*variable);
+        }
+        QueryTerm::Input(input) => {
+            output.push(1);
+            output.push(*input);
+        }
+        QueryTerm::Constant(value) => {
+            output.push(2);
+            encode_value(output, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_query_template(cursor: &mut Cursor<'_>) -> Result<QueryTemplate, SemanticError> {
+    let version = cursor.u16()?;
+    if version != QUERY_TEMPLATE_VERSION {
+        return Err(SemanticError::new(
+            ErrorCategory::Unsupported,
+            "encoding/unsupported-query-template-version",
+            format!("query template version {version} is unsupported"),
+        ));
+    }
+    let find_len = cursor.collection_len()?;
+    if find_len == 0 || find_len > MAX_QUERY_VARIABLES {
+        return Err(fault(
+            "encoding/query-find-shape",
+            format!("query find exceeds {MAX_QUERY_VARIABLES} variable slots"),
+        ));
+    }
+    let mut find = Vec::with_capacity(find_len);
+    for _ in 0..find_len {
+        find.push(cursor.u8()?);
+    }
+    let pattern_len = cursor.collection_len()?;
+    if pattern_len == 0 || pattern_len > MAX_QUERY_PATTERNS {
+        return Err(fault(
+            "encoding/query-pattern-limit",
+            format!("query exceeds {MAX_QUERY_PATTERNS} data patterns"),
+        ));
+    }
+    let mut patterns = Vec::with_capacity(pattern_len);
+    for _ in 0..pattern_len {
+        patterns.push(QueryPattern::new(
+            decode_query_term(cursor)?,
+            cursor.u32()?,
+            decode_query_term(cursor)?,
+        ));
+    }
+    QueryTemplate::new(find, patterns).map_err(|error| {
+        fault(
+            "encoding/invalid-query-template",
+            format!("persisted query template failed validation: {error}"),
+        )
+    })
+}
+
+fn decode_query_term(cursor: &mut Cursor<'_>) -> Result<QueryTerm, SemanticError> {
+    Ok(match cursor.u8()? {
+        0 => QueryTerm::Variable(cursor.u8()?),
+        1 => QueryTerm::Input(cursor.u8()?),
+        2 => QueryTerm::Constant(decode_value(cursor, 0)?),
+        tag => return Err(invalid_tag("query template term", tag)),
     })
 }
 
@@ -821,34 +1361,6 @@ fn decode_datom(cursor: &mut Cursor<'_>) -> Result<Datom, SemanticError> {
         tx,
         added,
     })
-}
-
-fn encode_schema_change(output: &mut Vec<u8>, change: &SchemaChange) -> Result<(), SemanticError> {
-    match change {
-        SchemaChange::Install(attribute) => {
-            output.push(0);
-            encode_attribute(output, attribute)
-        }
-        SchemaChange::Alter(attribute) => {
-            output.push(1);
-            encode_attribute(output, attribute)
-        }
-    }
-}
-
-fn decode_schema_change(cursor: &mut Cursor<'_>) -> Result<SchemaChange, SemanticError> {
-    match cursor.u8()? {
-        0 => Ok(SchemaChange::Install(decode_attribute(cursor)?)),
-        1 => Ok(SchemaChange::Alter(decode_attribute(cursor)?)),
-        tag => Err(invalid_tag("schema change", tag)),
-    }
-}
-
-fn schema_change_key(change: &SchemaChange) -> (u32, u8) {
-    match change {
-        SchemaChange::Install(attribute) => (attribute.id, 0),
-        SchemaChange::Alter(attribute) => (attribute.id, 1),
-    }
 }
 
 fn encode_attribute(output: &mut Vec<u8>, attribute: &Attribute) -> Result<(), SemanticError> {
@@ -899,66 +1411,6 @@ fn encode_attribute(output: &mut Vec<u8>, attribute: &Attribute) -> Result<(), S
     Ok(())
 }
 
-fn decode_attribute(cursor: &mut Cursor<'_>) -> Result<Attribute, SemanticError> {
-    let id = cursor.u32()?;
-    let ident = decode_keyword(cursor)?;
-    let value_type = decode_value_type(cursor.u8()?)?;
-    let cardinality = match cursor.u8()? {
-        0 => Cardinality::One,
-        1 => Cardinality::Many,
-        tag => return Err(invalid_tag("cardinality", tag)),
-    };
-    let unique = match cursor.u8()? {
-        0 => None,
-        1 => Some(Unique::Identity),
-        2 => Some(Unique::Value),
-        tag => return Err(invalid_tag("unique", tag)),
-    };
-    let indexed = cursor.boolean()?;
-    let component = cursor.boolean()?;
-    let no_history = cursor.boolean()?;
-    let tuple = match cursor.u8()? {
-        0 => None,
-        1 => Some(TupleSpec::Homogeneous(decode_value_type(cursor.u8()?)?)),
-        2 => {
-            let count = cursor.collection_len()?;
-            let mut types = Vec::with_capacity(count);
-            for _ in 0..count {
-                types.push(decode_value_type(cursor.u8()?)?);
-            }
-            Some(TupleSpec::Heterogeneous(types))
-        }
-        3 => {
-            let count = cursor.collection_len()?;
-            let mut attributes = Vec::with_capacity(count);
-            for _ in 0..count {
-                attributes.push(cursor.u32()?);
-            }
-            Some(TupleSpec::Composite(attributes))
-        }
-        tag => return Err(invalid_tag("tuple specification", tag)),
-    };
-    let tuple_discontinued = cursor.boolean()?;
-    let predicate_count = cursor.collection_len()?;
-    let mut predicates = Vec::with_capacity(predicate_count);
-    for _ in 0..predicate_count {
-        predicates.push(cursor.string()?);
-    }
-    Ok(Attribute {
-        id,
-        ident,
-        value_type,
-        cardinality,
-        unique,
-        indexed,
-        component,
-        no_history,
-        tuple,
-        tuple_discontinued,
-        predicates,
-    })
-}
-
 fn encode_value(output: &mut Vec<u8>, value: &Value) -> Result<(), SemanticError> {
     match value {
         Value::BigDec(value) => {
@@ -986,6 +1438,12 @@ fn encode_value(output: &mut Vec<u8>, value: &Value) -> Result<(), SemanticError
         Value::Float(value) => {
             output.push(5);
             put_u32(output, canonical_f32_bits(*value));
+        }
+        Value::Function(hash) => {
+            // Function values are immutable native program identities. The
+            // canonical payload is the content hash itself, never JVM code.
+            output.push(15);
+            output.extend_from_slice(hash);
         }
         Value::Instant(value) => {
             output.push(6);
@@ -1093,6 +1551,7 @@ fn decode_value(cursor: &mut Cursor<'_>, depth: usize) -> Result<Value, Semantic
         }
         13 => Ok(Value::Uuid(u128::from_be_bytes(cursor.array()?))),
         14 => Ok(Value::Uri(cursor.string()?)),
+        15 => Ok(Value::Function(cursor.array()?)),
         tag => Err(invalid_tag("value", tag)),
     }
 }
@@ -1147,16 +1606,10 @@ fn encode_tx_op(output: &mut Vec<u8>, op: &TxOp) -> Result<(), SemanticError> {
             output.push(3);
             encode_entity_ref(output, entity)?;
         }
-        TxOp::Ensure { entity, required } => {
+        TxOp::Ensure { entity, spec } => {
             output.push(4);
             encode_entity_ref(output, entity)?;
-            let mut required = required.clone();
-            required.sort_unstable();
-            required.dedup();
-            put_len(output, required.len())?;
-            for attribute in required {
-                put_u32(output, attribute);
-            }
+            encode_entity_ref(output, spec)?;
         }
         TxOp::InstallAttribute(attribute) => {
             output.push(5);
@@ -1168,6 +1621,221 @@ fn encode_tx_op(output: &mut Vec<u8>, op: &TxOp) -> Result<(), SemanticError> {
         }
     }
     Ok(())
+}
+
+/// Canonical encoding for transaction forms that are safe to submit to the
+/// authoritative transactor. Process-local callbacks deliberately have no
+/// persistent/request representation.
+fn encode_persistent_tx_form(output: &mut Vec<u8>, form: &TxForm) -> Result<(), SemanticError> {
+    match form {
+        TxForm::Op(op) => {
+            output.push(0);
+            encode_tx_op(output, op)?;
+        }
+        TxForm::EntityMap(map) => {
+            output.push(1);
+            encode_entity_map(output, map, 0)?;
+        }
+        TxForm::ProgramCall(call) => {
+            output.push(2);
+            encode_program_call(output, call)?;
+        }
+        TxForm::Call(_) => {
+            return Err(SemanticError::incorrect(
+                "service/process-local-call",
+                "process-local Rust transaction callbacks cannot cross the authoritative service boundary",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn persistent_tx_form_bytes(form: &TxForm) -> Result<usize, SemanticError> {
+    let mut encoded = Vec::new();
+    encode_persistent_tx_form(&mut encoded, form)?;
+    Ok(encoded.len())
+}
+
+fn encode_entity_map(
+    output: &mut Vec<u8>,
+    map: &EntityMap,
+    depth: usize,
+) -> Result<(), SemanticError> {
+    if depth > 32 {
+        return Err(SemanticError::incorrect(
+            "transaction/map-depth",
+            "entity maps may contain at most 32 nested collection levels",
+        ));
+    }
+    match &map.id {
+        Some(entity) => {
+            output.push(1);
+            encode_entity_ref(output, entity)?;
+        }
+        None => output.push(0),
+    }
+
+    // Map entry order is not transaction semantics. Sorting the complete
+    // encoded entry also gives deterministic ordering when malformed input
+    // repeats an attribute; semantic validation remains the normalizer's job.
+    let mut entries = map
+        .attributes
+        .iter()
+        .map(|(attribute, value)| {
+            let mut encoded = Vec::new();
+            encode_attribute_ref(&mut encoded, attribute)?;
+            encode_map_value(&mut encoded, value, depth + 1)?;
+            Ok(encoded)
+        })
+        .collect::<Result<Vec<_>, SemanticError>>()?;
+    entries.sort();
+    put_len(output, entries.len())?;
+    for entry in entries {
+        put_bytes(output, &entry)?;
+    }
+    Ok(())
+}
+
+fn encode_attribute_ref(
+    output: &mut Vec<u8>,
+    attribute: &AttributeRef,
+) -> Result<(), SemanticError> {
+    match attribute {
+        AttributeRef::Id(attribute) => {
+            output.push(0);
+            put_u32(output, *attribute);
+        }
+        AttributeRef::Ident(ident) => {
+            output.push(1);
+            encode_keyword(output, ident)?;
+        }
+        AttributeRef::ReverseId(attribute) => {
+            output.push(2);
+            put_u32(output, *attribute);
+        }
+        AttributeRef::ReverseIdent(ident) => {
+            output.push(3);
+            encode_keyword(output, ident)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_map_value(
+    output: &mut Vec<u8>,
+    value: &MapValue,
+    depth: usize,
+) -> Result<(), SemanticError> {
+    if depth > 32 {
+        return Err(SemanticError::incorrect(
+            "transaction/map-depth",
+            "entity maps may contain at most 32 nested collection levels",
+        ));
+    }
+    match value {
+        MapValue::Value(value) => {
+            output.push(0);
+            encode_tx_value(output, value)?;
+        }
+        MapValue::Nested(map) => {
+            output.push(1);
+            encode_entity_map(output, map, depth + 1)?;
+        }
+        MapValue::Many(values) => {
+            output.push(2);
+            let mut values = values
+                .iter()
+                .map(|value| {
+                    let mut encoded = Vec::new();
+                    encode_map_value(&mut encoded, value, depth + 1)?;
+                    Ok(encoded)
+                })
+                .collect::<Result<Vec<_>, SemanticError>>()?;
+            values.sort();
+            put_len(output, values.len())?;
+            for value in values {
+                put_bytes(output, &value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_program_call(output: &mut Vec<u8>, call: &ProgramCall) -> Result<(), SemanticError> {
+    match &call.function {
+        CallableRef::Database(entity) => {
+            output.push(0);
+            encode_entity_ref(output, entity)?;
+        }
+        CallableRef::ExactHash(hash) => {
+            output.push(1);
+            output.extend_from_slice(hash);
+        }
+        CallableRef::Local(symbol) => {
+            output.push(2);
+            encode_symbol(output, symbol)?;
+        }
+    }
+    put_len(output, call.arguments.len())?;
+    for argument in &call.arguments {
+        encode_runtime_value(output, argument, 0)?;
+    }
+    Ok(())
+}
+
+fn encode_runtime_value(
+    output: &mut Vec<u8>,
+    value: &RuntimeValue,
+    depth: usize,
+) -> Result<(), SemanticError> {
+    if depth > 16 {
+        return Err(SemanticError::incorrect(
+            "program/value-depth",
+            "runtime values may contain at most 16 collection levels",
+        ));
+    }
+    match value {
+        RuntimeValue::Scalar(value) => {
+            output.push(0);
+            encode_value(output, value)?;
+        }
+        RuntimeValue::Entity(entity) => {
+            output.push(1);
+            encode_entity_ref(output, entity)?;
+        }
+        RuntimeValue::Null => output.push(2),
+        RuntimeValue::Vector(values) => {
+            output.push(3);
+            put_len(output, values.len())?;
+            for value in values {
+                encode_runtime_value(output, value, depth + 1)?;
+            }
+        }
+        RuntimeValue::Map(entries) => {
+            if entries.windows(2).any(|entries| {
+                entries[0].0.stored_cmp(&entries[1].0) != std::cmp::Ordering::Less
+                    || entries[0].0.index_cmp(&entries[1].0) == std::cmp::Ordering::Equal
+            }) {
+                return Err(SemanticError::incorrect(
+                    "program/noncanonical-map",
+                    "runtime map keys must be unique and canonically ordered",
+                ));
+            }
+            output.push(4);
+            put_len(output, entries.len())?;
+            for (key, value) in entries {
+                encode_value(output, key)?;
+                encode_runtime_value(output, value, depth + 1)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn program_call_digest(call: &ProgramCall) -> Result<Digest, SemanticError> {
+    let mut bytes = Vec::new();
+    encode_program_call(&mut bytes, call)?;
+    Ok(sha256(&bytes))
 }
 
 fn encode_entity_ref(output: &mut Vec<u8>, entity: &EntityRef) -> Result<(), SemanticError> {
@@ -1192,6 +1860,20 @@ fn encode_entity_ref(output: &mut Vec<u8>, entity: &EntityRef) -> Result<(), Sem
         EntityRef::Tx => output.push(4),
     }
     Ok(())
+}
+
+fn decode_entity_ref(cursor: &mut Cursor<'_>) -> Result<EntityRef, SemanticError> {
+    Ok(match cursor.u8()? {
+        0 => EntityRef::Id(cursor.u64()?),
+        1 => EntityRef::Ident(decode_keyword(cursor)?),
+        2 => EntityRef::Temp(cursor.string()?),
+        3 => EntityRef::Lookup {
+            attribute: cursor.u32()?,
+            value: decode_value(cursor, 0)?,
+        },
+        4 => EntityRef::Tx,
+        tag => return Err(invalid_tag("entity reference", tag)),
+    })
 }
 
 fn encode_tx_value(output: &mut Vec<u8>, value: &TxValue) -> Result<(), SemanticError> {
@@ -1326,27 +2008,7 @@ fn value_type_tag(value_type: ValueType) -> u8 {
         ValueType::Tuple => 12,
         ValueType::Uuid => 13,
         ValueType::Uri => 14,
-    }
-}
-
-fn decode_value_type(tag: u8) -> Result<ValueType, SemanticError> {
-    match tag {
-        0 => Ok(ValueType::BigDec),
-        1 => Ok(ValueType::BigInt),
-        2 => Ok(ValueType::Boolean),
-        3 => Ok(ValueType::Bytes),
-        4 => Ok(ValueType::Double),
-        5 => Ok(ValueType::Float),
-        6 => Ok(ValueType::Instant),
-        7 => Ok(ValueType::Keyword),
-        8 => Ok(ValueType::Long),
-        9 => Ok(ValueType::Ref),
-        10 => Ok(ValueType::String),
-        11 => Ok(ValueType::Symbol),
-        12 => Ok(ValueType::Tuple),
-        13 => Ok(ValueType::Uuid),
-        14 => Ok(ValueType::Uri),
-        tag => Err(invalid_tag("value type", tag)),
+        ValueType::Function => 15,
     }
 }
 
@@ -1406,6 +2068,10 @@ impl<'a> Cursor<'a> {
         Ok(self.take(1)?[0])
     }
 
+    fn u16(&mut self) -> Result<u16, SemanticError> {
+        Ok(u16::from_be_bytes(self.array()?))
+    }
+
     fn u32(&mut self) -> Result<u32, SemanticError> {
         Ok(u32::from_be_bytes(self.array()?))
     }
@@ -1434,7 +2100,11 @@ impl<'a> Cursor<'a> {
     }
 
     fn bytes(&mut self) -> Result<&'a [u8], SemanticError> {
-        let length = self.collection_len()?;
+        // Byte/string payload length is bounded by MAX_VALUE_LEN, not by the
+        // lower entry-count guard used for vectors and maps. Conflating the
+        // two made legal multi-megabyte scalar values encode but fail their
+        // mandatory canonical decode.
+        let length = self.u32()? as usize;
         if length > MAX_VALUE_LEN {
             return Err(fault(
                 "encoding/value-too-large",
@@ -1482,53 +2152,8 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{USER_PARTITION, canonical_genesis_datoms, make_eid};
     use std::str::FromStr;
-
-    fn schema() -> Schema {
-        let mut schema = Schema::new();
-        schema
-            .install(Attribute::new(
-                1,
-                Keyword::new("db", "txInstant"),
-                ValueType::Instant,
-                Cardinality::One,
-            ))
-            .unwrap();
-        schema
-            .install(
-                Attribute::new(
-                    10,
-                    Keyword::new("item", "key"),
-                    ValueType::Tuple,
-                    Cardinality::One,
-                )
-                .tuple(TupleSpec::Heterogeneous(vec![
-                    ValueType::Long,
-                    ValueType::String,
-                ]))
-                .unique(Unique::Identity)
-                .predicate("valid-key"),
-            )
-            .unwrap();
-        schema.rename(10, Keyword::new("item", "key-v2")).unwrap();
-        schema
-    }
-
-    #[test]
-    fn schema_encoding_is_stable_and_round_trips() {
-        let schema = schema();
-        let encoded = encode_schema(&schema).unwrap();
-        assert_eq!(
-            hex(&sha256(&encoded)),
-            "25359d1f1ad2e77fc21fe496c48564868f3840e4f2876fb0b0b51fc1a179af62"
-        );
-        let decoded = decode_schema(&encoded).unwrap();
-        assert_eq!(encode_schema(&decoded).unwrap(), encoded);
-        assert_eq!(
-            decoded.attributes().collect::<Vec<_>>(),
-            schema.attributes().collect::<Vec<_>>()
-        );
-    }
 
     #[test]
     fn every_value_variant_round_trips_in_a_transaction() {
@@ -1539,10 +2164,11 @@ mod tests {
             Value::Bytes(vec![0, 128, 255]),
             Value::Double(f64::NAN),
             Value::Float(-0.0),
+            Value::Function([0xa5; 32]),
             Value::Instant(-1),
             Value::Keyword(Keyword::new("a", "b")),
             Value::Long(i64::MIN),
-            Value::Ref(u64::MAX),
+            Value::Ref(make_eid(USER_PARTITION, 42).unwrap()),
             Value::String("\u{10000}\u{e000}".into()),
             Value::Symbol(Symbol::unqualified("symbol")),
             Value::Tuple(vec![None, Some(Value::Long(7))]),
@@ -1553,7 +2179,7 @@ mod tests {
             database_id: "encoding-test".into(),
             basis_t: 1,
             previous_hash: [0; 32],
-            next_eid: 1_000,
+            eidx_frontier: 1_000,
             tempids: BTreeMap::new(),
             tx_data: values
                 .into_iter()
@@ -1562,11 +2188,10 @@ mod tests {
                     entity: offset as u64 + 1,
                     attribute: 10,
                     value,
-                    tx: 1,
+                    tx: t_to_tx(1).unwrap(),
                     added: true,
                 })
                 .collect(),
-            schema_changes: vec![],
         };
         let encoded = encode_transaction(&transaction).unwrap();
         let decoded = decode_transaction(&encoded).unwrap();
@@ -1575,22 +2200,42 @@ mod tests {
     }
 
     #[test]
+    fn function_value_and_schema_type_have_stable_native_tags() {
+        let hash = [0xa5; 32];
+        let mut encoded = Vec::new();
+        encode_value(&mut encoded, &Value::Function(hash)).unwrap();
+
+        assert_eq!(encoded, [&[15][..], &hash[..]].concat());
+        assert_eq!(value_type_tag(ValueType::Function), 15);
+
+        let mut cursor = Cursor::new(&encoded);
+        assert_eq!(decode_value(&mut cursor, 0).unwrap(), Value::Function(hash));
+        cursor.finish().unwrap();
+    }
+
+    #[test]
     fn checksum_version_truncation_and_wrong_kind_fail_closed() {
-        let encoded = encode_schema(&schema()).unwrap();
+        let encoded = encode_genesis(&canonical_genesis_datoms()).unwrap();
         let mut corrupt = encoded.clone();
         corrupt[HEADER_LEN] ^= 1;
         assert_eq!(
-            decode_schema(&corrupt).unwrap_err().code,
+            decode_genesis(&corrupt).unwrap_err().code,
             "encoding/checksum-mismatch"
         );
         let mut unsupported = encoded.clone();
-        unsupported[5..7].copy_from_slice(&2_u16.to_be_bytes());
+        unsupported[5..7].copy_from_slice(&4_u16.to_be_bytes());
         assert_eq!(
-            decode_schema(&unsupported).unwrap_err().code,
+            decode_genesis(&unsupported).unwrap_err().code,
+            "encoding/unsupported-version"
+        );
+        let mut legacy_identity = encoded.clone();
+        legacy_identity[5..7].copy_from_slice(&1_u16.to_be_bytes());
+        assert_eq!(
+            decode_genesis(&legacy_identity).unwrap_err().code,
             "encoding/unsupported-version"
         );
         assert_eq!(
-            decode_schema(&encoded[..encoded.len() - 1])
+            decode_genesis(&encoded[..encoded.len() - 1])
                 .unwrap_err()
                 .code,
             "encoding/length-mismatch"
@@ -1603,7 +2248,7 @@ mod tests {
         let mut oversized = encoded.clone();
         oversized[8..16].copy_from_slice(&((MAX_BLOB_LEN as u64) + 1).to_be_bytes());
         assert_eq!(
-            decode_schema(&oversized).unwrap_err().code,
+            decode_genesis(&oversized).unwrap_err().code,
             "encoding/blob-too-large"
         );
     }
@@ -1614,37 +2259,35 @@ mod tests {
             database_id: "encoding-test".into(),
             basis_t: 1,
             previous_hash: [0; 32],
-            next_eid: 1_000,
+            eidx_frontier: 1_000,
             tempids: BTreeMap::new(),
             tx_data: vec![
                 Datom {
                     entity: 2,
                     attribute: 1,
                     value: Value::Instant(2),
-                    tx: 1,
+                    tx: t_to_tx(1).unwrap(),
                     added: true,
                 },
                 Datom {
                     entity: 1,
                     attribute: 1,
                     value: Value::Instant(1),
-                    tx: 1,
+                    tx: t_to_tx(1).unwrap(),
                     added: true,
                 },
             ],
-            schema_changes: vec![],
         };
         let mut body = Vec::new();
         put_string(&mut body, &transaction.database_id).unwrap();
         put_u64(&mut body, transaction.basis_t);
         body.extend_from_slice(&transaction.previous_hash);
-        put_u64(&mut body, transaction.next_eid);
+        put_u64(&mut body, transaction.eidx_frontier);
         put_len(&mut body, transaction.tempids.len()).unwrap();
         put_len(&mut body, transaction.tx_data.len()).unwrap();
         for datom in &transaction.tx_data {
             encode_datom(&mut body, datom).unwrap();
         }
-        put_len(&mut body, 0).unwrap();
         let encoded = encode_blob(KIND_TRANSACTION, &body).unwrap();
         assert_eq!(
             decode_transaction(&encoded).unwrap_err().code,
@@ -1658,17 +2301,16 @@ mod tests {
             entity: 1,
             attribute: 10,
             value: Value::BigDec(BigDecimal::from_str(value).unwrap()),
-            tx: 1,
+            tx: t_to_tx(1).unwrap(),
             added: true,
         };
         let mut transaction = DurableTransaction {
             database_id: "encoding-test".into(),
             basis_t: 1,
             previous_hash: [0; 32],
-            next_eid: 1_000,
+            eidx_frontier: 1_000,
             tempids: BTreeMap::new(),
             tx_data: vec![datom("1.0"), datom("1.00")],
-            schema_changes: vec![],
         };
         let forward = encode_transaction(&transaction).unwrap();
         transaction.tx_data.reverse();
@@ -1692,7 +2334,68 @@ mod tests {
         assert_ne!(request_digest(&ops, 1_000, 8).unwrap(), forward);
     }
 
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    #[test]
+    fn submission_digest_covers_full_unordered_transaction_data() {
+        let map = |reverse: bool| {
+            let mut attributes = vec![
+                (
+                    AttributeRef::Ident(Keyword::new("item", "tags")),
+                    MapValue::Many(vec![
+                        MapValue::Value(TxValue::Scalar(Value::String("b".into()))),
+                        MapValue::Value(TxValue::Scalar(Value::String("a".into()))),
+                    ]),
+                ),
+                (
+                    AttributeRef::Ident(Keyword::new("item", "count")),
+                    MapValue::Value(TxValue::Scalar(Value::Long(7))),
+                ),
+            ];
+            if reverse {
+                attributes.reverse();
+                let MapValue::Many(values) = &mut attributes[0].1 else {
+                    // The reversal moved `count` first; find the collection.
+                    let MapValue::Many(values) = &mut attributes[1].1 else {
+                        unreachable!()
+                    };
+                    values.reverse();
+                    return TxForm::EntityMap(EntityMap {
+                        id: Some(EntityRef::Temp("mapped".into())),
+                        attributes,
+                    });
+                };
+                values.reverse();
+            }
+            TxForm::EntityMap(EntityMap {
+                id: Some(EntityRef::Temp("mapped".into())),
+                attributes,
+            })
+        };
+        let op = TxForm::Op(TxOp::RetractEntity(EntityRef::Id(42)));
+        let left = vec![map(false), op.clone()];
+        let right = vec![op, map(true)];
+        let left = canonical_submission_request(&left, None, None, 1 << 20).unwrap();
+        let right = canonical_submission_request(&right, None, None, 1 << 20).unwrap();
+        assert_eq!(left, right);
+
+        let local = TxForm::Call(crate::TxCall {
+            function: "process/local".into(),
+            arguments: Vec::new(),
+        });
+        assert_eq!(
+            canonical_submission_request(&[local], None, None, 1 << 20)
+                .unwrap_err()
+                .code,
+            "service/process-local-call"
+        );
+        assert_eq!(
+            canonical_submission_request(&left_forms_for_limit(), None, None, 1)
+                .unwrap_err()
+                .code,
+            "service/request-byte-capacity"
+        );
+    }
+
+    fn left_forms_for_limit() -> Vec<TxForm> {
+        vec![TxForm::Op(TxOp::RetractEntity(EntityRef::Id(42)))]
     }
 }

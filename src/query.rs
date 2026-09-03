@@ -1,7 +1,7 @@
 use crate::{
-    Database, ErrorCategory, IndexOrder, IndexPrefix, Keyword, Program, ProgramControl,
-    ProgramHash, ProgramKind, ProgramOutput, ProgramRuntime, PullPattern, SemanticError, Value,
-    View,
+    Database, ErrorCategory, IndexOrder, IndexPrefix, Program, ProgramControl, ProgramHash,
+    ProgramKind, ProgramOutput, ProgramRuntime, PullPattern, SemanticError, Value, View,
+    schema_eid_to_attr_id,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -225,12 +225,112 @@ pub struct QuerySource<'a> {
     pub view: View,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum QueryValue {
+    Nil,
     Scalar(Value),
     Collection(Vec<QueryValue>),
     Tuple(Vec<QueryValue>),
-    Map(Vec<(Keyword, QueryValue)>),
+    Map(Vec<(QueryValue, QueryValue)>),
+}
+
+impl QueryValue {
+    /// Deterministic total comparison used to canonicalize arbitrary pull
+    /// result keys. This is deliberately a query-result ordering rather than
+    /// a stored-value index ordering: container shape participates before
+    /// recursively comparing contents, while scalar comparison delegates to
+    /// Datomic's logical value comparator.
+    pub fn canonical_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        let rank = |value: &Self| match value {
+            Self::Nil => 0_u8,
+            Self::Scalar(_) => 1,
+            Self::Tuple(_) => 2,
+            Self::Collection(_) => 3,
+            Self::Map(_) => 4,
+        };
+        let ordering = rank(self).cmp(&rank(other));
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+        match (self, other) {
+            (Self::Nil, Self::Nil) => Ordering::Equal,
+            (Self::Scalar(left), Self::Scalar(right)) => left.index_cmp(right),
+            (Self::Tuple(left), Self::Tuple(right))
+            | (Self::Collection(left), Self::Collection(right)) => {
+                compare_query_sequences(left, right)
+            }
+            (Self::Map(left), Self::Map(right)) => compare_query_maps(left, right),
+            _ => unreachable!("equal query-value ranks must have matching variants"),
+        }
+    }
+
+    /// Insert or replace one map entry and restore canonical key order. Pull
+    /// maps are semantically unordered, so neither keyword-only ordering nor
+    /// selector order may leak into equality or returned representation.
+    pub(crate) fn put_map_entry(
+        entries: &mut Vec<(QueryValue, QueryValue)>,
+        key: QueryValue,
+        value: QueryValue,
+    ) {
+        if let Some((_, existing)) = entries
+            .iter_mut()
+            .find(|(candidate, _)| candidate.canonical_cmp(&key).is_eq())
+        {
+            *existing = value;
+        } else {
+            entries.push((key, value));
+            entries.sort_by(|(left, _), (right, _)| left.canonical_cmp(right));
+        }
+    }
+}
+
+impl PartialEq for QueryValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical_cmp(other).is_eq()
+    }
+}
+
+impl Eq for QueryValue {}
+
+fn compare_query_sequences(left: &[QueryValue], right: &[QueryValue]) -> std::cmp::Ordering {
+    left.iter()
+        .zip(right)
+        .find_map(|(left, right)| {
+            let ordering = left.canonical_cmp(right);
+            ordering.is_ne().then_some(ordering)
+        })
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn compare_query_maps(
+    left: &[(QueryValue, QueryValue)],
+    right: &[(QueryValue, QueryValue)],
+) -> std::cmp::Ordering {
+    let left = sorted_query_map_entries(left);
+    let right = sorted_query_map_entries(right);
+    left.iter()
+        .zip(&right)
+        .find_map(|((left_key, left_value), (right_key, right_value))| {
+            let ordering = left_key
+                .canonical_cmp(right_key)
+                .then_with(|| left_value.canonical_cmp(right_value));
+            ordering.is_ne().then_some(ordering)
+        })
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn sorted_query_map_entries(
+    entries: &[(QueryValue, QueryValue)],
+) -> Vec<&(QueryValue, QueryValue)> {
+    let mut entries = entries.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left_key, left_value), (right_key, right_value)| {
+        left_key
+            .canonical_cmp(right_key)
+            .then_with(|| left_value.canonical_cmp(right_value))
+    });
+    entries
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -360,7 +460,11 @@ impl QueryExtensions {
                     let program_control = ProgramControl {
                         fuel: control.max_work as u64,
                         max_stack: control.max_intermediate_rows,
-                        max_output: control.max_result_rows,
+                        max_value_bytes: control.max_work,
+                        max_collection_items: control.max_intermediate_rows,
+                        max_forms: control.max_result_rows,
+                        max_output: control.max_work,
+                        max_calls: 1,
                         cancelled: Some(control.cancel.as_ref()),
                     };
                     match ProgramRuntime.execute(&program, database, arguments, program_control)? {
@@ -416,8 +520,63 @@ impl QueryExtensions {
     }
 }
 
-type Row = BTreeMap<Variable, Value>;
-type RuleRelations = BTreeMap<String, Vec<Vec<Value>>>;
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BoundValue {
+    Nil,
+    Stored(Value),
+}
+
+impl Ord for BoundValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.index_cmp(other)
+    }
+}
+
+impl PartialOrd for BoundValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl BoundValue {
+    fn stored(&self) -> Option<&Value> {
+        match self {
+            Self::Nil => None,
+            Self::Stored(value) => Some(value),
+        }
+    }
+
+    fn index_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Nil, Self::Nil) => std::cmp::Ordering::Equal,
+            (Self::Nil, Self::Stored(_)) => std::cmp::Ordering::Less,
+            (Self::Stored(_), Self::Nil) => std::cmp::Ordering::Greater,
+            (Self::Stored(left), Self::Stored(right)) => left.index_cmp(right),
+        }
+    }
+
+    fn query_value(&self) -> QueryValue {
+        match self {
+            Self::Nil => QueryValue::Nil,
+            Self::Stored(value) => QueryValue::Scalar(value.clone()),
+        }
+    }
+}
+
+impl From<Value> for BoundValue {
+    fn from(value: Value) -> Self {
+        Self::Stored(value)
+    }
+}
+
+type Row = BTreeMap<Variable, BoundValue>;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RuleInvocationKey {
+    source: String,
+    name: String,
+    bindings: Vec<Option<BoundValue>>,
+}
 
 struct State<'a> {
     sources: BTreeMap<&'a str, (&'a Database, View)>,
@@ -427,6 +586,8 @@ struct State<'a> {
     stats: QueryStats,
     plan: Vec<PlanStep>,
     extensions: Option<&'a QueryExtensions>,
+    rule_memo: BTreeMap<RuleInvocationKey, Vec<Vec<BoundValue>>>,
+    solving_rules: bool,
 }
 
 impl QueryEngine {
@@ -474,10 +635,11 @@ impl QueryEngine {
             stats: QueryStats::default(),
             plan: Vec::new(),
             extensions,
+            rule_memo: BTreeMap::new(),
+            solving_rules: false,
         };
         let initial = bind_inputs(&query.inputs, inputs)?;
-        let rules = build_rule_relations(&query.rules, &mut state)?;
-        let rows = evaluate_clauses(&query.clauses, initial, &rules, &mut state)?;
+        let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut state)?;
         let default_database = state.sources["$"].0;
         let result = shape_results(query, rows, control.max_result_rows, default_database)?;
         state.stats.rows_produced = result_len(&result) as u64;
@@ -546,6 +708,7 @@ fn validate_query(query: &Query, inputs: &[QueryInput]) -> Result<(), SemanticEr
             ),
         ));
     }
+    validate_ground_clauses(&query.clauses)?;
     for rule in &query.rules {
         if rule.name.is_empty()
             || rule.head.is_empty()
@@ -556,6 +719,7 @@ fn validate_query(query: &Query, inputs: &[QueryInput]) -> Result<(), SemanticEr
                 "rule heads need a name, arguments, and valid required indexes",
             ));
         }
+        validate_ground_clauses(&rule.clauses)?;
     }
     let mut pulled = BTreeSet::new();
     for element in find_elements(&query.find) {
@@ -571,16 +735,56 @@ fn validate_query(query: &Query, inputs: &[QueryInput]) -> Result<(), SemanticEr
             ));
         }
     }
-    let mut arities = BTreeMap::new();
+    let mut signatures = BTreeMap::new();
     for rule in &query.rules {
-        if arities
-            .insert(rule.name.as_str(), rule.head.len())
-            .is_some_and(|arity| arity != rule.head.len())
-        {
-            return Err(SemanticError::incorrect(
-                "query/rule-arity",
-                format!("rule {} has inconsistent arity", rule.name),
-            ));
+        if let Some((arity, required)) = signatures.get(rule.name.as_str()) {
+            if *arity != rule.head.len() {
+                return Err(SemanticError::incorrect(
+                    "query/rule-arity",
+                    format!("rule {} has inconsistent arity", rule.name),
+                ));
+            }
+            if *required != &rule.required {
+                return Err(SemanticError::incorrect(
+                    "query/rule-required-mismatch",
+                    format!("rule {} has inconsistent required bindings", rule.name),
+                ));
+            }
+        } else {
+            signatures.insert(rule.name.as_str(), (rule.head.len(), &rule.required));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
+    for clause in clauses {
+        match clause {
+            Clause::Function {
+                function: Function::Ground,
+                args,
+                ..
+            } => {
+                if args.len() != 1 {
+                    return Err(SemanticError::incorrect(
+                        "query/function-arity",
+                        "ground requires exactly one constant",
+                    ));
+                }
+                if !matches!(args[0], Term::Constant(_)) {
+                    return Err(SemanticError::incorrect(
+                        "query/ground-not-constant",
+                        "ground requires a constant argument",
+                    ));
+                }
+            }
+            Clause::Not { clauses, .. } => validate_ground_clauses(clauses)?,
+            Clause::Or { branches, .. } => {
+                for branch in branches {
+                    validate_ground_clauses(branch)?;
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -636,7 +840,11 @@ fn bind_inputs(specs: &[InputSpec], values: &[QueryInput]) -> Result<Vec<Row>, S
                 let mut valid = true;
                 for (variable, value) in bindings {
                     if let Some(variable) = variable
-                        && !unify_variable(&mut candidate, variable, value)
+                        && !unify_variable(
+                            &mut candidate,
+                            variable,
+                            &BoundValue::Stored((*value).clone()),
+                        )
                     {
                         valid = false;
                         break;
@@ -655,7 +863,8 @@ fn bind_inputs(specs: &[InputSpec], values: &[QueryInput]) -> Result<Vec<Row>, S
 fn evaluate_clauses(
     clauses: &[Clause],
     mut rows: Vec<Row>,
-    rules: &RuleRelations,
+    rules: &[Rule],
+    inherited_source: Option<&str>,
     state: &mut State<'_>,
 ) -> Result<Vec<Row>, SemanticError> {
     let mut remaining: Vec<_> = clauses.iter().collect();
@@ -676,7 +885,7 @@ fn evaluate_clauses(
             })?;
         let clause = remaining.remove(selected);
         let before = rows.len();
-        let (next, access) = evaluate_clause(clause, rows, rules, state)?;
+        let (next, access) = evaluate_clause(clause, rows, rules, inherited_source, state)?;
         rows = dedupe_rows(next);
         if rows.len() > state.control.max_intermediate_rows {
             return Err(resource(
@@ -701,11 +910,12 @@ fn evaluate_clauses(
 fn evaluate_clause(
     clause: &Clause,
     rows: Vec<Row>,
-    rules: &RuleRelations,
+    rules: &[Rule],
+    inherited_source: Option<&str>,
     state: &mut State<'_>,
 ) -> Result<(Vec<Row>, String), SemanticError> {
     match clause {
-        Clause::Pattern(pattern) => evaluate_pattern(pattern, rows, state),
+        Clause::Pattern(pattern) => evaluate_pattern(pattern, rows, inherited_source, state),
         Clause::Predicate {
             predicate,
             source,
@@ -715,7 +925,12 @@ fn evaluate_clause(
             for row in rows {
                 state.check(1)?;
                 let values = resolve_args(args, &row)?;
-                if evaluate_predicate(*predicate, source, &values, state)? {
+                if evaluate_predicate(
+                    *predicate,
+                    effective_source(source, inherited_source),
+                    &values,
+                    state,
+                )? {
                     next.push(row);
                 }
             }
@@ -731,7 +946,13 @@ fn evaluate_clause(
             for row in rows {
                 state.check(1)?;
                 let values = resolve_args(args, &row)?;
-                for produced in evaluate_function(function.clone(), source, &values, state)? {
+                for produced in evaluate_function(
+                    function.clone(),
+                    effective_source(source, inherited_source),
+                    &values,
+                    binding,
+                    state,
+                )? {
                     for bound in bind_output(&row, binding, &produced)? {
                         push_unique_row(&mut next, bound);
                     }
@@ -763,7 +984,8 @@ fn evaluate_clause(
                 } else {
                     row.clone()
                 };
-                if evaluate_clauses(clauses, vec![seed], rules, state)?.is_empty() {
+                if evaluate_clauses(clauses, vec![seed], rules, inherited_source, state)?.is_empty()
+                {
                     next.push(row);
                 }
             }
@@ -777,7 +999,9 @@ fn evaluate_clause(
                     let seed = join
                         .as_ref()
                         .map_or_else(|| row.clone(), |variables| project_row(&row, variables));
-                    for produced in evaluate_clauses(branch, vec![seed], rules, state)? {
+                    for produced in
+                        evaluate_clauses(branch, vec![seed], rules, inherited_source, state)?
+                    {
                         if let Some(join) = join {
                             let mut merged = row.clone();
                             if join.iter().all(|variable| {
@@ -795,13 +1019,36 @@ fn evaluate_clause(
             }
             Ok((next, "set-union".into()))
         }
-        Clause::Rule { name, args, .. } => {
-            let relation = rules.get(name).ok_or_else(|| {
-                SemanticError::incorrect("query/unknown-rule", format!("unknown rule {name}"))
-            })?;
+        Clause::Rule { source, name, args } => {
+            let source = effective_source(source, inherited_source);
+            let (arity, required) = rule_signature(rules, name)?;
+            if args.len() != arity {
+                return Err(SemanticError::incorrect(
+                    "query/rule-arity",
+                    format!("rule {name} expects {arity} arguments, got {}", args.len()),
+                ));
+            }
             let mut next = Vec::new();
             for row in rows {
-                for tuple in relation {
+                if required
+                    .iter()
+                    .any(|index| !term_is_bound(&args[*index], &row))
+                {
+                    return Err(SemanticError::incorrect(
+                        "query/insufficient-binding",
+                        format!("rule {name} requires its declared input positions to be bound"),
+                    ));
+                }
+                let key = RuleInvocationKey {
+                    source: source.to_owned(),
+                    name: name.clone(),
+                    bindings: args
+                        .iter()
+                        .map(|term| term_bound_value(term, &row))
+                        .collect(),
+                };
+                let relation = solve_rule_invocation(key, rules, state)?;
+                for tuple in &relation {
                     if tuple.len() != args.len() {
                         return Err(fault(
                             "query/rule-relation-width",
@@ -826,31 +1073,31 @@ fn evaluate_clause(
 fn evaluate_pattern(
     pattern: &DataPattern,
     rows: Vec<Row>,
+    inherited_source: Option<&str>,
     state: &mut State<'_>,
 ) -> Result<(Vec<Row>, String), SemanticError> {
-    let (database, view) = state
-        .sources
-        .get(pattern.source.as_str())
-        .copied()
-        .ok_or_else(|| {
-            SemanticError::incorrect(
-                "query/unknown-source",
-                format!("unknown source {}", pattern.source),
-            )
-        })?;
+    let source = effective_source(&pattern.source, inherited_source);
+    let (database, view) = state.sources.get(source).copied().ok_or_else(|| {
+        SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
+    })?;
     let mut next = Vec::new();
     let mut access = "EAVT scan".to_owned();
     for row in rows {
         state.check(1)?;
-        let entity = term_value(&pattern.entity, &row).and_then(entity_id);
+        let entity = resolve_entity(database, &pattern.entity, &row)?;
         let attribute = resolve_attribute(database, &pattern.attribute, &row)?;
-        let value = term_value(&pattern.value, &row);
+        let bound_value = term_bound_value(&pattern.value, &row);
+        let value = bound_value
+            .as_ref()
+            .and_then(BoundValue::stored)
+            .map(|value| resolve_pattern_value(database, attribute, value))
+            .transpose()?;
         let (datoms, selected) = select_datoms(
             database,
             view,
             entity,
             attribute,
-            value,
+            value.as_ref(),
             state.control.force_scan,
         )?;
         access = selected;
@@ -861,20 +1108,38 @@ fn evaluate_pattern(
         for datom in datoms {
             state.check(1)?;
             let mut candidate = row.clone();
-            let attribute_value =
-                attribute_term_value(database, &pattern.attribute, &candidate, datom.attribute)?;
-            if unify_term(&mut candidate, &pattern.entity, &Value::Ref(datom.entity))
-                && unify_term(&mut candidate, &pattern.attribute, &attribute_value)
-                && unify_term(&mut candidate, &pattern.value, &datom.value)
-                && pattern
-                    .transaction
-                    .as_ref()
-                    .is_none_or(|term| unify_term(&mut candidate, term, &Value::Ref(datom.tx)))
-                && pattern
-                    .added
-                    .as_ref()
-                    .is_none_or(|term| unify_term(&mut candidate, term, &Value::Bool(datom.added)))
-            {
+            if unify_entity_term(
+                database,
+                &mut candidate,
+                &pattern.entity,
+                entity,
+                datom.entity,
+            )? && unify_attribute_term(
+                database,
+                &mut candidate,
+                &pattern.attribute,
+                attribute,
+                datom.attribute,
+            )? && unify_value_term(
+                database,
+                &mut candidate,
+                &pattern.value,
+                attribute,
+                value.as_ref(),
+                &datom.value,
+            )? && pattern.transaction.as_ref().is_none_or(|term| {
+                unify_term(
+                    &mut candidate,
+                    term,
+                    &BoundValue::Stored(Value::Ref(datom.tx)),
+                )
+            }) && pattern.added.as_ref().is_none_or(|term| {
+                unify_term(
+                    &mut candidate,
+                    term,
+                    &BoundValue::Stored(Value::Bool(datom.added)),
+                )
+            }) {
                 push_unique_row(&mut next, candidate);
             }
         }
@@ -944,12 +1209,29 @@ fn select_datoms(
     Ok((database.datoms(view, IndexOrder::Eavt), "EAVT scan".into()))
 }
 
-fn clause_ready(clause: &Clause, row: &Row, rules: &RuleRelations) -> bool {
+fn clause_ready(clause: &Clause, row: &Row, rules: &[Rule]) -> bool {
     match clause {
         Clause::Pattern(_) | Clause::Or { .. } => true,
-        Clause::Predicate { args, .. } | Clause::Function { args, .. } => args.iter().all(|term| !matches!(term, Term::Variable(variable) if !row.contains_key(variable))),
-        Clause::Not { join, clauses } => join.clone().unwrap_or_else(|| variables_in_clauses(clauses)).iter().all(|variable| row.contains_key(variable)),
-        Clause::Rule { name, args, .. } => rules.get(&format!("@required:{name}")).is_none_or(|required| required[0].iter().enumerate().filter(|(_, value)| **value == Value::Bool(true)).all(|(index, _)| !matches!(&args[index], Term::Variable(variable) if !row.contains_key(variable)))),
+        Clause::Predicate { args, .. } | Clause::Function { args, .. } => args
+            .iter()
+            .all(|term| !matches!(term, Term::Variable(variable) if !row.contains_key(variable))),
+        Clause::Not { join, clauses } => join
+            .clone()
+            .unwrap_or_else(|| variables_in_clauses(clauses))
+            .iter()
+            .all(|variable| row.contains_key(variable)),
+        Clause::Rule { name, args, .. } => {
+            match rule_signature(rules, name) {
+                Ok((arity, required)) => {
+                    args.len() != arity
+                        || required
+                            .iter()
+                            .all(|index| term_is_bound(&args[*index], row))
+                }
+                // Let evaluation produce the precise unknown-rule anomaly.
+                Err(_) => true,
+            }
+        }
     }
 }
 
@@ -958,7 +1240,7 @@ fn clause_score(clause: &Clause, row: &Row) -> usize {
         Clause::Pattern(pattern) => {
             [&pattern.entity, &pattern.attribute, &pattern.value]
                 .into_iter()
-                .filter(|term| term_value(term, row).is_some())
+                .filter(|term| term_is_bound(term, row))
                 .count()
                 * 10
         }
@@ -969,78 +1251,160 @@ fn clause_score(clause: &Clause, row: &Row) -> usize {
     }
 }
 
-fn build_rule_relations(
+fn rule_signature<'a>(
+    rules: &'a [Rule],
+    name: &str,
+) -> Result<(usize, &'a BTreeSet<usize>), SemanticError> {
+    rules
+        .iter()
+        .find(|rule| rule.name == name)
+        .map(|rule| (rule.head.len(), &rule.required))
+        .ok_or_else(|| {
+            SemanticError::incorrect("query/unknown-rule", format!("unknown rule {name}"))
+        })
+}
+
+fn solve_rule_invocation(
+    key: RuleInvocationKey,
     rules: &[Rule],
     state: &mut State<'_>,
-) -> Result<RuleRelations, SemanticError> {
-    let mut relations = RuleRelations::new();
-    for rule in rules {
-        relations.entry(rule.name.clone()).or_default();
-        let required = relations
-            .entry(format!("@required:{}", rule.name))
-            .or_default();
-        if required.is_empty() {
-            required.push(
-                (0..rule.head.len())
-                    .map(|index| Value::Bool(rule.required.contains(&index)))
-                    .collect(),
-            );
-        }
+) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
+    // Recovered `eval-query` keys its input work by source and adorned
+    // predicate, accumulates answers in `ans`, and the outer `qsqr` loop
+    // repeats until answer cardinalities stop changing. This memo uses the
+    // concrete bound values as well as the adornment: it is more selective,
+    // while retaining the same monotone fixed-point boundary.
+    if !state.sources.contains_key(key.source.as_str()) {
+        return Err(SemanticError::incorrect(
+            "query/unknown-source",
+            format!("unknown source {}", key.source),
+        ));
     }
-    for iteration in 0..128 {
-        let before: usize = relations
-            .iter()
-            .filter(|(name, _)| !name.starts_with('@'))
-            .map(|(_, rows)| rows.len())
-            .sum();
-        for rule in rules {
-            let rows =
-                evaluate_clauses(&rule.clauses, vec![Row::new()], &relations.clone(), state)?;
-            let relation = relations
-                .get_mut(&rule.name)
-                .expect("rule relation initialized");
-            for row in rows {
-                let tuple = rule
-                    .head
-                    .iter()
-                    .map(|variable| {
-                        row.get(variable).cloned().ok_or_else(|| {
-                            SemanticError::incorrect(
-                                "query/unbound-rule-head",
-                                format!("rule {} did not bind {}", rule.name, variable.name()),
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if !relation.contains(&tuple) {
-                    relation.push(tuple);
+    let (arity, required) = rule_signature(rules, &key.name)?;
+    if key.bindings.len() != arity {
+        return Err(SemanticError::incorrect(
+            "query/rule-arity",
+            format!(
+                "rule {} expects {arity} arguments, got {}",
+                key.name,
+                key.bindings.len()
+            ),
+        ));
+    }
+    if required.iter().any(|index| key.bindings[*index].is_none()) {
+        return Err(SemanticError::incorrect(
+            "query/insufficient-binding",
+            format!(
+                "rule {} requires its declared input positions to be bound",
+                key.name
+            ),
+        ));
+    }
+
+    ensure_rule_memo_entry(state, key.clone());
+    if !state.solving_rules {
+        state.solving_rules = true;
+        let result = stabilize_rule_memo(rules, state);
+        state.solving_rules = false;
+        result?;
+    }
+    Ok(rule_memo_rows(state, &key))
+}
+
+fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> Result<(), SemanticError> {
+    loop {
+        state.check(1)?;
+        let before_entries = state.rule_memo.len();
+        let before_rows = state.rule_memo.values().map(Vec::len).sum::<usize>();
+        let keys = state.rule_memo.keys().cloned().collect::<Vec<_>>();
+
+        for key in keys {
+            let produced = evaluate_rule_key(&key, rules, state)?;
+            ensure_rule_memo_entry(state, key.clone());
+            for tuple in produced {
+                let is_new = !state
+                    .rule_memo
+                    .get(&key)
+                    .is_some_and(|rows| rows.contains(&tuple));
+                if is_new {
+                    state.check(1)?;
+                    let rows = state
+                        .rule_memo
+                        .get_mut(&key)
+                        .expect("rule memo entry was ensured");
+                    rows.push(tuple);
+                    if rows.len() > state.control.max_intermediate_rows {
+                        return Err(resource(
+                            "query/intermediate-limit",
+                            "rule memo relation exceeded the intermediate row limit",
+                        ));
+                    }
                 }
             }
         }
+
         state.stats.rule_iterations += 1;
-        let after: usize = relations
-            .iter()
-            .filter(|(name, _)| !name.starts_with('@'))
-            .map(|(_, rows)| rows.len())
-            .sum();
-        if after == before {
-            return Ok(relations);
-        }
-        state.check(after - before)?;
-        if iteration == 127 {
-            return Err(resource(
-                "query/rule-iteration-limit",
-                "rules did not reach a fixed point",
-            ));
+        let after_rows = state.rule_memo.values().map(Vec::len).sum::<usize>();
+        if state.rule_memo.len() == before_entries && after_rows == before_rows {
+            return Ok(());
         }
     }
-    unreachable!()
+}
+
+fn evaluate_rule_key(
+    key: &RuleInvocationKey,
+    rules: &[Rule],
+    state: &mut State<'_>,
+) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
+    let mut produced = Vec::new();
+    for rule in rules.iter().filter(|rule| rule.name == key.name) {
+        let mut seed = Row::new();
+        let mut compatible = true;
+        for (variable, value) in rule.head.iter().zip(&key.bindings) {
+            if let Some(value) = value
+                && !unify_variable(&mut seed, variable, value)
+            {
+                compatible = false;
+                break;
+            }
+        }
+        if !compatible {
+            continue;
+        }
+        let rows = evaluate_clauses(&rule.clauses, vec![seed], rules, Some(&key.source), state)?;
+        for row in rows {
+            let tuple = rule
+                .head
+                .iter()
+                .map(|variable| {
+                    row.get(variable).cloned().ok_or_else(|| {
+                        SemanticError::incorrect(
+                            "query/unbound-rule-head",
+                            format!("rule {} did not bind {}", rule.name, variable.name()),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if !produced.contains(&tuple) {
+                produced.push(tuple);
+            }
+        }
+    }
+    Ok(produced)
+}
+
+fn ensure_rule_memo_entry(state: &mut State<'_>, key: RuleInvocationKey) {
+    state.rule_memo.entry(key).or_default();
+}
+
+fn rule_memo_rows(state: &State<'_>, key: &RuleInvocationKey) -> Vec<Vec<BoundValue>> {
+    state.rule_memo.get(key).cloned().unwrap_or_default()
 }
 
 fn evaluate_predicate(
     predicate: Predicate,
     source: &str,
-    args: &[Value],
+    args: &[BoundValue],
     state: &State<'_>,
 ) -> Result<bool, SemanticError> {
     match predicate {
@@ -1077,10 +1441,12 @@ fn evaluate_predicate(
             let (database, _) = state.sources.get(source).copied().ok_or_else(|| {
                 SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
             })?;
-            let entity = entity_id(&args[0]).ok_or_else(|| {
+            let entity = entity_value(database, require_stored(&args[0], "query/entity-value")?)?
+                .ok_or_else(|| {
                 SemanticError::incorrect("query/entity-value", "missing entity must be a ref")
             })?;
-            let attribute = attribute_value(database, &args[1])?;
+            let attribute =
+                attribute_value(database, require_stored(&args[1], "query/attribute-value")?)?;
             Ok(database.values(entity, attribute).is_empty())
         }
     }
@@ -1089,19 +1455,21 @@ fn evaluate_predicate(
 fn evaluate_function(
     function: Function,
     source: &str,
-    args: &[Value],
+    args: &[BoundValue],
+    binding: &Binding,
     state: &State<'_>,
-) -> Result<Vec<Vec<Value>>, SemanticError> {
+) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
     match function {
-        Function::Ground => Ok(vec![args.to_vec()]),
-        Function::Tuple => Ok(vec![vec![Value::Tuple(
-            args.iter().cloned().map(Some).collect(),
-        )]]),
+        Function::Ground => ground_output(args, binding),
+        Function::Tuple => Ok(vec![vec![BoundValue::Stored(Value::Tuple(
+            args.iter().map(|value| value.stored().cloned()).collect(),
+        ))]]),
         Function::Untuple => match args {
-            [Value::Tuple(values)] => Ok(vec![
+            [BoundValue::Stored(Value::Tuple(values))] => Ok(vec![
                 values
                     .iter()
-                    .map(|value| value.clone().unwrap_or(Value::String(String::new())))
+                    .cloned()
+                    .map(|value| value.map_or(BoundValue::Nil, BoundValue::Stored))
                     .collect(),
             ]),
             _ => Err(SemanticError::incorrect(
@@ -1110,7 +1478,7 @@ fn evaluate_function(
             )),
         },
         Function::Add | Function::Subtract | Function::Multiply | Function::Divide => {
-            numeric_function(function, args).map(|value| vec![vec![value]])
+            numeric_function(function, args).map(|value| vec![vec![BoundValue::Stored(value)]])
         }
         Function::GetElse => {
             if args.len() != 3 {
@@ -1120,24 +1488,25 @@ fn evaluate_function(
                 ));
             }
             let database = source_database(state, source)?;
-            let entity = entity_id(&args[0]).ok_or_else(|| {
+            let entity = entity_value(database, require_stored(&args[0], "query/entity-value")?)?
+                .ok_or_else(|| {
                 SemanticError::incorrect("query/entity-value", "get-else entity must be a ref")
             })?;
-            let attribute = attribute_value(database, &args[1])?;
+            let attribute =
+                attribute_value(database, require_stored(&args[1], "query/attribute-value")?)?;
             if database.schema().attribute(attribute)?.cardinality != crate::Cardinality::One {
                 return Err(SemanticError::incorrect(
                     "query/get-else-cardinality",
                     "get-else requires cardinality one",
                 ));
             }
-            Ok(vec![vec![
+            let default = require_stored(&args[2], "query/get-else-nil-default")?.clone();
+            Ok(vec![vec![BoundValue::Stored(
                 database
                     .values(entity, attribute)
                     .first()
-                    .cloned()
-                    .cloned()
-                    .unwrap_or_else(|| args[2].clone()),
-            ]])
+                    .map_or(default, |value| (*value).clone()),
+            )]])
         }
         Function::GetSome => {
             if args.len() < 2 {
@@ -1147,15 +1516,31 @@ fn evaluate_function(
                 ));
             }
             let database = source_database(state, source)?;
-            let entity = entity_id(&args[0]).ok_or_else(|| {
+            let entity = entity_value(database, require_stored(&args[0], "query/entity-value")?)?
+                .ok_or_else(|| {
                 SemanticError::incorrect("query/entity-value", "get-some entity must be a ref")
             })?;
-            for value in &args[1..] {
-                let attribute = attribute_value(database, value)?;
+            let attributes = args[1..]
+                .iter()
+                .map(|value| {
+                    let attribute =
+                        attribute_value(database, require_stored(value, "query/attribute-value")?)?;
+                    if database.schema().attribute(attribute)?.cardinality
+                        != crate::Cardinality::One
+                    {
+                        return Err(SemanticError::incorrect(
+                            "query/get-some-cardinality",
+                            "get-some requires cardinality-one attributes",
+                        ));
+                    }
+                    Ok(attribute)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for attribute in attributes {
                 if let Some(found) = database.values(entity, attribute).first() {
                     return Ok(vec![vec![
-                        Value::Keyword(database.schema().attribute(attribute)?.ident.clone()),
-                        (*found).clone(),
+                        BoundValue::Stored(Value::Ref(u64::from(attribute))),
+                        BoundValue::Stored((*found).clone()),
                     ]]);
                 }
             }
@@ -1169,7 +1554,11 @@ fn evaluate_function(
                     format!("no query extension registry supplies {name}"),
                 )
             })?;
-            let rows = extensions.invoke(&name, database, args, state.control)?;
+            let extension_args = args
+                .iter()
+                .map(|value| require_stored(value, "query/nil-extension-arg").cloned())
+                .collect::<Result<Vec<_>, _>>()?;
+            let rows = extensions.invoke(&name, database, &extension_args, state.control)?;
             if rows.len() > state.control.max_result_rows
                 || rows.iter().map(Vec::len).sum::<usize>() > state.control.max_intermediate_rows
             {
@@ -1178,19 +1567,81 @@ fn evaluate_function(
                     "query extension exceeded its output limits",
                 ));
             }
-            Ok(rows)
+            Ok(rows
+                .into_iter()
+                .map(|row| row.into_iter().map(BoundValue::Stored).collect())
+                .collect())
         }
     }
 }
 
-fn numeric_function(function: Function, args: &[Value]) -> Result<Value, SemanticError> {
+fn ground_output(
+    args: &[BoundValue],
+    binding: &Binding,
+) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
+    let [constant] = args else {
+        return Err(SemanticError::incorrect(
+            "query/function-arity",
+            "ground requires exactly one constant",
+        ));
+    };
+    match binding {
+        Binding::Scalar(_) | Binding::Collection(_) => Ok(vec![vec![constant.clone()]]),
+        Binding::Tuple(_) => match constant {
+            BoundValue::Stored(Value::Tuple(values)) => Ok(vec![
+                values
+                    .iter()
+                    .cloned()
+                    .map(|value| value.map_or(BoundValue::Nil, BoundValue::Stored))
+                    .collect(),
+            ]),
+            _ => Err(SemanticError::incorrect(
+                "query/function-binding",
+                "ground tuple binding requires one tuple constant",
+            )),
+        },
+        Binding::Relation(_) => match constant {
+            BoundValue::Stored(Value::Tuple(rows)) => rows
+                .iter()
+                .map(|row| match row {
+                    Some(Value::Tuple(values)) => Ok(values
+                        .iter()
+                        .cloned()
+                        .map(|value| value.map_or(BoundValue::Nil, BoundValue::Stored))
+                        .collect()),
+                    _ => Err(SemanticError::incorrect(
+                        "query/function-binding",
+                        "ground relation binding requires a collection of tuple constants",
+                    )),
+                })
+                .collect(),
+            _ => Err(SemanticError::incorrect(
+                "query/function-binding",
+                "ground relation binding requires a collection of tuple constants",
+            )),
+        },
+    }
+}
+
+fn require_stored<'a>(
+    value: &'a BoundValue,
+    code: &'static str,
+) -> Result<&'a Value, SemanticError> {
+    value.stored().ok_or_else(|| {
+        SemanticError::incorrect(code, "nil is not valid for this query function argument")
+    })
+}
+
+fn numeric_function(function: Function, args: &[BoundValue]) -> Result<Value, SemanticError> {
     if args.len() != 2 {
         return Err(SemanticError::incorrect(
             "query/function-arity",
             "arithmetic functions require two arguments",
         ));
     }
-    match (&args[0], &args[1]) {
+    let left = require_stored(&args[0], "query/numeric-type")?;
+    let right = require_stored(&args[1], "query/numeric-type")?;
+    match (left, right) {
         (Value::Long(left), Value::Long(right)) => {
             let result = match function {
                 Function::Add => left.checked_add(*right),
@@ -1208,8 +1659,8 @@ fn numeric_function(function: Function, args: &[Value]) -> Result<Value, Semanti
             Ok(Value::Long(result))
         }
         _ => {
-            let left = as_f64(&args[0])?;
-            let right = as_f64(&args[1])?;
+            let left = as_f64(left)?;
+            let right = as_f64(right)?;
             if function == Function::Divide && right == 0.0 {
                 return Err(SemanticError::incorrect(
                     "query/arithmetic",
@@ -1227,9 +1678,13 @@ fn numeric_function(function: Function, args: &[Value]) -> Result<Value, Semanti
     }
 }
 
-fn bind_output(row: &Row, binding: &Binding, output: &[Value]) -> Result<Vec<Row>, SemanticError> {
+fn bind_output(
+    row: &Row,
+    binding: &Binding,
+    output: &[BoundValue],
+) -> Result<Vec<Row>, SemanticError> {
     if let Binding::Collection(variable) = binding {
-        let [Value::Tuple(values)] = output else {
+        let [BoundValue::Stored(Value::Tuple(values))] = output else {
             return Err(SemanticError::incorrect(
                 "query/function-binding",
                 "collection binding requires one tuple value",
@@ -1237,21 +1692,15 @@ fn bind_output(row: &Row, binding: &Binding, output: &[Value]) -> Result<Vec<Row
         };
         let mut rows = Vec::new();
         for value in values {
-            let value = value.as_ref().ok_or_else(|| {
-                SemanticError::new(
-                    ErrorCategory::Unsupported,
-                    "query/nil-tuple-slot",
-                    "nil tuple slots are not supported as query bindings",
-                )
-            })?;
+            let value = value.clone().map_or(BoundValue::Nil, BoundValue::Stored);
             let mut candidate = row.clone();
-            if unify_variable(&mut candidate, variable, value) {
+            if unify_variable(&mut candidate, variable, &value) {
                 push_unique_row(&mut rows, candidate);
             }
         }
         return Ok(rows);
     }
-    let bindings: Vec<(Option<&Variable>, &Value)> = match binding {
+    let bindings: Vec<(Option<&Variable>, &BoundValue)> = match binding {
         Binding::Scalar(variable) if output.len() == 1 => vec![(Some(variable), &output[0])],
         Binding::Tuple(variables) | Binding::Relation(variables)
             if variables.len() == output.len() =>
@@ -1350,7 +1799,7 @@ fn shape_results(
 fn aggregate_rows(
     elements: &[FindElement],
     basis_variables: &[Variable],
-    basis: &[Vec<Value>],
+    basis: &[Vec<BoundValue>],
     database: &Database,
 ) -> Result<Vec<Vec<QueryValue>>, SemanticError> {
     let group_variables: Vec<_> = elements
@@ -1360,7 +1809,7 @@ fn aggregate_rows(
             _ => None,
         })
         .collect();
-    let mut groups: Vec<(Vec<Value>, Vec<&Vec<Value>>)> = Vec::new();
+    let mut groups: Vec<(Vec<BoundValue>, Vec<&Vec<BoundValue>>)> = Vec::new();
     for row in basis {
         let key = group_variables
             .iter()
@@ -1393,7 +1842,7 @@ fn aggregate_rows(
                             basis_variables
                                 .iter()
                                 .position(|candidate| candidate == variable)
-                                .map(|index| QueryValue::Scalar(row[index].clone()))
+                                .map(|index| row[index].query_value())
                         })
                         .ok_or_else(|| {
                             fault("query/missing-group-key", "aggregate group key is missing")
@@ -1408,7 +1857,7 @@ fn aggregate_rows(
                             .ok_or_else(|| {
                                 fault("query/missing-group-key", "pull variable is missing")
                             })?;
-                        let entity = entity_id(&row[index]).ok_or_else(|| {
+                        let entity = row[index].stored().and_then(entity_id).ok_or_else(|| {
                             SemanticError::incorrect(
                                 "query/pull-entity",
                                 "pull expression variable must bind an entity id",
@@ -1434,7 +1883,10 @@ fn aggregate_rows(
         .collect()
 }
 
-fn aggregate(function: Aggregate, mut values: Vec<&Value>) -> Result<QueryValue, SemanticError> {
+fn aggregate(
+    function: Aggregate,
+    mut values: Vec<&BoundValue>,
+) -> Result<QueryValue, SemanticError> {
     match function {
         Aggregate::Count => Ok(QueryValue::Scalar(Value::Long(values.len() as i64))),
         Aggregate::CountDistinct => {
@@ -1455,7 +1907,7 @@ fn aggregate(function: Aggregate, mut values: Vec<&Value>) -> Result<QueryValue,
             .ok_or_else(|| {
                 SemanticError::incorrect("query/empty-aggregate", "min/max has no values")
             })?;
-            Ok(QueryValue::Scalar(value.clone()))
+            Ok(value.query_value())
         }
         Aggregate::Sum
         | Aggregate::Average
@@ -1471,19 +1923,23 @@ fn aggregate(function: Aggregate, mut values: Vec<&Value>) -> Result<QueryValue,
                     "numeric aggregate has no values",
                 ));
             }
-            let all_long = values.iter().all(|value| matches!(value, Value::Long(_)));
+            let all_long = values
+                .iter()
+                .all(|value| matches!(value, BoundValue::Stored(Value::Long(_))));
             if all_long && matches!(function, Aggregate::Sum | Aggregate::Median) {
                 if function == Aggregate::Median {
                     values.sort_by(|left, right| left.index_cmp(right));
                     let middle = values.len() / 2;
                     let value = if values.len() % 2 == 1 {
-                        let Value::Long(value) = values[middle] else {
+                        let BoundValue::Stored(Value::Long(value)) = values[middle] else {
                             unreachable!()
                         };
                         *value
                     } else {
-                        let (Value::Long(left), Value::Long(right)) =
-                            (values[middle - 1], values[middle])
+                        let (
+                            BoundValue::Stored(Value::Long(left)),
+                            BoundValue::Stored(Value::Long(right)),
+                        ) = (values[middle - 1], values[middle])
                         else {
                             unreachable!()
                         };
@@ -1496,7 +1952,7 @@ fn aggregate(function: Aggregate, mut values: Vec<&Value>) -> Result<QueryValue,
                 let total = values
                     .iter()
                     .try_fold(0_i64, |total, value| {
-                        if let Value::Long(value) = value {
+                        if let BoundValue::Stored(Value::Long(value)) = value {
                             total.checked_add(*value)
                         } else {
                             None
@@ -1509,7 +1965,7 @@ fn aggregate(function: Aggregate, mut values: Vec<&Value>) -> Result<QueryValue,
             } else {
                 let mut numeric = values
                     .iter()
-                    .map(|value| as_f64(value))
+                    .map(|value| as_f64(require_stored(value, "query/numeric-type")?))
                     .collect::<Result<Vec<_>, _>>()?;
                 let total: f64 = numeric.iter().sum();
                 let mean = total / numeric.len() as f64;
@@ -1546,11 +2002,7 @@ fn aggregate(function: Aggregate, mut values: Vec<&Value>) -> Result<QueryValue,
             values.sort_by(|left, right| left.index_cmp(right));
             values.dedup_by(|left, right| left.index_cmp(right).is_eq());
             Ok(QueryValue::Collection(
-                values
-                    .into_iter()
-                    .cloned()
-                    .map(QueryValue::Scalar)
-                    .collect(),
+                values.into_iter().map(BoundValue::query_value).collect(),
             ))
         }
         Aggregate::MinN(limit) | Aggregate::MaxN(limit) => {
@@ -1558,13 +2010,11 @@ fn aggregate(function: Aggregate, mut values: Vec<&Value>) -> Result<QueryValue,
             if matches!(function, Aggregate::MaxN(_)) {
                 values.reverse();
             }
-            values.dedup_by(|a, b| a.index_cmp(b).is_eq());
             Ok(QueryValue::Collection(
                 values
                     .into_iter()
                     .take(limit)
-                    .cloned()
-                    .map(QueryValue::Scalar)
+                    .map(BoundValue::query_value)
                     .collect(),
             ))
         }
@@ -1666,7 +2116,7 @@ fn find_elements(find: &FindSpec) -> &[FindElement] {
 fn project_element(
     element: &FindElement,
     basis_variables: &[Variable],
-    row: &[Value],
+    row: &[BoundValue],
     database: &Database,
 ) -> Result<QueryValue, SemanticError> {
     let variable = match element {
@@ -1684,7 +2134,7 @@ fn project_element(
         })?;
     match element {
         FindElement::Pull { pattern, .. } => {
-            let entity = entity_id(&row[index]).ok_or_else(|| {
+            let entity = row[index].stored().and_then(entity_id).ok_or_else(|| {
                 SemanticError::incorrect(
                     "query/pull-entity",
                     "pull expression variable must bind an entity id",
@@ -1692,13 +2142,13 @@ fn project_element(
             })?;
             database.pull(pattern, entity)
         }
-        _ => Ok(QueryValue::Scalar(row[index].clone())),
+        _ => Ok(row[index].query_value()),
     }
 }
-fn resolve_args(args: &[Term], row: &Row) -> Result<Vec<Value>, SemanticError> {
+fn resolve_args(args: &[Term], row: &Row) -> Result<Vec<BoundValue>, SemanticError> {
     args.iter()
         .map(|term| match term {
-            Term::Constant(value) => Ok(value.clone()),
+            Term::Constant(value) => Ok(BoundValue::Stored(value.clone())),
             Term::Variable(variable) => row.get(variable).cloned().ok_or_else(|| {
                 SemanticError::incorrect(
                     "query/insufficient-binding",
@@ -1712,12 +2162,16 @@ fn resolve_args(args: &[Term], row: &Row) -> Result<Vec<Value>, SemanticError> {
         })
         .collect()
 }
-fn term_value<'a>(term: &'a Term, row: &'a Row) -> Option<&'a Value> {
+fn term_bound_value(term: &Term, row: &Row) -> Option<BoundValue> {
     match term {
-        Term::Constant(value) => Some(value),
-        Term::Variable(variable) => row.get(variable),
+        Term::Constant(value) => Some(BoundValue::Stored(value.clone())),
+        Term::Variable(variable) => row.get(variable).cloned(),
         Term::Blank => None,
     }
+}
+fn term_is_bound(term: &Term, row: &Row) -> bool {
+    !matches!(term, Term::Blank)
+        && !matches!(term, Term::Variable(variable) if !row.contains_key(variable))
 }
 fn entity_id(value: &Value) -> Option<u64> {
     match value {
@@ -1726,57 +2180,178 @@ fn entity_id(value: &Value) -> Option<u64> {
         _ => None,
     }
 }
+fn entity_value(database: &Database, value: &Value) -> Result<Option<u64>, SemanticError> {
+    match value {
+        Value::Keyword(keyword) => database.entid(keyword).map(Some).ok_or_else(|| {
+            SemanticError::incorrect(
+                "query/unknown-ident",
+                format!("unknown ident {}", keyword.qualified_name()),
+            )
+        }),
+        _ => Ok(entity_id(value)),
+    }
+}
+fn resolve_entity(
+    database: &Database,
+    term: &Term,
+    row: &Row,
+) -> Result<Option<u64>, SemanticError> {
+    match term_bound_value(term, row) {
+        Some(BoundValue::Stored(value)) => entity_value(database, &value),
+        Some(BoundValue::Nil) | None => Ok(None),
+    }
+}
 fn resolve_attribute(
     database: &Database,
     term: &Term,
     row: &Row,
 ) -> Result<Option<u32>, SemanticError> {
-    term_value(term, row)
-        .map(|value| attribute_value(database, value))
-        .transpose()
-}
-fn attribute_term_value(
-    database: &Database,
-    term: &Term,
-    row: &Row,
-    attribute: u32,
-) -> Result<Value, SemanticError> {
-    Ok(match term_value(term, row) {
-        Some(Value::Keyword(_)) => {
-            Value::Keyword(database.schema().attribute(attribute)?.ident.clone())
-        }
-        Some(Value::Long(_)) => Value::Long(i64::from(attribute)),
-        _ => Value::Ref(u64::from(attribute)),
-    })
+    match term_bound_value(term, row) {
+        Some(BoundValue::Stored(value)) => attribute_value(database, &value).map(Some),
+        Some(BoundValue::Nil) | None => Ok(None),
+    }
 }
 fn attribute_value(database: &Database, value: &Value) -> Result<u32, SemanticError> {
-    match value {
-        Value::Keyword(keyword) => database.schema().resolve_ident(keyword).ok_or_else(|| {
+    let entity = match value {
+        Value::Keyword(keyword) => database.entid(keyword).ok_or_else(|| {
             SemanticError::incorrect(
                 "query/unknown-attribute",
                 format!("unknown attribute {}", keyword.qualified_name()),
             )
-        }),
-        Value::Ref(value) => u32::try_from(*value).map_err(|_| {
-            SemanticError::incorrect("query/attribute-value", "attribute id exceeds u32")
-        }),
-        Value::Long(value) => u32::try_from(*value).map_err(|_| {
+        })?,
+        Value::Ref(value) => *value,
+        Value::Long(value) => u64::try_from(*value).map_err(|_| {
             SemanticError::incorrect("query/attribute-value", "attribute id is out of range")
-        }),
+        })?,
         _ => Err(SemanticError::incorrect(
             "query/attribute-value",
             "attribute must be a keyword or id",
-        )),
+        ))?,
+    };
+    let attribute = schema_eid_to_attr_id(entity).map_err(|_| {
+        SemanticError::incorrect(
+            "query/attribute-value",
+            format!("entity {entity} cannot identify an installed attribute"),
+        )
+    })?;
+    database.schema().attribute(attribute).map_err(|_| {
+        SemanticError::incorrect(
+            "query/unknown-attribute",
+            format!("unknown attribute id {attribute}"),
+        )
+    })?;
+    Ok(attribute)
+}
+fn resolve_pattern_value(
+    database: &Database,
+    attribute: Option<u32>,
+    value: &Value,
+) -> Result<Value, SemanticError> {
+    let Some(attribute) = attribute else {
+        return Ok(value.clone());
+    };
+    if database.schema().attribute(attribute)?.value_type == crate::ValueType::Ref {
+        return match value {
+            Value::Keyword(keyword) => database.entid(keyword).map(Value::Ref).ok_or_else(|| {
+                SemanticError::incorrect(
+                    "query/unknown-ident",
+                    format!("unknown ident {}", keyword.qualified_name()),
+                )
+            }),
+            Value::Long(entity) => u64::try_from(*entity).map(Value::Ref).map_err(|_| {
+                SemanticError::incorrect(
+                    "query/entity-value",
+                    "ref value entity id is out of range",
+                )
+            }),
+            _ => Ok(value.clone()),
+        };
+    }
+    Ok(value.clone())
+}
+fn unify_entity_term(
+    database: &Database,
+    row: &mut Row,
+    term: &Term,
+    resolved: Option<u64>,
+    entity: u64,
+) -> Result<bool, SemanticError> {
+    match term {
+        Term::Blank => Ok(true),
+        Term::Constant(_) => Ok(resolved == Some(entity)),
+        Term::Variable(variable) => match row.get(variable) {
+            Some(BoundValue::Nil) => Ok(false),
+            Some(BoundValue::Stored(expected)) => Ok(match resolved {
+                Some(resolved) => resolved == entity,
+                None => entity_value(database, expected)? == Some(entity),
+            }),
+            None => {
+                row.insert(variable.clone(), BoundValue::Stored(Value::Ref(entity)));
+                Ok(true)
+            }
+        },
     }
 }
-fn unify_term(row: &mut Row, term: &Term, value: &Value) -> bool {
+fn unify_attribute_term(
+    database: &Database,
+    row: &mut Row,
+    term: &Term,
+    resolved: Option<u32>,
+    attribute: u32,
+) -> Result<bool, SemanticError> {
+    match term {
+        Term::Blank => Ok(true),
+        Term::Constant(_) => Ok(resolved == Some(attribute)),
+        Term::Variable(variable) => match row.get(variable) {
+            Some(BoundValue::Nil) => Ok(false),
+            Some(BoundValue::Stored(expected)) => Ok(match resolved {
+                Some(resolved) => resolved == attribute,
+                None => attribute_value(database, expected)? == attribute,
+            }),
+            None => {
+                row.insert(
+                    variable.clone(),
+                    BoundValue::Stored(Value::Ref(u64::from(attribute))),
+                );
+                Ok(true)
+            }
+        },
+    }
+}
+fn unify_value_term(
+    database: &Database,
+    row: &mut Row,
+    term: &Term,
+    resolved_attribute: Option<u32>,
+    resolved: Option<&Value>,
+    value: &Value,
+) -> Result<bool, SemanticError> {
+    match term {
+        Term::Blank => Ok(true),
+        Term::Constant(_) => Ok(resolved == Some(value)),
+        Term::Variable(variable) => match row.get(variable) {
+            Some(BoundValue::Nil) => Ok(false),
+            Some(BoundValue::Stored(expected)) => Ok(match resolved {
+                Some(resolved) => resolved == value,
+                None => resolve_pattern_value(database, resolved_attribute, expected)? == *value,
+            }),
+            None => {
+                row.insert(variable.clone(), BoundValue::Stored(value.clone()));
+                Ok(true)
+            }
+        },
+    }
+}
+fn unify_term(row: &mut Row, term: &Term, value: &BoundValue) -> bool {
     match term {
         Term::Blank => true,
-        Term::Constant(expected) => expected == value,
+        Term::Constant(expected) => {
+            matches!(value, BoundValue::Stored(actual) if expected == actual)
+        }
         Term::Variable(variable) => unify_variable(row, variable, value),
     }
 }
-fn unify_variable(row: &mut Row, variable: &Variable, value: &Value) -> bool {
+fn unify_variable(row: &mut Row, variable: &Variable, value: &BoundValue) -> bool {
     match row.get(variable) {
         Some(expected) => expected == value,
         None => {
@@ -1826,6 +2401,13 @@ fn source_database<'a>(state: &'a State<'_>, source: &str) -> Result<&'a Databas
         .ok_or_else(|| {
             SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
         })
+}
+fn effective_source<'a>(source: &'a str, inherited_source: Option<&'a str>) -> &'a str {
+    if source == "$" {
+        inherited_source.unwrap_or(source)
+    } else {
+        source
+    }
 }
 fn as_f64(value: &Value) -> Result<f64, SemanticError> {
     match value {

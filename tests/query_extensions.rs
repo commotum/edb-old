@@ -2,13 +2,21 @@ use atomic_core::{
     Attribute, Binding, Cardinality, Clause, EntityRef, ErrorCategory, FindElement, FindSpec,
     Function, InputSpec, Instruction, Keyword, PostgresStore, Program, ProgramKind, Query,
     QueryControl, QueryExtensions, QueryInput, QueryResult, QueryValue, Schema, Term, TxOp,
-    TxValue, Value, ValueType, Variable,
+    TxValue, USER_PARTITION, Value, ValueType, Variable, make_eid,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod common;
+
+const ITEM_COUNT: u32 = 1_000;
+
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
+}
+
+fn user(eidx: u64) -> u64 {
+    make_eid(USER_PARTITION, eidx).unwrap()
 }
 
 fn unique(prefix: &str) -> String {
@@ -26,15 +34,7 @@ fn schema() -> Schema {
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
-            1,
-            Keyword::new("db", "txInstant"),
-            ValueType::Instant,
-            Cardinality::One,
-        ))
-        .unwrap();
-    schema
-        .install(Attribute::new(
-            10,
+            ITEM_COUNT,
             Keyword::new("item", "count"),
             ValueType::Long,
             Cardinality::One,
@@ -152,26 +152,25 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
     let database_id = unique("query_program");
     let mut store = PostgresStore::connect(&connection).unwrap();
     store.migrate().unwrap();
-    store.create_database(&database_id, schema()).unwrap();
-    let committed = store
-        .transact(
-            &database_id,
-            "initial",
-            0,
-            &[TxOp::Add {
-                entity: EntityRef::Id(1_000),
-                attribute: 10,
-                value: TxValue::Scalar(Value::Long(5)),
-            }],
-            1_000,
-        )
-        .unwrap();
+    let created = store.create_database(&database_id, schema()).unwrap();
+    let service = common::start_service(&connection, &database_id);
+    let committed = common::transact(
+        &service,
+        "initial",
+        created.basis_t(),
+        &[TxOp::Add {
+            entity: EntityRef::Id(user(42)),
+            attribute: ITEM_COUNT,
+            value: TxValue::Scalar(Value::Long(5)),
+        }],
+        1_000,
+    );
     let program = Program {
         kind: ProgramKind::Query,
         arity: 1,
         instructions: vec![
             Instruction::PushArgument(0),
-            Instruction::LoadOne(10),
+            Instruction::LoadOne(ITEM_COUNT),
             Instruction::PushConstant(Value::String("old".into())),
             Instruction::EmitRow(2),
             Instruction::PushConstant(Value::Long(6)),
@@ -193,7 +192,7 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
         .resolve_active_program(&database_id, "snapshot")
         .unwrap();
     assert_eq!(resolved_hash, hash);
-    let old = Arc::new(committed.database);
+    let old = Arc::new(committed.db_after);
     let mut extensions = QueryExtensions::new();
     extensions
         .register_program("snapshot", hash, resolved)
@@ -216,26 +215,24 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
         std::thread::spawn(move || {
             old.query_with_extensions(
                 &query,
-                &[QueryInput::Scalar(Value::Ref(1_000))],
+                &[QueryInput::Scalar(Value::Ref(user(42)))],
                 &QueryControl::default(),
                 &extensions,
             )
             .unwrap()
         })
     };
-    restarted
-        .transact(
-            &database_id,
-            "advance",
-            1,
-            &[TxOp::Add {
-                entity: EntityRef::Id(1_000),
-                attribute: 10,
-                value: TxValue::Scalar(Value::Long(99)),
-            }],
-            2_000,
-        )
-        .unwrap();
+    common::transact(
+        &service,
+        "advance",
+        committed.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Id(user(42)),
+            attribute: ITEM_COUNT,
+            value: TxValue::Scalar(Value::Long(99)),
+        }],
+        2_000,
+    );
     let outcome = query_thread.join().unwrap();
     assert!(matches!(
         outcome.result,
@@ -256,10 +253,11 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
     let error = old
         .query_with_extensions(
             &query,
-            &[QueryInput::Scalar(Value::Ref(1_000))],
+            &[QueryInput::Scalar(Value::Ref(user(42)))],
             &cancelled,
             &extensions,
         )
         .unwrap_err();
     assert_eq!(error.category, ErrorCategory::Interrupted);
+    service.shutdown();
 }

@@ -7,6 +7,10 @@ use atomic_core::{
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 
+const NAME: u32 = 1_000;
+const AGE: u32 = 1_001;
+const FRIEND: u32 = 1_002;
+
 fn var(name: &str) -> Variable {
     Variable::new(name).unwrap()
 }
@@ -30,17 +34,9 @@ fn pattern(entity: Term, attribute: Term, value: Term) -> Clause {
 fn schema() -> Schema {
     let mut schema = Schema::new();
     schema
-        .install(Attribute::new(
-            1,
-            Keyword::new("db", "txInstant"),
-            ValueType::Instant,
-            Cardinality::One,
-        ))
-        .unwrap();
-    schema
         .install(
             Attribute::new(
-                10,
+                NAME,
                 Keyword::new("person", "name"),
                 ValueType::String,
                 Cardinality::One,
@@ -49,7 +45,7 @@ fn schema() -> Schema {
         )
         .unwrap();
     let mut age = Attribute::new(
-        11,
+        AGE,
         Keyword::new("person", "age"),
         ValueType::Long,
         Cardinality::One,
@@ -57,7 +53,7 @@ fn schema() -> Schema {
     age.indexed = true;
     schema.install(age).unwrap();
     let mut friend = Attribute::new(
-        12,
+        FRIEND,
         Keyword::new("person", "friend"),
         ValueType::Ref,
         Cardinality::Many,
@@ -74,79 +70,79 @@ fn database() -> (Database, Database, [u64; 4]) {
             &[
                 TxOp::Add {
                     entity: EntityRef::Temp("alice".into()),
-                    attribute: 10,
+                    attribute: NAME,
                     value: TxValue::Scalar(Value::String("Alice".into())),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("alice".into()),
-                    attribute: 11,
+                    attribute: AGE,
                     value: TxValue::Scalar(Value::Long(40)),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("alice".into()),
-                    attribute: 12,
+                    attribute: FRIEND,
                     value: TxValue::Entity(EntityRef::Temp("bob".into())),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("bob".into()),
-                    attribute: 10,
+                    attribute: NAME,
                     value: TxValue::Scalar(Value::String("Bob".into())),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("bob".into()),
-                    attribute: 11,
+                    attribute: AGE,
                     value: TxValue::Scalar(Value::Long(30)),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("bob".into()),
-                    attribute: 12,
+                    attribute: FRIEND,
                     value: TxValue::Entity(EntityRef::Temp("cara".into())),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("cara".into()),
-                    attribute: 10,
+                    attribute: NAME,
                     value: TxValue::Scalar(Value::String("Cara".into())),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("cara".into()),
-                    attribute: 11,
+                    attribute: AGE,
                     value: TxValue::Scalar(Value::Long(30)),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("cara".into()),
-                    attribute: 12,
+                    attribute: FRIEND,
                     value: TxValue::Entity(EntityRef::Temp("alice".into())),
                 },
             ],
             1_000,
         )
         .unwrap();
-    let ids = [
+    let mut ids = [
         report.tempids["alice"],
         report.tempids["bob"],
         report.tempids["cara"],
-        1_003,
+        0,
     ];
     let db1 = report.db_after;
-    let db2 = db1
+    let report = db1
         .with(
             &[
                 TxOp::Add {
                     entity: EntityRef::Id(ids[1]),
-                    attribute: 11,
+                    attribute: AGE,
                     value: TxValue::Scalar(Value::Long(31)),
                 },
                 TxOp::Add {
                     entity: EntityRef::Temp("dave".into()),
-                    attribute: 10,
+                    attribute: NAME,
                     value: TxValue::Scalar(Value::String("Dave".into())),
                 },
             ],
             2_000,
         )
-        .unwrap()
-        .db_after;
-    (db1, db2, ids)
+        .unwrap();
+    ids[3] = report.tempids["dave"];
+    (db1, report.db_after, ids)
 }
 
 fn relation_values(result: QueryResult) -> Vec<Vec<QueryValue>> {
@@ -225,7 +221,7 @@ fn temporal_sources_inputs_set_and_with_bag_semantics_are_explicit() {
         &[QuerySource {
             name: "$".into(),
             database: &db2,
-            view: View::AsOf(1),
+            view: View::AsOf(2),
         }],
         &[],
         &QueryControl::default(),
@@ -234,7 +230,7 @@ fn temporal_sources_inputs_set_and_with_bag_semantics_are_explicit() {
     assert_eq!(relation_values(temporal.result).len(), 2);
     assert_eq!(
         db1.datoms(View::Current, IndexOrder::Eavt),
-        db2.datoms(View::AsOf(1), IndexOrder::Eavt)
+        db2.datoms(View::AsOf(2), IndexOrder::Eavt)
     );
 
     let mut bag_query = age_query.clone();
@@ -669,7 +665,7 @@ fn explicit_join_clauses_isolate_non_join_variables() {
         FindSpec::Scalar(FindElement::Variable(var("name"))),
         vec![pattern(
             Term::Blank,
-            Term::Constant(Value::Ref(10)),
+            Term::Constant(Value::Ref(u64::from(NAME))),
             v("name"),
         )],
     );
@@ -688,12 +684,12 @@ fn selective_optimized_plan_scales_with_matches_not_database_size() {
         let temp = format!("person-{index}");
         ops.push(TxOp::Add {
             entity: EntityRef::Temp(temp.clone()),
-            attribute: 10,
+            attribute: NAME,
             value: TxValue::Scalar(Value::String(temp.clone())),
         });
         ops.push(TxOp::Add {
             entity: EntityRef::Temp(temp),
-            attribute: 11,
+            attribute: AGE,
             value: TxValue::Scalar(Value::Long(index)),
         });
     }

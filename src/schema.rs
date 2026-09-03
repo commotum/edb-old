@@ -1,5 +1,13 @@
-use crate::{Keyword, SemanticError, Value};
-use std::collections::BTreeMap;
+use crate::idents::IdentIndex;
+use crate::vocabulary::{
+    DB_ALTER_ATTRIBUTE, DB_ATTR_PREDS, DB_CARDINALITY, DB_IDENT, DB_INDEX, DB_INSTALL_ATTRIBUTE,
+    DB_IS_COMPONENT, DB_NO_HISTORY, DB_PART_DB, DB_TUPLE_ATTRS, DB_TUPLE_DISCONTINUED,
+    DB_TUPLE_TYPE, DB_TUPLE_TYPES, DB_UNIQUE, DB_VALUE_TYPE, cardinality_entity,
+    cardinality_for_entity, schema_eid_to_attr_id, unique_entity, unique_for_entity,
+    value_type_entity, value_type_for_entity, value_type_ident,
+};
+use crate::{Datom, ErrorCategory, IndexOrder, Keyword, SemanticError, Symbol, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type AttrId = u32;
 
@@ -23,6 +31,7 @@ pub enum ValueType {
     Bytes,
     Double,
     Float,
+    Function,
     Instant,
     Keyword,
     Long,
@@ -82,7 +91,6 @@ impl Attribute {
 
     pub fn unique(mut self, unique: Unique) -> Self {
         self.unique = Some(unique);
-        self.indexed = true;
         self
     }
 
@@ -104,7 +112,7 @@ impl Attribute {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Schema {
     attributes: BTreeMap<AttrId, Attribute>,
     current_idents: BTreeMap<Keyword, AttrId>,
@@ -266,6 +274,174 @@ impl Schema {
         Ok(())
     }
 
+    /// Rebuild the operative attribute cache from ordinary current facts.
+    ///
+    /// `idents` is itself derived from all historical `:db/ident`
+    /// assertions. The recovered peer performs these two passes in the same
+    /// order (`ident-setting-datoms` followed by install/alter hooks), so this
+    /// routine is the only authoritative projection used by construction,
+    /// transaction successors, and recovery.
+    pub(crate) fn derive_from_information(
+        current: &[Datom],
+        idents: &IdentIndex,
+    ) -> Result<Self, SemanticError> {
+        let mut installed = BTreeSet::new();
+        for datom in current.iter().filter(|datom| {
+            datom.added
+                && datom.entity == DB_PART_DB
+                && (u64::from(datom.attribute) == DB_INSTALL_ATTRIBUTE
+                    || u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE)
+        }) {
+            let Value::Ref(entity) = datom.value else {
+                return Err(schema_information_error(
+                    "schema/invalid-install-marker",
+                    "attribute install and alter markers must contain refs",
+                ));
+            };
+            installed.insert(entity);
+        }
+
+        let mut schema = Self::new();
+        for entity in installed {
+            let id = schema_eid_to_attr_id(entity)?;
+            let ident = required_keyword(current, entity, DB_IDENT, ":db/ident")?;
+            let value_type_entity = required_ref(current, entity, DB_VALUE_TYPE, ":db/valueType")?;
+            let value_type = value_type_for_entity(value_type_entity).ok_or_else(|| {
+                schema_information_error(
+                    "schema/unknown-value-type",
+                    format!("attribute {entity} names unknown value type {value_type_entity}"),
+                )
+            })?;
+            let cardinality_entity =
+                required_ref(current, entity, DB_CARDINALITY, ":db/cardinality")?;
+            let cardinality = cardinality_for_entity(cardinality_entity).ok_or_else(|| {
+                schema_information_error(
+                    "schema/unknown-cardinality",
+                    format!("attribute {entity} names unknown cardinality {cardinality_entity}"),
+                )
+            })?;
+            let unique = optional_ref(current, entity, DB_UNIQUE, ":db/unique")?
+                .map(|unique| {
+                    unique_for_entity(unique).ok_or_else(|| {
+                        schema_information_error(
+                            "schema/unknown-unique",
+                            format!("attribute {entity} names unknown uniqueness {unique}"),
+                        )
+                    })
+                })
+                .transpose()?;
+            let explicitly_indexed =
+                optional_bool(current, entity, DB_INDEX, ":db/index")?.unwrap_or(false);
+            let component = optional_bool(current, entity, DB_IS_COMPONENT, ":db/isComponent")?
+                .unwrap_or(false);
+            let no_history =
+                optional_bool(current, entity, DB_NO_HISTORY, ":db/noHistory")?.unwrap_or(false);
+
+            let homogeneous = optional_keyword(current, entity, DB_TUPLE_TYPE, ":db/tupleType")?;
+            let heterogeneous = optional_tuple(current, entity, DB_TUPLE_TYPES, ":db/tupleTypes")?;
+            let composite = optional_tuple(current, entity, DB_TUPLE_ATTRS, ":db/tupleAttrs")?;
+            if usize::from(homogeneous.is_some())
+                + usize::from(heterogeneous.is_some())
+                + usize::from(composite.is_some())
+                > 1
+            {
+                return Err(schema_information_error(
+                    "schema/multiple-tuple-specs",
+                    format!("attribute {entity} has more than one tuple definition"),
+                ));
+            }
+            let tuple = if let Some(value_type) = homogeneous {
+                Some(TupleSpec::Homogeneous(value_type_from_keyword(
+                    idents,
+                    &value_type,
+                )?))
+            } else if let Some(values) = heterogeneous {
+                Some(TupleSpec::Heterogeneous(
+                    tuple_keywords(values, ":db/tupleTypes")?
+                        .into_iter()
+                        .map(|ident| value_type_from_keyword(idents, &ident))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            } else if let Some(values) = composite {
+                Some(TupleSpec::Composite(
+                    tuple_keywords(values, ":db/tupleAttrs")?
+                        .into_iter()
+                        .map(|ident| {
+                            let entity = idents.resolve(&ident).ok_or_else(|| {
+                                schema_information_error(
+                                    "schema/unknown-tuple-attribute",
+                                    format!(
+                                        "tuple constituent {} does not resolve",
+                                        ident.qualified_name()
+                                    ),
+                                )
+                            })?;
+                            schema_eid_to_attr_id(entity)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            } else {
+                None
+            };
+            let tuple_discontinued = optional_bool(
+                current,
+                entity,
+                DB_TUPLE_DISCONTINUED,
+                ":db.tuple/discontinued",
+            )?
+            .unwrap_or(false);
+            let mut predicates = values(current, entity, DB_ATTR_PREDS)
+                .into_iter()
+                .map(|value| match value {
+                    Value::Symbol(symbol) if qualified_symbol(symbol) => Ok(symbol_name(symbol)),
+                    Value::Symbol(_) => Err(schema_information_error(
+                        "schema/unqualified-attribute-predicate",
+                        ":db.attr/preds values must be fully qualified symbols",
+                    )),
+                    _ => Err(schema_information_error(
+                        "schema/invalid-attribute-predicate",
+                        ":db.attr/preds values must be symbols",
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            predicates.sort();
+            predicates.dedup();
+
+            schema.install(Attribute {
+                id,
+                ident,
+                value_type,
+                cardinality,
+                unique,
+                // `indexed` records the explicit :db/index fact. Unique
+                // attributes are effective AVET members independently.
+                indexed: explicitly_indexed,
+                component,
+                no_history,
+                tuple,
+                tuple_discontinued,
+                predicates,
+            })?;
+        }
+
+        // Attribute aliases are the subset of the general historical ident
+        // index whose winning target is an installed attribute and whose name
+        // is not that entity's current ident.
+        for (ident, entity) in idents.aliases() {
+            let Ok(attribute) = schema_eid_to_attr_id(entity) else {
+                continue;
+            };
+            let Some(current) = schema.attributes.get(&attribute) else {
+                continue;
+            };
+            if &current.ident != ident {
+                schema.install_ident_alias(ident.clone(), attribute)?;
+            }
+        }
+        schema.validate_tuple_definitions()?;
+        Ok(schema)
+    }
+
     pub fn validate_value(
         &self,
         attribute: &Attribute,
@@ -297,7 +473,95 @@ impl Schema {
         }
     }
 
+    /// Validate tuple definitions that depend on the complete successor
+    /// schema rather than on one attribute in isolation.
+    ///
+    /// This is intentionally separate from `validate_attribute`: a schema
+    /// transaction may install a composite before one of its constituents in
+    /// canonical operation order. The recovered transactor validates
+    /// `:db/tupleAttrs` against its fully formed db-after value. Callers that
+    /// assemble or transition a schema must therefore invoke this after all
+    /// proposed attributes have been installed or altered.
+    pub fn validate_tuple_definitions(&self) -> Result<(), SemanticError> {
+        for attribute in self.attributes.values() {
+            self.validate_attribute(attribute)?;
+
+            let Some(TupleSpec::Composite(constituents)) = &attribute.tuple else {
+                continue;
+            };
+
+            // Discontinuation removes the reverse constituent links in
+            // 1.0.7705. Former constituents may subsequently change
+            // cardinality, while the immutable tuple definition remains as
+            // historical schema information.
+            if attribute.tuple_discontinued {
+                continue;
+            }
+
+            for constituent_id in constituents {
+                let Some(constituent) = self.attributes.get(constituent_id) else {
+                    return Err(SemanticError::incorrect(
+                        "schema/invalid-tuple-attributes",
+                        format!(
+                            "composite {} references unknown constituent attribute {}",
+                            attribute.ident.qualified_name(),
+                            constituent_id
+                        ),
+                    ));
+                };
+
+                if constituent.cardinality != Cardinality::One
+                    || !is_tuple_scalar_type(constituent.value_type)
+                {
+                    return Err(SemanticError::incorrect(
+                        "schema/invalid-tuple-attributes",
+                        format!(
+                            "composite {} constituent {} must be a cardinality-one tuple scalar",
+                            attribute.ident.qualified_name(),
+                            constituent.ident.qualified_name()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate tuple installation rules against a complete proposed schema.
+    ///
+    /// The installed IDs distinguish an attempted install-time
+    /// `:db.tuple/discontinued` assertion from decoding a legitimate schema in
+    /// which an older composite has already been discontinued. This method is
+    /// the single validation hook for the transaction boundary after all
+    /// schema operations have been applied to its successor candidate.
+    pub fn validate_tuple_installations(
+        &self,
+        installed_attributes: &[AttrId],
+    ) -> Result<(), SemanticError> {
+        for attribute_id in installed_attributes {
+            let attribute = self.attribute(*attribute_id)?;
+            if attribute.tuple_discontinued {
+                return Err(SemanticError::incorrect(
+                    "schema/cannot-discontinue-at-install",
+                    "a composite tuple cannot be discontinued when it is installed",
+                ));
+            }
+        }
+        self.validate_tuple_definitions()
+    }
+
     pub(crate) fn validate_attribute(&self, attribute: &Attribute) -> Result<(), SemanticError> {
+        if attribute.predicates.iter().any(|predicate| {
+            let Some((namespace, name)) = predicate.split_once('/') else {
+                return true;
+            };
+            namespace.is_empty() || name.is_empty() || name.contains('/')
+        }) {
+            return Err(SemanticError::incorrect(
+                "schema/unqualified-attribute-predicate",
+                "attribute predicates must be fully qualified symbols",
+            ));
+        }
         if attribute.unique.is_some() && attribute.cardinality != Cardinality::One {
             return Err(SemanticError::incorrect(
                 "schema/unique-must-be-cardinality-one",
@@ -316,7 +580,22 @@ impl Schema {
                 "component attributes must have ref value type",
             ));
         }
+        if attribute.tuple_discontinued && !matches!(attribute.tuple, Some(TupleSpec::Composite(_)))
+        {
+            return Err(SemanticError::incorrect(
+                "schema/not-a-composite-tuple",
+                "tuple discontinuation applies only to composite tuple attributes",
+            ));
+        }
         match (&attribute.value_type, &attribute.tuple) {
+            (ValueType::Tuple, Some(TupleSpec::Homogeneous(value_type)))
+                if !is_tuple_scalar_type(*value_type) =>
+            {
+                Err(SemanticError::incorrect(
+                    "schema/invalid-tuple-element-type",
+                    "homogeneous tuples require a permitted scalar value type",
+                ))
+            }
             (ValueType::Tuple, Some(TupleSpec::Heterogeneous(types)))
                 if !(2..=8).contains(&types.len()) =>
             {
@@ -325,12 +604,30 @@ impl Schema {
                     "heterogeneous tuples require 2 through 8 slots",
                 ))
             }
+            (ValueType::Tuple, Some(TupleSpec::Heterogeneous(types)))
+                if types
+                    .iter()
+                    .any(|value_type| !is_tuple_scalar_type(*value_type)) =>
+            {
+                Err(SemanticError::incorrect(
+                    "schema/invalid-tuple-element-type",
+                    "heterogeneous tuple slots require permitted scalar value types",
+                ))
+            }
             (ValueType::Tuple, Some(TupleSpec::Composite(attributes)))
                 if !(2..=8).contains(&attributes.len()) =>
             {
                 Err(SemanticError::incorrect(
                     "schema/invalid-tuple-length",
                     "composite tuples require 2 through 8 attributes",
+                ))
+            }
+            (ValueType::Tuple, Some(TupleSpec::Composite(_)))
+                if attribute.cardinality != Cardinality::One =>
+            {
+                Err(SemanticError::incorrect(
+                    "schema/composite-must-be-cardinality-one",
+                    "composite tuple attributes must have cardinality one",
                 ))
             }
             (ValueType::Tuple, Some(_)) => Ok(()),
@@ -400,6 +697,320 @@ impl Schema {
     }
 }
 
+pub(crate) fn attribute_information_datoms(
+    attribute: &Attribute,
+    names: &Schema,
+    tx: u64,
+) -> Result<Vec<Datom>, SemanticError> {
+    schema_eid_to_attr_id(u64::from(attribute.id))?;
+    let entity = u64::from(attribute.id);
+    let mut datoms = vec![
+        information_assertion(
+            entity,
+            DB_IDENT,
+            Value::Keyword(attribute.ident.clone()),
+            tx,
+        )?,
+        information_assertion(
+            entity,
+            DB_VALUE_TYPE,
+            Value::Ref(value_type_entity(attribute.value_type)),
+            tx,
+        )?,
+        information_assertion(
+            entity,
+            DB_CARDINALITY,
+            Value::Ref(cardinality_entity(attribute.cardinality)),
+            tx,
+        )?,
+    ];
+    if let Some(unique) = attribute.unique {
+        datoms.push(information_assertion(
+            entity,
+            DB_UNIQUE,
+            Value::Ref(unique_entity(unique)),
+            tx,
+        )?);
+    }
+    if attribute.indexed {
+        datoms.push(information_assertion(
+            entity,
+            DB_INDEX,
+            Value::Bool(true),
+            tx,
+        )?);
+    }
+    if attribute.component {
+        datoms.push(information_assertion(
+            entity,
+            DB_IS_COMPONENT,
+            Value::Bool(true),
+            tx,
+        )?);
+    }
+    if attribute.no_history {
+        datoms.push(information_assertion(
+            entity,
+            DB_NO_HISTORY,
+            Value::Bool(true),
+            tx,
+        )?);
+    }
+    match &attribute.tuple {
+        Some(TupleSpec::Homogeneous(value_type)) => datoms.push(information_assertion(
+            entity,
+            DB_TUPLE_TYPE,
+            Value::Keyword(value_type_ident(*value_type)),
+            tx,
+        )?),
+        Some(TupleSpec::Heterogeneous(types)) => datoms.push(information_assertion(
+            entity,
+            DB_TUPLE_TYPES,
+            Value::Tuple(
+                types
+                    .iter()
+                    .map(|value_type| Some(Value::Keyword(value_type_ident(*value_type))))
+                    .collect(),
+            ),
+            tx,
+        )?),
+        Some(TupleSpec::Composite(attributes)) => {
+            let idents = attributes
+                .iter()
+                .map(|id| {
+                    names
+                        .attribute(*id)
+                        .map(|attribute| Some(Value::Keyword(attribute.ident.clone())))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            datoms.push(information_assertion(
+                entity,
+                DB_TUPLE_ATTRS,
+                Value::Tuple(idents),
+                tx,
+            )?);
+        }
+        None => {}
+    }
+    if attribute.tuple_discontinued {
+        datoms.push(information_assertion(
+            entity,
+            DB_TUPLE_DISCONTINUED,
+            Value::Bool(true),
+            tx,
+        )?);
+    }
+    for predicate in &attribute.predicates {
+        datoms.push(information_assertion(
+            entity,
+            DB_ATTR_PREDS,
+            Value::Symbol(parse_symbol(predicate)),
+            tx,
+        )?);
+    }
+    datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+    Ok(datoms)
+}
+
+fn information_assertion(
+    entity: u64,
+    attribute: u64,
+    value: Value,
+    tx: u64,
+) -> Result<Datom, SemanticError> {
+    Ok(Datom {
+        entity,
+        attribute: schema_eid_to_attr_id(attribute)?,
+        value,
+        tx,
+        added: true,
+    })
+}
+
+fn schema_information_error(code: &'static str, message: impl Into<String>) -> SemanticError {
+    SemanticError::new(ErrorCategory::Incorrect, code, message)
+}
+
+fn values(current: &[Datom], entity: u64, attribute: u64) -> Vec<&Value> {
+    current
+        .iter()
+        .filter(|datom| {
+            datom.added && datom.entity == entity && u64::from(datom.attribute) == attribute
+        })
+        .map(|datom| &datom.value)
+        .collect()
+}
+
+fn exactly_zero_or_one<'a>(
+    current: &'a [Datom],
+    entity: u64,
+    attribute: u64,
+    label: &str,
+) -> Result<Option<&'a Value>, SemanticError> {
+    let found = values(current, entity, attribute);
+    match found.as_slice() {
+        [] => Ok(None),
+        [value] => Ok(Some(*value)),
+        _ => Err(schema_information_error(
+            "schema/conflicting-functional-property",
+            format!("entity {entity} has multiple current {label} values"),
+        )),
+    }
+}
+
+fn required_keyword(
+    current: &[Datom],
+    entity: u64,
+    attribute: u64,
+    label: &str,
+) -> Result<Keyword, SemanticError> {
+    match exactly_zero_or_one(current, entity, attribute, label)? {
+        Some(Value::Keyword(value)) => Ok(value.clone()),
+        Some(_) => Err(schema_information_error(
+            "schema/invalid-property-type",
+            format!("entity {entity} {label} must be a keyword"),
+        )),
+        None => Err(schema_information_error(
+            "schema/missing-property",
+            format!("entity {entity} must specify {label}"),
+        )),
+    }
+}
+
+fn required_ref(
+    current: &[Datom],
+    entity: u64,
+    attribute: u64,
+    label: &str,
+) -> Result<u64, SemanticError> {
+    match exactly_zero_or_one(current, entity, attribute, label)? {
+        Some(Value::Ref(value)) => Ok(*value),
+        Some(_) => Err(schema_information_error(
+            "schema/invalid-property-type",
+            format!("entity {entity} {label} must be a ref"),
+        )),
+        None => Err(schema_information_error(
+            "schema/missing-property",
+            format!("entity {entity} must specify {label}"),
+        )),
+    }
+}
+
+fn optional_ref(
+    current: &[Datom],
+    entity: u64,
+    attribute: u64,
+    label: &str,
+) -> Result<Option<u64>, SemanticError> {
+    match exactly_zero_or_one(current, entity, attribute, label)? {
+        Some(Value::Ref(value)) => Ok(Some(*value)),
+        Some(_) => Err(schema_information_error(
+            "schema/invalid-property-type",
+            format!("entity {entity} {label} must be a ref"),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn optional_bool(
+    current: &[Datom],
+    entity: u64,
+    attribute: u64,
+    label: &str,
+) -> Result<Option<bool>, SemanticError> {
+    match exactly_zero_or_one(current, entity, attribute, label)? {
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(schema_information_error(
+            "schema/invalid-property-type",
+            format!("entity {entity} {label} must be a boolean"),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn optional_keyword(
+    current: &[Datom],
+    entity: u64,
+    attribute: u64,
+    label: &str,
+) -> Result<Option<Keyword>, SemanticError> {
+    match exactly_zero_or_one(current, entity, attribute, label)? {
+        Some(Value::Keyword(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(schema_information_error(
+            "schema/invalid-property-type",
+            format!("entity {entity} {label} must be a keyword"),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn optional_tuple<'a>(
+    current: &'a [Datom],
+    entity: u64,
+    attribute: u64,
+    label: &str,
+) -> Result<Option<&'a [Option<Value>]>, SemanticError> {
+    match exactly_zero_or_one(current, entity, attribute, label)? {
+        Some(Value::Tuple(values)) => Ok(Some(values)),
+        Some(_) => Err(schema_information_error(
+            "schema/invalid-property-type",
+            format!("entity {entity} {label} must be a tuple"),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn tuple_keywords(values: &[Option<Value>], label: &str) -> Result<Vec<Keyword>, SemanticError> {
+    values
+        .iter()
+        .map(|value| match value {
+            Some(Value::Keyword(value)) => Ok(value.clone()),
+            _ => Err(schema_information_error(
+                "schema/invalid-tuple-property",
+                format!("{label} must contain only non-nil keywords"),
+            )),
+        })
+        .collect()
+}
+
+fn value_type_from_keyword(
+    idents: &IdentIndex,
+    ident: &Keyword,
+) -> Result<ValueType, SemanticError> {
+    idents
+        .resolve(ident)
+        .and_then(value_type_for_entity)
+        .ok_or_else(|| {
+            schema_information_error(
+                "schema/unknown-tuple-value-type",
+                format!("unknown tuple value type {}", ident.qualified_name()),
+            )
+        })
+}
+
+fn symbol_name(symbol: &Symbol) -> String {
+    match &symbol.namespace {
+        Some(namespace) => format!("{namespace}/{}", symbol.name),
+        None => symbol.name.clone(),
+    }
+}
+
+fn qualified_symbol(symbol: &Symbol) -> bool {
+    symbol
+        .namespace
+        .as_deref()
+        .is_some_and(|namespace| !namespace.is_empty())
+        && !symbol.name.is_empty()
+        && !symbol.name.contains('/')
+}
+
+fn parse_symbol(value: &str) -> Symbol {
+    match value.split_once('/') {
+        Some((namespace, name)) => Symbol::new(namespace, name),
+        None => Symbol::unqualified(value),
+    }
+}
+
 fn matches_value_type(value_type: ValueType, value: &Value) -> bool {
     matches!(
         (value_type, value),
@@ -409,6 +1020,7 @@ fn matches_value_type(value_type: ValueType, value: &Value) -> bool {
             | (ValueType::Bytes, Value::Bytes(_))
             | (ValueType::Double, Value::Double(_))
             | (ValueType::Float, Value::Float(_))
+            | (ValueType::Function, Value::Function(_))
             | (ValueType::Instant, Value::Instant(_))
             | (ValueType::Keyword, Value::Keyword(_))
             | (ValueType::Long, Value::Long(_))
@@ -421,11 +1033,32 @@ fn matches_value_type(value_type: ValueType, value: &Value) -> bool {
     )
 }
 
+/// Exact native counterpart of 1.0.7705's `datomic.db/tuple-value-types`.
+/// Float, bytes, function, and tuple are ordinary Datomic value types but are
+/// not legal tuple slot types.
+fn is_tuple_scalar_type(value_type: ValueType) -> bool {
+    matches!(
+        value_type,
+        ValueType::BigDec
+            | ValueType::BigInt
+            | ValueType::Boolean
+            | ValueType::Double
+            | ValueType::Instant
+            | ValueType::Keyword
+            | ValueType::Long
+            | ValueType::Ref
+            | ValueType::String
+            | ValueType::Symbol
+            | ValueType::Uuid
+            | ValueType::Uri
+    )
+}
+
 fn validate_tuple_slot(value_type: ValueType, value: &Value) -> Result<(), SemanticError> {
-    if value_type == ValueType::Tuple || value_type == ValueType::Bytes {
+    if !is_tuple_scalar_type(value_type) {
         return Err(SemanticError::incorrect(
             "schema/invalid-tuple-element-type",
-            "tuples and bytes cannot be tuple elements",
+            "float, bytes, function, and tuple cannot be tuple elements",
         ));
     }
     if !matches_value_type(value_type, value) {

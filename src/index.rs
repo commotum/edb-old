@@ -40,7 +40,7 @@ impl IndexPrefix {
         }
     }
 
-    fn validate(&self) -> Result<(), SemanticError> {
+    pub(crate) fn validate(&self) -> Result<(), SemanticError> {
         let has_gap = match self {
             Self::Eavt {
                 attribute, value, ..
@@ -60,10 +60,6 @@ impl IndexPrefix {
         Ok(())
     }
 
-    pub(crate) fn matches(&self, datom: &Datom) -> Result<bool, SemanticError> {
-        self.validate()?;
-        Ok(compare_prefix(datom, self).is_eq())
-    }
 }
 
 /// Immutable roots for a single database value.
@@ -172,7 +168,7 @@ fn sorted(mut datoms: Vec<Datom>, order: IndexOrder) -> Vec<Datom> {
     datoms
 }
 
-fn compare_prefix(datom: &Datom, prefix: &IndexPrefix) -> Ordering {
+pub(crate) fn compare_prefix(datom: &Datom, prefix: &IndexPrefix) -> Ordering {
     match prefix {
         IndexPrefix::Eavt {
             entity,

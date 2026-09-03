@@ -95,6 +95,14 @@ owner attempting publication after replacement.
 
 ### 3. Bounded serialized transaction worker
 
+**Status:** Complete. `TransactionService` owns one fenced `PostgresStore` on
+one worker thread, renews its lease while idle, admits through a configurable
+`sync_channel`, returns per-request tickets, exposes queue counters, and drains
+queued work as unavailable on shutdown/leadership loss. Tests hold the database
+head to prove a capacity-one queue never exceeds one, the next request is
+`Busy`, work is processed serially, and shutdown allows the already executing
+fenced commit while settling rather than executing queued work.
+
 **Outcome:** A Rust service owns one `PostgresStore`, admits requests through a
 fixed queue, processes them in order, returns typed outcomes, and fails pending
 work cleanly on shutdown or leadership loss.
@@ -104,6 +112,15 @@ concurrently; overload is bounded; cancellation/timeout semantics are explicit;
 and graceful/abrupt worker tests leave no hidden pending work.
 
 ### 4. Durable retry, reports, and peer-facing integration
+
+**Status:** Complete. Sync/async client calls require an expected basis and
+durable request key; ticket timeout/disconnection is `UnknownOutcome` with the
+key and never cancels admitted work. `ServiceTransactionReport` carries exact
+immutable before/after values, datoms, tempids, hash, basis and replay state.
+Bounded live subscriptions drop rather than block on slow consumers and remove
+on drop. Real PostgreSQL tests prove exact replay, changed-key conflict,
+timeout-then-reconciliation, report ordering/non-replay publication,
+subscriber overflow/unsubscribe, and monotonic basis reports.
 
 **Outcome:** Sync and async submission expose request keys, expected basis,
 transaction reports and unknown outcomes without automatic semantic retry.
@@ -115,6 +132,16 @@ reads/sync remain monotonic.
 
 ### 5. Standby takeover and failure injection
 
+**Status:** Complete. `TransactionStandby` polls only for the specific
+lease-held anomaly, starts the normal service after server-time expiry, and
+surfaces all other startup failures. An independent-connection failure test
+abandons a lease without release, keeps a peer's immutable reads live during
+the gap, observes automatic higher-epoch takeover and a successful write,
+synchronizes the peer, then proves the resumed old epoch cannot publish despite
+the current expected basis. Goal 3's retained process-death and
+acknowledgement-loss fixtures exercise the same fenced publication/idempotency
+lower boundary in the integrated suite.
+
 **Outcome:** A standby catches up, acquires a higher epoch after lease expiry,
 and serves writes without fork while the old owner is fenced.
 
@@ -124,6 +151,16 @@ exactly one epoch publishes, history is contiguous, and reads remain usable.
 
 ### 6. Stress and integrated verification
 
+**Status:** Complete. Twelve concurrent clients committed 240 transactions
+across independent timelines through a four-slot queue in about 1.7 seconds;
+channel-plus-worker high-water was five, `Busy` admission was exercised, and
+every database recovered contiguously at basis/value 20. The complete serial
+real-PostgreSQL suite passes (95 tests: 94 passed and the subprocess worker
+intentionally ignored), including server restart, process death, publication
+and acknowledgement faults, corruption, program races, peer/query behavior,
+leases, takeover, overload and shutdown. Formatting and strict Clippy pass.
+`ARCHITECTURE.md` records recovered mappings, deviations and metric meaning.
+
 **Outcome:** The transaction service remains bounded, diagnosable, and correct
 under sustained concurrency and the full prior feature set.
 
@@ -132,6 +169,11 @@ serial outcomes; all format/lint/unit/integration/restart/fault suites pass on
 real PostgreSQL; deliberate deviations and remaining Goal 8 work are recorded.
 
 ## Availability exit condition
+
+**Status:** Complete. All six stages establish bounded serialized service,
+same-transaction epoch fencing, durable/unknown retry behavior, reports,
+automatic takeover, stale-owner rejection, peer read availability and
+integrated failure evidence.
 
 Goal 7 is complete when the production-shaped Rust write service provides one
 fenced serialized owner, bounded admission, actionable/unknown outcomes,

@@ -1,5 +1,11 @@
 # Goal 0 Working Loop
 
+Goal 0 is currently reopened. Execute the corrective parent at
+`goal-9/0-plan.md` and `goal-9/0-loop.md`; do not treat the historical
+`goal-1/` through `goal-8/` completion labels as current acceptance evidence.
+When Goal 9 completes, fold its integrated evidence back here and reassess the
+original success condition.
+
 1. Read `goal-0/0-plan.md` and reconcile every status and assumption with the repository, child-goal plans, tests, recorded decisions, `datomic_pro_docs`, and relevant `1.0.7705` evidence.
 2. Select the first parent stage whose completion signal is not actually established. Never skip an incomplete or blocked stage merely because a later scaffold exists.
 3. Map that stage to `goal-N/`, where `N` is its stable parent-stage number.

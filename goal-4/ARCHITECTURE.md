@@ -84,16 +84,16 @@ preserved; JVM object layout and key/value-store traversal machinery are not.
 
 ## `:db/noHistory`
 
-The authoritative transaction log remains complete. Consolidation may forget
-superseded history for an attribute only after that attribute is marked
-`noHistory`; it must retain the current assertion set so reconstruction still
-produces the same current database. Turning the flag off retains subsequent
-history but does not promise to recover already-forgotten durable-index facts.
-The first implementation carries prior consolidated history forward and
-filters at consolidation, matching the recovered `filter-nohist-pairs` timing
-model instead of rebuilding forgotten history from the full log. Because the
-documentation deliberately gives no precise removal time, delayed
-consolidation is observable only as extra history and is permitted.
+The authoritative transaction log remains complete. A consolidation job may
+omit eligible superseded history only for attributes marked `noHistory` in
+that job's endpoint database; it must retain enough current information for
+the same present database value. Turning the flag off before a job leaves that
+unconsolidated interval intact, while turning it off after publication cannot
+recreate omitted index facts. The implementation carries prior consolidated
+history forward and applies recovered `filter-nohist-pairs` policy only to the
+new merge range. Because the documentation deliberately gives no precise
+removal time, extra retained history is permitted and must not be treated as a
+semantic failure.
 
 ## Failure outcomes
 

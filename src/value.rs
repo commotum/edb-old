@@ -2,6 +2,7 @@ use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
 use num_traits::One;
 use std::cmp::Ordering;
+use std::mem::size_of;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Keyword {
@@ -52,6 +53,13 @@ impl Symbol {
             name: name.into(),
         }
     }
+
+    pub fn qualified_name(&self) -> String {
+        match &self.namespace {
+            Some(namespace) => format!("{namespace}/{}", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// Logical values accepted by the semantic model.
@@ -67,6 +75,11 @@ pub enum Value {
     Bytes(Vec<u8>),
     Double(f64),
     Float(f32),
+    /// Content hash of an immutable native database-function program.
+    ///
+    /// This deliberately names native program content rather than retaining
+    /// Datomic's JVM function object or serialized Clojure/Java code.
+    Function([u8; 32]),
     Instant(i64),
     Keyword(Keyword),
     Long(i64),
@@ -79,6 +92,54 @@ pub enum Value {
 }
 
 impl Value {
+    /// Bytes retained outside the inline `Value` enum allocation.
+    ///
+    /// This is an allocator-independent capacity account used for memory-index
+    /// admission, not a claim about process RSS. Container capacities and
+    /// recursively owned values are included so a large tuple of `nil`s
+    /// cannot evade a byte limit merely because its canonical encoding is
+    /// compact.
+    pub(crate) fn retained_heap_bytes(&self) -> u64 {
+        fn string_bytes(value: &String) -> u64 {
+            value.capacity() as u64
+        }
+
+        match self {
+            Self::BigDec(value) => value.digits(),
+            Self::BigInt(value) => value.bits().div_ceil(8).max(1),
+            Self::Bytes(value) => value.capacity() as u64,
+            Self::Keyword(value) => value
+                .namespace
+                .as_ref()
+                .map_or(0, string_bytes)
+                .saturating_add(string_bytes(&value.name)),
+            Self::String(value) | Self::Uri(value) => string_bytes(value),
+            Self::Symbol(value) => value
+                .namespace
+                .as_ref()
+                .map_or(0, string_bytes)
+                .saturating_add(string_bytes(&value.name)),
+            Self::Tuple(values) => (values.capacity() as u64)
+                .saturating_mul(size_of::<Option<Value>>() as u64)
+                .saturating_add(
+                    values
+                        .iter()
+                        .filter_map(Option::as_ref)
+                        .fold(0_u64, |total, value| {
+                            total.saturating_add(value.retained_heap_bytes())
+                        }),
+                ),
+            Self::Bool(_)
+            | Self::Double(_)
+            | Self::Float(_)
+            | Self::Function(_)
+            | Self::Instant(_)
+            | Self::Long(_)
+            | Self::Ref(_)
+            | Self::Uuid(_) => 0,
+        }
+    }
+
     /// Datomic-style comparison used by indexes and identity checks.
     ///
     /// It follows recovered `datomic.common/compare`: numeric variants compare
@@ -113,6 +174,7 @@ impl Value {
                 right.namespace.as_deref(),
                 &right.name,
             ),
+            (Self::Function(left), Self::Function(right)) => left.cmp(right),
             (Self::Bool(left), Self::Bool(right)) => left.cmp(right),
             (Self::String(left), Self::String(right)) => compare_utf16(left, right),
             (Self::Uri(left), Self::Uri(right)) => compare_utf16(left, right),
@@ -147,6 +209,35 @@ impl Value {
             }
     }
 
+    /// Total ordering for physical/canonical storage boundaries.
+    ///
+    /// Datomic's logical comparator intentionally considers numerically equal
+    /// values equal across representations. Its stored equality adds the
+    /// BigDecimal scale distinction. Persistent Rust collections therefore
+    /// need the same distinction as a final tie-breaker or two legal stored
+    /// values such as `1.0M` and `1.00M` collapse into one sort position.
+    pub fn stored_cmp(&self, other: &Self) -> Ordering {
+        self.index_cmp(other).then_with(|| match (self, other) {
+            (Self::BigDec(left), Self::BigDec(right)) => left
+                .fractional_digit_count()
+                .cmp(&right.fractional_digit_count()),
+            (Self::Tuple(left), Self::Tuple(right)) => left
+                .iter()
+                .zip(right)
+                .find_map(|(left, right)| {
+                    let ordering = match (left, right) {
+                        (None, None) => Ordering::Equal,
+                        (None, Some(_)) => Ordering::Less,
+                        (Some(_), None) => Ordering::Greater,
+                        (Some(left), Some(right)) => left.stored_cmp(right),
+                    };
+                    ordering.is_ne().then_some(ordering)
+                })
+                .unwrap_or_else(|| left.len().cmp(&right.len())),
+            _ => Ordering::Equal,
+        })
+    }
+
     pub fn is_nan(&self) -> bool {
         matches!(self, Self::Float(value) if value.is_nan())
             || matches!(self, Self::Double(value) if value.is_nan())
@@ -160,6 +251,7 @@ impl Value {
             Self::Bytes(_) => "bytes",
             Self::Double(_) => "double",
             Self::Float(_) => "float",
+            Self::Function(_) => "function",
             Self::Instant(_) => "instant",
             Self::Keyword(_) => "keyword",
             Self::Long(_) => "long",
@@ -183,6 +275,9 @@ impl Value {
             Self::Instant(_) => 7,
             Self::Uuid(_) => 8,
             Self::Tuple(_) => 9,
+            // Keep all existing native ranks stable as this value type is
+            // added; hashes have a deterministic bytewise order at the end.
+            Self::Function(_) => 10,
             Self::BigDec(_)
             | Self::BigInt(_)
             | Self::Double(_)
@@ -470,6 +565,7 @@ mod tests {
             Value::Float(0.5),
             Value::Double(f64::INFINITY),
             Value::Double(f64::NAN),
+            Value::Function([0x5a; 32]),
             Value::Bytes(vec![255]),
             Value::Keyword(Keyword::new("a", "b")),
             Value::Symbol(Symbol::new("a", "b")),
@@ -502,5 +598,17 @@ mod tests {
             Value::String("\u{10000}".into()).index_cmp(&Value::String("\u{e000}".into())),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn function_values_compare_by_immutable_content_hash() {
+        let low = Value::Function([0; 32]);
+        let mut high_hash = [0; 32];
+        high_hash[31] = 1;
+        let high = Value::Function(high_hash);
+
+        assert_eq!(low.index_cmp(&high), Ordering::Less);
+        assert_eq!(low.stored_cmp(&low.clone()), Ordering::Equal);
+        assert_eq!(low.type_name(), "function");
     }
 }
