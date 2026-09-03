@@ -1,4 +1,4 @@
-use atomic_core::PostgresMigrator;
+use atomic_core::{PostgresMigrator, PostgresStore, Schema};
 use postgres::{Client, NoTls};
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,14 +22,35 @@ const PEER_TABLES: &[&str] = &[
     "atomic_index_segments",
     "atomic_index_manifests",
     "atomic_programs",
-    "atomic_program_versions",
-    "atomic_active_programs",
     "atomic_database_generations",
+    "atomic_log_generations",
+    "atomic_transaction_contents",
+    "atomic_generation_transactions",
+    "atomic_generation_requests",
+    "atomic_log_generation_activations",
+    "atomic_completed_excision_requests",
+    "atomic_log_generation_completions",
+    "atomic_log_generation_retirements",
     "atomic_index_publications",
     "atomic_tree_nodes",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
     "atomic_tree_publications",
+    "atomic_tree_publication_states",
+    "atomic_tree_live_sets",
+    "atomic_tree_live_nodes",
+    "atomic_tree_retirements",
+    "atomic_tree_retired_nodes",
+    "atomic_tree_retirement_progress",
+];
+const WRITER_SELECT_TABLES: &[&str] = &[
+    "atomic_transactor_leases",
+    "atomic_tree_build_intents",
+    "atomic_tree_build_intent_nodes",
+    "atomic_tree_delta_headers",
+    "atomic_tree_delta_nodes",
+    "atomic_generation_request_tempids",
+    "atomic_program_generation_refs",
 ];
 const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_transactions",
@@ -38,13 +59,34 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_tree_nodes",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
-    "atomic_tree_publications",
+    "atomic_programs",
+    "atomic_tree_delta_headers",
+    "atomic_tree_delta_nodes",
+    "atomic_tree_build_intents",
+    "atomic_tree_build_intent_nodes",
+    "atomic_transaction_contents",
+    "atomic_generation_transactions",
+    "atomic_generation_requests",
+    "atomic_generation_request_tempids",
+    "atomic_program_generation_refs",
 ];
 const WRITER_UPDATE_TABLES: &[&str] = &[
     "atomic_databases",
     "atomic_heads",
     "atomic_transactor_leases",
+    "atomic_tree_build_intents",
+    "atomic_tree_delta_headers",
 ];
+
+const WRITER_FUNCTIONS: &[&str] = &[
+    "atomic_apply_tree_publication_work(bytea,bigint)",
+    "atomic_finish_tree_build(bytea)",
+    "atomic_heartbeat_tree_build(bytea)",
+    "atomic_log_generation_pin_key(text,bigint)",
+    "atomic_publish_tree(text,bigint,bigint,bytea,bytea)",
+    "atomic_tree_database_build_pin_key(text)",
+];
+const PEER_FUNCTIONS: &[&str] = &["atomic_log_generation_pin_key(text,bigint)"];
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
@@ -222,7 +264,9 @@ fn expected_peer_grants() -> BTreeSet<(String, String)> {
 
 fn expected_writer_grants() -> BTreeSet<(String, String)> {
     let mut expected = expected_peer_grants();
-    expected.insert(("atomic_transactor_leases".to_owned(), "SELECT".to_owned()));
+    for table in WRITER_SELECT_TABLES {
+        expected.insert(((*table).to_owned(), "SELECT".to_owned()));
+    }
     for table in WRITER_INSERT_TABLES {
         expected.insert(((*table).to_owned(), "INSERT".to_owned()));
     }
@@ -408,6 +452,41 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
         ))
         .unwrap();
     migrator.grant_runtime_privileges(&writer, &peer).unwrap();
+
+    // Runtime roles deliberately retain the database's ordinary TEMP
+    // capability. SECURITY DEFINER functions must therefore capture the
+    // trusted Atomic schema first and spell pg_temp explicitly last; otherwise
+    // PostgreSQL's implicit temp-first lookup redirects owner reads here.
+    let writer_connection = with_connection_parameter(
+        &with_connection_parameter(&connection, "user", &writer),
+        "password",
+        &password,
+    );
+    let mut runtime_writer = Client::connect(&writer_connection, NoTls).unwrap();
+    runtime_writer
+        .batch_execute(
+            "CREATE TEMP TABLE atomic_databases \
+                 (database_id TEXT PRIMARY KEY, lineage_id TEXT NOT NULL); \
+             INSERT INTO atomic_databases VALUES \
+                 ('temp-shadow', '00000000-0000-4000-8000-000000000000')",
+        )
+        .unwrap();
+    let shadow_error = runtime_writer
+        .query_one(
+            "SELECT atomic_tree_database_build_pin_key('temp-shadow')",
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(
+        shadow_error
+            .as_db_error()
+            .expect("owner function returned a PostgreSQL error")
+            .code()
+            .code(),
+        "23503",
+        "SECURITY DEFINER lookup was redirected through pg_temp"
+    );
+
     for relation in ["atomic_excisions", "atomic_future_extension"] {
         let retained: bool = roles
             .admin

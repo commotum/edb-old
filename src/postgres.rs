@@ -246,6 +246,8 @@ const WRITER_RUNTIME_TABLES: &[&str] = &[
     "atomic_transactor_leases",
     "atomic_tree_build_intents",
     "atomic_tree_build_intent_nodes",
+    "atomic_tree_delta_headers",
+    "atomic_tree_delta_nodes",
     "atomic_generation_request_tempids",
     "atomic_program_generation_refs",
 ];
@@ -257,6 +259,7 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_tree_nodes",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
+    "atomic_programs",
     "atomic_tree_delta_headers",
     "atomic_tree_delta_nodes",
     "atomic_tree_build_intents",
@@ -266,6 +269,14 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_generation_requests",
     "atomic_generation_request_tempids",
     "atomic_program_generation_refs",
+];
+
+const WRITER_UPDATE_TABLES: &[&str] = &[
+    "atomic_databases",
+    "atomic_heads",
+    "atomic_transactor_leases",
+    "atomic_tree_build_intents",
+    "atomic_tree_delta_headers",
 ];
 
 /// Administrative PostgreSQL owner for schema installation and runtime-role
@@ -323,6 +334,7 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     let mut transaction = client
         .transaction()
         .map_err(|error| postgres_error("postgres/migration-begin", error))?;
+    let schema = pin_current_schema(&mut transaction)?;
     transaction
         .query_one("SELECT pg_advisory_xact_lock($1)", &[&0x41544f4d_i64])
         .map_err(|error| postgres_error("postgres/migration-lock", error))?;
@@ -374,6 +386,7 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     if POSTGRES_SCHEMA_VERSION >= 14 {
         backfill_program_generation_refs(&mut transaction)?;
     }
+    repair_atomic_security_definer_paths(&mut transaction, &schema)?;
     transaction
         .commit()
         .map_err(|error| postgres_error("postgres/migration-commit", error))
@@ -383,9 +396,7 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
 /// content dependencies. SQL cannot authenticate native values, so this is a
 /// Rust migration/repair boundary; any corrupt log or missing program aborts
 /// the migration and leaves GC fail-closed.
-fn backfill_program_generation_refs<C: GenericClient>(
-    client: &mut C,
-) -> Result<(), SemanticError> {
+fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
     client
         .batch_execute(
             "LOCK TABLE atomic_transactions IN SHARE MODE; \
@@ -470,8 +481,7 @@ fn backfill_program_generation_refs<C: GenericClient>(
                 ),
                 None => (0, genesis_hash),
             };
-            let recovered =
-                recover_generation_to(client, &database_id, generation, basis, hash)?;
+            let recovered = recover_generation_to(client, &database_id, generation, basis, hash)?;
             let mut roots = BTreeSet::new();
             for datom in recovered
                 .database
@@ -542,7 +552,8 @@ fn authenticated_program_closure<C: GenericClient>(
             ));
         }
         let program = decode_program(&payload)?;
-        if program_kind_i16(program.kind) != stored_kind || i16::from(program.arity) != stored_arity {
+        if program_kind_i16(program.kind) != stored_kind || i16::from(program.arity) != stored_arity
+        {
             return Err(fault(
                 "postgres/program-ref-metadata",
                 "temporal program metadata disagrees with canonical program bytes",
@@ -1124,11 +1135,9 @@ fn grant_runtime_privileges(
     let mut transaction = client
         .transaction()
         .map_err(|error| postgres_error("postgres/runtime-grants-begin", error))?;
+    let schema = pin_current_schema(&mut transaction)?;
     verify_schema_compatibility(&mut transaction)?;
-    let schema: String = transaction
-        .query_one("SELECT current_schema()", &[])
-        .map_err(|error| postgres_error("postgres/runtime-grants-schema", error))?
-        .get(0);
+    repair_atomic_security_definer_paths(&mut transaction, &schema)?;
     let database: String = transaction
         .query_one("SELECT current_database()", &[])
         .map_err(|error| postgres_error("postgres/runtime-grants-database", error))?
@@ -1231,24 +1240,38 @@ fn grant_runtime_privileges(
         })
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
+    let atomic_routines = transaction
+        .query(
+            "SELECT p.proname::text, pg_get_function_identity_arguments(p.oid) \
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = $1 AND p.proname LIKE 'atomic\\_%' ESCAPE '\\' \
+              ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
+            &[&schema],
+        )
+        .map_err(|error| postgres_error("postgres/runtime-grants-routines", error))?
+        .into_iter()
+        .map(|row| {
+            let name = quote_identifier(&row.get::<_, String>(0))?;
+            let arguments: String = row.get(1);
+            Ok(format!("{schema_ident}.{name}({arguments})"))
+        })
+        .collect::<Result<Vec<_>, SemanticError>>()?;
     for role_ident in [&writer_ident, &peer_ident] {
         transaction
             .batch_execute(&format!(
                 "REVOKE ALL PRIVILEGES ON TABLE {all_relations} FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_heartbeat_tree_build(bytea) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_finish_tree_build(bytea) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_retirement(text, bigint, bytea, bigint) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_build_intent(bytea, bigint) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_garbage(bigint) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_orphans(bigint, bigint) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_program_garbage(bigint, bigint) FROM {role_ident}; \
-                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) FROM {role_ident}; \
                  REVOKE CREATE ON SCHEMA {schema_ident} FROM {role_ident}; \
                  GRANT CONNECT ON DATABASE {database_ident} TO {role_ident}; \
                  GRANT USAGE ON SCHEMA {schema_ident} TO {role_ident}"
             ))
             .map_err(|error| postgres_error("postgres/runtime-grants-reset", error))?;
+        for routine in &atomic_routines {
+            transaction
+                .batch_execute(&format!(
+                    "REVOKE ALL ON FUNCTION {routine} FROM {role_ident}"
+                ))
+                .map_err(|error| postgres_error("postgres/runtime-grants-function-reset", error))?;
+        }
     }
     let peer_relations = relation_list(&schema_ident, PEER_RUNTIME_TABLES);
     // The tree-publication trigger takes `atomic_databases FOR UPDATE` as its
@@ -1261,22 +1284,77 @@ fn grant_runtime_privileges(
             "GRANT SELECT ON TABLE {peer_relations} TO {peer_ident}; \
              GRANT SELECT ON TABLE {peer_relations} TO {writer_ident}; \
              GRANT SELECT ON TABLE {} TO {writer_ident}; \
-             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_databases\", \
-                                   {schema_ident}.\"atomic_heads\" TO {writer_ident}; \
+             GRANT UPDATE ON TABLE {} TO {writer_ident}; \
              GRANT INSERT ON TABLE {} TO {writer_ident}; \
-             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_transactor_leases\" TO {writer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea), \
                                        {schema_ident}.atomic_heartbeat_tree_build(bytea), \
                                        {schema_ident}.atomic_finish_tree_build(bytea), \
+                                       {schema_ident}.atomic_apply_tree_publication_work(bytea, bigint), \
+                                       {schema_ident}.atomic_tree_database_build_pin_key(text), \
                                        {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {writer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {peer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
+            relation_list(&schema_ident, WRITER_UPDATE_TABLES),
             relation_list(&schema_ident, WRITER_INSERT_TABLES),
         ))
         .map_err(|error| postgres_error("postgres/runtime-grants-apply", error))?;
     transaction
         .commit()
         .map_err(|error| postgres_error("postgres/runtime-grants-commit", error))
+}
+
+/// Pin all unqualified migration and grant work to the caller-selected
+/// installation schema. Explicitly listing `pg_temp` last suppresses
+/// PostgreSQL's usual implicit temporary-schema precedence for relations.
+fn pin_current_schema<C: GenericClient>(client: &mut C) -> Result<String, SemanticError> {
+    let schema = client
+        .query_one("SELECT current_schema()::text", &[])
+        .map_err(|error| postgres_error("postgres/current-schema", error))?
+        .get::<_, Option<String>>(0)
+        .ok_or_else(|| {
+            SemanticError::incorrect(
+                "postgres/current-schema-missing",
+                "connection search_path has no installation schema",
+            )
+        })?;
+    let schema_ident = quote_identifier(&schema)?;
+    client
+        .batch_execute(&format!(
+            "SET LOCAL search_path TO {schema_ident}, pg_catalog, pg_temp"
+        ))
+        .map_err(|error| postgres_error("postgres/current-schema-pin", error))?;
+    Ok(schema)
+}
+
+/// Migration and role provisioning are repair boundaries for functions
+/// installed by older binaries. Every Atomic SECURITY DEFINER routine gets
+/// the owner-controlled schema first and the temporary schema last.
+fn repair_atomic_security_definer_paths<C: GenericClient>(
+    client: &mut C,
+    schema: &str,
+) -> Result<(), SemanticError> {
+    let schema_ident = quote_identifier(schema)?;
+    let routines = client
+        .query(
+            "SELECT p.proname::text, pg_get_function_identity_arguments(p.oid) \
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = $1 AND p.prosecdef \
+                AND p.proname LIKE 'atomic\\_%' ESCAPE '\\' \
+              ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
+            &[&schema],
+        )
+        .map_err(|error| postgres_error("postgres/security-definer-discovery", error))?;
+    for row in routines {
+        let function = quote_identifier(&row.get::<_, String>(0))?;
+        let arguments: String = row.get(1);
+        client
+            .batch_execute(&format!(
+                "ALTER FUNCTION {schema_ident}.{function}({arguments}) \
+                 SET search_path TO {schema_ident}, pg_catalog, pg_temp"
+            ))
+            .map_err(|error| postgres_error("postgres/security-definer-path", error))?;
+    }
+    Ok(())
 }
 
 fn validate_runtime_role<C: GenericClient>(
@@ -1382,22 +1460,6 @@ fn program_kind_i16(kind: ProgramKind) -> i16 {
         ProgramKind::Query => 2,
         ProgramKind::EntityPredicate => 3,
     }
-}
-
-fn validate_program_name_version(name: &str, version: u64) -> Result<(), SemanticError> {
-    if name.is_empty() {
-        return Err(SemanticError::incorrect(
-            "postgres/empty-program-name",
-            "program name cannot be empty",
-        ));
-    }
-    if version == 0 {
-        return Err(SemanticError::incorrect(
-            "postgres/invalid-program-version",
-            "program version must be positive",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_lease_args(
@@ -1810,7 +1872,7 @@ fn collect_program_hashes(value: &Value, output: &mut BTreeSet<Digest>) {
     }
 }
 
-fn insert_program_generation_refs<C: GenericClient>(
+pub(crate) fn insert_program_generation_refs<C: GenericClient>(
     client: &mut C,
     database_id: &str,
     generation: u64,
@@ -2290,16 +2352,16 @@ impl PostgresStore {
             )
             .map_err(|error| postgres_error("postgres/create-catalog", error))?
             .get(0);
-        let generation_i64: i64 = transaction
-            .query_one(
+        let generation_i64 = 1_i64;
+        transaction
+            .execute(
                 "INSERT INTO atomic_log_generations \
-                     (database_id, lineage_id, build_kind, request_count) \
-                 VALUES ($1, $2, 0, 0) RETURNING generation",
-                &[&database_id, &lineage_id],
+                     (database_id, generation, lineage_id, build_kind, request_count) \
+                 VALUES ($1, $2, $3, 0, 0)",
+                &[&database_id, &generation_i64, &lineage_id],
             )
-            .map_err(|error| postgres_error("postgres/create-generation", error))?
-            .get(0);
-        let generation = pg_basis(generation_i64, "initial log generation")?;
+            .map_err(|error| postgres_error("postgres/create-generation", error))?;
+        let generation = 1;
         transaction
             .execute(
                 "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) \
@@ -2498,14 +2560,10 @@ impl PostgresStore {
             })?;
             digest(row.get::<_, Vec<u8>>(0), "basis transaction hash")?
         };
-        Ok(recover_generation_to(
-            &mut self.client,
-            database_id,
-            generation,
-            basis_t,
-            hash,
-        )?
-        .database)
+        Ok(
+            recover_generation_to(&mut self.client, database_id, generation, basis_t, hash)?
+                .database,
+        )
     }
 
     /// Resolve the durable decision for one admitted request without
@@ -2566,7 +2624,7 @@ impl PostgresStore {
                 &[&database_id, &generation_sql, &&key_hash[..]],
             )
         }
-            .map_err(|error| postgres_error("postgres/request-outcome-read", error))?;
+        .map_err(|error| postgres_error("postgres/request-outcome-read", error))?;
         let Some(row) = row else {
             transaction
                 .commit()
@@ -2581,13 +2639,8 @@ impl PostgresStore {
         }
         let basis = pg_basis(row.get::<_, i64>(0), "request outcome")?;
         let hash = digest(row.get::<_, Vec<u8>>(1), "request transaction hash")?;
-        let recovered = recover_generation_to(
-            &mut transaction,
-            database_id,
-            generation,
-            basis,
-            hash,
-        )?;
+        let recovered =
+            recover_generation_to(&mut transaction, database_id, generation, basis, hash)?;
         let previous_hash = recovered
             .final_transaction
             .as_ref()
@@ -2672,175 +2725,6 @@ impl PostgresStore {
             .map_err(|error| postgres_error("postgres/program-deploy-commit", error))?;
         self.cache_program(hash, program.clone(), program_cache_weight(encoded.len()));
         Ok(hash)
-    }
-
-    /// Legacy operator metadata retained during migration. It does not select
-    /// code for transactions; only temporal `:db/fn` information does.
-    pub fn deploy_program(
-        &mut self,
-        database_id: &str,
-        name: &str,
-        version: u64,
-        program: &Program,
-    ) -> Result<ProgramHash, SemanticError> {
-        validate_program_name_version(name, version)?;
-        let encoded = encode_program(program)?;
-        let hash = sha256(&encoded);
-        let version = sql_basis(version)?;
-        let kind = program_kind_i16(program.kind);
-        let arity = i16::from(program.arity);
-        let mut transaction = self
-            .client
-            .transaction()
-            .map_err(|error| postgres_error("postgres/program-deploy-begin", error))?;
-        transaction
-            .execute(
-                "INSERT INTO atomic_programs (program_hash, kind, arity, payload) \
-                 VALUES ($1, $2, $3, $4) ON CONFLICT (program_hash) DO NOTHING",
-                &[&&hash[..], &kind, &arity, &&encoded[..]],
-            )
-            .map_err(|error| postgres_error("postgres/program-insert", error))?;
-        let row = transaction
-            .query_one(
-                "SELECT kind, arity, payload FROM atomic_programs WHERE program_hash = $1",
-                &[&&hash[..]],
-            )
-            .map_err(|error| postgres_error("postgres/program-verify", error))?;
-        let stored_kind: i16 = row.get(0);
-        let stored_arity: i16 = row.get(1);
-        let stored_payload: Vec<u8> = row.get(2);
-        if stored_kind != kind || stored_arity != arity || stored_payload != encoded {
-            return Err(fault(
-                "postgres/program-hash-collision",
-                "stored program hash resolves to different metadata or bytes",
-            ));
-        }
-        transaction
-            .execute(
-                "INSERT INTO atomic_program_versions (database_id, name, version, program_hash) \
-                 VALUES ($1, $2, $3, $4) ON CONFLICT (database_id, name, version) DO NOTHING",
-                &[&database_id, &name, &version, &&hash[..]],
-            )
-            .map_err(|error| postgres_error("postgres/program-version-insert", error))?;
-        let bound: Vec<u8> = transaction
-            .query_one(
-                "SELECT program_hash FROM atomic_program_versions \
-                 WHERE database_id = $1 AND name = $2 AND version = $3",
-                &[&database_id, &name, &version],
-            )
-            .map_err(|error| postgres_error("postgres/program-version-verify", error))?
-            .get(0);
-        if digest(bound, "program version hash")? != hash {
-            return Err(SemanticError::conflict(
-                "postgres/program-version-immutable",
-                "program name/version is already bound to different content",
-            ));
-        }
-        transaction
-            .commit()
-            .map_err(|error| postgres_error("postgres/program-deploy-commit", error))?;
-        self.cache_program(hash, program.clone(), program_cache_weight(encoded.len()));
-        Ok(hash)
-    }
-
-    /// Conditionally publish an immutable program version. `None` expects no
-    /// active version; an identical target is an idempotent replay.
-    pub fn activate_program(
-        &mut self,
-        database_id: &str,
-        name: &str,
-        expected_version: Option<u64>,
-        version: u64,
-    ) -> Result<ProgramHash, SemanticError> {
-        validate_program_name_version(name, version)?;
-        let version_sql = sql_basis(version)?;
-        let expected_sql = expected_version.map(sql_basis).transpose()?;
-        let mut transaction = self
-            .client
-            .transaction()
-            .map_err(|error| postgres_error("postgres/program-activate-begin", error))?;
-        let target = transaction
-            .query_opt(
-                "SELECT program_hash FROM atomic_program_versions \
-                 WHERE database_id = $1 AND name = $2 AND version = $3",
-                &[&database_id, &name, &version_sql],
-            )
-            .map_err(|error| postgres_error("postgres/program-activate-target", error))?
-            .ok_or_else(|| {
-                SemanticError::new(
-                    ErrorCategory::NotFound,
-                    "postgres/program-version-not-found",
-                    format!("program {name} version {version} is not deployed"),
-                )
-            })?;
-        let target_hash = digest(target.get::<_, Vec<u8>>(0), "target program hash")?;
-        let active = transaction
-            .query_opt(
-                "SELECT version, program_hash FROM atomic_active_programs \
-                 WHERE database_id = $1 AND name = $2 FOR UPDATE",
-                &[&database_id, &name],
-            )
-            .map_err(|error| postgres_error("postgres/program-activate-lock", error))?;
-        if let Some(row) = &active {
-            let active_version: i64 = row.get(0);
-            let active_hash = digest(row.get::<_, Vec<u8>>(1), "active program hash")?;
-            if active_version == version_sql && active_hash == target_hash {
-                transaction
-                    .commit()
-                    .map_err(|error| postgres_error("postgres/program-activate-replay", error))?;
-                return Ok(target_hash);
-            }
-        }
-        let actual = active.as_ref().map(|row| row.get::<_, i64>(0));
-        if actual != expected_sql {
-            return Err(SemanticError::conflict(
-                "postgres/program-activation-conflict",
-                format!(
-                    "expected active version {:?}, found {:?}",
-                    expected_version,
-                    actual.map(|value| value as u64)
-                ),
-            ));
-        }
-        transaction
-            .execute(
-                "INSERT INTO atomic_active_programs (database_id, name, version, program_hash) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (database_id, name) DO UPDATE \
-                 SET version = EXCLUDED.version, program_hash = EXCLUDED.program_hash",
-                &[&database_id, &name, &version_sql, &&target_hash[..]],
-            )
-            .map_err(|error| postgres_error("postgres/program-activate", error))?;
-        transaction
-            .commit()
-            .map_err(|error| postgres_error("postgres/program-activate-commit", error))?;
-        Ok(target_hash)
-    }
-
-    pub fn resolve_active_program(
-        &mut self,
-        database_id: &str,
-        name: &str,
-    ) -> Result<(u64, ProgramHash, Program), SemanticError> {
-        let row = self
-            .client
-            .query_opt(
-                "SELECT version, program_hash FROM atomic_active_programs \
-                 WHERE database_id = $1 AND name = $2",
-                &[&database_id, &name],
-            )
-            .map_err(|error| postgres_error("postgres/program-active-read", error))?
-            .ok_or_else(|| {
-                SemanticError::new(
-                    ErrorCategory::NotFound,
-                    "postgres/active-program-not-found",
-                    format!("program {name} is not active"),
-                )
-            })?;
-        let version = pg_basis(row.get(0), "program version")?;
-        let hash = digest(row.get::<_, Vec<u8>>(1), "active program hash")?;
-        let program = self.resolve_program(hash)?;
-        Ok((version, hash, program))
     }
 
     pub fn resolve_program(&mut self, hash: ProgramHash) -> Result<Program, SemanticError> {
@@ -3001,15 +2885,10 @@ impl PostgresStore {
                    FROM atomic_generation_requests \
                   WHERE database_id = $1 AND generation = $2 \
                     AND request_key_hash = $3",
-                &[
-                    &database_id,
-                    &log_generation_i64,
-                    &&idem_key_hash[..],
-                ],
+                &[&database_id, &log_generation_i64, &&idem_key_hash[..]],
             )
         }
-            .map_err(|error| postgres_error("postgres/idempotency-read", error))?
-        ;
+        .map_err(|error| postgres_error("postgres/idempotency-read", error))?;
         if let Some(row) = existing_request {
             if row.get::<_, i16>(3) == 0 {
                 return Err(SemanticError::conflict(
@@ -3026,13 +2905,8 @@ impl PostgresStore {
             }
             let basis = pg_basis(row.get::<_, i64>(1), "request outcome")?;
             let hash = digest(row.get::<_, Vec<u8>>(2), "request transaction hash")?;
-            let recovered = recover_generation_to(
-                &mut transaction,
-                database_id,
-                log_generation,
-                basis,
-                hash,
-            )?;
+            let recovered =
+                recover_generation_to(&mut transaction, database_id, log_generation, basis, hash)?;
             let previous_hash = recovered
                 .final_transaction
                 .as_ref()
@@ -3059,12 +2933,7 @@ impl PostgresStore {
             transaction
                 .commit()
                 .map_err(|error| unknown_outcome(request_key, error.to_string()))?;
-            let receipt = receipt_with_tempids(
-                recovered,
-                db_before,
-                true,
-                receipt_tempids,
-            );
+            let receipt = receipt_with_tempids(recovered, db_before, true, receipt_tempids);
             if basis == head_basis && hash == head_hash {
                 self.current
                     .insert(database_id.to_owned(), (hash, receipt.database.clone()));
@@ -3215,8 +3084,7 @@ impl PostgresStore {
                 .map_err(|error| postgres_error("postgres/transaction-content-verify", error))?;
             if stored.get::<_, String>(0) != lineage_id
                 || stored.get::<_, i64>(1) != next_basis
-                || pg_basis(stored.get(2), "stored content frontier")?
-                    != envelope.eidx_frontier
+                || pg_basis(stored.get(2), "stored content frontier")? != envelope.eidx_frontier
                 || stored.get::<_, i16>(3) != 1
                 || stored.get::<_, Vec<u8>>(4) != payload
             {
@@ -3368,6 +3236,11 @@ pub(crate) struct AuthenticatedLogTransaction {
     pub(crate) transaction: DurableTransaction,
     pub(crate) tx_hash: Digest,
     pub(crate) state_hash: Digest,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) content_hash: Option<Digest>,
+    pub(crate) legacy_request_key: Option<String>,
+    pub(crate) request_key_hash: Option<Digest>,
+    pub(crate) request_digest: Digest,
     /// Only COW tombstones may require replay with a removed predecessor
     /// assertion. Ordinary commits remain strict even in a positive generation.
     pub(crate) excision_replay: bool,
@@ -3407,7 +3280,7 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
             .query(
                 "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.payload, \
                         t.state_hash, NULL::bytea, NULL::bigint, NULL::text, \
-                        1::smallint \
+                        1::smallint, r.request_key, NULL::bytea, r.request_digest \
                    FROM atomic_transactions t \
                    JOIN atomic_requests r \
                      ON r.database_id = t.database_id AND r.basis_t = t.basis_t \
@@ -3422,7 +3295,7 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
             .query(
                 "SELECT t.basis_t, t.previous_hash, t.tx_hash, c.payload, \
                         t.state_hash, t.content_hash, t.eidx_frontier, c.lineage_id, \
-                        r.request_kind \
+                        r.request_kind, NULL::text, r.request_key_hash, r.request_digest \
                    FROM atomic_generation_transactions t \
                    JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
                    JOIN atomic_generation_requests r \
@@ -3453,12 +3326,20 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
         let payload: Vec<u8> = row.get(3);
         let state_hash = digest(row.get(4), "transaction range state hash")?;
         let request_kind: i16 = row.get(8);
+        let legacy_request_key: Option<String> = row.get(9);
+        let stored_request_key_hash: Option<Vec<u8>> = row.get(10);
+        let request_digest = digest(row.get::<_, Vec<u8>>(11), "transaction request digest")?;
         if basis != expected_basis || stored_previous != expected_previous {
             return Err(fault(
                 "recovery/invalid-log-link",
                 "transaction range is noncontiguous or has a predecessor mismatch",
             ));
         }
+        let content_hash = if generation == 0 {
+            None
+        } else {
+            Some(digest(row.get(5), "transaction content hash")?)
+        };
         let transaction = if generation == 0 {
             if transaction_hash(&payload) != tx_hash {
                 return Err(fault(
@@ -3478,7 +3359,7 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
             }
             transaction
         } else {
-            let content_hash = digest(row.get(5), "transaction content hash")?;
+            let content_hash = content_hash.expect("positive generation has content hash");
             let frontier = pg_basis(row.get(6), "transaction content frontier")?;
             let content_lineage: String = row.get(7);
             if sha256(&payload) != content_hash {
@@ -3513,7 +3394,13 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
                     "lineage transaction membership commitment is invalid",
                 ));
             }
-            content.to_transaction(stored_previous)
+            let mut transaction = content.to_transaction(stored_previous);
+            // ATLC commits the stable lineage, not a mutable catalog alias.
+            // Consumers authenticate that lineage above, then project the
+            // transaction into the alias through which this database was
+            // opened so recent-tier and receipt boundaries remain coherent.
+            transaction.database_id = database_id.to_owned();
+            transaction
         };
         if !matches!(request_kind, 0 | 1) || (generation == 0 && request_kind != 1) {
             return Err(fault(
@@ -3521,10 +3408,28 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
                 "transaction request record has an invalid kind",
             ));
         }
+        if (generation == 0
+            && (legacy_request_key.as_deref().map_or(true, str::is_empty)
+                || stored_request_key_hash.is_some()))
+            || (generation > 0
+                && (legacy_request_key.is_some() || stored_request_key_hash.is_none()))
+        {
+            return Err(fault(
+                "recovery/request-identity",
+                "transaction request record has invalid generation identity metadata",
+            ));
+        }
         output.push(AuthenticatedLogTransaction {
             transaction,
             tx_hash,
             state_hash,
+            payload,
+            content_hash,
+            legacy_request_key,
+            request_key_hash: stored_request_key_hash
+                .map(|hash| digest(hash, "transaction request key hash"))
+                .transpose()?,
+            request_digest,
             excision_replay: request_kind == 0,
         });
         expected_previous = tx_hash;

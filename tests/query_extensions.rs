@@ -180,19 +180,11 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
             Instruction::Return,
         ],
     };
-    let hash = store
-        .deploy_program(&database_id, "snapshot", 1, &program)
-        .unwrap();
-    store
-        .activate_program(&database_id, "snapshot", None, 1)
-        .unwrap();
+    let hash = store.deploy_program_blob(&program).unwrap();
     drop(store);
 
     let mut restarted = PostgresStore::connect(&connection).unwrap();
-    let (_, resolved_hash, resolved) = restarted
-        .resolve_active_program(&database_id, "snapshot")
-        .unwrap();
-    assert_eq!(resolved_hash, hash);
+    let resolved = restarted.resolve_program(hash).unwrap();
     let old = Arc::new(committed.db_after);
     let mut extensions = QueryExtensions::new();
     extensions

@@ -189,7 +189,9 @@ impl GenerationRewriter {
                         "lineage source membership commitment is invalid",
                     ));
                 }
-                content.to_transaction(source.transaction.previous_hash)
+                let mut transaction = content.to_transaction(source.transaction.previous_hash);
+                transaction.database_id = source.transaction.database_id.clone();
+                transaction
             }
         };
         if authenticated_transaction != source.transaction {
@@ -249,6 +251,46 @@ impl GenerationRewriter {
         self.previous_hash = tx_hash;
         self.source_previous_hash = source.tx_hash;
         Ok(row)
+    }
+
+    pub(crate) fn frozen_predicates(&self) -> Vec<PlannedExcisionPredicate> {
+        self.plan.frozen_predicates()
+    }
+
+    pub(crate) fn request_set_hash(&self) -> Digest {
+        self.plan.request_set_hash()
+    }
+
+    pub(crate) fn current_basis(&self) -> u64 {
+        self.database.basis_t()
+    }
+
+    pub(crate) fn current_head_hash(&self) -> Digest {
+        self.previous_hash
+    }
+
+    pub(crate) fn current_source_hash(&self) -> Digest {
+        self.source_previous_hash
+    }
+
+    pub(crate) fn current_state_hash(&self) -> Result<Digest, SemanticError> {
+        checkpoint_state_hash(&self.database)
+    }
+
+    pub(crate) fn current_eidx_frontier(&self) -> u64 {
+        self.database.eidx_frontier()
+    }
+
+    pub(crate) fn current_database(&self) -> &Database {
+        &self.database
+    }
+
+    pub(crate) fn removed_datoms(&self) -> u64 {
+        self.removed_datoms
+    }
+
+    pub(crate) fn expect_through(&mut self, basis_t: u64) {
+        self.expected_basis = basis_t;
     }
 
     pub(crate) fn finish(self) -> Result<GenerationRewriteOutcome, SemanticError> {

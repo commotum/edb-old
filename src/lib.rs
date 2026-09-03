@@ -56,10 +56,11 @@ pub use identity::{
 };
 pub use index::IndexPrefix;
 pub use operations::{
-    ExcisionFault, ExcisionReceipt, ExcisionSpec, ExcisionTarget, GarbageInventory,
-    IntegrityProblem, IntegrityReport, MAX_PROGRAMS_PER_GC, MAX_TREE_BUILD_INTENTS_PER_GC,
-    MAX_TREE_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC, OperationalMetrics, PostgresOperator,
-    RECOMMENDED_GARBAGE_COLLECTION_AGE, TreeBuildIntentGarbage, TreePublicationGarbage,
+    ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
+    MAX_PROGRAMS_PER_GC, MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_BUILD_INTENTS_PER_GC,
+    MAX_TREE_NODES_PER_GC, MAX_TREE_RETIREMENT_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC,
+    OperationalMetrics, PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE,
+    TreeBuildIntentGarbage, TreePublicationGarbage,
 };
 pub use peer::{
     CacheStats, IndexBuildFault, IndexBuildReceipt, Peer, PeerCursorStats, PeerIndexCursor,

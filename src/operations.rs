@@ -1,5 +1,15 @@
+use crate::cow_generation::{
+    GenerationLogRow, GenerationRewriter, SourceLogEncoding, SourceLogRow, SourceRequest,
+    SourceRequestKey,
+};
+use crate::database::ExcisionCutoff;
+use crate::excision::{ExcisionTargetKind, PlannedExcisionPredicate};
+use crate::log_generation::LineageTransactionContent;
 use crate::persistent_tree::{TreeNode, TreeNodeSet, decode_tree_node, validate_tree};
-use crate::postgres::verify_schema_compatibility;
+use crate::postgres::{
+    AuthenticatedLogTransaction, insert_program_generation_refs, read_authenticated_log_range,
+    recover_generation_to, verify_schema_compatibility,
+};
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
     BackupVerification, DB_PARTITION, Database, Digest, MAX_EIDX, PersistentTreeManifest,
@@ -7,7 +17,7 @@ use crate::{
     decode_index_segment, decode_transaction, eid_to_part, encode_genesis, encode_transaction,
     sha256, transaction_hash, tx_to_t,
 };
-use postgres::{Client, IsolationLevel};
+use postgres::{Client, GenericClient, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -120,6 +130,7 @@ pub struct TreePublicationGarbage {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct TreeBuildIntentGarbage {
     pub database_id: String,
+    pub log_generation: u64,
     pub expected_revision: u64,
     pub manifest_hash: Digest,
     /// True for an abandoned upload whose exact uploaded values become
@@ -152,40 +163,24 @@ impl GarbageCandidates {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExcisionTarget {
-    Entity {
-        entity: u64,
-        /// Empty means every attribute of the entity.
-        attributes: Vec<u32>,
-    },
-    Attribute(u32),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExcisionSpec {
-    pub excision_id: String,
-    pub target: ExcisionTarget,
-    /// Exclusive transaction-basis cutoff. `None` means all history.
-    pub before_t: Option<u64>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExcisionFault {
     None,
-    AfterRewrite,
+    AfterCandidateStaged,
+    AfterActivation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExcisionReceipt {
     pub database_id: String,
-    pub excision_id: String,
+    pub source_generation: u64,
+    pub generation: u64,
     pub basis_t: u64,
+    pub request_count: u64,
     pub removed_datoms: u64,
     pub old_head_hash: Digest,
     pub new_head_hash: Digest,
-    pub generation: u64,
-    pub replayed: bool,
+    pub resumed: bool,
 }
 
 impl IntegrityReport {
@@ -502,15 +497,11 @@ impl PostgresOperator {
         // temporal reference is unreadable.
         let temporal_programs =
             inspect_temporal_program_references(&mut transaction, database_id, &mut problems)?;
-        let unversioned_programs = transaction
-            .query(
-                "SELECT p.program_hash FROM atomic_programs p WHERE NOT EXISTS \
-                 (SELECT 1 FROM atomic_program_versions v WHERE v.program_hash = p.program_hash)",
-                &[],
-            )
+        let stored_programs = transaction
+            .query("SELECT program_hash FROM atomic_programs", &[])
             .map_err(|error| operation_error("operations/program-metrics", error))?;
         metrics.orphan_programs = match temporal_programs {
-            Some(temporal_programs) => unversioned_programs
+            Some(temporal_programs) => stored_programs
                 .into_iter()
                 .map(|row| digest(row.get(0), "program hash"))
                 .collect::<Result<Vec<_>, _>>()?
@@ -595,6 +586,33 @@ impl PostgresOperator {
             .start()
             .map_err(|error| operation_error("operations/gc-begin", error))?;
         let mut candidates = garbage_candidates(&mut transaction, millis)?;
+        // Publication visibility is independent of derived membership.  Move
+        // one root's restart-safe fold after taking this call's dry-equivalent
+        // inventory so newly enabled GC work is considered on the next call,
+        // preserving exact preview/apply results.
+        if let Some(row) = transaction
+            .query_opt(
+                "SELECT h.manifest_hash \
+                   FROM atomic_tree_delta_headers h \
+                   JOIN atomic_tree_publications p ON p.manifest_hash = h.manifest_hash \
+                  WHERE h.delta_state = 2 \
+                  ORDER BY p.published_at, p.database_id, p.publication_revision \
+                  LIMIT 1",
+                &[],
+            )
+            .map_err(|error| operation_error("operations/gc-publication-work-read", error))?
+        {
+            let manifest_hash = digest(row.get(0), "pending tree publication hash")?;
+            transaction
+                .query_one(
+                    "SELECT atomic_apply_tree_publication_work($1, $2)",
+                    &[
+                        &&manifest_hash[..],
+                        &(MAX_TREE_RETIREMENT_NODES_PER_GC as i64),
+                    ],
+                )
+                .map_err(|error| operation_error("operations/gc-publication-work", error))?;
+        }
         for publication in &candidates.tree_publications {
             let collected: bool = transaction
                 .query_one(
@@ -655,398 +673,852 @@ impl PostgresOperator {
         Ok(candidates.inventory(true))
     }
 
-    /// Permanently rewrite matching history outside the logical timeline.
-    ///
-    /// The verified backup must cover the currently locked head. The whole
-    /// chain, durable request references, head, derived-root invalidation,
-    /// generation bump and non-sensitive audit record change in one SQL
-    /// transaction. This is intentionally a privileged, exceptional path.
-    pub fn excise_database(
+    /// Process ordinary A=15 (`:db/excise`) facts through a background,
+    /// copy-on-write log generation. A backup remains strongly recommended,
+    /// matching Datomic's operational guidance, but it is not an authorization
+    /// token and is therefore absent from this semantic API.
+    pub fn process_excision_requests(
         &mut self,
         database_id: &str,
-        spec: &ExcisionSpec,
-        backup: &BackupVerification,
     ) -> Result<ExcisionReceipt, SemanticError> {
-        self.excise_database_with_fault(database_id, spec, backup, ExcisionFault::None)
+        self.process_excision_requests_with_fault(database_id, ExcisionFault::None)
     }
 
-    pub fn excise_database_with_fault(
+    #[doc(hidden)]
+    pub fn process_excision_requests_with_fault(
         &mut self,
         database_id: &str,
-        spec: &ExcisionSpec,
-        backup: &BackupVerification,
         fault_point: ExcisionFault,
     ) -> Result<ExcisionReceipt, SemanticError> {
-        validate_excision_spec(spec)?;
-        let before_t = spec.before_t.map(normalize_t_or_tx).transpose()?;
-        let (target_kind, target_id, attributes) = normalized_target(&spec.target)?;
-        let target_id_sql = sql_u64(target_id, "excision target")?;
-        let attribute_ids: Vec<i32> = attributes
-            .iter()
-            .map(|value| {
-                i32::try_from(*value).map_err(|_| {
-                    SemanticError::incorrect(
-                        "excision/attribute-out-of-range",
-                        "attribute id cannot be represented by PostgreSQL INTEGER",
-                    )
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        let before_t_sql = before_t
-            .map(|value| sql_u64(value, "before-t"))
-            .transpose()?;
-        let mut transaction = self
-            .client
-            .transaction()
-            .map_err(|error| operation_error("excision/begin", error))?;
-        let head = transaction
-            .query_opt(
-                "SELECT h.basis_t, h.tx_hash, d.lineage_id \
-                   FROM atomic_heads h \
-                   JOIN atomic_databases d USING (database_id) \
-                  WHERE h.database_id = $1 FOR UPDATE OF h",
-                &[&database_id],
-            )
-            .map_err(|error| operation_error("excision/lock-head", error))?
-            .ok_or_else(|| {
-                SemanticError::new(
-                    crate::ErrorCategory::NotFound,
-                    "excision/database-not-found",
-                    format!("database {database_id} does not exist"),
-                )
-            })?;
-        let basis_t = positive_or_zero(head.get(0), "head basis")?;
-        let old_head_hash = digest(head.get(1), "head hash")?;
-        let lineage_id: String = head.get(2);
+        process_excision_with_session_fences(&mut self.client, database_id, fault_point)
+    }
 
-        if let Some(row) = transaction
-            .query_opt(
-                "SELECT backup_basis_t, backup_manifest_hash, target_kind, target_id, \
-                        attribute_ids, before_t, removed_datoms, old_head_hash, \
-                        new_head_hash, generation \
-                 FROM atomic_excisions WHERE database_id = $1 AND excision_id = $2",
-                &[&database_id, &spec.excision_id],
-            )
-            .map_err(|error| operation_error("excision/idempotency-read", error))?
-        {
-            let stored_attrs: Vec<i32> = row.get(4);
-            let stored_before: Option<i64> = row.get(5);
-            let same = positive_or_zero(row.get(0), "backup basis")? == backup.point.basis_t
-                && digest(row.get(1), "backup manifest hash")? == backup.point.manifest_hash
-                && row.get::<_, i16>(2) == target_kind
-                && positive_or_zero(row.get(3), "target id")? == target_id
-                && stored_attrs == attribute_ids
-                && stored_before == before_t_sql;
-            if !same {
-                return Err(SemanticError::new(
-                    crate::ErrorCategory::Conflict,
-                    "excision/idempotency-key-reused",
-                    "excision id is already bound to another predicate or backup",
-                ));
-            }
-            let receipt = ExcisionReceipt {
-                database_id: database_id.into(),
-                excision_id: spec.excision_id.clone(),
-                basis_t,
-                removed_datoms: positive_or_zero(row.get(6), "removed datoms")?,
-                old_head_hash: digest(row.get(7), "old head hash")?,
-                new_head_hash: digest(row.get(8), "new head hash")?,
-                generation: positive_or_zero(row.get(9), "generation")?,
-                replayed: true,
-            };
-            transaction
-                .commit()
-                .map_err(|error| operation_error("excision/idempotency-commit", error))?;
-            return Ok(receipt);
-        }
-
-        if backup.point.lineage_id != lineage_id
-            || backup.point.basis_t != basis_t
-            || backup.database.basis_t() != basis_t
-        {
-            return Err(SemanticError::incorrect(
-                "excision/backup-does-not-cover-head",
-                "verified backup must belong to this database and exactly cover the locked head",
-            ));
-        }
-        let recovered =
-            crate::postgres::recover_to(&mut transaction, database_id, basis_t, old_head_hash)?
-                .database;
-        if !same_database_information(&recovered, &backup.database) {
-            return Err(SemanticError::new(
-                crate::ErrorCategory::Fault,
-                "excision/backup-state-mismatch",
-                "verified backup does not reproduce the database being excised",
-            ));
-        }
-        validate_excision_target(&recovered, &spec.target)?;
-        let extent = component_extent(&recovered, &spec.target)?;
-        let rows = transaction
-            .query(
-                "SELECT basis_t, payload FROM atomic_transactions \
-                 WHERE database_id = $1 ORDER BY basis_t",
-                &[&database_id],
-            )
-            .map_err(|error| operation_error("excision/read-chain", error))?;
-        let mut rewritten = Vec::with_capacity(rows.len());
-        let genesis_hash = sha256(&encode_genesis(recovered.genesis_datoms())?);
-        let mut rewritten_database = Database::from_genesis(recovered.genesis_datoms().to_vec())?;
-        let mut previous = genesis_hash;
-        let mut removed_datoms = 0_u64;
-        let tx_instant_attribute = recovered
-            .schema()
-            .resolve_ident(&crate::Keyword::new("db", "txInstant"))
-            .expect("Database construction requires :db/txInstant");
-        for row in rows {
-            let row_basis = positive_or_zero(row.get(0), "transaction basis")?;
-            let payload: Vec<u8> = row.get(1);
-            let mut envelope = decode_transaction(&payload)?;
-            let before = envelope.tx_data.len();
-            envelope.tx_data.retain(|datom| {
-                !excision_matches(datom, &spec.target, &extent, before_t, tx_instant_attribute)
-            });
-            removed_datoms += (before - envelope.tx_data.len()) as u64;
-            envelope.previous_hash = previous;
-            let payload = encode_transaction(&envelope)?;
-            let hash = transaction_hash(&payload);
-            rewritten_database = rewritten_database.apply_committed(&envelope)?;
-            let state_hash = checkpoint_state_hash(&rewritten_database)?;
-            rewritten.push((row_basis, previous, hash, payload, state_hash));
-            previous = hash;
-        }
-        let new_head_hash = if basis_t == 0 { genesis_hash } else { previous };
-
-        transaction
-            .batch_execute(
-                "LOCK TABLE atomic_index_publications IN SHARE ROW EXCLUSIVE MODE; \
-                 LOCK TABLE atomic_index_manifests IN SHARE ROW EXCLUSIVE MODE; \
-                 SET LOCAL session_replication_role = replica",
-            )
-            .map_err(|error| operation_error("excision/privileged-mode", error))?;
-        transaction
-            .execute(
-                "DELETE FROM atomic_index_publications WHERE database_id = $1",
-                &[&database_id],
-            )
-            .map_err(|error| operation_error("excision/invalidate-index-publications", error))?;
-        transaction
-            .execute(
-                "DELETE FROM atomic_index_manifests WHERE database_id = $1",
-                &[&database_id],
-            )
-            .map_err(|error| operation_error("excision/invalidate-indexes", error))?;
-        for (row_basis, predecessor, hash, payload, state_hash) in &rewritten {
-            let row_basis = sql_u64(*row_basis, "transaction basis")?;
-            transaction
-                .execute(
-                    "UPDATE atomic_transactions \
-                     SET previous_hash = $1, tx_hash = $2, payload = $3, state_hash = $4 \
-                     WHERE database_id = $5 AND basis_t = $6",
-                    &[
-                        &&predecessor[..],
-                        &&hash[..],
-                        &payload,
-                        &&state_hash[..],
-                        &database_id,
-                        &row_basis,
-                    ],
-                )
-                .map_err(|error| operation_error("excision/rewrite-transaction", error))?;
-            transaction
-                .execute(
-                    "UPDATE atomic_requests SET tx_hash = $1 \
-                     WHERE database_id = $2 AND basis_t = $3",
-                    &[&&hash[..], &database_id, &row_basis],
-                )
-                .map_err(|error| operation_error("excision/rewrite-request", error))?;
-        }
-        transaction
-            .execute(
-                "UPDATE atomic_heads SET tx_hash = $1 WHERE database_id = $2",
-                &[&&new_head_hash[..], &database_id],
-            )
-            .map_err(|error| operation_error("excision/rewrite-head", error))?;
-        if fault_point == ExcisionFault::AfterRewrite {
-            return Err(SemanticError::new(
-                crate::ErrorCategory::Interrupted,
-                "excision/injected-fault",
-                "injected failure after history rewrite",
-            ));
-        }
-        let generation: i64 = transaction
-            .query_one(
-                "UPDATE atomic_database_generations \
-                 SET excision_generation = excision_generation + 1 \
-                 WHERE database_id = $1 RETURNING excision_generation",
-                &[&database_id],
-            )
-            .map_err(|error| operation_error("excision/generation", error))?
-            .get(0);
-        transaction
-            .execute(
-                "INSERT INTO atomic_excisions \
-                 (database_id, excision_id, backup_basis_t, backup_manifest_hash, \
-                  target_kind, target_id, attribute_ids, before_t, removed_datoms, \
-                  old_head_hash, new_head_hash, generation) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-                &[
-                    &database_id,
-                    &spec.excision_id,
-                    &sql_u64(backup.point.basis_t, "backup basis")?,
-                    &&backup.point.manifest_hash[..],
-                    &target_kind,
-                    &target_id_sql,
-                    &attribute_ids,
-                    &before_t_sql,
-                    &sql_u64(removed_datoms, "removed datoms")?,
-                    &&old_head_hash[..],
-                    &&new_head_hash[..],
-                    &generation,
-                ],
-            )
-            .map_err(|error| operation_error("excision/audit", error))?;
-        transaction
-            .batch_execute("SET LOCAL session_replication_role = origin")
-            .map_err(|error| operation_error("excision/restore-triggers", error))?;
-        crate::postgres::recover_to(&mut transaction, database_id, basis_t, new_head_hash)?;
-        transaction
-            .commit()
-            .map_err(|error| operation_error("excision/commit", error))?;
-        Ok(ExcisionReceipt {
-            database_id: database_id.into(),
-            excision_id: spec.excision_id.clone(),
-            basis_t,
-            removed_datoms,
-            old_head_hash,
-            new_head_hash,
-            generation: positive_or_zero(generation, "generation")?,
-            replayed: false,
-        })
+    /// True only when every A=15 request at or before `through_t` is reflected
+    /// by the active generation and its root-last completion marker.
+    pub fn sync_excise(
+        &mut self,
+        database_id: &str,
+        through_t: u64,
+    ) -> Result<bool, SemanticError> {
+        sync_excise_in(&mut self.client, database_id, through_t)
     }
 }
 
-fn validate_excision_spec(spec: &ExcisionSpec) -> Result<(), SemanticError> {
-    if spec.excision_id.is_empty() {
-        return Err(SemanticError::incorrect(
-            "excision/empty-id",
-            "excision id cannot be empty",
+const EXCISION_LOG_BATCH: u64 = 256;
+const EXCISION_COMPLETION_BATCH: i64 = 512;
+
+fn process_excision_with_session_fences(
+    client: &mut Client,
+    database_id: &str,
+    fault_point: ExcisionFault,
+) -> Result<ExcisionReceipt, SemanticError> {
+    let lock_row = client
+        .query_opt(
+            "SELECT atomic_tree_database_build_pin_key($1), \
+                    hashtextextended('atomic/excision-worker/v1/' || lineage_id, \
+                                     4707476001900298240::bigint) \
+               FROM atomic_databases WHERE database_id = $1",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("excision/lock-coordinates", error))?
+        .ok_or_else(|| {
+            SemanticError::new(
+                crate::ErrorCategory::NotFound,
+                "excision/database-not-found",
+                format!("database {database_id} does not exist"),
+            )
+        })?;
+    let builder_key: i64 = lock_row.get(0);
+    let worker_key: i64 = lock_row.get(1);
+    let builder_locked: bool = client
+        .query_one("SELECT pg_try_advisory_lock_shared($1)", &[&builder_key])
+        .map_err(|error| operation_error("excision/builder-pin", error))?
+        .get(0);
+    if !builder_locked {
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Busy,
+            "excision/restore-in-progress",
+            "a point restore currently fences generation builders",
         ));
     }
-    Ok(())
-}
-
-fn normalized_target(target: &ExcisionTarget) -> Result<(i16, u64, Vec<u32>), SemanticError> {
-    match target {
-        ExcisionTarget::Entity { entity, attributes } => {
-            let mut attributes = attributes.clone();
-            attributes.sort_unstable();
-            attributes.dedup();
-            Ok((0, *entity, attributes))
-        }
-        ExcisionTarget::Attribute(attribute) => Ok((1, u64::from(*attribute), Vec::new())),
+    let worker_locked = client
+        .query_one("SELECT pg_try_advisory_lock($1)", &[&worker_key])
+        .map_err(|error| operation_error("excision/worker-pin", error))?
+        .get::<_, bool>(0);
+    if !worker_locked {
+        let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&builder_key]);
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Busy,
+            "excision/already-running",
+            "another background excision worker owns this database",
+        ));
     }
-}
 
-fn validate_excision_target(
-    database: &Database,
-    target: &ExcisionTarget,
-) -> Result<(), SemanticError> {
-    let tx_instant = database
-        .schema()
-        .resolve_ident(&crate::Keyword::new("db", "txInstant"))
-        .expect("Database construction requires :db/txInstant");
-    match target {
-        ExcisionTarget::Entity { entity, attributes } => {
-            let partition = eid_to_part(*entity)?;
-            if partition == DB_PARTITION {
+    let result = process_excision_fenced(client, database_id, fault_point);
+    let worker_release = client
+        .query_one("SELECT pg_advisory_unlock($1)", &[&worker_key])
+        .map_err(|error| operation_error("excision/worker-unpin", error));
+    let builder_release = client
+        .query_one("SELECT pg_advisory_unlock_shared($1)", &[&builder_key])
+        .map_err(|error| operation_error("excision/builder-unpin", error));
+    match result {
+        Err(error) => Err(error),
+        Ok(receipt) => {
+            if !worker_release?.get::<_, bool>(0) || !builder_release?.get::<_, bool>(0) {
                 return Err(SemanticError::new(
-                    crate::ErrorCategory::Forbidden,
-                    "excision/protected-entity",
-                    "entities in :db.part/db cannot be excised",
+                    crate::ErrorCategory::Fault,
+                    "excision/session-pin-lost",
+                    "background excision session lost its advisory fence",
                 ));
             }
-            for attribute in attributes {
-                database.schema().attribute(*attribute)?;
-                if *attribute == tx_instant {
-                    return Err(protected_attribute());
+            Ok(receipt)
+        }
+    }
+}
+
+fn process_excision_fenced(
+    client: &mut Client,
+    database_id: &str,
+    fault_point: ExcisionFault,
+) -> Result<ExcisionReceipt, SemanticError> {
+    if let Some(receipt) = resume_activated_excision(client, database_id)? {
+        return Ok(receipt);
+    }
+
+    let head = client
+        .query_opt(
+            "SELECT h.log_generation, h.basis_t, h.tx_hash, d.lineage_id, d.genesis_hash \
+               FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
+              WHERE h.database_id = $1",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("excision/read-head", error))?
+        .ok_or_else(|| {
+            SemanticError::new(
+                crate::ErrorCategory::NotFound,
+                "excision/database-not-found",
+                format!("database {database_id} has no published head"),
+            )
+        })?;
+    let source_generation = positive_or_zero(head.get(0), "source generation")?;
+    let captured_basis = positive_or_zero(head.get(1), "source basis")?;
+    let captured_hash = digest(head.get(2), "source head hash")?;
+    let lineage_id: String = head.get(3);
+    let genesis_hash = digest(head.get(4), "genesis hash")?;
+
+    let source_pin_key: i64 = client
+        .query_one(
+            "SELECT atomic_log_generation_pin_key($1, $2)",
+            &[
+                &database_id,
+                &sql_u64(source_generation, "source generation")?,
+            ],
+        )
+        .map_err(|error| operation_error("excision/source-pin-key", error))?
+        .get(0);
+    let source_locked: bool = client
+        .query_one("SELECT pg_try_advisory_lock_shared($1)", &[&source_pin_key])
+        .map_err(|error| operation_error("excision/source-pin", error))?
+        .get(0);
+    if !source_locked {
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Busy,
+            "excision/source-collecting",
+            "the selected source generation is being collected",
+        ));
+    }
+    let result = build_and_activate_excision(
+        client,
+        database_id,
+        &lineage_id,
+        genesis_hash,
+        source_generation,
+        captured_basis,
+        captured_hash,
+        fault_point,
+    );
+    let release = client
+        .query_one("SELECT pg_advisory_unlock_shared($1)", &[&source_pin_key])
+        .map_err(|error| operation_error("excision/source-unpin", error));
+    match result {
+        Err(error) => Err(error),
+        Ok(receipt) => {
+            if !release?.get::<_, bool>(0) {
+                return Err(SemanticError::new(
+                    crate::ErrorCategory::Fault,
+                    "excision/source-pin-lost",
+                    "background excision lost its source-generation pin",
+                ));
+            }
+            Ok(receipt)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_and_activate_excision(
+    client: &mut Client,
+    database_id: &str,
+    lineage_id: &str,
+    genesis_hash: Digest,
+    source_generation: u64,
+    captured_basis: u64,
+    captured_hash: Digest,
+    fault_point: ExcisionFault,
+) -> Result<ExcisionReceipt, SemanticError> {
+    let mut snapshot = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .map_err(|error| operation_error("excision/snapshot-begin", error))?;
+    let stable_head = snapshot
+        .query_one(
+            "SELECT log_generation, basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("excision/snapshot-head", error))?;
+    if positive_or_zero(stable_head.get(0), "snapshot generation")? != source_generation
+        || positive_or_zero(stable_head.get(1), "snapshot basis")? != captured_basis
+        || digest(stable_head.get(2), "snapshot head hash")? != captured_hash
+    {
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Conflict,
+            "excision/source-changed-before-capture",
+            "the active log changed while the excision source was being pinned",
+        ));
+    }
+    let source_database = recover_generation_to(
+        &mut snapshot,
+        database_id,
+        source_generation,
+        captured_basis,
+        captured_hash,
+    )?
+    .database;
+    let completed = completed_excision_identities(&mut snapshot, database_id, source_generation)?;
+    snapshot
+        .query_one(
+            "SELECT database_id FROM atomic_databases WHERE database_id = $1 FOR UPDATE",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("excision/lock-generation-counter", error))?;
+    let generation = positive_or_zero(
+        snapshot
+            .query_one(
+                "SELECT COALESCE(max(generation), 0) + 1 \
+                   FROM atomic_log_generations WHERE database_id = $1",
+                &[&database_id],
+            )
+            .map_err(|error| operation_error("excision/allocate-generation", error))?
+            .get(0),
+        "allocated generation",
+    )?;
+    let mut rewriter = GenerationRewriter::for_excision(
+        lineage_id,
+        generation,
+        genesis_hash,
+        &source_database,
+        &completed,
+    )?;
+    let predicates = rewriter.frozen_predicates();
+    let request_count = predicates.len() as u64;
+    let request_set_hash = rewriter.request_set_hash();
+    snapshot
+        .execute(
+            "INSERT INTO atomic_log_generations \
+                 (database_id, generation, lineage_id, build_kind, request_count) \
+             VALUES ($1, $2, $3, 1, $4)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &lineage_id,
+                &sql_u64(request_count, "request count")?,
+            ],
+        )
+        .map_err(|error| operation_error("excision/create-generation", error))?;
+    snapshot
+        .execute(
+            "INSERT INTO atomic_log_generation_builds \
+                 (database_id, generation, source_generation, captured_basis_t, \
+                  captured_head_hash, frozen_plan_hash) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &sql_u64(source_generation, "source generation")?,
+                &sql_u64(captured_basis, "captured basis")?,
+                &&captured_hash[..],
+                &&request_set_hash[..],
+            ],
+        )
+        .map_err(|error| operation_error("excision/create-build", error))?;
+    for predicate in &predicates {
+        insert_excision_predicate(&mut snapshot, database_id, generation, predicate)?;
+    }
+    insert_excision_checkpoint(
+        &mut snapshot,
+        database_id,
+        generation,
+        0,
+        genesis_hash,
+        rewriter.current_state_hash()?,
+        genesis_hash,
+        rewriter.current_eidx_frontier(),
+        0,
+    )?;
+    snapshot
+        .commit()
+        .map_err(|error| operation_error("excision/capture-commit", error))?;
+
+    rewrite_source_through(
+        client,
+        database_id,
+        source_generation,
+        generation,
+        captured_basis,
+        &mut rewriter,
+    )?;
+    loop {
+        let row = client
+            .query_one(
+                "SELECT rows_advanced, is_sealed \
+                   FROM atomic_stage_excision_completions($1, $2, $3)",
+                &[
+                    &database_id,
+                    &sql_u64(generation, "generation")?,
+                    &EXCISION_COMPLETION_BATCH,
+                ],
+            )
+            .map_err(|error| operation_error("excision/stage-completions", error))?;
+        if row.get::<_, bool>(1) {
+            break;
+        }
+    }
+    if fault_point == ExcisionFault::AfterCandidateStaged {
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Interrupted,
+            "excision/injected-fault",
+            "injected failure after the COW candidate became durable",
+        ));
+    }
+
+    let (final_basis, final_source_hash) = loop {
+        let head = client
+            .query_one(
+                "SELECT log_generation, basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
+                &[&database_id],
+            )
+            .map_err(|error| operation_error("excision/catchup-head", error))?;
+        let active_generation = positive_or_zero(head.get(0), "catch-up generation")?;
+        let active_basis = positive_or_zero(head.get(1), "catch-up basis")?;
+        let active_hash = digest(head.get(2), "catch-up hash")?;
+        if active_generation != source_generation {
+            return Err(SemanticError::new(
+                crate::ErrorCategory::Conflict,
+                "excision/source-generation-replaced",
+                "another generation replaced the excision source",
+            ));
+        }
+        if active_basis > rewriter.current_basis() {
+            rewrite_source_through(
+                client,
+                database_id,
+                source_generation,
+                generation,
+                active_basis,
+                &mut rewriter,
+            )?;
+            continue;
+        }
+        rewriter.expect_through(active_basis);
+        match client.query_one(
+            "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, NULL)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &sql_u64(active_basis, "activation basis")?,
+                &&rewriter.current_head_hash()[..],
+                &&rewriter.current_state_hash()?[..],
+            ],
+        ) {
+            Ok(_) => break (active_basis, active_hash),
+            Err(error) => {
+                let semantic = operation_error("excision/activate", error);
+                if semantic.category == crate::ErrorCategory::Conflict {
+                    continue;
                 }
+                return Err(semantic);
             }
         }
-        ExcisionTarget::Attribute(attribute) => {
-            database.schema().attribute(*attribute)?;
-            if *attribute == tx_instant {
-                return Err(protected_attribute());
-            }
+    };
+    if fault_point == ExcisionFault::AfterActivation {
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Interrupted,
+            "excision/injected-fault",
+            "injected failure after generation activation",
+        ));
+    }
+    client
+        .query_one(
+            "SELECT atomic_complete_excision_generation($1, $2, NULL)",
+            &[&database_id, &sql_u64(generation, "generation")?],
+        )
+        .map_err(|error| operation_error("excision/complete", error))?;
+    cleanup_completed_generation_build(client, database_id, generation)?;
+    let outcome = rewriter.finish()?;
+    Ok(ExcisionReceipt {
+        database_id: database_id.to_owned(),
+        source_generation,
+        generation,
+        basis_t: final_basis,
+        request_count,
+        removed_datoms: outcome.removed_datoms,
+        old_head_hash: final_source_hash,
+        new_head_hash: outcome.head_hash,
+        resumed: false,
+    })
+}
+
+fn rewrite_source_through(
+    client: &mut Client,
+    database_id: &str,
+    source_generation: u64,
+    candidate_generation: u64,
+    through_basis: u64,
+    rewriter: &mut GenerationRewriter,
+) -> Result<(), SemanticError> {
+    while rewriter.current_basis() < through_basis {
+        let after = rewriter.current_basis();
+        let through = through_basis.min(after.saturating_add(EXCISION_LOG_BATCH));
+        let mut transaction = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .start()
+            .map_err(|error| operation_error("excision/rewrite-begin", error))?;
+        let source_rows = read_authenticated_log_range(
+            &mut transaction,
+            database_id,
+            source_generation,
+            after,
+            through,
+            rewriter.current_source_hash(),
+        )?;
+        for source in source_rows {
+            let source = source_log_row(source, source_generation)?;
+            let row = rewriter.rewrite_row(source)?;
+            insert_generation_log_row(&mut transaction, database_id, candidate_generation, &row)?;
+            let transaction_value =
+                LineageTransactionContent::decode(&row.payload)?.to_transaction(row.previous_hash);
+            insert_program_generation_refs(
+                &mut transaction,
+                database_id,
+                candidate_generation,
+                &transaction_value.tx_data,
+            )?;
         }
+        insert_excision_checkpoint(
+            &mut transaction,
+            database_id,
+            candidate_generation,
+            rewriter.current_basis(),
+            rewriter.current_head_hash(),
+            rewriter.current_state_hash()?,
+            rewriter.current_source_hash(),
+            rewriter.current_eidx_frontier(),
+            rewriter.removed_datoms(),
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| operation_error("excision/rewrite-commit", error))?;
     }
     Ok(())
 }
 
-fn protected_attribute() -> SemanticError {
-    SemanticError::new(
-        crate::ErrorCategory::Forbidden,
-        "excision/protected-attribute",
-        ":db/txInstant and operational audit facts cannot be excised",
-    )
-}
-
-fn component_extent(
-    database: &Database,
-    target: &ExcisionTarget,
-) -> Result<BTreeSet<u64>, SemanticError> {
-    let ExcisionTarget::Entity { entity, attributes } = target else {
-        return Ok(BTreeSet::new());
+fn source_log_row(
+    row: AuthenticatedLogTransaction,
+    generation: u64,
+) -> Result<SourceLogRow, SemanticError> {
+    let encoding = if generation == 0 {
+        SourceLogEncoding::Legacy(row.payload)
+    } else {
+        SourceLogEncoding::Lineage {
+            generation,
+            content_hash: row.content_hash.ok_or_else(|| {
+                SemanticError::new(
+                    crate::ErrorCategory::Fault,
+                    "excision/missing-source-content-hash",
+                    "positive source transaction lacks immutable content identity",
+                )
+            })?,
+            payload: row.payload,
+        }
     };
-    let mut extent = BTreeSet::from([*entity]);
-    let mut pending = vec![(*entity, Some(attributes.as_slice()))];
-    let history = database.datoms(View::History, crate::IndexOrder::Eavt);
-    while let Some((owner, first_attributes)) = pending.pop() {
-        for datom in history.iter().filter(|datom| datom.entity == owner) {
-            if first_attributes
-                .is_some_and(|attrs| !attrs.is_empty() && !attrs.contains(&datom.attribute))
-            {
-                continue;
-            }
-            let Ok(attribute) = database.schema().attribute(datom.attribute) else {
-                continue;
-            };
-            let Value::Ref(child) = &datom.value else {
-                continue;
-            };
-            if attribute.component && extent.insert(*child) {
-                pending.push((*child, None));
-            }
-        }
-    }
-    Ok(extent)
+    let key = if generation == 0 {
+        SourceRequestKey::LegacyPlaintext(row.legacy_request_key.ok_or_else(|| {
+            SemanticError::new(
+                crate::ErrorCategory::Fault,
+                "excision/missing-source-request-key",
+                "legacy source request lacks its durable identity",
+            )
+        })?)
+    } else {
+        SourceRequestKey::Digest(row.request_key_hash.ok_or_else(|| {
+            SemanticError::new(
+                crate::ErrorCategory::Fault,
+                "excision/missing-source-request-key",
+                "positive source request lacks its durable digest identity",
+            )
+        })?)
+    };
+    Ok(SourceLogRow {
+        tx_hash: row.tx_hash,
+        state_hash: row.state_hash,
+        encoding,
+        transaction: row.transaction,
+        request: SourceRequest {
+            key,
+            request_digest: row.request_digest,
+        },
+    })
 }
 
-fn excision_matches(
-    datom: &crate::Datom,
-    target: &ExcisionTarget,
-    extent: &BTreeSet<u64>,
-    before_t: Option<u64>,
-    tx_instant_attribute: u32,
-) -> bool {
-    if eid_to_part(datom.entity).is_ok_and(|partition| partition == DB_PARTITION)
-        || datom.attribute == tx_instant_attribute
-        || before_t.is_some_and(|cutoff| tx_to_t(datom.tx).is_ok_and(|t| t >= cutoff))
+fn insert_excision_predicate<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    predicate: &PlannedExcisionPredicate,
+) -> Result<(), SemanticError> {
+    let (cutoff_kind, cutoff_value) = match predicate.request.cutoff {
+        None => (0_i16, None),
+        Some(ExcisionCutoff::BeforeT(t)) => (1, Some(sql_u64(t, "excision cutoff")?)),
+        Some(ExcisionCutoff::BeforeInstant(instant)) => (2, Some(instant)),
+    };
+    let target_kind = match predicate.kind {
+        ExcisionTargetKind::Entity => 0_i16,
+        ExcisionTargetKind::Attribute => 1_i16,
+    };
+    let requested_attributes = predicate
+        .request
+        .attributes
+        .iter()
+        .map(|value| sql_u64(*value, "excision attribute"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let component_extent = predicate
+        .extent
+        .iter()
+        .map(|value| sql_u64(*value, "excision component"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let reference_attributes = predicate
+        .reference_attributes
+        .iter()
+        .map(|value| {
+            i32::try_from(*value).map_err(|_| {
+                SemanticError::new(
+                    crate::ErrorCategory::Unsupported,
+                    "excision/attribute-out-of-range",
+                    "attribute id cannot be represented by PostgreSQL INTEGER",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    client
+        .execute(
+            "INSERT INTO atomic_generation_excision_predicates \
+                 (database_id, generation, request_entity, request_t, target_id, \
+                  target_kind, requested_cutoff_kind, requested_cutoff_value, \
+                  effective_before_t, requested_attributes, component_extent, \
+                  reference_attributes, protected_entity_target, predicate_hash) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &sql_u64(predicate.request.request_entity, "request entity")?,
+                &sql_u64(predicate.request.request_t, "request transaction")?,
+                &sql_u64(predicate.request.target, "target entity")?,
+                &target_kind,
+                &cutoff_kind,
+                &cutoff_value,
+                &sql_u64(predicate.before_t, "effective cutoff")?,
+                &requested_attributes,
+                &component_extent,
+                &reference_attributes,
+                &predicate.protected_entity_target,
+                &&predicate.hash[..],
+            ],
+        )
+        .map_err(|error| operation_error("excision/stage-predicate", error))?;
+    Ok(())
+}
+
+fn insert_generation_log_row<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    row: &GenerationLogRow,
+) -> Result<(), SemanticError> {
+    client
+        .execute(
+            "INSERT INTO atomic_transaction_contents \
+                 (content_hash, lineage_id, basis_t, eidx_frontier, payload) \
+             SELECT $1, g.lineage_id, $2, $3, $4 \
+               FROM atomic_log_generations g \
+              WHERE g.database_id = $5 AND g.generation = $6 \
+             ON CONFLICT (content_hash) DO NOTHING",
+            &[
+                &&row.content_hash[..],
+                &sql_u64(row.basis_t, "transaction basis")?,
+                &sql_u64(row.eidx_frontier, "entity frontier")?,
+                &row.payload,
+                &database_id,
+                &sql_u64(generation, "generation")?,
+            ],
+        )
+        .map_err(|error| operation_error("excision/stage-content", error))?;
+    let stored = client
+        .query_one(
+            "SELECT basis_t, eidx_frontier, payload FROM atomic_transaction_contents \
+              WHERE content_hash = $1",
+            &[&&row.content_hash[..]],
+        )
+        .map_err(|error| operation_error("excision/verify-content", error))?;
+    if positive_or_zero(stored.get(0), "content basis")? != row.basis_t
+        || positive_or_zero(stored.get(1), "content frontier")? != row.eidx_frontier
+        || stored.get::<_, Vec<u8>>(2) != row.payload
     {
-        return false;
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Fault,
+            "excision/content-hash-collision",
+            "immutable transaction content hash resolves to different bytes or coordinates",
+        ));
     }
-    match target {
-        ExcisionTarget::Attribute(attribute) => datom.attribute == *attribute,
-        ExcisionTarget::Entity { entity, attributes } => {
-            let references =
-                |candidate| matches!(datom.value, Value::Ref(value) if value == candidate);
-            let root = (datom.entity == *entity || references(*entity))
-                && (attributes.is_empty() || attributes.contains(&datom.attribute));
-            let component = extent.iter().any(|candidate| {
-                *candidate != *entity && (datom.entity == *candidate || references(*candidate))
-            });
-            root || component
+    client
+        .execute(
+            "INSERT INTO atomic_generation_transactions \
+                 (database_id,generation,basis_t,previous_hash,tx_hash,content_hash, \
+                  state_hash,eidx_frontier) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &sql_u64(row.basis_t, "transaction basis")?,
+                &&row.previous_hash[..],
+                &&row.tx_hash[..],
+                &&row.content_hash[..],
+                &&row.state_hash[..],
+                &sql_u64(row.eidx_frontier, "entity frontier")?,
+            ],
+        )
+        .map_err(|error| operation_error("excision/stage-membership", error))?;
+    client
+        .execute(
+            "INSERT INTO atomic_generation_requests \
+                 (database_id,generation,request_key_hash,request_digest,request_kind, \
+                  basis_t,tx_hash) VALUES ($1,$2,$3,$4,0,$5,$6)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &&row.request_key_hash[..],
+                &&row.request_digest[..],
+                &sql_u64(row.basis_t, "transaction basis")?,
+                &&row.tx_hash[..],
+            ],
+        )
+        .map_err(|error| operation_error("excision/stage-request", error))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_excision_checkpoint<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    through_basis: u64,
+    head_hash: Digest,
+    state_hash: Digest,
+    source_head_hash: Digest,
+    eidx_frontier: u64,
+    removed_datoms: u64,
+) -> Result<(), SemanticError> {
+    client
+        .execute(
+            "INSERT INTO atomic_log_generation_checkpoints \
+                 (database_id,generation,through_basis_t,head_hash,state_hash, \
+                  source_head_hash,eidx_frontier,removed_datoms) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &sql_u64(through_basis, "checkpoint basis")?,
+                &&head_hash[..],
+                &&state_hash[..],
+                &&source_head_hash[..],
+                &sql_u64(eidx_frontier, "entity frontier")?,
+                &sql_u64(removed_datoms, "removed datoms")?,
+            ],
+        )
+        .map_err(|error| operation_error("excision/stage-checkpoint", error))?;
+    Ok(())
+}
+
+fn completed_excision_identities<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+) -> Result<BTreeSet<(u64, u64)>, SemanticError> {
+    if generation == 0 {
+        return Ok(BTreeSet::new());
+    }
+    if !client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_log_generation_completions \
+                            WHERE database_id = $1 AND generation = $2)",
+            &[&database_id, &sql_u64(generation, "generation")?],
+        )
+        .map_err(|error| operation_error("excision/source-completion", error))?
+        .get::<_, bool>(0)
+    {
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Busy,
+            "excision/source-not-complete",
+            "the active generation has not completed its derived-root publication",
+        ));
+    }
+    client
+        .query(
+            "SELECT request_t, request_entity FROM atomic_completed_excision_requests \
+              WHERE database_id = $1 AND generation = $2 \
+              ORDER BY request_t, request_entity",
+            &[&database_id, &sql_u64(generation, "generation")?],
+        )
+        .map_err(|error| operation_error("excision/completed-requests", error))?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                positive_or_zero(row.get(0), "completed request transaction")?,
+                positive_or_zero(row.get(1), "completed request entity")?,
+            ))
+        })
+        .collect()
+}
+
+fn cleanup_completed_generation_build(
+    client: &mut Client,
+    database_id: &str,
+    generation: u64,
+) -> Result<(), SemanticError> {
+    loop {
+        let row = client
+            .query_one(
+                "SELECT rows_removed, is_complete \
+                   FROM atomic_cleanup_log_generation_build($1, $2, $3)",
+                &[
+                    &database_id,
+                    &sql_u64(generation, "generation")?,
+                    &EXCISION_COMPLETION_BATCH,
+                ],
+            )
+            .map_err(|error| operation_error("excision/cleanup-build", error))?;
+        if row.get::<_, bool>(1) {
+            return Ok(());
         }
     }
+}
+
+fn resume_activated_excision(
+    client: &mut Client,
+    database_id: &str,
+) -> Result<Option<ExcisionReceipt>, SemanticError> {
+    let row = client
+        .query_opt(
+            "SELECT a.generation, a.prior_generation, a.basis_t, a.head_hash, \
+                    a.manifest_hash, g.request_count, b.captured_head_hash, \
+                    c.removed_datoms \
+               FROM atomic_heads h \
+               JOIN atomic_log_generation_activations a \
+                 ON a.database_id=h.database_id AND a.generation=h.log_generation \
+               JOIN atomic_log_generations g \
+                 ON g.database_id=a.database_id AND g.generation=a.generation \
+               JOIN atomic_log_generation_builds b \
+                 ON b.database_id=g.database_id AND b.generation=g.generation \
+               JOIN atomic_log_generation_checkpoints c \
+                 ON c.database_id=g.database_id AND c.generation=g.generation \
+                AND c.through_basis_t=a.basis_t AND c.head_hash=a.head_hash \
+              WHERE h.database_id=$1 AND g.build_kind=1 \
+                AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_completions done \
+                                 WHERE done.database_id=h.database_id \
+                                   AND done.generation=h.log_generation)",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("excision/resume-activation", error))?;
+    let Some(row) = row else { return Ok(None) };
+    let generation = positive_or_zero(row.get(0), "generation")?;
+    let source_generation = positive_or_zero(row.get(1), "source generation")?;
+    let basis_t = positive_or_zero(row.get(2), "activation basis")?;
+    let new_head_hash = digest(row.get(3), "activation head")?;
+    let manifest: Option<Vec<u8>> = row.get(4);
+    let request_count = positive_or_zero(row.get(5), "request count")?;
+    let old_head_hash = digest(row.get(6), "captured source head")?;
+    let removed_datoms = positive_or_zero(row.get(7), "removed datoms")?;
+    client
+        .query_one(
+            "SELECT atomic_complete_excision_generation($1,$2,$3)",
+            &[
+                &database_id,
+                &sql_u64(generation, "generation")?,
+                &manifest.as_deref(),
+            ],
+        )
+        .map_err(|error| operation_error("excision/resume-completion", error))?;
+    cleanup_completed_generation_build(client, database_id, generation)?;
+    Ok(Some(ExcisionReceipt {
+        database_id: database_id.to_owned(),
+        source_generation,
+        generation,
+        basis_t,
+        request_count,
+        removed_datoms,
+        old_head_hash,
+        new_head_hash,
+        resumed: true,
+    }))
+}
+
+fn sync_excise_in(
+    client: &mut Client,
+    database_id: &str,
+    through_t: u64,
+) -> Result<bool, SemanticError> {
+    let head = client
+        .query_opt(
+            "SELECT log_generation,basis_t,tx_hash FROM atomic_heads WHERE database_id=$1",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("excision/sync-head", error))?
+        .ok_or_else(|| {
+            SemanticError::new(
+                crate::ErrorCategory::NotFound,
+                "excision/database-not-found",
+                format!("database {database_id} has no published head"),
+            )
+        })?;
+    let generation = positive_or_zero(head.get(0), "generation")?;
+    let basis = positive_or_zero(head.get(1), "basis")?;
+    let hash = digest(head.get(2), "head hash")?;
+    let database = recover_generation_to(client, database_id, generation, basis, hash)?.database;
+    let requested = database
+        .historical_excision_requests()?
+        .into_iter()
+        .filter(|request| request.request_t <= through_t)
+        .map(|request| (request.request_t, request.request_entity))
+        .collect::<BTreeSet<_>>();
+    if requested.is_empty() {
+        return Ok(true);
+    }
+    if generation == 0 {
+        return Ok(false);
+    }
+    let completed = completed_excision_identities(client, database_id, generation)?;
+    Ok(requested.is_subset(&completed))
 }
 
 #[derive(Default)]
@@ -1681,12 +2153,13 @@ fn garbage_candidates<C: postgres::GenericClient>(
                     (SELECT count(*) FROM atomic_tree_retired_nodes n \
                       WHERE n.database_id = r.database_id \
                         AND n.publication_revision = r.publication_revision) \
-               FROM atomic_tree_retirements r \
+              FROM atomic_tree_retirements r \
                JOIN atomic_tree_publications p \
                  ON p.database_id = r.database_id \
                 AND p.publication_revision = r.publication_revision \
                 AND p.manifest_hash = r.manifest_hash \
-              WHERE (EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
+              WHERE r.bookkeeping_complete \
+                AND (EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
                               WHERE progress.database_id = r.database_id \
                                 AND progress.publication_revision = r.publication_revision \
                                 AND progress.manifest_hash = r.manifest_hash) \
@@ -1750,18 +2223,28 @@ fn garbage_candidates<C: postgres::GenericClient>(
         .collect::<Vec<_>>();
     let mut tree_build_intents = Vec::new();
     let mut selected_intent_nodes = Vec::new();
+    let mut selected_intent_delta_nodes = Vec::new();
     let mut marked_intent_nodes = Vec::new();
+    let mut finishing_abandoned_manifests = Vec::new();
     for row in client
         .query(
-            "SELECT database_id, expected_revision, manifest_hash, intent_state \
+            "SELECT database_id, log_generation, expected_revision, manifest_hash, intent_state, \
+                    (SELECT count(*) FROM atomic_tree_build_intent_nodes n \
+                      WHERE n.manifest_hash = i.manifest_hash), \
+                    (SELECT count(*) FROM atomic_tree_delta_nodes d \
+                      WHERE d.manifest_hash = i.manifest_hash) \
                FROM atomic_tree_build_intents i \
-              WHERE i.intent_state = 2 \
+              WHERE (i.intent_state = 2 \
+                     AND NOT EXISTS (SELECT 1 FROM atomic_tree_delta_headers h \
+                                     WHERE h.manifest_hash = i.manifest_hash)) \
                  OR i.intent_state = 3 \
                  OR (i.intent_state IN (0, 1) \
                      AND i.heartbeat_at < clock_timestamp() - \
                                           $1::bigint * interval '1 millisecond' \
                      AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications p \
-                                     WHERE p.manifest_hash = i.manifest_hash)) \
+                                     WHERE p.manifest_hash = i.manifest_hash) \
+                     AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                                     WHERE a.manifest_hash = i.manifest_hash)) \
               ORDER BY CASE WHEN i.intent_state IN (2, 3) THEN 0 ELSE 1 END, \
                        i.heartbeat_at, i.manifest_hash \
               LIMIT $2",
@@ -1769,14 +2252,18 @@ fn garbage_candidates<C: postgres::GenericClient>(
         )
         .map_err(|error| operation_error("operations/gc-tree-build-intents", error))?
     {
-        let state: i16 = row.get(3);
+        let state: i16 = row.get(4);
         let intent = TreeBuildIntentGarbage {
             database_id: row.get(0),
-            expected_revision: positive_or_zero(row.get(1), "build expected revision")?,
-            manifest_hash: digest(row.get(2), "build intent manifest hash")?,
+            log_generation: positive_or_zero(row.get(1), "build log generation")?,
+            expected_revision: positive_or_zero(row.get(2), "build expected revision")?,
+            manifest_hash: digest(row.get(3), "build intent manifest hash")?,
             abandoned: state != 2,
         };
         if try_lock_tree_build_for_gc(client, intent.manifest_hash)? {
+            let intent_node_count = positive_or_zero(row.get(5), "build intent node count")?;
+            let delta_node_count = positive_or_zero(row.get(6), "build delta node count")?;
+            let mut selected_count = 0_usize;
             for node in client
                 .query(
                     "SELECT node_hash, EXISTS (SELECT 1 FROM atomic_tree_nodes stored \
@@ -1793,9 +2280,33 @@ fn garbage_candidates<C: postgres::GenericClient>(
             {
                 let hash = digest(node.get(0), "build intent node hash")?;
                 selected_intent_nodes.push((intent.manifest_hash, hash));
+                selected_count += 1;
                 if intent.abandoned && node.get::<_, bool>(1) {
                     marked_intent_nodes.push(hash);
                 }
+            }
+            let remaining = MAX_TREE_BUILD_INTENT_NODES_PER_GC.saturating_sub(selected_count);
+            if intent.abandoned && remaining > 0 {
+                for node in client
+                    .query(
+                        "SELECT node_hash FROM atomic_tree_delta_nodes \
+                          WHERE manifest_hash = $1 \
+                          ORDER BY node_hash LIMIT $2",
+                        &[&&intent.manifest_hash[..], &(remaining as i64)],
+                    )
+                    .map_err(|error| operation_error("operations/gc-intent-delta-batch", error))?
+                {
+                    selected_intent_delta_nodes.push((
+                        intent.manifest_hash,
+                        digest(node.get(0), "abandoned delta node hash")?,
+                    ));
+                }
+            }
+            if intent.abandoned
+                && intent_node_count.saturating_add(delta_node_count)
+                    <= MAX_TREE_BUILD_INTENT_NODES_PER_GC as u64
+            {
+                finishing_abandoned_manifests.push(intent.manifest_hash);
             }
             tree_build_intents.push(intent);
         }
@@ -1805,6 +2316,8 @@ fn garbage_candidates<C: postgres::GenericClient>(
         &selected_retirement_nodes,
         &finishing_retirements,
         &selected_intent_nodes,
+        &selected_intent_delta_nodes,
+        &finishing_abandoned_manifests,
         &marked_intent_nodes,
     )?;
 
@@ -1849,6 +2362,8 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
     selected_retirement_nodes: &[(String, u64, Digest)],
     finishing_retirements: &[(String, u64, Digest)],
     selected_intent_nodes: &[(Digest, Digest)],
+    selected_intent_delta_nodes: &[(Digest, Digest)],
+    finishing_abandoned_manifests: &[Digest],
     marked_intent_nodes: &[Digest],
 ) -> Result<Vec<Digest>, SemanticError> {
     let retirement_databases = selected_retirement_nodes
@@ -1887,6 +2402,18 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
         .iter()
         .map(|node_hash| node_hash.to_vec())
         .collect::<Vec<_>>();
+    let intent_delta_manifests = selected_intent_delta_nodes
+        .iter()
+        .map(|(manifest_hash, _)| manifest_hash.to_vec())
+        .collect::<Vec<_>>();
+    let intent_delta_nodes = selected_intent_delta_nodes
+        .iter()
+        .map(|(_, node_hash)| node_hash.to_vec())
+        .collect::<Vec<_>>();
+    let finishing_abandoned_manifests = finishing_abandoned_manifests
+        .iter()
+        .map(|manifest_hash| manifest_hash.to_vec())
+        .collect::<Vec<_>>();
     client
         .query(
             "WITH selected_retirement_nodes(database_id, publication_revision, node_hash) AS ( \
@@ -1895,12 +2422,16 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                  SELECT * FROM unnest($4::text[], $5::bigint[], $6::bytea[]) \
              ), selected_intent_nodes(manifest_hash, node_hash) AS ( \
                  SELECT * FROM unnest($7::bytea[], $8::bytea[]) \
+             ), selected_intent_delta_nodes(manifest_hash, node_hash) AS ( \
+                 SELECT * FROM unnest($9::bytea[], $10::bytea[]) \
+             ), finishing_abandoned_manifests(manifest_hash) AS ( \
+                 SELECT * FROM unnest($11::bytea[]) \
              ), pending(node_hash) AS ( \
                  SELECT node_hash FROM atomic_tree_garbage_nodes \
                  UNION \
                  SELECT node_hash FROM selected_retirement_nodes \
                  UNION \
-                 SELECT * FROM unnest($9::bytea[]) \
+                 SELECT * FROM unnest($12::bytea[]) \
              ) \
              SELECT p.node_hash \
                FROM pending p \
@@ -1922,6 +2453,11 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                 AND NOT EXISTS ( \
                         SELECT 1 FROM atomic_tree_delta_nodes d \
                          WHERE d.node_hash = p.node_hash \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM selected_intent_delta_nodes selected \
+                                WHERE selected.manifest_hash = d.manifest_hash \
+                                  AND selected.node_hash = d.node_hash \
+                           ) \
                     ) \
                 AND NOT EXISTS ( \
                         SELECT 1 FROM atomic_tree_build_intent_nodes i \
@@ -1937,6 +2473,10 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                          WHERE r.root_hash = p.node_hash \
                            AND NOT EXISTS ( \
                                SELECT 1 FROM finishing_retirements finishing \
+                                WHERE finishing.manifest_hash = r.manifest_hash \
+                           ) \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM finishing_abandoned_manifests finishing \
                                 WHERE finishing.manifest_hash = r.manifest_hash \
                            ) \
                     ) \
@@ -1994,7 +2534,7 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                                ) \
                     ) \
               ORDER BY p.node_hash \
-              LIMIT $10",
+              LIMIT $13",
             &[
                 &retirement_databases,
                 &retirement_revisions,
@@ -2004,6 +2544,9 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                 &finishing_manifests,
                 &intent_manifests,
                 &intent_nodes,
+                &intent_delta_manifests,
+                &intent_delta_nodes,
+                &finishing_abandoned_manifests,
                 &marked_intent_nodes,
                 &(MAX_TREE_NODES_PER_GC as i64),
             ],

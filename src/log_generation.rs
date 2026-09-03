@@ -369,7 +369,12 @@ impl GenerationTransactionMembership {
         }
         let mut cursor = MEMBERSHIP_DOMAIN.len();
         let lineage_id = std::str::from_utf8(take(bytes, &mut cursor, 36)?)
-            .map_err(|_| fault("generation/membership-lineage", "membership lineage is not UTF-8"))?
+            .map_err(|_| {
+                fault(
+                    "generation/membership-lineage",
+                    "membership lineage is not UTF-8",
+                )
+            })?
             .to_owned();
         let generation = read_u64(bytes, &mut cursor)?;
         let basis_t = read_u64(bytes, &mut cursor)?;

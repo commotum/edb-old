@@ -356,6 +356,49 @@ impl RecentTier {
         endpoint_projection: EndpointProjection,
         limits: RecentLimits,
     ) -> Result<Self, SemanticError> {
+        Self::new_entries(
+            database_id,
+            base_t,
+            base_hash,
+            transactions.into_iter().map(|transaction| (None, transaction)),
+            endpoint_projection,
+            limits,
+        )
+    }
+
+    /// Construct a recent value from log entries whose chain hashes were
+    /// already authenticated by the durable log reader. Generation logs hash
+    /// their immutable membership envelope, not merely the portable
+    /// transaction payload, so that hash cannot be recomputed from
+    /// `DurableTransaction` alone.
+    pub(crate) fn new_authenticated(
+        database_id: impl Into<String>,
+        base_t: u64,
+        base_hash: Digest,
+        transactions: impl IntoIterator<Item = (Digest, DurableTransaction)>,
+        endpoint_projection: EndpointProjection,
+        limits: RecentLimits,
+    ) -> Result<Self, SemanticError> {
+        Self::new_entries(
+            database_id,
+            base_t,
+            base_hash,
+            transactions
+                .into_iter()
+                .map(|(hash, transaction)| (Some(hash), transaction)),
+            endpoint_projection,
+            limits,
+        )
+    }
+
+    fn new_entries(
+        database_id: impl Into<String>,
+        base_t: u64,
+        base_hash: Digest,
+        transactions: impl IntoIterator<Item = (Option<Digest>, DurableTransaction)>,
+        endpoint_projection: EndpointProjection,
+        limits: RecentLimits,
+    ) -> Result<Self, SemanticError> {
         limits.validate()?;
         t_to_tx(base_t)?;
         let database_id = database_id.into();
@@ -375,11 +418,17 @@ impl RecentTier {
         let mut datom_count = 0_u64;
         let mut byte_count = 0_u64;
         let mut accounted_count = 0_u64;
-        for transaction in transactions {
+        for (authenticated_hash, transaction) in transactions {
             expected_t = expected_t.checked_add(1).ok_or_else(|| {
                 fault("recent/basis-overflow", "recent transaction basis overflow")
             })?;
-            let entry = authenticate_entry(&database_id, expected_t, expected_hash, transaction)?;
+            let entry = authenticate_entry(
+                &database_id,
+                expected_t,
+                expected_hash,
+                transaction,
+                authenticated_hash,
+            )?;
             let entry_datoms = entry.transaction.tx_data.len() as u64;
             work.authenticated_datoms = work.authenticated_datoms.saturating_add(entry_datoms);
             work.bulk_rebuild_datoms = work.bulk_rebuild_datoms.saturating_add(entry_datoms);
@@ -444,6 +493,30 @@ impl RecentTier {
         transactions: impl IntoIterator<Item = DurableTransaction>,
         endpoint_projection: EndpointProjection,
     ) -> Result<Self, SemanticError> {
+        self.extend_entries(
+            transactions.into_iter().map(|transaction| (None, transaction)),
+            endpoint_projection,
+        )
+    }
+
+    pub(crate) fn extend_authenticated(
+        &self,
+        transactions: impl IntoIterator<Item = (Digest, DurableTransaction)>,
+        endpoint_projection: EndpointProjection,
+    ) -> Result<Self, SemanticError> {
+        self.extend_entries(
+            transactions
+                .into_iter()
+                .map(|(hash, transaction)| (Some(hash), transaction)),
+            endpoint_projection,
+        )
+    }
+
+    fn extend_entries(
+        &self,
+        transactions: impl IntoIterator<Item = (Option<Digest>, DurableTransaction)>,
+        endpoint_projection: EndpointProjection,
+    ) -> Result<Self, SemanticError> {
         let mut expected_t = self.stats.end_t;
         let mut end_hash = self.stats.end_hash;
         let mut datom_count = self.stats.datoms;
@@ -458,11 +531,17 @@ impl RecentTier {
             &mut indexes,
             &mut last_work,
         )?;
-        for transaction in transactions {
+        for (authenticated_hash, transaction) in transactions {
             expected_t = expected_t.checked_add(1).ok_or_else(|| {
                 fault("recent/basis-overflow", "recent transaction basis overflow")
             })?;
-            let entry = authenticate_entry(&self.database_id, expected_t, end_hash, transaction)?;
+            let entry = authenticate_entry(
+                &self.database_id,
+                expected_t,
+                end_hash,
+                transaction,
+                authenticated_hash,
+            )?;
             let entry_datoms = entry.transaction.tx_data.len() as u64;
             last_work.authenticated_datoms =
                 last_work.authenticated_datoms.saturating_add(entry_datoms);
@@ -908,6 +987,7 @@ fn authenticate_entry(
     expected_t: u64,
     expected_hash: Digest,
     transaction: DurableTransaction,
+    authenticated_hash: Option<Digest>,
 ) -> Result<RecentEntry, SemanticError> {
     if transaction.database_id != database_id {
         return Err(fault(
@@ -931,7 +1011,7 @@ fn authenticate_entry(
         ));
     }
     let encoded = encode_transaction(&transaction)?;
-    let hash = transaction_hash(&encoded);
+    let hash = authenticated_hash.unwrap_or_else(|| transaction_hash(&encoded));
     let locator_bytes = (transaction.tx_data.len() as u64)
         .saturating_mul(size_of::<RecentDatomRef>() as u64)
         .saturating_mul(MAX_BTSET_REFERENCES_PER_DATOM);

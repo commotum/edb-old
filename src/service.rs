@@ -1,9 +1,9 @@
+use crate::log_generation::request_key_hash;
 use crate::postgres::{
     CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
     is_postgres_connection_error, postgres_error, read_authenticated_log_range,
     shared_program_cache_stats,
 };
-use crate::log_generation::request_key_hash;
 use crate::{
     Database, Datom, Digest, ErrorCategory, IndexOrder, PersistentTreeManifest,
     PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
@@ -1339,9 +1339,8 @@ fn load_indexing_seed(
         )? {
             published_revision = publication_revision;
             published_basis_t = basis_t;
-            published_hash = candidate_digest(tx_hash_bytes).expect(
-                "a usable native publication has an authenticated transaction hash",
-            );
+            published_hash = candidate_digest(tx_hash_bytes)
+                .expect("a usable native publication has an authenticated transaction hash");
             break;
         }
     }

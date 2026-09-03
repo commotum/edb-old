@@ -1,20 +1,15 @@
 use atomic_core::{
-    Attribute, Cardinality, EntityRef, ErrorCategory, ExcisionFault, ExcisionSpec, ExcisionTarget,
-    IndexOrder, Keyword, Peer, PortableBackup, PostgresIndexer, PostgresOperator, PostgresStore,
-    Schema, TxOp, TxValue, USER_PARTITION, Value, ValueType, View, make_eid, t_to_tx,
+    Attribute, Cardinality, DB_EXCISE, EntityRef, ErrorCategory, ExcisionFault, IndexOrder,
+    Keyword, Peer, PostgresOperator, PostgresStore, Schema, TxOp, TxValue, USER_PARTITION, Value,
+    ValueType, View, make_eid,
 };
-use postgres::{Client, NoTls};
-use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod common;
 
-const DB_TX_INSTANT: u32 = 50;
 const SECRET: u32 = 1_000;
 const RETAINED: u32 = 1_001;
-const CHILD: u32 = 1_002;
-const RELATED: u32 = 1_003;
+const RELATED: u32 = 1_002;
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
@@ -33,10 +28,6 @@ fn unique(prefix: &str) -> String {
             .unwrap()
             .as_nanos()
     )
-}
-
-fn backup_directory() -> PathBuf {
-    std::env::temp_dir().join(unique("atomic_excision_backup"))
 }
 
 fn schema() -> Schema {
@@ -58,17 +49,6 @@ fn schema() -> Schema {
         ))
         .unwrap();
     schema
-        .install(
-            Attribute::new(
-                CHILD,
-                Keyword::new("person", "child"),
-                ValueType::Ref,
-                Cardinality::Many,
-            )
-            .component(),
-        )
-        .unwrap();
-    schema
         .install(Attribute::new(
             RELATED,
             Keyword::new("person", "related"),
@@ -87,22 +67,12 @@ fn add(entity: u64, attribute: u32, value: Value) -> TxOp {
     }
 }
 
-fn contains_entity(database: &atomic_core::Database, entity: u64) -> bool {
-    database
-        .datoms(View::History, IndexOrder::Eavt)
-        .iter()
-        .any(|datom| {
-            datom.entity == entity || matches!(datom.value, Value::Ref(value) if value == entity)
-        })
-}
-
 #[test]
-fn entity_excision_is_atomic_recursive_audited_and_invalidates_peers() {
+fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
     let Some(connection) = connection() else {
         return;
     };
-    let database_id = unique("excise_entity");
-    let directory = backup_directory();
+    let database_id = unique("a15_cow");
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
@@ -110,216 +80,87 @@ fn entity_excision_is_atomic_recursive_audited_and_invalidates_peers() {
     let service = common::start_service(&connection, &database_id);
     let seeded = common::transact(
         &service,
-        "seed",
+        "seed-private-person",
         created.basis_t(),
         &[
-            add(user(42), SECRET, Value::String("root-secret".into())),
+            add(user(42), SECRET, Value::String("erase-this-secret".into())),
             add(user(42), RETAINED, Value::Long(7)),
-            add(user(42), CHILD, Value::Ref(user(43))),
-            add(user(43), SECRET, Value::String("child-secret".into())),
-            add(user(44), RELATED, Value::Ref(user(42))),
-            add(user(44), RETAINED, Value::Long(9)),
+            add(user(43), RELATED, Value::Ref(user(42))),
         ],
         1_000,
     );
+    let requested = common::transact(
+        &service,
+        "ordinary-a15-request",
+        seeded.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("privacy-request".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(42))),
+        }],
+        2_000,
+    );
+    let request_entity = requested.tempids["privacy-request"];
     service.shutdown();
-    let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
-    indexer.consolidate().unwrap();
-    let peer = Peer::connect(&connection, &database_id, 8).unwrap();
-    let old_snapshot = peer.db();
-    assert!(contains_entity(&old_snapshot, user(42)));
 
-    let mut backups = PortableBackup::connect(&connection).unwrap();
-    backups.backup_database(&database_id, &directory).unwrap();
-    let verified = PortableBackup::verify_backup(&directory, seeded.basis_t, true).unwrap();
-    let spec = ExcisionSpec {
-        excision_id: "forget-person-1000".into(),
-        target: ExcisionTarget::Entity {
-            entity: user(42),
-            attributes: Vec::new(),
-        },
-        before_t: None,
-    };
+    let peer = Peer::connect(&connection, &database_id, 8).unwrap();
+    let old_value = peer.db();
+    assert_eq!(
+        old_value.values(user(42), SECRET),
+        vec![&Value::String("erase-this-secret".into())]
+    );
     let mut operator = PostgresOperator::connect(&connection).unwrap();
-    let error = operator
-        .excise_database_with_fault(&database_id, &spec, &verified, ExcisionFault::AfterRewrite)
+    assert!(!operator.sync_excise(&database_id, requested.basis_t).unwrap());
+
+    let interrupted = operator
+        .process_excision_requests_with_fault(&database_id, ExcisionFault::AfterActivation)
         .unwrap_err();
     assert_eq!(
-        (error.category, error.code),
+        (interrupted.category, interrupted.code),
         (ErrorCategory::Interrupted, "excision/injected-fault")
     );
-    assert!(
-        PostgresStore::connect(&connection)
-            .unwrap()
-            .recover(&database_id)
-            .map(|database| contains_entity(&database, user(42)))
-            .unwrap()
-    );
-    let mut raw = Client::connect(&connection, NoTls).unwrap();
-    assert_eq!(
-        raw.query_one(
-            "SELECT count(*) FROM atomic_excisions WHERE database_id = $1",
-            &[&database_id],
-        )
-        .unwrap()
-        .get::<_, i64>(0),
-        0
-    );
-    assert_eq!(
-        raw.query_one(
-            "SELECT count(*) FROM atomic_index_manifests WHERE database_id = $1",
-            &[&database_id],
-        )
-        .unwrap()
-        .get::<_, i64>(0),
-        1
-    );
+    // Head activation is authoritative, but sync-excise remains false until
+    // the separate root-last completion marker is durable.
+    let switched = store.recover(&database_id).unwrap();
+    assert!(switched.values(user(42), SECRET).is_empty());
+    assert!(!operator.sync_excise(&database_id, requested.basis_t).unwrap());
 
-    let receipt = operator
-        .excise_database(&database_id, &spec, &verified)
-        .unwrap();
-    assert!(!receipt.replayed);
-    assert!(receipt.removed_datoms >= 5);
-    assert_ne!(receipt.old_head_hash, receipt.new_head_hash);
-    assert_eq!(receipt.generation, 1);
-    assert!(contains_entity(&old_snapshot, user(42)));
-    let refreshed = peer.sync().unwrap();
-    assert_eq!(peer.excision_generation(), 1);
-    assert!(!contains_entity(&refreshed, user(42)));
-    assert!(!contains_entity(&refreshed, user(43)));
-    assert_eq!(refreshed.values(user(44), RETAINED), vec![&Value::Long(9)]);
+    let receipt = operator.process_excision_requests(&database_id).unwrap();
+    assert!(receipt.resumed);
+    assert_eq!(receipt.request_count, 1);
+    assert!(receipt.removed_datoms >= 3);
+    assert_ne!(receipt.source_generation, receipt.generation);
+    assert!(operator.sync_excise(&database_id, requested.basis_t).unwrap());
+
+    // Existing immutable peer values retain their old branch. Refresh chooses
+    // the new generation and no query-visible history contains the secret.
     assert_eq!(
-        raw.query_one(
-            "SELECT count(*) FROM atomic_index_manifests WHERE database_id = $1",
-            &[&database_id],
-        )
-        .unwrap()
-        .get::<_, i64>(0),
-        0
+        old_value.values(user(42), SECRET),
+        vec![&Value::String("erase-this-secret".into())]
     );
-    for secret in ["root-secret", "child-secret"] {
-        assert_eq!(
-            raw.query_one(
-                "SELECT count(*) FROM atomic_transactions \
-                 WHERE database_id = $1 AND position(convert_to($2, 'UTF8') in payload) > 0",
-                &[&database_id, &secret],
-            )
-            .unwrap()
-            .get::<_, i64>(0),
-            0
-        );
-        assert_eq!(
-            raw.query_one(
-                "SELECT count(*) FROM atomic_index_segments \
-                 WHERE position(convert_to($1, 'UTF8') in payload) > 0",
-                &[&secret],
-            )
-            .unwrap()
-            .get::<_, i64>(0),
-            0
-        );
-    }
-    let recovered = PostgresStore::connect(&connection)
+    let refreshed = peer.sync().unwrap();
+    assert!(refreshed.values(user(42), SECRET).is_empty());
+    assert!(refreshed.values(user(42), RETAINED).is_empty());
+    assert!(refreshed.values(user(43), RELATED).is_empty());
+    assert!(!refreshed
+        .datoms(View::History, IndexOrder::Eavt)
+        .iter()
+        .any(|datom| datom.value == Value::String("erase-this-secret".into())));
+    // The ordinary A=15 assertion remains the permanent semantic audit fact.
+    assert!(refreshed
+        .datoms(View::History, IndexOrder::Eavt)
+        .iter()
+        .any(|datom| datom.entity == request_entity
+            && datom.attribute == DB_EXCISE as u32
+            && datom.value == Value::Ref(user(42))));
+
+    let restarted = PostgresStore::connect(&connection)
         .unwrap()
         .recover(&database_id)
         .unwrap();
-    assert!(!contains_entity(&recovered, user(42)));
-    assert!(
-        PostgresOperator::connect(&connection)
-            .unwrap()
-            .inspect_database(&database_id, true)
-            .unwrap()
-            .healthy()
-    );
-    assert!(
-        operator
-            .excise_database(&database_id, &spec, &verified)
-            .unwrap()
-            .replayed
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn attribute_cutoff_backup_binding_and_protected_facts_are_enforced() {
-    let Some(connection) = connection() else {
-        return;
-    };
-    let database_id = unique("excise_attribute");
-    let other_database = unique("excise_other");
-    let directory = backup_directory();
-    let other_directory = backup_directory();
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
-    let created = store.create_database(&database_id, schema()).unwrap();
-    let service = common::start_service(&connection, &database_id);
-    let old = common::transact(
-        &service,
-        "old",
-        created.basis_t(),
-        &[add(user(45), SECRET, Value::String("old-secret".into()))],
-        1_000,
-    );
-    let new = common::transact(
-        &service,
-        "new",
-        old.basis_t,
-        &[add(user(45), SECRET, Value::String("new-retained".into()))],
-        2_000,
-    );
-    service.shutdown();
-    let other = store.create_database(&other_database, schema()).unwrap();
-    let mut backups = PortableBackup::connect(&connection).unwrap();
-    backups.backup_database(&database_id, &directory).unwrap();
-    backups
-        .backup_database(&other_database, &other_directory)
-        .unwrap();
-    let verified = PortableBackup::verify_backup(&directory, new.basis_t, true).unwrap();
-    let wrong = PortableBackup::verify_backup(&other_directory, other.basis_t(), true).unwrap();
-    let spec = ExcisionSpec {
-        excision_id: "retention-window".into(),
-        target: ExcisionTarget::Attribute(SECRET),
-        before_t: Some(t_to_tx(new.basis_t).unwrap()),
-    };
-    let mut operator = PostgresOperator::connect(&connection).unwrap();
-    let error = operator
-        .excise_database(&database_id, &spec, &wrong)
-        .unwrap_err();
-    assert_eq!(error.code, "excision/backup-does-not-cover-head");
-    for target in [
-        ExcisionTarget::Attribute(DB_TX_INSTANT),
-        ExcisionTarget::Entity {
-            entity: 1,
-            attributes: Vec::new(),
-        },
-    ] {
-        let protected = ExcisionSpec {
-            excision_id: unique("protected"),
-            target,
-            before_t: None,
-        };
-        let error = operator
-            .excise_database(&database_id, &protected, &verified)
-            .unwrap_err();
-        assert_eq!(error.category, ErrorCategory::Forbidden);
-    }
-    let receipt = operator
-        .excise_database(&database_id, &spec, &verified)
-        .unwrap();
-    assert_eq!(receipt.removed_datoms, 1);
-    let recovered = store.recover(&database_id).unwrap();
+    assert_eq!(restarted.basis_t(), refreshed.basis_t());
     assert_eq!(
-        recovered.values(user(45), SECRET),
-        vec![&Value::String("new-retained".into())]
+        restarted.datoms(View::History, IndexOrder::Eavt),
+        refreshed.datoms(View::History, IndexOrder::Eavt)
     );
-    assert!(
-        !recovered
-            .datoms(View::History, IndexOrder::Eavt)
-            .iter()
-            .any(|datom| datom.value == Value::String("old-secret".into()))
-    );
-
-    fs::remove_dir_all(directory).unwrap();
-    fs::remove_dir_all(other_directory).unwrap();
 }

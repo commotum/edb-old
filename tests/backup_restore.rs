@@ -70,14 +70,21 @@ fn manifest_v4_root_shape(path: &std::path::Path) -> (usize, bool) {
     assert_eq!(u16::from_be_bytes(bytes[4..6].try_into().unwrap()), 4);
     let mut at = 14;
     let lineage_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    at += 4 + lineage_len + 8 + 32;
-    at += 32 + 32 + 32;
+    at += 4 + lineage_len + 8 + 8 + 32;
+    at += 32 + 32 + 32 + 32;
     let has_tree = match bytes[at] {
         0 => false,
         1 => true,
         value => panic!("invalid tree tag {value}"),
     };
     (bytes.len(), has_tree)
+}
+
+fn snapshot_path(directory: &std::path::Path, point: &atomic_core::BackupPoint) -> PathBuf {
+    directory.join("snapshots").join(format!(
+        "{:020}-g{:020}.atbk",
+        point.basis_t, point.log_generation
+    ))
 }
 
 fn schema() -> Schema {
@@ -141,40 +148,15 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     let second = backup.backup_database(&source, &directory).unwrap();
     assert_eq!(second.basis_t, basis2);
     assert!(second.objects_reused >= 3);
-    let first_root_shape = manifest_v4_root_shape(
-        &directory
-            .join("snapshots")
-            .join(format!("{:020}.atbk", basis1.basis_t())),
-    );
-    let second_root_shape = manifest_v4_root_shape(
-        &directory
-            .join("snapshots")
-            .join(format!("{basis2:020}.atbk")),
-    );
+    let first_root_shape = manifest_v4_root_shape(&snapshot_path(&directory, &first));
+    let second_root_shape = manifest_v4_root_shape(&snapshot_path(&directory, &second));
     assert_eq!(first_root_shape, second_root_shape);
-    assert!(second_root_shape.0 <= 256);
+    assert!(second_root_shape.0 <= 320);
     assert_eq!(
         PortableBackup::list_backups(&directory).unwrap(),
         vec![basis1.basis_t(), basis2]
     );
 
-    // Named version/activation rows are mutable operator configuration, not
-    // temporal database information. Changing them without a transaction
-    // must not change the canonical backup at this t.
-    let operator_program = Program {
-        kind: ProgramKind::Query,
-        arity: 0,
-        instructions: vec![
-            Instruction::PushConstant(Value::Long(42)),
-            Instruction::Return,
-        ],
-    };
-    store
-        .deploy_program(&source, "operator-answer", 1, &operator_program)
-        .unwrap();
-    store
-        .activate_program(&source, "operator-answer", None, 1)
-        .unwrap();
     let alias_retry = backup.backup_database(&source, &directory).unwrap();
     assert_eq!(alias_retry.manifest_hash, second.manifest_hash);
     assert_eq!(alias_retry.objects_written, 0);
@@ -289,11 +271,6 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
         .unwrap()
         .get(0);
     assert_eq!(target_lineage, source_lineage);
-    let mut restored_operator = PostgresStore::connect(&target2_connection).unwrap();
-    let alias_error = restored_operator
-        .resolve_active_program(&target2, "operator-answer")
-        .unwrap_err();
-    assert_eq!(alias_error.code, "postgres/active-program-not-found");
     let renamed_retry = target2_restore
         .backup_database(&target2, &directory)
         .unwrap();
@@ -490,8 +467,19 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
                 &[&before_commit],
             )
             .unwrap()
+            .is_some()
+    );
+    assert!(
+        client
+            .query_opt(
+                "SELECT 1 FROM atomic_heads WHERE database_id = $1",
+                &[&before_commit],
+            )
+            .unwrap()
             .is_none()
     );
+    let mut unpublished = PostgresStore::connect(&before_connection).unwrap();
+    assert!(unpublished.recover(&before_commit).is_err());
     let restored = before_restore
         .restore_backup(&directory, committed.basis_t, &before_commit)
         .unwrap();

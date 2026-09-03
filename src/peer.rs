@@ -577,14 +577,14 @@ impl PostgresIndexer {
                     ],
                 )
             })
-                .map_err(|error| postgres_error("tree/authoritative-state", error))?
-                .ok_or_else(|| {
-                    fault(
-                        "tree/missing-authoritative-state",
-                        "head has no transaction state commitment in its active generation",
-                    )
-                })?
-                .get(0),
+            .map_err(|error| postgres_error("tree/authoritative-state", error))?
+            .ok_or_else(|| {
+                fault(
+                    "tree/missing-authoritative-state",
+                    "head has no transaction state commitment in its active generation",
+                )
+            })?
+            .get(0),
             "authoritative tree state commitment",
         )?;
         let selection = load_latest_native_manifest(
@@ -720,6 +720,7 @@ impl PostgresIndexer {
         let upload_hashes = build.nodes.iter().map(|(hash, _)| *hash).collect();
         self.tree_store.begin_build_intent(
             &self.database_id,
+            tree_record.excision_generation,
             expected_publication_revision,
             tree_manifest_hash,
             &upload_hashes,
@@ -2228,7 +2229,10 @@ impl RootPinManager {
         if let Some(client) = state.client.as_mut()
             && let Ok(row) = client.query_opt(
                 "SELECT atomic_log_generation_pin_key($1, $2)",
-                &[&self.database_id, &sql_basis(generation).unwrap_or(i64::MAX)],
+                &[
+                    &self.database_id,
+                    &sql_basis(generation).unwrap_or(i64::MAX),
+                ],
             )
             && let Some(row) = row
         {
@@ -2548,15 +2552,13 @@ impl Peer {
             } else {
                 None
             };
-            let (mut database, mut current_hash, durable_base_t) =
-                match legacy_base {
-                    Some(base) => base,
-                    None => {
-                        let recovered =
-                            recover_to(&mut client, &database_id, head_basis, head_hash)?;
-                        (recovered.database, recovered.final_hash, 0)
-                    }
-                };
+            let (mut database, mut current_hash, durable_base_t) = match legacy_base {
+                Some(base) => base,
+                None => {
+                    let recovered = recover_to(&mut client, &database_id, head_basis, head_hash)?;
+                    (recovered.database, recovered.final_hash, 0)
+                }
+            };
             if database.basis_t() < head_basis {
                 apply_tail(
                     &mut client,
@@ -2573,12 +2575,8 @@ impl Peer {
                     "legacy peer open does not reach observed head",
                 ));
             }
-            let state_hash = read_state_hash(
-                &mut client,
-                &database_id,
-                excision_generation,
-                head_basis,
-            )?;
+            let state_hash =
+                read_state_hash(&mut client, &database_id, excision_generation, head_basis)?;
             let metadata = Arc::new(MetadataProjection::from_database(&database)?);
             let recent = Arc::new(RecentTier::new(
                 &database_id,
@@ -4458,13 +4456,13 @@ fn read_state_hash<C: GenericClient>(
             ],
         )
     }
-        .map_err(|error| postgres_error("peer/state-hash", error))?
-        .ok_or_else(|| {
-            fault(
-                "peer/missing-state-hash",
-                "snapshot endpoint row is missing",
-            )
-        })?;
+    .map_err(|error| postgres_error("peer/state-hash", error))?
+    .ok_or_else(|| {
+        fault(
+            "peer/missing-state-hash",
+            "snapshot endpoint row is missing",
+        )
+    })?;
     digest(row.get(0), "snapshot state commitment")
 }
 

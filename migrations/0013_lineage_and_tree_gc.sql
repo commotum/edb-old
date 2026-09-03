@@ -25,6 +25,35 @@ ALTER TABLE atomic_databases
         CHECK (lineage_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
     ADD CONSTRAINT atomic_databases_lineage_id_key UNIQUE (lineage_id);
 
+-- Coarse liveness only for operations that must exclude every active tree or
+-- generation builder of one durable database (notably point restore). Normal
+-- root GC uses the finer manifest lock and never waits for unrelated peers.
+CREATE OR REPLACE FUNCTION atomic_tree_database_build_pin_key(
+    candidate_database_id TEXT
+)
+RETURNS BIGINT
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+    candidate_lineage TEXT;
+BEGIN
+    SELECT lineage_id INTO candidate_lineage
+      FROM atomic_databases
+     WHERE database_id = candidate_database_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Atomic tree build database does not exist'
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN hashtextextended('atomic/tree-build-db/' || candidate_lineage, 0);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION atomic_tree_database_build_pin_key(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION atomic_tree_database_build_pin_key(TEXT) TO CURRENT_USER;
+
 -- Program bytes are content-addressed values prepared before ordinary
 -- :db/fn information refers to them. Every deployment is therefore a future
 -- age-gated candidate, while per-log-generation temporal references are the
@@ -113,6 +142,10 @@ CREATE TABLE atomic_tree_retirements (
     publication_revision BIGINT NOT NULL CHECK (publication_revision > 0),
     manifest_hash BYTEA NOT NULL CHECK (octet_length(manifest_hash) = 32),
     retired_at TIMESTAMPTZ NOT NULL,
+    -- False while the successor's durable delta is still being folded into
+    -- current membership and the exact old-minus-new ledger.  Root GC must
+    -- not claim this publication until the bounded fold seals it.
+    bookkeeping_complete BOOLEAN NOT NULL,
     garbage_complete BOOLEAN NOT NULL,
     PRIMARY KEY (database_id, publication_revision),
     UNIQUE (manifest_hash),
@@ -178,6 +211,7 @@ CREATE INDEX atomic_tree_garbage_nodes_age
 CREATE TABLE atomic_tree_build_intents (
     manifest_hash BYTEA PRIMARY KEY CHECK (octet_length(manifest_hash) = 32),
     database_id TEXT NOT NULL REFERENCES atomic_databases(database_id),
+    log_generation BIGINT NOT NULL CHECK (log_generation >= 0),
     expected_revision BIGINT NOT NULL CHECK (expected_revision >= 0),
     expected_node_count BIGINT NOT NULL CHECK (expected_node_count >= 0),
     staged_node_count BIGINT NOT NULL DEFAULT 0 CHECK (
@@ -208,15 +242,30 @@ CREATE TABLE atomic_tree_build_intent_nodes (
 CREATE INDEX atomic_tree_build_intent_nodes_hash
     ON atomic_tree_build_intent_nodes (node_hash, manifest_hash);
 
--- Transaction-local staging lets the ordinary Rust publisher write an O(delta)
--- set before the root.  The root trigger consumes it atomically, so no added
--- membership can appear after a retired membership is removed.
+-- Publication work is staged and sealed before the root transaction.  The
+-- final root only verifies this compact commitment and flips delta_state from
+-- 1 to 2.  Bounded owner transactions subsequently fold the rows into live
+-- membership and the predecessor's exact retirement ledger.
 CREATE TABLE atomic_tree_delta_headers (
-    manifest_hash BYTEA PRIMARY KEY REFERENCES atomic_tree_manifests(manifest_hash),
-    predecessor_manifest_hash BYTEA REFERENCES atomic_tree_manifests(manifest_hash)
-        ON DELETE CASCADE,
+    manifest_hash BYTEA PRIMARY KEY CHECK (octet_length(manifest_hash) = 32),
+    predecessor_manifest_hash BYTEA CHECK (
+        predecessor_manifest_hash IS NULL
+        OR octet_length(predecessor_manifest_hash) = 32
+    ),
     delta_mode SMALLINT NOT NULL CHECK (delta_mode BETWEEN 0 AND 2),
     -- 0 unknown/conservative, 1 complete replacement, 2 exact incremental
+    expected_node_count BIGINT NOT NULL CHECK (expected_node_count >= 0),
+    staged_node_count BIGINT NOT NULL DEFAULT 0 CHECK (
+        staged_node_count >= 0 AND staged_node_count <= expected_node_count
+    ),
+    delta_set_hash BYTEA NOT NULL CHECK (octet_length(delta_set_hash) = 32),
+    added_node_count BIGINT NOT NULL CHECK (
+        added_node_count >= 0 AND added_node_count <= expected_node_count
+    ),
+    added_set_hash BYTEA NOT NULL CHECK (octet_length(added_set_hash) = 32),
+    -- 0=staging, 1=sealed/unpublished, 2=published/folding.
+    delta_state SMALLINT NOT NULL DEFAULT 0 CHECK (delta_state BETWEEN 0 AND 2),
+    CHECK (delta_state = 0 OR staged_node_count = expected_node_count),
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
@@ -230,6 +279,9 @@ CREATE TABLE atomic_tree_delta_nodes (
 
 CREATE INDEX atomic_tree_delta_nodes_hash
     ON atomic_tree_delta_nodes (node_hash, manifest_hash);
+
+CREATE INDEX atomic_tree_delta_nodes_direction
+    ON atomic_tree_delta_nodes (manifest_hash, direction, node_hash);
 
 -- O(1) publication provenance makes ambiguous retries auditable without
 -- retaining the transient added-node half of every delta.
@@ -248,19 +300,21 @@ AS $$
 DECLARE
     mode SMALLINT;
     predecessor BYTEA;
+    expected_nodes BIGINT;
+    staged_nodes BIGINT;
+    added_nodes BIGINT;
+    added_hash BYTEA;
+    work_state SMALLINT;
     current_hash BYTEA;
     current_complete BOOLEAN;
-    invalid_nodes BIGINT;
     covered_roots BIGINT;
 BEGIN
-    SELECT delta_mode, predecessor_manifest_hash
-      INTO mode, predecessor
+    SELECT delta_mode, predecessor_manifest_hash, expected_node_count,
+           staged_node_count, added_node_count, added_set_hash, delta_state
+      INTO STRICT mode, predecessor, expected_nodes, staged_nodes,
+                  added_nodes, added_hash, work_state
       FROM atomic_tree_delta_headers
      WHERE manifest_hash = NEW.manifest_hash;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Atomic tree publication requires one explicit delta header'
-            USING ERRCODE = '23503';
-    END IF;
 
     SELECT p.manifest_hash, COALESCE(l.complete, false)
       INTO current_hash, current_complete
@@ -282,35 +336,35 @@ BEGIN
     END IF;
 
     IF mode = 0 THEN
-        IF EXISTS (
-            SELECT 1 FROM atomic_tree_delta_nodes
-             WHERE manifest_hash = NEW.manifest_hash
-        ) THEN
+        IF expected_nodes <> 0 OR staged_nodes <> 0 OR added_nodes <> 0
+           OR work_state <> 1 THEN
             RAISE EXCEPTION 'Unknown Atomic tree delta cannot claim node changes'
                 USING ERRCODE = '23514';
         END IF;
         RETURN NEW;
     END IF;
 
-    IF NOT EXISTS (
+    IF work_state <> 1 OR staged_nodes <> expected_nodes OR NOT EXISTS (
         SELECT 1 FROM atomic_tree_build_intents i
          WHERE i.manifest_hash = NEW.manifest_hash
            AND i.database_id = NEW.database_id
            AND i.expected_revision = NEW.publication_revision - 1
+           AND i.log_generation = (
+               SELECT m.excision_generation FROM atomic_tree_manifests m
+                WHERE m.manifest_hash = NEW.manifest_hash
+           )
            AND i.intent_state = 1
            AND i.staged_node_count = i.expected_node_count
-    ) OR EXISTS (
-        SELECT 1 FROM atomic_tree_delta_nodes d
-         WHERE d.manifest_hash = NEW.manifest_hash
-           AND d.direction = 1
-           AND NOT EXISTS (
-               SELECT 1 FROM atomic_tree_build_intent_nodes i
-                WHERE i.manifest_hash = d.manifest_hash
-                  AND i.node_hash = d.node_hash
-           )
+           AND i.expected_node_count = added_nodes
+           AND i.node_set_hash = added_hash
     ) THEN
-        RAISE EXCEPTION 'Atomic tree publication lacks its pre-upload intent'
+        RAISE EXCEPTION 'Atomic tree publication lacks its sealed pre-upload work'
             USING ERRCODE = '23514';
+    END IF;
+
+    IF current_hash IS NOT NULL AND NOT current_complete THEN
+        RAISE EXCEPTION 'Previous Atomic tree publication work is incomplete'
+            USING ERRCODE = '55000';
     END IF;
 
     IF mode = 1 THEN
@@ -333,17 +387,6 @@ BEGIN
 
     IF predecessor IS NULL OR NOT current_complete THEN
         RAISE EXCEPTION 'Incremental Atomic tree delta requires a complete predecessor membership'
-            USING ERRCODE = '23514';
-    END IF;
-    SELECT count(*) INTO invalid_nodes
-      FROM atomic_tree_delta_nodes d
-      LEFT JOIN atomic_tree_live_nodes l
-        ON l.database_id = NEW.database_id AND l.node_hash = d.node_hash
-     WHERE d.manifest_hash = NEW.manifest_hash
-       AND d.direction = -1
-       AND l.node_hash IS NULL;
-    IF invalid_nodes <> 0 THEN
-        RAISE EXCEPTION 'Incremental Atomic tree delta retires a non-live node'
             USING ERRCODE = '23514';
     END IF;
     SELECT count(*) INTO covered_roots
@@ -393,98 +436,47 @@ DECLARE
     mode SMALLINT;
     predecessor_revision BIGINT;
     predecessor_hash BYTEA;
-    predecessor_complete BOOLEAN;
 BEGIN
     SELECT delta_mode, predecessor_manifest_hash
       INTO STRICT mode, predecessor_hash
       FROM atomic_tree_delta_headers
      WHERE manifest_hash = NEW.manifest_hash;
 
-    SELECT p.publication_revision, COALESCE(l.complete, false)
-      INTO predecessor_revision, predecessor_complete
+    SELECT p.publication_revision
+      INTO predecessor_revision
       FROM atomic_tree_publications p
-      LEFT JOIN atomic_tree_live_sets l
-        ON l.database_id = p.database_id AND l.manifest_hash = p.manifest_hash
      WHERE p.database_id = NEW.database_id
        AND p.publication_revision = NEW.publication_revision - 1
        AND p.manifest_hash = predecessor_hash;
 
-    -- Added/reintroduced content becomes protected before any old membership
-    -- is removed. PostgreSQL FK row locking then closes the content-first/GC
-    -- race across databases.
-    INSERT INTO atomic_tree_live_nodes (database_id, node_hash)
-    SELECT NEW.database_id, node_hash
-      FROM atomic_tree_delta_nodes
-     WHERE manifest_hash = NEW.manifest_hash AND direction = 1
-    ON CONFLICT DO NOTHING;
-
-    -- A globally pending mark may predate a later reintroduction by this or a
-    -- different database. Remove it while the new live membership already
-    -- protects the value. A future exact retirement will establish a fresh
-    -- grace boundary.
-    PERFORM set_config('atomic.tree_gc_active', 'v13', true);
-    DELETE FROM atomic_tree_garbage_nodes g
-     USING atomic_tree_delta_nodes d
-     WHERE d.manifest_hash = NEW.manifest_hash
-       AND d.direction = 1
-       AND g.node_hash = d.node_hash;
-    PERFORM set_config('atomic.tree_gc_active', 'off', true);
-
-    IF mode = 1 THEN
-        DELETE FROM atomic_tree_live_nodes l
-         WHERE l.database_id = NEW.database_id
-           AND NOT EXISTS (
-               SELECT 1 FROM atomic_tree_delta_nodes d
-                WHERE d.manifest_hash = NEW.manifest_hash
-                  AND d.direction = 1 AND d.node_hash = l.node_hash
-           );
-    ELSIF mode = 2 THEN
-        DELETE FROM atomic_tree_live_nodes l
-         WHERE l.database_id = NEW.database_id
-           AND EXISTS (
-               SELECT 1 FROM atomic_tree_delta_nodes d
-                WHERE d.manifest_hash = NEW.manifest_hash
-                  AND d.direction = -1 AND d.node_hash = l.node_hash
-           );
-    END IF;
-
     IF predecessor_revision IS NOT NULL THEN
         INSERT INTO atomic_tree_retirements
                (database_id, publication_revision, manifest_hash, retired_at,
-                garbage_complete)
+                bookkeeping_complete, garbage_complete)
         VALUES (NEW.database_id, predecessor_revision, predecessor_hash,
-                clock_timestamp(), mode = 2 AND predecessor_complete);
-        IF mode = 2 AND predecessor_complete THEN
-            INSERT INTO atomic_tree_retired_nodes
-                   (database_id, publication_revision, node_hash)
-            SELECT NEW.database_id, predecessor_revision, node_hash
-              FROM atomic_tree_delta_nodes
-             WHERE manifest_hash = NEW.manifest_hash AND direction = -1;
-        END IF;
+                clock_timestamp(), mode = 0, false);
     END IF;
 
     INSERT INTO atomic_tree_publication_states
            (manifest_hash, predecessor_manifest_hash, delta_mode)
     VALUES (NEW.manifest_hash, predecessor_hash, mode);
 
-    INSERT INTO atomic_tree_live_sets
-           (database_id, manifest_hash, complete, problem_code, updated_at)
-    VALUES (NEW.database_id, NEW.manifest_hash, mode <> 0,
-            CASE WHEN mode = 0 THEN 'tree/live-membership-unknown' ELSE NULL END,
-            clock_timestamp())
-    ON CONFLICT (database_id) DO UPDATE
-        SET manifest_hash = EXCLUDED.manifest_hash,
-            complete = EXCLUDED.complete,
-            problem_code = EXCLUDED.problem_code,
-            updated_at = EXCLUDED.updated_at;
-
-    DELETE FROM atomic_tree_delta_nodes WHERE manifest_hash = NEW.manifest_hash;
-    DELETE FROM atomic_tree_delta_headers WHERE manifest_hash = NEW.manifest_hash;
-    -- Consuming an upload intent is deliberately O(1).  Its possibly huge
-    -- node ledger is ordinary post-publication bookkeeping and is drained by
-    -- the bounded collector instead of being cascade-deleted in this root
-    -- publication transaction.
-    IF mode <> 0 THEN
+    IF mode = 0 THEN
+        INSERT INTO atomic_tree_live_sets
+               (database_id, manifest_hash, complete, problem_code, updated_at)
+        VALUES (NEW.database_id, NEW.manifest_hash, false,
+                'tree/live-membership-unknown', clock_timestamp())
+        ON CONFLICT (database_id) DO UPDATE
+            SET manifest_hash = EXCLUDED.manifest_hash,
+                complete = EXCLUDED.complete,
+                problem_code = EXCLUDED.problem_code,
+                updated_at = EXCLUDED.updated_at;
+        DELETE FROM atomic_tree_delta_headers
+         WHERE manifest_hash = NEW.manifest_hash;
+    ELSE
+        -- The final root transaction performs only constant work.  The
+        -- possibly huge upload and delta ledgers remain durable pins while
+        -- bounded owner transactions fold them after publication.
         UPDATE atomic_tree_build_intents
            SET intent_state = 2, heartbeat_at = clock_timestamp()
          WHERE manifest_hash = NEW.manifest_hash
@@ -492,6 +484,15 @@ BEGIN
            AND staged_node_count = expected_node_count;
         IF NOT FOUND THEN
             RAISE EXCEPTION 'Atomic tree publication could not consume its sealed upload intent'
+                USING ERRCODE = '40001';
+        END IF;
+        UPDATE atomic_tree_delta_headers
+           SET delta_state = 2
+         WHERE manifest_hash = NEW.manifest_hash
+           AND delta_state = 1
+           AND staged_node_count = expected_node_count;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Atomic tree publication could not consume its sealed delta'
                 USING ERRCODE = '40001';
         END IF;
     END IF;
@@ -505,6 +506,236 @@ FOR EACH ROW EXECUTE FUNCTION atomic_apply_tree_publication_delta();
 
 REVOKE ALL ON FUNCTION atomic_apply_tree_publication_delta() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION atomic_apply_tree_publication_delta() TO CURRENT_USER;
+
+-- Fold one published root's durable work in a bounded transaction.  Peers
+-- authenticate the immutable publication directly and never depend on this
+-- derived membership being current.  Until the fold seals, the upload intent
+-- pins every new value, the predecessor live set pins every old value, and
+-- raw-value GC fails closed because atomic_tree_live_sets still names the
+-- predecessor.
+CREATE OR REPLACE FUNCTION atomic_apply_tree_publication_work(
+    candidate_manifest_hash BYTEA,
+    maximum_nodes BIGINT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+    candidate_database_id TEXT;
+    candidate_revision BIGINT;
+    mode SMALLINT;
+    predecessor_hash BYTEA;
+    predecessor_revision BIGINT;
+    moved BIGINT := 0;
+    planned BIGINT := 0;
+    removed_live BIGINT := 0;
+    cleared BIGINT := 0;
+    remaining BIGINT;
+BEGIN
+    IF octet_length(candidate_manifest_hash) <> 32
+       OR maximum_nodes < 1 OR maximum_nodes > 4096 THEN
+        RAISE EXCEPTION 'Invalid Atomic tree publication-work boundary'
+            USING ERRCODE = '22023';
+    END IF;
+
+    SELECT p.database_id, p.publication_revision, h.delta_mode,
+           h.predecessor_manifest_hash
+      INTO candidate_database_id, candidate_revision, mode, predecessor_hash
+      FROM atomic_tree_delta_headers h
+      JOIN atomic_tree_publications p ON p.manifest_hash = h.manifest_hash
+     WHERE h.manifest_hash = candidate_manifest_hash
+       AND h.delta_state = 2
+     FOR UPDATE OF h;
+    IF NOT FOUND THEN
+        RETURN EXISTS (
+            SELECT 1
+              FROM atomic_tree_publications p
+              JOIN atomic_tree_live_sets l
+                ON l.database_id = p.database_id
+               AND l.manifest_hash = p.manifest_hash
+             WHERE p.manifest_hash = candidate_manifest_hash
+               AND l.complete
+        );
+    END IF;
+    IF mode NOT IN (1, 2) THEN
+        RAISE EXCEPTION 'Published Atomic tree work has an invalid delta mode'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT publication_revision INTO predecessor_revision
+      FROM atomic_tree_publications
+     WHERE database_id = candidate_database_id
+       AND publication_revision = candidate_revision - 1
+       AND manifest_hash = predecessor_hash;
+
+    PERFORM set_config('atomic.tree_gc_active', 'v13', true);
+
+    -- Protect additions in current membership before releasing their durable
+    -- delta row.  The still-retained build-intent ledger is a second pin until
+    -- the entire publication fold is sealed.
+    WITH batch AS MATERIALIZED (
+        SELECT node_hash
+          FROM atomic_tree_delta_nodes
+         WHERE manifest_hash = candidate_manifest_hash AND direction = 1
+         ORDER BY node_hash
+         LIMIT maximum_nodes
+         FOR UPDATE
+    ), protected AS (
+        INSERT INTO atomic_tree_live_nodes (database_id, node_hash)
+        SELECT candidate_database_id, node_hash FROM batch
+        ON CONFLICT DO NOTHING
+        RETURNING node_hash
+    ), unmarked AS (
+        DELETE FROM atomic_tree_garbage_nodes g
+         USING batch
+         WHERE g.node_hash = batch.node_hash
+        RETURNING g.node_hash
+    ), consumed AS (
+        DELETE FROM atomic_tree_delta_nodes d
+         USING batch
+         WHERE d.manifest_hash = candidate_manifest_hash
+           AND d.direction = 1
+           AND d.node_hash = batch.node_hash
+        RETURNING d.node_hash
+    )
+    SELECT count(*) INTO moved FROM consumed;
+    remaining := maximum_nodes - moved;
+
+    IF remaining > 0 AND mode = 2 THEN
+        IF predecessor_revision IS NULL THEN
+            RAISE EXCEPTION 'Incremental Atomic tree work lost its predecessor'
+                USING ERRCODE = '55000';
+        END IF;
+        WITH batch AS MATERIALIZED (
+            SELECT node_hash
+              FROM atomic_tree_delta_nodes
+             WHERE manifest_hash = candidate_manifest_hash AND direction = -1
+             ORDER BY node_hash
+             LIMIT remaining
+             FOR UPDATE
+        ), retained AS (
+            INSERT INTO atomic_tree_retired_nodes
+                   (database_id, publication_revision, node_hash)
+            SELECT candidate_database_id, predecessor_revision, node_hash FROM batch
+            ON CONFLICT DO NOTHING
+            RETURNING node_hash
+        ), removed AS (
+            DELETE FROM atomic_tree_live_nodes l
+             USING batch
+             WHERE l.database_id = candidate_database_id
+               AND l.node_hash = batch.node_hash
+            RETURNING l.node_hash
+        ), consumed AS (
+            DELETE FROM atomic_tree_delta_nodes d
+             USING batch
+             WHERE d.manifest_hash = candidate_manifest_hash
+               AND d.direction = -1
+               AND d.node_hash = batch.node_hash
+            RETURNING d.node_hash
+        )
+        SELECT (SELECT count(*) FROM batch),
+               (SELECT count(*) FROM removed),
+               (SELECT count(*) FROM consumed)
+          INTO planned, removed_live, cleared;
+        IF planned <> removed_live OR planned <> cleared THEN
+            RAISE EXCEPTION 'Incremental Atomic tree work retires a non-live node'
+                USING ERRCODE = '55000';
+        END IF;
+        moved := moved + cleared;
+        remaining := maximum_nodes - moved;
+    END IF;
+
+    -- A replacement's build intent is the complete successor membership, so
+    -- old-minus-new is derived exactly without materializing a second full
+    -- closure in the root transaction.
+    IF remaining > 0 AND mode = 1 AND predecessor_revision IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM atomic_tree_delta_nodes
+            WHERE manifest_hash = candidate_manifest_hash
+       ) THEN
+        WITH batch AS MATERIALIZED (
+            SELECT l.node_hash
+              FROM atomic_tree_live_nodes l
+             WHERE l.database_id = candidate_database_id
+               AND NOT EXISTS (
+                   SELECT 1 FROM atomic_tree_build_intent_nodes i
+                    WHERE i.manifest_hash = candidate_manifest_hash
+                      AND i.node_hash = l.node_hash
+               )
+             ORDER BY l.node_hash
+             LIMIT remaining
+             FOR UPDATE OF l
+        ), retained AS (
+            INSERT INTO atomic_tree_retired_nodes
+                   (database_id, publication_revision, node_hash)
+            SELECT candidate_database_id, predecessor_revision, node_hash FROM batch
+            ON CONFLICT DO NOTHING
+            RETURNING node_hash
+        ), removed AS (
+            DELETE FROM atomic_tree_live_nodes l
+             USING batch
+             WHERE l.database_id = candidate_database_id
+               AND l.node_hash = batch.node_hash
+            RETURNING l.node_hash
+        )
+        SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM removed)
+          INTO planned, removed_live;
+        IF planned <> removed_live THEN
+            RAISE EXCEPTION 'Replacement Atomic tree work changed while folding'
+                USING ERRCODE = '40001';
+        END IF;
+        moved := moved + removed_live;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM atomic_tree_delta_nodes
+         WHERE manifest_hash = candidate_manifest_hash
+    ) OR (mode = 1 AND EXISTS (
+        SELECT 1
+          FROM atomic_tree_live_nodes l
+         WHERE l.database_id = candidate_database_id
+           AND NOT EXISTS (
+               SELECT 1 FROM atomic_tree_build_intent_nodes i
+                WHERE i.manifest_hash = candidate_manifest_hash
+                  AND i.node_hash = l.node_hash
+           )
+    )) THEN
+        PERFORM set_config('atomic.tree_gc_active', 'off', true);
+        RETURN FALSE;
+    END IF;
+
+    IF predecessor_revision IS NOT NULL THEN
+        UPDATE atomic_tree_retirements
+           SET bookkeeping_complete = true, garbage_complete = true
+         WHERE database_id = candidate_database_id
+           AND publication_revision = predecessor_revision
+           AND manifest_hash = predecessor_hash
+           AND NOT bookkeeping_complete;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Atomic tree work lost its predecessor retirement'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+    INSERT INTO atomic_tree_live_sets
+           (database_id, manifest_hash, complete, problem_code, updated_at)
+    VALUES (candidate_database_id, candidate_manifest_hash, true, NULL,
+            clock_timestamp())
+    ON CONFLICT (database_id) DO UPDATE
+        SET manifest_hash = EXCLUDED.manifest_hash,
+            complete = true,
+            problem_code = NULL,
+            updated_at = EXCLUDED.updated_at;
+    DELETE FROM atomic_tree_delta_headers
+     WHERE manifest_hash = candidate_manifest_hash;
+    PERFORM set_config('atomic.tree_gc_active', 'off', true);
+    RETURN TRUE;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION atomic_apply_tree_publication_work(BYTEA, BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION atomic_apply_tree_publication_work(BYTEA, BIGINT) TO CURRENT_USER;
 
 -- v12's trigger functions were created without a fixed search path. Pin them
 -- to the installation schema before runtime roles are admitted; otherwise a
@@ -523,8 +754,8 @@ GRANT EXECUTE ON FUNCTION atomic_validate_tree_publication_insert() TO CURRENT_U
 -- only each database's newest root once to seed current live membership.
 INSERT INTO atomic_tree_retirements
        (database_id, publication_revision, manifest_hash, retired_at,
-        garbage_complete)
-SELECT database_id, publication_revision, manifest_hash, successor_at, false
+        bookkeeping_complete, garbage_complete)
+SELECT database_id, publication_revision, manifest_hash, successor_at, true, false
   FROM (
         SELECT database_id, publication_revision, manifest_hash,
                lead(published_at) OVER (
@@ -630,10 +861,13 @@ BEGIN
       INTO relation_owner
       FROM pg_catalog.pg_class
      WHERE oid = TG_RELID;
-    IF TG_OP = 'DELETE'
+    IF TG_OP IN ('UPDATE', 'DELETE')
        AND pg_catalog.current_setting('atomic.tree_gc_active', true) = 'v13'
        AND current_user = relation_owner THEN
-        RETURN OLD;
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
     END IF;
     RAISE EXCEPTION 'Atomic committed tree records are immutable'
         USING ERRCODE = '55000';
@@ -731,6 +965,7 @@ BEGIN
          WHERE r.database_id = candidate_database_id
            AND r.publication_revision = candidate_revision
            AND r.manifest_hash = candidate_manifest_hash
+           AND r.bookkeeping_complete
          FOR UPDATE OF r;
         IF NOT FOUND THEN
             RETURN FALSE;
@@ -745,6 +980,7 @@ BEGIN
          WHERE r.database_id = candidate_database_id
            AND r.publication_revision = candidate_revision
            AND r.manifest_hash = candidate_manifest_hash
+           AND r.bookkeeping_complete
            AND r.retired_at < clock_timestamp()
                               - older_than_millis * interval '1 millisecond'
            AND EXISTS (
@@ -845,6 +1081,8 @@ AS $$
 DECLARE
     lock_key BIGINT;
     removed_intents BIGINT;
+    removed_nodes BIGINT;
+    remaining BIGINT;
     state SMALLINT;
     last_heartbeat TIMESTAMPTZ;
 BEGIN
@@ -864,6 +1102,19 @@ BEGIN
      WHERE manifest_hash = candidate_manifest_hash
      FOR UPDATE;
     IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+
+    -- An excision/restore activation can durably name a pre-staged future
+    -- tree before its root publication. That activation is ownership, not an
+    -- abandoned upload, even after the staging process crashes.
+    IF EXISTS (
+        SELECT 1 FROM atomic_log_generation_activations
+         WHERE manifest_hash = candidate_manifest_hash
+    ) AND NOT EXISTS (
+        SELECT 1 FROM atomic_tree_publications
+         WHERE manifest_hash = candidate_manifest_hash
+    ) THEN
         RETURN FALSE;
     END IF;
 
@@ -892,6 +1143,15 @@ BEGIN
         END IF;
     END IF;
 
+    IF state = 2 AND EXISTS (
+        SELECT 1 FROM atomic_tree_delta_headers
+         WHERE manifest_hash = candidate_manifest_hash
+    ) THEN
+        -- Published upload rows remain liveness pins until the bounded
+        -- membership/retirement fold has sealed and removed its delta header.
+        RETURN FALSE;
+    END IF;
+
     PERFORM set_config('atomic.tree_gc_active', 'v13', true);
     IF state = 3 THEN
         INSERT INTO atomic_tree_garbage_nodes (node_hash, marked_at)
@@ -917,10 +1177,39 @@ BEGIN
            ) batch
      WHERE n.manifest_hash = candidate_manifest_hash
        AND n.node_hash = batch.node_hash;
+    GET DIAGNOSTICS removed_nodes = ROW_COUNT;
+    remaining := maximum_nodes - removed_nodes;
+    IF remaining > 0 AND state = 3 THEN
+        DELETE FROM atomic_tree_delta_nodes n
+         USING (
+                SELECT selected.node_hash
+                  FROM atomic_tree_delta_nodes selected
+                 WHERE selected.manifest_hash = candidate_manifest_hash
+                 ORDER BY selected.node_hash
+                 LIMIT remaining
+               ) batch
+         WHERE n.manifest_hash = candidate_manifest_hash
+           AND n.node_hash = batch.node_hash;
+    END IF;
     IF NOT EXISTS (
         SELECT 1 FROM atomic_tree_build_intent_nodes
          WHERE manifest_hash = candidate_manifest_hash
+    ) AND NOT EXISTS (
+        SELECT 1 FROM atomic_tree_delta_nodes
+         WHERE manifest_hash = candidate_manifest_hash
     ) THEN
+        DELETE FROM atomic_tree_delta_headers
+         WHERE manifest_hash = candidate_manifest_hash;
+        IF state = 3 THEN
+            DELETE FROM atomic_tree_manifest_roots
+             WHERE manifest_hash = candidate_manifest_hash;
+            DELETE FROM atomic_tree_manifests
+             WHERE manifest_hash = candidate_manifest_hash
+               AND NOT EXISTS (
+                   SELECT 1 FROM atomic_tree_publications
+                    WHERE manifest_hash = candidate_manifest_hash
+               );
+        END IF;
         DELETE FROM atomic_tree_build_intents
          WHERE manifest_hash = candidate_manifest_hash;
         GET DIAGNOSTICS removed_intents = ROW_COUNT;
@@ -1056,118 +1345,11 @@ $$;
 REVOKE ALL ON FUNCTION atomic_collect_tree_garbage(BIGINT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION atomic_collect_tree_garbage(BIGINT) TO CURRENT_USER;
 
--- Secondary cleanup for pre-ledger and content-first crash orphans. This is
--- deliberately unavailable until the retained publication history proves
--- exact: every current live set is complete and every superseded root has a
--- complete retirement witness. Age alone is never sufficient while that
--- global proof is absent.
-CREATE OR REPLACE FUNCTION atomic_collect_tree_orphans(
-    older_than_millis BIGINT,
-    maximum_nodes BIGINT
-)
-RETURNS SETOF BYTEA
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path FROM CURRENT
-AS $$
-BEGIN
-    IF older_than_millis < 0 OR maximum_nodes < 1 OR maximum_nodes > 4096 THEN
-        RAISE EXCEPTION 'Invalid Atomic tree orphan collection boundary'
-            USING ERRCODE = '22023';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-          FROM (
-                SELECT DISTINCT ON (database_id)
-                       database_id, manifest_hash
-                  FROM atomic_tree_publications
-                 ORDER BY database_id, publication_revision DESC
-               ) current_root
-          LEFT JOIN atomic_tree_live_sets l
-            ON l.database_id = current_root.database_id
-         WHERE l.database_id IS NULL
-            OR l.manifest_hash <> current_root.manifest_hash
-            OR NOT l.complete
-    ) OR EXISTS (
-        SELECT 1
-          FROM atomic_tree_manifest_roots r
-          JOIN atomic_tree_live_sets l ON l.manifest_hash = r.manifest_hash
-         WHERE l.complete
-           AND NOT EXISTS (
-               SELECT 1 FROM atomic_tree_live_nodes n
-                WHERE n.database_id = l.database_id
-                  AND n.node_hash = r.root_hash
-           )
-    ) OR EXISTS (
-        SELECT 1
-          FROM atomic_tree_publications publication
-         WHERE EXISTS (
-                   SELECT 1 FROM atomic_tree_publications newer
-                    WHERE newer.database_id = publication.database_id
-                      AND newer.publication_revision > publication.publication_revision
-               )
-           AND NOT EXISTS (
-                   SELECT 1 FROM atomic_tree_retirements r
-                    WHERE r.database_id = publication.database_id
-                      AND r.publication_revision = publication.publication_revision
-                      AND r.manifest_hash = publication.manifest_hash
-                      AND r.garbage_complete
-               )
-    ) THEN
-        RETURN;
-    END IF;
-
-    PERFORM set_config('atomic.tree_gc_active', 'v13', true);
-    RETURN QUERY
-    WITH candidates AS MATERIALIZED (
-        SELECT n.node_hash
-          FROM atomic_tree_nodes n
-         WHERE n.created_at < clock_timestamp()
-                              - older_than_millis * interval '1 millisecond'
-           AND NOT EXISTS (
-                   SELECT 1 FROM atomic_tree_live_nodes l
-                    WHERE l.node_hash = n.node_hash
-               )
-           AND NOT EXISTS (
-                   SELECT 1 FROM atomic_tree_retired_nodes r
-                    WHERE r.node_hash = n.node_hash
-               )
-           AND NOT EXISTS (
-                   SELECT 1 FROM atomic_tree_garbage_nodes g
-                    WHERE g.node_hash = n.node_hash
-               )
-           AND NOT EXISTS (
-                   SELECT 1 FROM atomic_tree_delta_nodes d
-                    WHERE d.node_hash = n.node_hash
-               )
-           AND NOT EXISTS (
-                   SELECT 1 FROM atomic_tree_build_intent_nodes i
-                    WHERE i.node_hash = n.node_hash
-               )
-           AND NOT EXISTS (
-                   SELECT 1 FROM atomic_tree_manifest_roots r
-                    WHERE r.root_hash = n.node_hash
-               )
-         ORDER BY n.created_at, n.node_hash
-         LIMIT maximum_nodes
-         FOR UPDATE OF n SKIP LOCKED
-    )
-    DELETE FROM atomic_tree_nodes n
-     USING candidates c
-     WHERE n.node_hash = c.node_hash
-       AND NOT EXISTS (SELECT 1 FROM atomic_tree_live_nodes l WHERE l.node_hash = n.node_hash)
-       AND NOT EXISTS (SELECT 1 FROM atomic_tree_retired_nodes r WHERE r.node_hash = n.node_hash)
-       AND NOT EXISTS (SELECT 1 FROM atomic_tree_garbage_nodes g WHERE g.node_hash = n.node_hash)
-       AND NOT EXISTS (SELECT 1 FROM atomic_tree_delta_nodes d WHERE d.node_hash = n.node_hash)
-       AND NOT EXISTS (SELECT 1 FROM atomic_tree_build_intent_nodes i WHERE i.node_hash = n.node_hash)
-       AND NOT EXISTS (SELECT 1 FROM atomic_tree_manifest_roots r WHERE r.root_hash = n.node_hash)
-    RETURNING n.node_hash;
-    PERFORM set_config('atomic.tree_gc_active', 'off', true);
-END;
-$$;
-
-REVOKE ALL ON FUNCTION atomic_collect_tree_orphans(BIGINT, BIGINT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION atomic_collect_tree_orphans(BIGINT, BIGINT) TO CURRENT_USER;
+-- Tree values are reclaimed only from exact retirement or abandoned-build
+-- witnesses. Apparent unreachability is not proof: a builder can upload a
+-- value before its durable intent exists, and source Datomic's garbage
+-- collector never infers ownership by scanning the value store.
+DROP FUNCTION IF EXISTS atomic_collect_tree_orphans(BIGINT, BIGINT);
 
 CREATE OR REPLACE FUNCTION atomic_collect_program_garbage(
     older_than_millis BIGINT,
