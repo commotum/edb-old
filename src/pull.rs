@@ -7,6 +7,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum AttributeName {
@@ -121,11 +122,89 @@ impl Default for PullControl {
 
 struct PullState<'a> {
     control: &'a PullControl,
+    query_budget: Option<&'a mut QueryPullBudget>,
     /// Cycle and depth state belongs to one lexical recursive selector. An
     /// ordinary nested pull, or a different recursive selector in the same
     /// pattern, must not consume this state.
     recursions: BTreeMap<Vec<usize>, RecursionState>,
     entities: usize,
+}
+
+/// Shared execution budget used when pull is a query result transformation.
+///
+/// Datomic's query timeout covers pull work too. Keeping this state separate
+/// from the public `PullControl` lets every pull expression in one query share
+/// the already-consumed query work and the original absolute deadline.
+pub(crate) struct QueryPullBudget {
+    cancel: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+    max_work: usize,
+    work: usize,
+}
+
+impl QueryPullBudget {
+    pub(crate) fn new(
+        cancel: Arc<AtomicBool>,
+        deadline: Option<Instant>,
+        max_work: usize,
+        work: usize,
+    ) -> Self {
+        Self {
+            cancel,
+            deadline,
+            max_work,
+            work,
+        }
+    }
+
+    pub(crate) fn work(&self) -> usize {
+        self.work
+    }
+
+    fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
+        self.work = self.work.saturating_add(amount);
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(SemanticError::new(
+                ErrorCategory::Interrupted,
+                "query/canceled",
+                "query was canceled",
+            ));
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(SemanticError::new(
+                ErrorCategory::Interrupted,
+                "query/timeout",
+                "query deadline elapsed",
+            ));
+        }
+        if self.work > self.max_work {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "query/work-limit",
+                "query exceeded its work limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl PullState<'_> {
+    fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
+        if let Some(budget) = self.query_budget.as_deref_mut() {
+            return budget.check(amount);
+        }
+        if self.control.cancel.load(Ordering::Relaxed) {
+            return Err(SemanticError::new(
+                ErrorCategory::Interrupted,
+                "pull/canceled",
+                "pull was canceled",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -252,7 +331,7 @@ impl Entity {
                 "reverse navigation requires a ref attribute",
             ));
         }
-        let values = if reverse {
+        let mut values = if reverse {
             self.database
                 .datoms_with_prefix(&IndexPrefix::Vaet {
                     value: Value::Ref(self.id),
@@ -273,6 +352,13 @@ impl Entity {
         } else {
             schema.cardinality == Cardinality::Many
         };
+        if multiple {
+            // EAVT groups equal forward values and VAET groups equal reverse
+            // entities contiguously.  A filtered value can expose more than
+            // one assertion event for the same logical E/A/V, but associative
+            // entity navigation remains set-valued.
+            values.dedup();
+        }
         let mut values = values
             .into_iter()
             .map(|value| entity_navigation_value(&self.database, schema.value_type, value))
@@ -473,10 +559,34 @@ impl DatabaseValue {
         validate_pattern(self, pattern)?;
         self.require_point_in_time("pull")?;
         let Some(entity) = self.resolve_entity_identifier(&entity.into())? else {
-            return Ok(QueryValue::Map(Vec::new()));
+            return Ok(unresolved_pull(pattern));
         };
         let mut state = PullState {
             control,
+            query_budget: None,
+            recursions: BTreeMap::new(),
+            entities: 0,
+        };
+        pull_entity(self, entity, pattern, &[], &mut state, 0)
+    }
+
+    /// Evaluate a find-pull expression under the enclosing query's shared
+    /// cancellation, deadline, and work budget.
+    pub(crate) fn pull_for_query(
+        &self,
+        pattern: &PullPattern,
+        entity: u64,
+        budget: &mut QueryPullBudget,
+    ) -> Result<QueryValue, SemanticError> {
+        validate_pattern(self, pattern)?;
+        self.require_point_in_time("pull")?;
+        let control = PullControl {
+            cancel: Arc::clone(&budget.cancel),
+            ..PullControl::default()
+        };
+        let mut state = PullState {
+            control: &control,
+            query_budget: Some(budget),
             recursions: BTreeMap::new(),
             entities: 0,
         };
@@ -503,6 +613,26 @@ impl DatabaseValue {
     }
 }
 
+fn unresolved_pull(pattern: &PullPattern) -> QueryValue {
+    let mut result = Vec::new();
+    if pattern.wildcard {
+        put(&mut result, keyword_key(db_id()), QueryValue::Nil);
+    }
+    for selector in &pattern.attributes {
+        let PullDirection::Forward(name) = &selector.direction else {
+            continue;
+        };
+        if is_db_id(name) {
+            let key = selector
+                .alias
+                .clone()
+                .unwrap_or_else(|| keyword_key(db_id()));
+            put(&mut result, key, QueryValue::Nil);
+        }
+    }
+    QueryValue::Map(result)
+}
+
 fn pull_entity(
     database: &DatabaseValue,
     entity: u64,
@@ -511,13 +641,7 @@ fn pull_entity(
     state: &mut PullState<'_>,
     depth: usize,
 ) -> Result<QueryValue, SemanticError> {
-    if state.control.cancel.load(Ordering::Relaxed) {
-        return Err(SemanticError::new(
-            ErrorCategory::Interrupted,
-            "pull/canceled",
-            "pull was canceled",
-        ));
-    }
+    state.check(1)?;
     if depth > state.control.max_depth {
         return Err(SemanticError::new(
             ErrorCategory::Busy,
@@ -546,6 +670,7 @@ fn pull_entity(
             attribute: None,
             value: None,
         })?;
+        state.check(datoms.len())?;
         let mut attributes = BTreeSet::new();
         for datom in datoms {
             attributes.insert(datom.attribute);
@@ -609,6 +734,7 @@ fn pull_attribute(
     state: &mut PullState<'_>,
     depth: usize,
 ) -> Result<Option<(QueryValue, QueryValue)>, SemanticError> {
+    state.check(1)?;
     let (name, reverse) = match &selector.direction {
         PullDirection::Forward(attribute) => (attribute, false),
         PullDirection::Reverse(attribute) => (attribute, true),
@@ -657,6 +783,7 @@ fn pull_attribute(
     } else {
         database.values(entity, attribute)?
     };
+    state.check(values.len())?;
     if values.is_empty() {
         return Ok(selector.default.clone().map(|default| (key, default)));
     }

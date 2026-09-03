@@ -126,8 +126,7 @@ fn temporal_sources_resolve_idents_from_the_database_values_current_cache() {
         &query,
         &[QuerySource {
             name: "$".into(),
-            database: &after_rename,
-            view: View::AsOf(2),
+            database: after_rename.database_value().as_of(2),
         }],
         &[],
         &QueryControl::default(),

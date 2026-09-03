@@ -1,11 +1,13 @@
 use atomic_core::persistent_tree::{TreeNode, decode_tree_node};
 use atomic_core::{
-    Attribute, AttributeName, Cardinality, Clause, DataPattern, Database, EntityRef, EntityValue,
-    FindElement, FindSpec, IndexBuildFault, IndexOrder, IndexPrefix, Keyword, Peer,
-    PostgresIndexer, PostgresStore, PullAttribute, PullPattern, Query, QueryControl, QueryResult,
-    QueryValue, Schema, Term, TransactionRequest, TransactionService, TransactionServiceConfig,
-    TxOp, TxValue, Unique, Value, ValueType, Variable, View, decode_index_manifest,
-    decode_index_segment, encode_index_manifest, encode_index_segment, sha256,
+    Attribute, AttributeName, Binding, Cardinality, Clause, DataPattern, Database, EntityRef,
+    EntityValue, FindElement, FindSpec, Function, IndexBuildFault, IndexOrder, IndexPrefix,
+    InputSpec, Instruction, Keyword, Peer, PostgresIndexer, PostgresStore, Program, ProgramKind,
+    PullAttribute, PullPattern, Query, QueryControl, QueryEngine, QueryExtensions, QueryInput,
+    QueryOutcome, QueryResult, QuerySource, QueryValue, Schema, Term, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxOp, TxValue, Unique, Value, ValueType,
+    Variable, View, decode_index_manifest, decode_index_segment, encode_index_manifest,
+    encode_index_segment, sha256,
 };
 use postgres::{Client, NoTls};
 use std::process::Command;
@@ -80,6 +82,50 @@ fn assert_current_eq(left: &Database, right: &Database) {
             right.datoms(View::Current, order)
         );
     }
+}
+
+fn assert_eager_native_query_differential(
+    label: &str,
+    query: &Query,
+    eager: atomic_core::DatabaseValue,
+    native: atomic_core::DatabaseValue,
+) -> Vec<QueryOutcome> {
+    let execute = |database, force_scan| {
+        QueryEngine::execute(
+            query,
+            &[QuerySource {
+                name: "$".into(),
+                database,
+            }],
+            &[],
+            &QueryControl {
+                force_scan,
+                ..QueryControl::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{label} failed (force_scan={force_scan}): {error}"))
+    };
+    let outcomes = vec![
+        execute(eager.clone(), false),
+        execute(eager, true),
+        execute(native.clone(), false),
+        execute(native, true),
+    ];
+    for outcome in &outcomes[1..] {
+        assert_eq!(
+            outcome.result, outcomes[0].result,
+            "{label} diverged between eager/native or optimized/scan evaluation"
+        );
+    }
+    assert!(
+        outcomes[0].stats.datoms_examined <= outcomes[1].stats.datoms_examined,
+        "{label} eager optimized path examined more datoms than force-scan"
+    );
+    assert!(
+        outcomes[2].stats.datoms_examined <= outcomes[3].stats.datoms_examined,
+        "{label} native optimized path examined more datoms than force-scan"
+    );
+    outcomes
 }
 
 fn populated(
@@ -1753,4 +1799,434 @@ fn native_entity_and_pull_pin_one_snapshot_without_compatibility_materialization
     );
     assert!(path_reads < built.segment_count as u64);
     service.shutdown();
+}
+
+#[test]
+fn native_queries_pin_exact_snapshots_and_read_bounded_tree_paths() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("native_query_snapshot");
+    let (_store, entity) = populated(&connection, &database_id, false, 1);
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .with_segment_datoms(1)
+        .unwrap();
+    let built = indexer.consolidate().unwrap();
+
+    // No decoded-node cache: every count below represents an actual bounded
+    // persistent-tree path rather than a process-local cache hit.
+    let peer = Peer::connect_with_cache_limits(&connection, &database_id, 0, 0).unwrap();
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
+    let old_snapshot = peer.snapshot();
+    let old_basis = old_snapshot.basis_t();
+    let value = Variable::new("value").unwrap();
+    let query = Query::new(
+        FindSpec::Scalar(FindElement::Variable(value.clone())),
+        vec![Clause::Pattern(Box::new(DataPattern::new(
+            Term::Constant(Value::Ref(entity)),
+            Term::Constant(Value::Keyword(Keyword::new("item", "count"))),
+            Term::Variable(value),
+        )))],
+    );
+
+    let service = common::start_service(&connection, &database_id);
+    let updated = common::transact(
+        &service,
+        "native-query-update",
+        old_basis,
+        &[TxOp::Add {
+            entity: EntityRef::Id(entity),
+            attribute: ITEM_COUNT,
+            value: TxValue::Scalar(Value::Long(77)),
+        }],
+        9_000,
+    );
+    let current_snapshot = peer
+        .sync_to_snapshot(updated.basis_t, Duration::from_secs(2))
+        .unwrap();
+    let before_queries = peer.load_stats();
+    assert_eq!(before_queries.compatibility_materializations, 0);
+
+    let old = old_snapshot
+        .query(&query, &[], &QueryControl::default())
+        .unwrap();
+    assert_eq!(
+        old.result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(Value::Long(1))))
+    );
+    let current = peer.query(&query, &[], &QueryControl::default()).unwrap();
+    assert_eq!(
+        current.result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(Value::Long(77))))
+    );
+
+    // Temporal and custom windows are evaluated over the same captured native
+    // value; neither path may fall back to the peer's current eager oracle.
+    let mut named_as_of_query = query.clone();
+    let Clause::Pattern(pattern) = &mut named_as_of_query.clauses[0] else {
+        unreachable!("test query has one data pattern")
+    };
+    pattern.source = "$old".into();
+    let as_of = QueryEngine::execute(
+        &named_as_of_query,
+        &[QuerySource {
+            name: "$old".into(),
+            database: current_snapshot.database_value().as_of(old_basis),
+        }],
+        &[],
+        &QueryControl::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        as_of.result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(Value::Long(1))))
+    );
+    let bad_t = updated.basis_t;
+    let filtered = current_snapshot
+        .database_value()
+        .filter(move |_, datom| atomic_core::tx_to_t(datom.tx).unwrap() != bad_t)
+        .query(&query, &[], &QueryControl::default())
+        .unwrap();
+    assert_eq!(
+        filtered.result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(Value::Long(1))))
+    );
+    for outcome in [&old, &current, &as_of, &filtered] {
+        assert_eq!(outcome.stats.index_seeks, 1);
+        assert_eq!(outcome.stats.datoms_examined, 1);
+    }
+
+    let after_queries = peer.load_stats();
+    assert_eq!(after_queries.compatibility_materializations, 0);
+    assert_eq!(after_queries.compatibility_hits, 0);
+    let path_reads = after_queries
+        .directory_reads
+        .saturating_sub(before_queries.directory_reads)
+        .saturating_add(
+            after_queries
+                .leaf_reads
+                .saturating_sub(before_queries.leaf_reads),
+        );
+    assert!(path_reads > 0);
+    // Prefix routing can inspect one predecessor directory/leaf. Four uncached
+    // selective queries therefore remain bounded by sixteen decoded nodes,
+    // independent of the full tree's segment count.
+    assert!(
+        path_reads <= 16,
+        "four selective queries used {path_reads} tree nodes"
+    );
+    assert!(path_reads < built.segment_count as u64);
+
+    // Persisted extensions are query programs, but their database reads must
+    // still use the exact DatabaseValue captured by the caller. This catches
+    // a particularly subtle regression where the outer query is native while
+    // the extension re-enters through the peer's eager compatibility value.
+    let hash = [0x51; 32];
+    let mut extensions = QueryExtensions::new();
+    extensions
+        .register_program(
+            "native-count",
+            hash,
+            Program {
+                kind: ProgramKind::Query,
+                arity: 1,
+                instructions: vec![
+                    Instruction::PushArgument(0),
+                    Instruction::LoadOne(ITEM_COUNT),
+                    Instruction::Return,
+                ],
+            },
+        )
+        .unwrap();
+    let extension_value = Variable::new("extension-value").unwrap();
+    let extension_query = Query {
+        find: FindSpec::Scalar(FindElement::Variable(extension_value.clone())),
+        with: Vec::new(),
+        inputs: vec![InputSpec::Scalar(Variable::from("target"))],
+        clauses: vec![Clause::Function {
+            function: Function::Extension("native-count".into()),
+            source: "$".into(),
+            args: vec![Term::var("target")],
+            binding: Binding::Scalar(extension_value),
+        }],
+        rules: Vec::new(),
+    };
+    let extension_inputs = [QueryInput::Scalar(Value::Ref(entity))];
+    let old_extension = old_snapshot
+        .query_with_extensions(
+            &extension_query,
+            &extension_inputs,
+            &QueryControl::default(),
+            &extensions,
+        )
+        .unwrap();
+    assert_eq!(
+        old_extension.result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(Value::Long(1))))
+    );
+    let current_extension = peer
+        .query_with_extensions(
+            &extension_query,
+            &extension_inputs,
+            &QueryControl::default(),
+            &extensions,
+        )
+        .unwrap();
+    assert_eq!(
+        current_extension.result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(Value::Long(77))))
+    );
+    let hash_hex = hash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(old_extension.plan[0].access.contains(&hash_hex));
+    assert!(current_extension.plan[0].access.contains(&hash_hex));
+
+    let after_extensions = peer.load_stats();
+    assert_eq!(after_extensions.root_reads, before_queries.root_reads);
+    assert_eq!(after_extensions.compatibility_materializations, 0);
+    assert_eq!(after_extensions.compatibility_hits, 0);
+    service.shutdown();
+}
+
+#[test]
+fn generated_queries_match_eager_native_and_force_scan_references() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("native_query_differential");
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    store.migrate().unwrap();
+    let created = store.create_database(&database_id, schema(false)).unwrap();
+    let service = common::start_service(&connection, &database_id);
+
+    // Generate enough connected facts to exercise AVET selection, joins, and
+    // history without introducing a separate property-test harness. The data
+    // and query sequence are fixed so a failure is exactly reproducible.
+    const ENTITY_COUNT: usize = 12;
+    let mut seed_ops = Vec::with_capacity(ENTITY_COUNT * 3);
+    for ordinal in 0..ENTITY_COUNT {
+        let entity = format!("node-{ordinal}");
+        let parent = format!("node-{}", (ordinal + 1) % ENTITY_COUNT);
+        seed_ops.extend([
+            TxOp::Add {
+                entity: EntityRef::Temp(entity.clone()),
+                attribute: ITEM_NAME,
+                value: TxValue::Scalar(Value::String(format!("{database_id}-node-{ordinal}"))),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp(entity.clone()),
+                attribute: ITEM_COUNT,
+                value: TxValue::Scalar(Value::Long((ordinal % 4) as i64)),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp(entity),
+                attribute: ITEM_PARENT,
+                value: TxValue::Entity(EntityRef::Temp(parent)),
+            },
+        ]);
+    }
+    let seeded = common::transact(
+        &service,
+        "differential-seed",
+        created.basis_t(),
+        &seed_ops,
+        10_000,
+    );
+    let entities = (0..ENTITY_COUNT)
+        .map(|ordinal| seeded.tempids[&format!("node-{ordinal}")])
+        .collect::<Vec<_>>();
+
+    let updates = (0..ENTITY_COUNT)
+        .filter(|ordinal| ordinal % 3 == 0)
+        .map(|ordinal| TxOp::Add {
+            entity: EntityRef::Id(entities[ordinal]),
+            attribute: ITEM_COUNT,
+            value: TxValue::Scalar(Value::Long(100 + ordinal as i64)),
+        })
+        .collect::<Vec<_>>();
+    let updated = common::transact(
+        &service,
+        "differential-updates",
+        seeded.basis_t,
+        &updates,
+        10_001,
+    );
+    let retracted = common::transact(
+        &service,
+        "differential-retract",
+        updated.basis_t,
+        &[TxOp::Retract {
+            entity: EntityRef::Id(entities[5]),
+            attribute: ITEM_COUNT,
+            value: None,
+        }],
+        10_002,
+    );
+    service.shutdown();
+
+    let eager_database = store.recover(&database_id).unwrap();
+    assert_eq!(eager_database.basis_t(), retracted.basis_t);
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .with_segment_datoms(4)
+        .unwrap();
+    let publication = indexer.consolidate().unwrap();
+    assert_eq!(publication.basis_t, retracted.basis_t);
+    let peer = Peer::connect(&connection, &database_id, 32).unwrap();
+    let native = peer.database_value();
+    let eager = eager_database.database_value();
+    assert_eq!(native.basis_t(), eager.basis_t());
+    assert_eq!(
+        native.datoms(IndexOrder::Eavt).unwrap(),
+        eager.datoms(IndexOrder::Eavt).unwrap()
+    );
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
+
+    let variable = |name: &str| Variable::new(name).unwrap();
+    let attribute = |name: &str| Term::Constant(Value::Keyword(Keyword::new("item", name)));
+    let pattern = |entity, name, value| {
+        Clause::Pattern(Box::new(DataPattern::new(entity, attribute(name), value)))
+    };
+
+    // Generate several selective cases, including values affected and not
+    // affected by cardinality-one replacement and explicit retraction.
+    for wanted in 0..4 {
+        let entity = variable("entity");
+        let query = Query::new(
+            FindSpec::Relation(vec![FindElement::Variable(entity.clone())]),
+            vec![pattern(
+                Term::Variable(entity),
+                "count",
+                Term::Constant(Value::Long(wanted)),
+            )],
+        );
+        let outcomes = assert_eager_native_query_differential(
+            &format!("selective-count-{wanted}"),
+            &query,
+            eager.clone(),
+            native.clone(),
+        );
+        assert!(outcomes[0].stats.datoms_examined < outcomes[1].stats.datoms_examined);
+        assert!(outcomes[2].stats.datoms_examined < outcomes[3].stats.datoms_examined);
+    }
+
+    let child = variable("child");
+    let parent = variable("parent");
+    let parent_name = variable("parent-name");
+    let join = Query::new(
+        FindSpec::Relation(vec![
+            FindElement::Variable(child.clone()),
+            FindElement::Variable(parent_name.clone()),
+        ]),
+        vec![
+            pattern(
+                Term::Variable(child.clone()),
+                "count",
+                Term::Constant(Value::Long(2)),
+            ),
+            pattern(
+                Term::Variable(child),
+                "parent",
+                Term::Variable(parent.clone()),
+            ),
+            pattern(Term::Variable(parent), "name", Term::Variable(parent_name)),
+        ],
+    );
+    let join_outcomes = assert_eager_native_query_differential(
+        "three-pattern-join",
+        &join,
+        eager.clone(),
+        native.clone(),
+    );
+    assert!(join_outcomes[0].stats.datoms_examined < join_outcomes[1].stats.datoms_examined);
+    assert!(join_outcomes[2].stats.datoms_examined < join_outcomes[3].stats.datoms_examined);
+
+    let entity = variable("entity");
+    let count = variable("count");
+    let name = variable("name");
+    let temporal_filtered = Query::new(
+        FindSpec::Relation(vec![
+            FindElement::Variable(entity.clone()),
+            FindElement::Variable(count.clone()),
+            FindElement::Variable(name.clone()),
+        ]),
+        vec![
+            pattern(
+                Term::Variable(entity.clone()),
+                "count",
+                Term::Variable(count),
+            ),
+            pattern(Term::Variable(entity), "name", Term::Variable(name)),
+        ],
+    );
+    let excluded = entities[4];
+    let eager_temporal = eager
+        .clone()
+        .as_of(seeded.basis_t)
+        .filter(move |_, datom| datom.entity != excluded);
+    let native_temporal = native
+        .clone()
+        .as_of(seeded.basis_t)
+        .filter(move |_, datom| datom.entity != excluded);
+    let temporal_outcomes = assert_eager_native_query_differential(
+        "as-of-plus-filter",
+        &temporal_filtered,
+        eager_temporal,
+        native_temporal,
+    );
+    let mut expected_temporal_rows = entities
+        .iter()
+        .enumerate()
+        .filter(|(ordinal, _)| *ordinal != 4)
+        .map(|(ordinal, entity)| {
+            vec![
+                QueryValue::Scalar(Value::Ref(*entity)),
+                QueryValue::Scalar(Value::Long((ordinal % 4) as i64)),
+                QueryValue::Scalar(Value::String(format!("{database_id}-node-{ordinal}"))),
+            ]
+        })
+        .collect::<Vec<_>>();
+    expected_temporal_rows.sort_by(|left, right| left[0].canonical_cmp(&right[0]));
+    assert_eq!(
+        temporal_outcomes[0].result,
+        QueryResult::Relation(expected_temporal_rows)
+    );
+
+    let historical_count = variable("historical-count");
+    let tx = variable("tx");
+    let added = variable("added");
+    let mut history_pattern = DataPattern::new(
+        Term::Blank,
+        attribute("count"),
+        Term::Variable(historical_count.clone()),
+    );
+    history_pattern.transaction = Some(Term::Variable(tx.clone()));
+    history_pattern.added = Some(Term::Variable(added.clone()));
+    let history = Query::new(
+        FindSpec::Relation(vec![
+            FindElement::Variable(historical_count),
+            FindElement::Variable(tx),
+            FindElement::Variable(added),
+        ]),
+        vec![Clause::Pattern(Box::new(history_pattern))],
+    );
+    let history_outcomes = assert_eager_native_query_differential(
+        "raw-history",
+        &history,
+        eager.history(),
+        native.history(),
+    );
+    let QueryResult::Relation(history_rows) = &history_outcomes[0].result else {
+        panic!("history differential must return a relation")
+    };
+    assert!(
+        history_rows
+            .iter()
+            .any(|row| { row[2] == QueryValue::Scalar(Value::Bool(false)) })
+    );
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
+    assert_eq!(peer.load_stats().compatibility_hits, 0);
 }

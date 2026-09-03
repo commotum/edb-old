@@ -188,6 +188,54 @@ fn ground_honors_binding_shape_and_tuple_nil_remains_query_only() {
     let database = Database::new(schema()).unwrap();
     let tuple = Value::Tuple(vec![Some(Value::Long(1)), None]);
 
+    let empty_tuple = Query::new(
+        FindSpec::Scalar(FindElement::Variable(var("tuple"))),
+        vec![Clause::Function {
+            function: Function::Tuple,
+            source: "$unused".into(),
+            args: Vec::new(),
+            binding: Binding::Scalar(var("tuple")),
+        }],
+    );
+    assert_eq!(
+        atomic_core::QueryEngine::execute(&empty_tuple, &[], &[], &QueryControl::default())
+            .unwrap_err()
+            .code,
+        "query/function-arity"
+    );
+
+    let scalar_nil = Query::new(
+        FindSpec::Scalar(FindElement::Variable(var("nil"))),
+        vec![Clause::Function {
+            function: Function::Ground,
+            source: "$unused".into(),
+            args: vec![Term::Nil],
+            binding: Binding::Scalar(var("nil")),
+        }],
+    );
+    assert_eq!(
+        atomic_core::QueryEngine::execute(&scalar_nil, &[], &[], &QueryControl::default(),)
+            .unwrap()
+            .result,
+        QueryResult::Scalar(Some(QueryValue::Nil))
+    );
+
+    let direct_tuple_nil = Query::new(
+        FindSpec::Scalar(FindElement::Variable(var("tuple"))),
+        vec![Clause::Function {
+            function: Function::Tuple,
+            source: "$unused".into(),
+            args: vec![val(Value::Long(1)), Term::Nil],
+            binding: Binding::Scalar(var("tuple")),
+        }],
+    );
+    assert_eq!(
+        atomic_core::QueryEngine::execute(&direct_tuple_nil, &[], &[], &QueryControl::default(),)
+            .unwrap()
+            .result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(tuple.clone())))
+    );
+
     let scalar = Query::new(
         FindSpec::Scalar(FindElement::Variable(var("value"))),
         vec![Clause::Function {
@@ -339,6 +387,43 @@ fn ground_honors_binding_shape_and_tuple_nil_remains_query_only() {
             .unwrap_err()
             .code,
         "query/ground-not-constant"
+    );
+}
+
+#[test]
+fn pattern_nil_matches_no_stored_value_and_empty_min_max_are_nil() {
+    let database = Database::new(schema()).unwrap();
+    let no_nil_fact = Query::new(
+        FindSpec::Relation(vec![FindElement::Variable(var("entity"))]),
+        vec![pattern(v("entity"), kw("person", "age"), Term::Nil)],
+    );
+    assert_eq!(
+        database
+            .query(&no_nil_fact, &[], &QueryControl::default())
+            .unwrap()
+            .result,
+        QueryResult::Relation(Vec::new())
+    );
+
+    let empty_extrema = Query::new(
+        FindSpec::Tuple(vec![
+            FindElement::Aggregate {
+                function: Aggregate::Min,
+                variable: var("age"),
+            },
+            FindElement::Aggregate {
+                function: Aggregate::Max,
+                variable: var("age"),
+            },
+        ]),
+        vec![pattern(Term::Blank, kw("person", "age"), v("age"))],
+    );
+    assert_eq!(
+        database
+            .query(&empty_extrema, &[], &QueryControl::default())
+            .unwrap()
+            .result,
+        QueryResult::Tuple(Some(vec![QueryValue::Nil, QueryValue::Nil]))
     );
 }
 

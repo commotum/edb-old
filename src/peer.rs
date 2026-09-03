@@ -12,8 +12,8 @@ use crate::state_commitment::{checkpoint_information, verify_checkpoint_state_ha
 use crate::{
     Database, DatabaseValue, Datom, Digest, DurableTransaction, Entity, EntityIdentifier,
     ErrorCategory, IndexManifest, IndexOrder, IndexPrefix, IndexSegment, ManifestTree,
-    PersistentTreeManifest, PostgresTreeStore, PullPattern, Query, QueryControl, QueryInput,
-    QueryOutcome, QueryValue, SemanticError, TreeManifestRecord, TreePublishOutcome,
+    PersistentTreeManifest, PostgresTreeStore, PullPattern, Query, QueryControl, QueryExtensions,
+    QueryInput, QueryOutcome, QueryValue, SemanticError, TreeManifestRecord, TreePublishOutcome,
     TreeRootBinding, View, decode_index_manifest, decode_index_segment, decode_transaction,
     encode_genesis, sha256, transaction_hash, tx_to_t,
 };
@@ -1952,8 +1952,9 @@ struct PeerState {
     /// indexing publication backfills them.
     avet_unready: Arc<BTreeSet<u32>>,
     /// Full kernel value retained solely for API compatibility. A valid
-    /// native open leaves this cell empty until `db`, query, pull, or entity
-    /// navigation explicitly asks for it.
+    /// native open leaves this cell empty until `db`/`try_db` or a
+    /// compatibility-returning sync method explicitly asks for it. Native
+    /// query, pull, and entity navigation do not use this cell.
     compatibility: Arc<OnceLock<Arc<Database>>>,
     generation: u64,
 }
@@ -2309,9 +2310,18 @@ impl Peer {
         inputs: &[QueryInput],
         control: &QueryControl,
     ) -> Result<QueryOutcome, SemanticError> {
-        let state = self.state();
-        self.database_for_state(&state)?
-            .query(query, inputs, control)
+        self.database_value().query(query, inputs, control)
+    }
+
+    pub fn query_with_extensions(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: &QueryExtensions,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.database_value()
+            .query_with_extensions(query, inputs, control, extensions)
     }
 
     pub fn pull(
@@ -3043,6 +3053,28 @@ impl PeerSnapshot {
 
     pub fn database_value(&self) -> crate::DatabaseValue {
         crate::DatabaseValue::from(self)
+    }
+
+    /// Execute against this captured immutable native snapshot. Advancing the
+    /// live peer cannot change the database value observed by the query.
+    pub fn query(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.database_value().query(query, inputs, control)
+    }
+
+    pub fn query_with_extensions(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: &QueryExtensions,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.database_value()
+            .query_with_extensions(query, inputs, control, extensions)
     }
 
     pub fn entity(

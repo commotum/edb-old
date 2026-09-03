@@ -1,6 +1,7 @@
+use crate::pull::QueryPullBudget;
 use crate::{
-    Database, ErrorCategory, IndexOrder, IndexPrefix, Program, ProgramControl, ProgramHash,
-    ProgramKind, ProgramOutput, ProgramRuntime, PullPattern, SemanticError, Value, View,
+    Database, DatabaseValue, ErrorCategory, IndexOrder, IndexPrefix, Program, ProgramControl,
+    ProgramHash, ProgramKind, ProgramOutput, ProgramRuntime, PullPattern, SemanticError, Value,
     schema_eid_to_attr_id,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,6 +43,9 @@ impl From<&str> for Variable {
 pub enum Term {
     Variable(Variable),
     Constant(Value),
+    /// Query-language nil. Nil is a legal literal and binding value, but is
+    /// deliberately not part of the persisted `Value` domain.
+    Nil,
     Blank,
 }
 
@@ -180,6 +184,7 @@ pub enum Aggregate {
 pub enum FindElement {
     Variable(Variable),
     Pull {
+        source: String,
         variable: Variable,
         pattern: Box<PullPattern>,
     },
@@ -219,10 +224,9 @@ impl Query {
 }
 
 #[derive(Clone, Debug)]
-pub struct QuerySource<'a> {
+pub struct QuerySource {
     pub name: String,
-    pub database: &'a Database,
-    pub view: View,
+    pub database: DatabaseValue,
 }
 
 #[derive(Clone, Debug)]
@@ -392,7 +396,7 @@ impl Default for QueryControl {
 
 pub struct QueryEngine;
 
-type NativeQueryFunction = dyn Fn(&Database, &[Value], &QueryControl) -> Result<Vec<Vec<Value>>, SemanticError>
+type NativeQueryFunction = dyn Fn(&DatabaseValue, &[Value], &QueryControl) -> Result<Vec<Vec<Value>>, SemanticError>
     + Send
     + Sync;
 
@@ -427,7 +431,7 @@ impl QueryExtensions {
 
     pub fn register_local<F>(&mut self, name: impl Into<String>, function: F)
     where
-        F: Fn(&Database, &[Value], &QueryControl) -> Result<Vec<Vec<Value>>, SemanticError>
+        F: Fn(&DatabaseValue, &[Value], &QueryControl) -> Result<Vec<Vec<Value>>, SemanticError>
             + Send
             + Sync
             + 'static,
@@ -467,7 +471,12 @@ impl QueryExtensions {
                         max_calls: 1,
                         cancelled: Some(control.cancel.as_ref()),
                     };
-                    match ProgramRuntime.execute(&program, database, arguments, program_control)? {
+                    match ProgramRuntime.execute_query(
+                        &program,
+                        database,
+                        arguments,
+                        program_control,
+                    )? {
                         ProgramOutput::Query(rows) => Ok(rows),
                         _ => unreachable!("program kind was checked"),
                     }
@@ -481,7 +490,7 @@ impl QueryExtensions {
     fn invoke(
         &self,
         name: &str,
-        database: &Database,
+        database: &DatabaseValue,
         arguments: &[Value],
         control: &QueryControl,
     ) -> Result<Vec<Vec<Value>>, SemanticError> {
@@ -579,7 +588,7 @@ struct RuleInvocationKey {
 }
 
 struct State<'a> {
-    sources: BTreeMap<&'a str, (&'a Database, View)>,
+    sources: BTreeMap<&'a str, &'a DatabaseValue>,
     control: &'a QueryControl,
     deadline: Option<Instant>,
     work: usize,
@@ -593,7 +602,7 @@ struct State<'a> {
 impl QueryEngine {
     pub fn execute(
         query: &Query,
-        sources: &[QuerySource<'_>],
+        sources: &[QuerySource],
         inputs: &[QueryInput],
         control: &QueryControl,
     ) -> Result<QueryOutcome, SemanticError> {
@@ -602,7 +611,7 @@ impl QueryEngine {
 
     pub fn execute_with_extensions(
         query: &Query,
-        sources: &[QuerySource<'_>],
+        sources: &[QuerySource],
         inputs: &[QueryInput],
         control: &QueryControl,
         extensions: Option<&QueryExtensions>,
@@ -611,7 +620,7 @@ impl QueryEngine {
         let mut source_map = BTreeMap::new();
         for source in sources {
             if source_map
-                .insert(source.name.as_str(), (source.database, source.view))
+                .insert(source.name.as_str(), &source.database)
                 .is_some()
             {
                 return Err(SemanticError::incorrect(
@@ -620,12 +629,7 @@ impl QueryEngine {
                 ));
             }
         }
-        if !source_map.contains_key("$") {
-            return Err(SemanticError::incorrect(
-                "query/missing-default-source",
-                "query needs a source named $",
-            ));
-        }
+        validate_consumed_sources(query, &source_map)?;
         let deadline = control.timeout.map(|timeout| Instant::now() + timeout);
         let mut state = State {
             sources: source_map,
@@ -640,8 +644,20 @@ impl QueryEngine {
         };
         let initial = bind_inputs(&query.inputs, inputs)?;
         let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut state)?;
-        let default_database = state.sources["$"].0;
-        let result = shape_results(query, rows, control.max_result_rows, default_database)?;
+        let mut pull_budget = QueryPullBudget::new(
+            Arc::clone(&control.cancel),
+            state.deadline,
+            control.max_work,
+            state.work,
+        );
+        let result = shape_results(
+            query,
+            rows,
+            control.max_result_rows,
+            &state.sources,
+            &mut pull_budget,
+        )?;
+        state.work = pull_budget.work();
         state.stats.rows_produced = result_len(&result) as u64;
         Ok(QueryOutcome {
             result,
@@ -651,7 +667,102 @@ impl QueryEngine {
     }
 }
 
-impl Database {
+fn validate_consumed_sources(
+    query: &Query,
+    sources: &BTreeMap<&str, &DatabaseValue>,
+) -> Result<(), SemanticError> {
+    let mut consumed = BTreeSet::new();
+    let mut visited_rules = BTreeSet::new();
+    collect_consumed_sources(
+        &query.clauses,
+        &query.rules,
+        None,
+        &mut consumed,
+        &mut visited_rules,
+    );
+    for element in find_elements(&query.find) {
+        if let FindElement::Pull { source, .. } = element {
+            consumed.insert(source.clone());
+        }
+    }
+    if let Some(source) = consumed
+        .into_iter()
+        .find(|source| !sources.contains_key(source.as_str()))
+    {
+        return Err(SemanticError::incorrect(
+            "query/unknown-source",
+            format!("unknown source {source}"),
+        ));
+    }
+    for element in find_elements(&query.find) {
+        if let FindElement::Pull { source, .. } = element {
+            sources
+                .get(source.as_str())
+                .expect("pull source existence was validated")
+                .require_point_in_time("pull")?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_consumed_sources(
+    clauses: &[Clause],
+    rules: &[Rule],
+    inherited_source: Option<&str>,
+    consumed: &mut BTreeSet<String>,
+    visited_rules: &mut BTreeSet<(String, String)>,
+) {
+    for clause in clauses {
+        match clause {
+            Clause::Pattern(pattern) => {
+                consumed.insert(effective_source(&pattern.source, inherited_source).to_owned());
+            }
+            Clause::Predicate {
+                predicate: Predicate::Missing,
+                source,
+                ..
+            }
+            | Clause::Function {
+                function: Function::GetElse | Function::GetSome | Function::Extension(_),
+                source,
+                ..
+            } => {
+                consumed.insert(effective_source(source, inherited_source).to_owned());
+            }
+            Clause::Not { clauses, .. } => {
+                collect_consumed_sources(clauses, rules, inherited_source, consumed, visited_rules)
+            }
+            Clause::Or { branches, .. } => {
+                for branch in branches {
+                    collect_consumed_sources(
+                        branch,
+                        rules,
+                        inherited_source,
+                        consumed,
+                        visited_rules,
+                    );
+                }
+            }
+            Clause::Rule { source, name, .. } => {
+                let source = effective_source(source, inherited_source).to_owned();
+                if visited_rules.insert((name.clone(), source.clone())) {
+                    for rule in rules.iter().filter(|rule| rule.name == *name) {
+                        collect_consumed_sources(
+                            &rule.clauses,
+                            rules,
+                            Some(&source),
+                            consumed,
+                            visited_rules,
+                        );
+                    }
+                }
+            }
+            Clause::Predicate { .. } | Clause::Function { .. } => {}
+        }
+    }
+}
+
+impl DatabaseValue {
     pub fn query(
         &self,
         query: &Query,
@@ -662,8 +773,7 @@ impl Database {
             query,
             &[QuerySource {
                 name: "$".into(),
-                database: self,
-                view: View::Current,
+                database: self.clone(),
             }],
             inputs,
             control,
@@ -681,13 +791,34 @@ impl Database {
             query,
             &[QuerySource {
                 name: "$".into(),
-                database: self,
-                view: View::Current,
+                database: self.clone(),
             }],
             inputs,
             control,
             Some(extensions),
         )
+    }
+}
+
+impl Database {
+    pub fn query(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.database_value().query(query, inputs, control)
+    }
+
+    pub fn query_with_extensions(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: &QueryExtensions,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.database_value()
+            .query_with_extensions(query, inputs, control, extensions)
     }
 }
 
@@ -761,6 +892,16 @@ fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
     for clause in clauses {
         match clause {
             Clause::Function {
+                function: Function::Tuple,
+                args,
+                ..
+            } if args.is_empty() => {
+                return Err(SemanticError::incorrect(
+                    "query/function-arity",
+                    "tuple requires one or more arguments",
+                ));
+            }
+            Clause::Function {
                 function: Function::Ground,
                 args,
                 ..
@@ -771,7 +912,7 @@ fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
                         "ground requires exactly one constant",
                     ));
                 }
-                if !matches!(args[0], Term::Constant(_)) {
+                if !matches!(args[0], Term::Constant(_) | Term::Nil) {
                     return Err(SemanticError::incorrect(
                         "query/ground-not-constant",
                         "ground requires a constant argument",
@@ -1077,7 +1218,7 @@ fn evaluate_pattern(
     state: &mut State<'_>,
 ) -> Result<(Vec<Row>, String), SemanticError> {
     let source = effective_source(&pattern.source, inherited_source);
-    let (database, view) = state.sources.get(source).copied().ok_or_else(|| {
+    let database = state.sources.get(source).copied().ok_or_else(|| {
         SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
     })?;
     let mut next = Vec::new();
@@ -1085,6 +1226,12 @@ fn evaluate_pattern(
     for row in rows {
         state.check(1)?;
         let entity = resolve_entity(database, &pattern.entity, &row)?;
+        // A bound lookup ref that does not resolve denotes no entity.  Keep it
+        // distinct from a blank or unbound entity term, which intentionally
+        // leaves the E position open for an index scan.
+        if entity.is_none() && term_is_bound(&pattern.entity, &row) {
+            continue;
+        }
         let attribute = resolve_attribute(database, &pattern.attribute, &row)?;
         let bound_value = term_bound_value(&pattern.value, &row);
         let value = bound_value
@@ -1094,7 +1241,6 @@ fn evaluate_pattern(
             .transpose()?;
         let (datoms, selected) = select_datoms(
             database,
-            view,
             entity,
             attribute,
             value.as_ref(),
@@ -1148,24 +1294,20 @@ fn evaluate_pattern(
 }
 
 fn select_datoms(
-    database: &Database,
-    view: View,
+    database: &DatabaseValue,
     entity: Option<u64>,
     attribute: Option<u32>,
     value: Option<&Value>,
     force_scan: bool,
 ) -> Result<(Vec<crate::Datom>, String), SemanticError> {
-    if view == View::Current && !force_scan {
+    if !force_scan {
         if let Some(entity) = entity {
             let prefix = IndexPrefix::Eavt {
                 entity,
                 attribute,
                 value: attribute.and(value).cloned(),
             };
-            return Ok((
-                database.datoms_with_prefix(&prefix)?.to_vec(),
-                "EAVT seek".into(),
-            ));
+            return Ok((database.datoms_with_prefix(&prefix)?, "EAVT seek".into()));
         }
         if let Some(attribute) = attribute {
             if let Some(value) = value
@@ -1179,20 +1321,14 @@ fn select_datoms(
                     value: Some(value.clone()),
                     entity: None,
                 };
-                return Ok((
-                    database.datoms_with_prefix(&prefix)?.to_vec(),
-                    "AVET seek".into(),
-                ));
+                return Ok((database.datoms_with_prefix(&prefix)?, "AVET seek".into()));
             }
             let prefix = IndexPrefix::Aevt {
                 attribute,
                 entity: None,
                 value: None,
             };
-            return Ok((
-                database.datoms_with_prefix(&prefix)?.to_vec(),
-                "AEVT seek".into(),
-            ));
+            return Ok((database.datoms_with_prefix(&prefix)?, "AEVT seek".into()));
         }
         if let Some(Value::Ref(referenced)) = value {
             let prefix = IndexPrefix::Vaet {
@@ -1200,13 +1336,10 @@ fn select_datoms(
                 attribute: None,
                 entity: None,
             };
-            return Ok((
-                database.datoms_with_prefix(&prefix)?.to_vec(),
-                "VAET seek".into(),
-            ));
+            return Ok((database.datoms_with_prefix(&prefix)?, "VAET seek".into()));
         }
     }
-    Ok((database.datoms(view, IndexOrder::Eavt), "EAVT scan".into()))
+    Ok((database.datoms(IndexOrder::Eavt)?, "EAVT scan".into()))
 }
 
 fn clause_ready(clause: &Clause, row: &Row, rules: &[Rule]) -> bool {
@@ -1274,12 +1407,6 @@ fn solve_rule_invocation(
     // repeats until answer cardinalities stop changing. This memo uses the
     // concrete bound values as well as the adornment: it is more selective,
     // while retaining the same monotone fixed-point boundary.
-    if !state.sources.contains_key(key.source.as_str()) {
-        return Err(SemanticError::incorrect(
-            "query/unknown-source",
-            format!("unknown source {}", key.source),
-        ));
-    }
     let (arity, required) = rule_signature(rules, &key.name)?;
     if key.bindings.len() != arity {
         return Err(SemanticError::incorrect(
@@ -1438,7 +1565,7 @@ fn evaluate_predicate(
                     "missing requires entity and attribute",
                 ));
             }
-            let (database, _) = state.sources.get(source).copied().ok_or_else(|| {
+            let database = state.sources.get(source).copied().ok_or_else(|| {
                 SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
             })?;
             let entity = entity_value(database, require_stored(&args[0], "query/entity-value")?)?
@@ -1447,7 +1574,7 @@ fn evaluate_predicate(
             })?;
             let attribute =
                 attribute_value(database, require_stored(&args[1], "query/attribute-value")?)?;
-            Ok(database.values(entity, attribute).is_empty())
+            Ok(database.values(entity, attribute)?.is_empty())
         }
     }
 }
@@ -1501,11 +1628,9 @@ fn evaluate_function(
                 ));
             }
             let default = require_stored(&args[2], "query/get-else-nil-default")?.clone();
+            let values = database.values(entity, attribute)?;
             Ok(vec![vec![BoundValue::Stored(
-                database
-                    .values(entity, attribute)
-                    .first()
-                    .map_or(default, |value| (*value).clone()),
+                values.first().cloned().unwrap_or(default),
             )]])
         }
         Function::GetSome => {
@@ -1537,10 +1662,10 @@ fn evaluate_function(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for attribute in attributes {
-                if let Some(found) = database.values(entity, attribute).first() {
+                if let Some(found) = database.values(entity, attribute)?.first() {
                     return Ok(vec![vec![
                         BoundValue::Stored(Value::Ref(u64::from(attribute))),
-                        BoundValue::Stored((*found).clone()),
+                        BoundValue::Stored(found.clone()),
                     ]]);
                 }
             }
@@ -1734,7 +1859,8 @@ fn shape_results(
     query: &Query,
     rows: Vec<Row>,
     max: usize,
-    database: &Database,
+    sources: &BTreeMap<&str, &DatabaseValue>,
+    pull_budget: &mut QueryPullBudget,
 ) -> Result<QueryResult, SemanticError> {
     let elements = match &query.find {
         FindSpec::Relation(elements) | FindSpec::Tuple(elements) => elements.as_slice(),
@@ -1765,14 +1891,16 @@ fn shape_results(
         .iter()
         .any(|element| matches!(element, FindElement::Aggregate { .. }))
     {
-        aggregate_rows(elements, &basis_variables, &basis, database)?
+        aggregate_rows(elements, &basis_variables, &basis, sources, pull_budget)?
     } else {
         basis
             .into_iter()
             .map(|row| {
                 elements
                     .iter()
-                    .map(|element| project_element(element, &basis_variables, &row, database))
+                    .map(|element| {
+                        project_element(element, &basis_variables, &row, sources, pull_budget)
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -1800,7 +1928,8 @@ fn aggregate_rows(
     elements: &[FindElement],
     basis_variables: &[Variable],
     basis: &[Vec<BoundValue>],
-    database: &Database,
+    sources: &BTreeMap<&str, &DatabaseValue>,
+    pull_budget: &mut QueryPullBudget,
 ) -> Result<Vec<Vec<QueryValue>>, SemanticError> {
     let group_variables: Vec<_> = elements
         .iter()
@@ -1847,7 +1976,11 @@ fn aggregate_rows(
                         .ok_or_else(|| {
                             fault("query/missing-group-key", "aggregate group key is missing")
                         }),
-                    FindElement::Pull { variable, pattern } => {
+                    FindElement::Pull {
+                        source,
+                        variable,
+                        pattern,
+                    } => {
                         let row = rows.first().ok_or_else(|| {
                             fault("query/missing-group-key", "pull group key is missing")
                         })?;
@@ -1863,7 +1996,7 @@ fn aggregate_rows(
                                 "pull expression variable must bind an entity id",
                             )
                         })?;
-                        database.pull(pattern, entity)
+                        find_source(sources, source)?.pull_for_query(pattern, entity, pull_budget)
                     }
                     FindElement::Aggregate { function, variable } => {
                         let index = basis_variables
@@ -1903,11 +2036,8 @@ fn aggregate(
                 values.into_iter().min_by(|a, b| a.index_cmp(b))
             } else {
                 values.into_iter().max_by(|a, b| a.index_cmp(b))
-            }
-            .ok_or_else(|| {
-                SemanticError::incorrect("query/empty-aggregate", "min/max has no values")
-            })?;
-            Ok(value.query_value())
+            };
+            Ok(value.map_or(QueryValue::Nil, BoundValue::query_value))
         }
         Aggregate::Sum
         | Aggregate::Average
@@ -2117,7 +2247,8 @@ fn project_element(
     element: &FindElement,
     basis_variables: &[Variable],
     row: &[BoundValue],
-    database: &Database,
+    sources: &BTreeMap<&str, &DatabaseValue>,
+    pull_budget: &mut QueryPullBudget,
 ) -> Result<QueryValue, SemanticError> {
     let variable = match element {
         FindElement::Variable(variable) | FindElement::Aggregate { variable, .. } => variable,
@@ -2133,14 +2264,16 @@ fn project_element(
             )
         })?;
     match element {
-        FindElement::Pull { pattern, .. } => {
+        FindElement::Pull {
+            source, pattern, ..
+        } => {
             let entity = row[index].stored().and_then(entity_id).ok_or_else(|| {
                 SemanticError::incorrect(
                     "query/pull-entity",
                     "pull expression variable must bind an entity id",
                 )
             })?;
-            database.pull(pattern, entity)
+            find_source(sources, source)?.pull_for_query(pattern, entity, pull_budget)
         }
         _ => Ok(row[index].query_value()),
     }
@@ -2149,6 +2282,7 @@ fn resolve_args(args: &[Term], row: &Row) -> Result<Vec<BoundValue>, SemanticErr
     args.iter()
         .map(|term| match term {
             Term::Constant(value) => Ok(BoundValue::Stored(value.clone())),
+            Term::Nil => Ok(BoundValue::Nil),
             Term::Variable(variable) => row.get(variable).cloned().ok_or_else(|| {
                 SemanticError::incorrect(
                     "query/insufficient-binding",
@@ -2165,6 +2299,7 @@ fn resolve_args(args: &[Term], row: &Row) -> Result<Vec<BoundValue>, SemanticErr
 fn term_bound_value(term: &Term, row: &Row) -> Option<BoundValue> {
     match term {
         Term::Constant(value) => Some(BoundValue::Stored(value.clone())),
+        Term::Nil => Some(BoundValue::Nil),
         Term::Variable(variable) => row.get(variable).cloned(),
         Term::Blank => None,
     }
@@ -2180,7 +2315,7 @@ fn entity_id(value: &Value) -> Option<u64> {
         _ => None,
     }
 }
-fn entity_value(database: &Database, value: &Value) -> Result<Option<u64>, SemanticError> {
+fn entity_value(database: &DatabaseValue, value: &Value) -> Result<Option<u64>, SemanticError> {
     match value {
         Value::Keyword(keyword) => database.entid(keyword).map(Some).ok_or_else(|| {
             SemanticError::incorrect(
@@ -2188,11 +2323,21 @@ fn entity_value(database: &Database, value: &Value) -> Result<Option<u64>, Seman
                 format!("unknown ident {}", keyword.qualified_name()),
             )
         }),
+        Value::Tuple(parts) => match parts.as_slice() {
+            [Some(attribute), Some(value)] => {
+                let attribute = attribute_value(database, attribute)?;
+                database.lookup(attribute, value)
+            }
+            _ => Err(SemanticError::incorrect(
+                "query/entity-value",
+                "lookup ref must contain exactly an attribute and value",
+            )),
+        },
         _ => Ok(entity_id(value)),
     }
 }
 fn resolve_entity(
-    database: &Database,
+    database: &DatabaseValue,
     term: &Term,
     row: &Row,
 ) -> Result<Option<u64>, SemanticError> {
@@ -2202,7 +2347,7 @@ fn resolve_entity(
     }
 }
 fn resolve_attribute(
-    database: &Database,
+    database: &DatabaseValue,
     term: &Term,
     row: &Row,
 ) -> Result<Option<u32>, SemanticError> {
@@ -2211,7 +2356,7 @@ fn resolve_attribute(
         Some(BoundValue::Nil) | None => Ok(None),
     }
 }
-fn attribute_value(database: &Database, value: &Value) -> Result<u32, SemanticError> {
+fn attribute_value(database: &DatabaseValue, value: &Value) -> Result<u32, SemanticError> {
     let entity = match value {
         Value::Keyword(keyword) => database.entid(keyword).ok_or_else(|| {
             SemanticError::incorrect(
@@ -2243,7 +2388,7 @@ fn attribute_value(database: &Database, value: &Value) -> Result<u32, SemanticEr
     Ok(attribute)
 }
 fn resolve_pattern_value(
-    database: &Database,
+    database: &DatabaseValue,
     attribute: Option<u32>,
     value: &Value,
 ) -> Result<Value, SemanticError> {
@@ -2270,7 +2415,7 @@ fn resolve_pattern_value(
     Ok(value.clone())
 }
 fn unify_entity_term(
-    database: &Database,
+    database: &DatabaseValue,
     row: &mut Row,
     term: &Term,
     resolved: Option<u64>,
@@ -2278,6 +2423,7 @@ fn unify_entity_term(
 ) -> Result<bool, SemanticError> {
     match term {
         Term::Blank => Ok(true),
+        Term::Nil => Ok(false),
         Term::Constant(_) => Ok(resolved == Some(entity)),
         Term::Variable(variable) => match row.get(variable) {
             Some(BoundValue::Nil) => Ok(false),
@@ -2293,7 +2439,7 @@ fn unify_entity_term(
     }
 }
 fn unify_attribute_term(
-    database: &Database,
+    database: &DatabaseValue,
     row: &mut Row,
     term: &Term,
     resolved: Option<u32>,
@@ -2301,6 +2447,7 @@ fn unify_attribute_term(
 ) -> Result<bool, SemanticError> {
     match term {
         Term::Blank => Ok(true),
+        Term::Nil => Ok(false),
         Term::Constant(_) => Ok(resolved == Some(attribute)),
         Term::Variable(variable) => match row.get(variable) {
             Some(BoundValue::Nil) => Ok(false),
@@ -2319,7 +2466,7 @@ fn unify_attribute_term(
     }
 }
 fn unify_value_term(
-    database: &Database,
+    database: &DatabaseValue,
     row: &mut Row,
     term: &Term,
     resolved_attribute: Option<u32>,
@@ -2328,6 +2475,7 @@ fn unify_value_term(
 ) -> Result<bool, SemanticError> {
     match term {
         Term::Blank => Ok(true),
+        Term::Nil => Ok(false),
         Term::Constant(_) => Ok(resolved == Some(value)),
         Term::Variable(variable) => match row.get(variable) {
             Some(BoundValue::Nil) => Ok(false),
@@ -2345,6 +2493,7 @@ fn unify_value_term(
 fn unify_term(row: &mut Row, term: &Term, value: &BoundValue) -> bool {
     match term {
         Term::Blank => true,
+        Term::Nil => matches!(value, BoundValue::Nil),
         Term::Constant(expected) => {
             matches!(value, BoundValue::Stored(actual) if expected == actual)
         }
@@ -2393,14 +2542,22 @@ fn dedupe_query_rows(rows: &mut Vec<Vec<QueryValue>>, dedupe: bool) {
         *rows = unique;
     }
 }
-fn source_database<'a>(state: &'a State<'_>, source: &str) -> Result<&'a Database, SemanticError> {
-    state
-        .sources
-        .get(source)
-        .map(|(database, _)| *database)
-        .ok_or_else(|| {
-            SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
-        })
+fn source_database<'a>(
+    state: &'a State<'_>,
+    source: &str,
+) -> Result<&'a DatabaseValue, SemanticError> {
+    state.sources.get(source).copied().ok_or_else(|| {
+        SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
+    })
+}
+
+fn find_source<'a>(
+    sources: &'a BTreeMap<&str, &DatabaseValue>,
+    source: &str,
+) -> Result<&'a DatabaseValue, SemanticError> {
+    sources.get(source).copied().ok_or_else(|| {
+        SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
+    })
 }
 fn effective_source<'a>(source: &'a str, inherited_source: Option<&'a str>) -> &'a str {
     if source == "$" {

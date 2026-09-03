@@ -306,6 +306,44 @@ fn pull_explicit_id_unknown_attributes_and_nested_empty_results() {
 }
 
 #[test]
+fn unresolved_idents_and_lookup_refs_retain_only_requested_nil_db_id() {
+    let (db, _) = database();
+    let db_id = Keyword::new("db", "id");
+    let unresolved = [
+        atomic_core::EntityIdentifier::Ident(Keyword::new("person", "nobody")),
+        atomic_core::EntityIdentifier::Lookup {
+            attribute: AttributeName::Id(NAME),
+            value: Value::String("Nobody".into()),
+        },
+    ];
+
+    for identifier in unresolved {
+        let explicit = db
+            .pull(
+                &PullPattern::attributes(vec![PullAttribute::forward(
+                    AttributeName::Ident(db_id.clone()),
+                )]),
+                identifier.clone(),
+            )
+            .unwrap();
+        assert_eq!(field(&explicit, &db_id), Some(&QueryValue::Nil));
+
+        let wildcard = db.pull(&PullPattern::wildcard(), identifier.clone()).unwrap();
+        assert_eq!(field(&wildcard, &db_id), Some(&QueryValue::Nil));
+
+        let name_only = db
+            .pull(
+                &PullPattern::attributes(vec![PullAttribute::forward(
+                    AttributeName::Id(NAME),
+                )]),
+                identifier,
+            )
+            .unwrap();
+        assert_eq!(name_only, QueryValue::Map(Vec::new()));
+    }
+}
+
+#[test]
 fn pull_rejects_duplicate_selectors_and_non_positive_limits() {
     let (db, ids) = database();
     let duplicate = PullPattern::attributes(vec![
@@ -478,6 +516,53 @@ fn eager_entity_navigation_returns_entities_and_keeps_one_snapshot() {
 }
 
 #[test]
+fn filtered_entity_many_and_reverse_navigation_remain_set_valued() {
+    let (db, ids) = database();
+    let retracted = db
+        .with(
+            &[TxOp::Retract {
+                entity: EntityRef::Id(ids[0]),
+                attribute: FRIEND,
+                value: Some(TxValue::Entity(EntityRef::Id(ids[1]))),
+            }],
+            2_000,
+        )
+        .unwrap()
+        .db_after;
+    let asserted_again = retracted
+        .with(
+            &[TxOp::Add {
+                entity: EntityRef::Id(ids[0]),
+                attribute: FRIEND,
+                value: TxValue::Entity(EntityRef::Id(ids[1])),
+            }],
+            3_000,
+        )
+        .unwrap()
+        .db_after;
+    let filtered = asserted_again
+        .database_value()
+        .filter(|_, datom| atomic_core::tx_to_t(datom.tx).unwrap() != 3);
+
+    let alice = filtered.entity(ids[0]).unwrap().unwrap();
+    let Some(EntityValue::Collection(friends)) = alice.get(FRIEND).unwrap() else {
+        panic!("cardinality-many ref must remain a collection")
+    };
+    assert_eq!(friends.len(), 1);
+    assert!(matches!(&friends[0], EntityValue::Entity(bob) if bob.id() == ids[1]));
+
+    let bob = filtered.entity(ids[1]).unwrap().unwrap();
+    let Some(EntityValue::Collection(incoming)) = bob
+        .get_direction(&PullDirection::Reverse(AttributeName::Id(FRIEND)))
+        .unwrap()
+    else {
+        panic!("non-component reverse refs must remain a collection")
+    };
+    assert_eq!(incoming.len(), 1);
+    assert!(matches!(&incoming[0], EntityValue::Entity(alice) if alice.id() == ids[0]));
+}
+
+#[test]
 fn pull_and_entities_retain_the_exact_database_value_and_reject_history() {
     let (before, ids) = database();
     let after = before
@@ -568,6 +653,7 @@ fn query_pull_expression_projects_from_the_same_snapshot() {
     let entity = Variable::new("entity").unwrap();
     let query = Query::new(
         FindSpec::Scalar(FindElement::Pull {
+            source: "$".into(),
             variable: entity.clone(),
             pattern: Box::new(PullPattern::attributes(vec![PullAttribute::forward(
                 AttributeName::Id(NAME),

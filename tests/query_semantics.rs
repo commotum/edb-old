@@ -220,8 +220,7 @@ fn temporal_sources_inputs_set_and_with_bag_semantics_are_explicit() {
         &age_query,
         &[QuerySource {
             name: "$".into(),
-            database: &db2,
-            view: View::AsOf(2),
+            database: db2.database_value().as_of(2),
         }],
         &[],
         &QueryControl::default(),
@@ -534,18 +533,15 @@ fn all_input_and_find_shapes_multiple_sources_and_history_components_work() {
             &[
                 QuerySource {
                     name: "$".into(),
-                    database: &db2,
-                    view: View::Current,
+                    database: db2.database_value(),
                 },
                 QuerySource {
                     name: "$old".into(),
-                    database: &db1,
-                    view: View::Current,
+                    database: db1.database_value(),
                 },
                 QuerySource {
                     name: "$new".into(),
-                    database: &db2,
-                    view: View::Current,
+                    database: db2.database_value(),
                 },
             ],
             &[],
@@ -578,8 +574,7 @@ fn all_input_and_find_shapes_multiple_sources_and_history_components_work() {
         &history_query,
         &[QuerySource {
             name: "$".into(),
-            database: &db2,
-            view: View::History,
+            database: db2.database_value().history(),
         }],
         &[],
         &QueryControl::default(),

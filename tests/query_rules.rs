@@ -5,7 +5,7 @@
 use atomic_core::{
     Attribute, Cardinality, Clause, DataPattern, Database, EntityRef, FindElement, FindSpec,
     InputSpec, Keyword, Query, QueryControl, QueryEngine, QueryInput, QueryResult, QuerySource,
-    QueryValue, Rule, Schema, Term, TxOp, TxValue, Value, ValueType, Variable, View,
+    QueryValue, Rule, Schema, Term, TxOp, TxValue, Value, ValueType, Variable,
 };
 use std::collections::BTreeSet;
 
@@ -115,19 +115,12 @@ fn rule_invocation_source_is_inherited_and_partitions_the_memo() {
         &query,
         &[
             QuerySource {
-                name: "$".into(),
-                database: &current,
-                view: View::Current,
-            },
-            QuerySource {
                 name: "$old".into(),
-                database: &old,
-                view: View::Current,
+                database: old.database_value(),
             },
             QuerySource {
                 name: "$new".into(),
-                database: &current,
-                view: View::Current,
+                database: current.database_value(),
             },
         ],
         &[],

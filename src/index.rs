@@ -59,7 +59,6 @@ impl IndexPrefix {
         }
         Ok(())
     }
-
 }
 
 /// Immutable roots for a single database value.

@@ -67,8 +67,8 @@ pub use program::{
     QueryPattern, QueryTemplate, QueryTerm, RuntimeValue, is_exact_true, require_exact_true,
 };
 pub use pull::{
-    AttributeName, Entity, EntityIdentifier, EntityValue, PullAttribute, PullControl, PullDirection,
-    PullLimit, PullNested, PullPattern,
+    AttributeName, Entity, EntityIdentifier, EntityValue, PullAttribute, PullControl,
+    PullDirection, PullLimit, PullNested, PullPattern,
 };
 pub use query::{
     Aggregate, Binding, Clause, DataPattern, FindElement, FindSpec, Function, InputSpec, PlanStep,
