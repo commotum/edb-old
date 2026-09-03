@@ -3,13 +3,13 @@ use crate::encoding::program_call_digest;
 use crate::program::ValidatedProgram;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
 use crate::{
-    CallableRef, Database, Datom, Digest, DurableTransaction, ErrorCategory, Program,
-    ProgramBudget, ProgramCall, ProgramHash, ProgramKind, ProgramLimits, ProgramOutput,
-    ProgramRuntime, Schema, SemanticError, TxForm, TxFunctions, TxOp, Value, decode_genesis,
-    decode_program, decode_transaction, encode_genesis, encode_program, encode_transaction,
-    request_digest, sha256, transaction_hash,
+    CallableRef, Database, Datom, Digest, DurableTransaction, ErrorCategory,
+    PostgresConnectionConfig, Program, ProgramBudget, ProgramCall, ProgramHash, ProgramKind,
+    ProgramLimits, ProgramOutput, ProgramRuntime, Schema, SemanticError, TxForm, TxFunctions, TxOp,
+    Value, decode_genesis, decode_program, decode_transaction, encode_genesis, encode_program,
+    encode_transaction, request_digest, sha256, transaction_hash,
 };
-use postgres::{Client, GenericClient, IsolationLevel, NoTls};
+use postgres::{Client, GenericClient, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -186,6 +186,358 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0012_tree_publication_revisions.sql"),
     ),
 ];
+
+/// Latest PostgreSQL schema understood by this binary.
+///
+/// This is an operator compatibility boundary, not a data-format version.
+pub const POSTGRES_SCHEMA_VERSION: i64 = 12;
+
+const PEER_RUNTIME_TABLES: &[&str] = &[
+    "atomic_schema_migrations",
+    "atomic_databases",
+    "atomic_heads",
+    "atomic_transactions",
+    "atomic_requests",
+    "atomic_index_segments",
+    "atomic_index_manifests",
+    "atomic_programs",
+    "atomic_program_versions",
+    "atomic_active_programs",
+    "atomic_database_generations",
+    "atomic_index_publications",
+    "atomic_tree_nodes",
+    "atomic_tree_manifests",
+    "atomic_tree_manifest_roots",
+    "atomic_tree_publications",
+];
+
+const WRITER_RUNTIME_TABLES: &[&str] = &["atomic_transactor_leases"];
+
+const WRITER_INSERT_TABLES: &[&str] = &[
+    "atomic_transactions",
+    "atomic_requests",
+    "atomic_transactor_leases",
+    "atomic_tree_nodes",
+    "atomic_tree_manifests",
+    "atomic_tree_manifest_roots",
+    "atomic_tree_publications",
+];
+
+/// Administrative PostgreSQL owner for schema installation and runtime-role
+/// grants. Ordinary peers and transaction services never need this type or
+/// its DDL authority.
+pub struct PostgresMigrator {
+    client: Client,
+}
+
+impl PostgresMigrator {
+    pub fn connect(connection: &str) -> Result<Self, SemanticError> {
+        Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
+    }
+
+    pub fn connect_configured(
+        connection: &PostgresConnectionConfig,
+    ) -> Result<Self, SemanticError> {
+        let client = connection.connect_for("postgres/migration-connect")?;
+        Ok(Self { client })
+    }
+
+    pub fn from_client(client: Client) -> Self {
+        Self { client }
+    }
+
+    /// Install every known migration under one transaction-scoped advisory
+    /// lock. An older binary refuses an already-installed newer migration.
+    pub fn migrate(&mut self) -> Result<(), SemanticError> {
+        apply_migrations(&mut self.client)
+    }
+
+    /// Grant the exact table privileges used by the native peer and fenced
+    /// transaction service. Roles must already exist and must not be elevated,
+    /// own Atomic relations, or inherit another role's privileges.
+    pub fn grant_runtime_privileges(
+        &mut self,
+        writer_role: &str,
+        peer_role: &str,
+    ) -> Result<(), SemanticError> {
+        grant_runtime_privileges(&mut self.client, writer_role, peer_role)
+    }
+}
+
+fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
+    debug_assert_eq!(
+        MIGRATIONS.last().map(|(version, _)| *version),
+        Some(POSTGRES_SCHEMA_VERSION)
+    );
+    let mut transaction = client
+        .transaction()
+        .map_err(|error| postgres_error("postgres/migration-begin", error))?;
+    transaction
+        .query_one("SELECT pg_advisory_xact_lock($1)", &[&0x41544f4d_i64])
+        .map_err(|error| postgres_error("postgres/migration-lock", error))?;
+    let migration_table_exists: bool = transaction
+        .query_one(
+            "SELECT to_regclass('atomic_schema_migrations') IS NOT NULL",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/migration-discovery", error))?
+        .get(0);
+    let installed = if migration_table_exists {
+        read_migration_rows(&mut transaction)?
+    } else {
+        Vec::new()
+    };
+    validate_migration_rows(&installed, false)?;
+
+    for (version, sql) in MIGRATIONS.iter().skip(installed.len()) {
+        transaction
+            .batch_execute(sql)
+            .map_err(|error| postgres_error("postgres/migration-ddl", error))?;
+        let checksum = sha256(sql.as_bytes());
+        transaction
+            .execute(
+                "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
+                &[version, &&checksum[..]],
+            )
+            .map_err(|error| postgres_error("postgres/migration-record", error))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| postgres_error("postgres/migration-commit", error))
+}
+
+fn migration_table_exists<C: GenericClient>(client: &mut C) -> Result<bool, SemanticError> {
+    client
+        .query_one(
+            "SELECT to_regclass('atomic_schema_migrations') IS NOT NULL",
+            &[],
+        )
+        .map(|row| row.get(0))
+        .map_err(|error| postgres_error("postgres/migration-discovery", error))
+}
+
+fn read_migration_rows<C: GenericClient>(
+    client: &mut C,
+) -> Result<Vec<(i64, Vec<u8>)>, SemanticError> {
+    client
+        .query(
+            "SELECT version, checksum FROM atomic_schema_migrations ORDER BY version",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/migration-read", error))
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect()
+        })
+}
+
+fn validate_migration_rows(
+    installed: &[(i64, Vec<u8>)],
+    require_complete: bool,
+) -> Result<(), SemanticError> {
+    if let Some((version, _)) = installed
+        .iter()
+        .find(|(version, _)| *version > POSTGRES_SCHEMA_VERSION)
+    {
+        return Err(SemanticError::new(
+            ErrorCategory::Unavailable,
+            "postgres/schema-too-new",
+            format!(
+                "database schema version {version} is newer than binary version {POSTGRES_SCHEMA_VERSION}"
+            ),
+        ));
+    }
+    if installed.len() > MIGRATIONS.len() {
+        return Err(fault(
+            "postgres/migration-history-invalid",
+            "installed migration history is not a prefix known to this binary",
+        ));
+    }
+    for ((version, checksum), (expected_version, sql)) in installed.iter().zip(MIGRATIONS) {
+        if version != expected_version {
+            return Err(fault(
+                "postgres/migration-history-invalid",
+                format!(
+                    "installed migration {version} appears where version {expected_version} is required"
+                ),
+            ));
+        }
+        if checksum.as_slice() != sha256(sql.as_bytes()) {
+            return Err(fault(
+                "postgres/migration-checksum-mismatch",
+                format!("installed migration {version} differs from this binary"),
+            ));
+        }
+    }
+    if require_complete && installed.len() != MIGRATIONS.len() {
+        let installed_version = installed.last().map_or(0, |(version, _)| *version);
+        return Err(SemanticError::new(
+            ErrorCategory::Unavailable,
+            "postgres/schema-upgrade-required",
+            format!(
+                "database schema version {installed_version} is older than required version {POSTGRES_SCHEMA_VERSION}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_schema_compatibility<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), SemanticError> {
+    if !migration_table_exists(client)? {
+        return Err(SemanticError::new(
+            ErrorCategory::Unavailable,
+            "postgres/schema-not-installed",
+            "Atomic PostgreSQL migrations have not been installed",
+        ));
+    }
+    validate_migration_rows(&read_migration_rows(client)?, true)
+}
+
+fn grant_runtime_privileges(
+    client: &mut Client,
+    writer_role: &str,
+    peer_role: &str,
+) -> Result<(), SemanticError> {
+    if writer_role == peer_role {
+        return Err(SemanticError::incorrect(
+            "postgres/runtime-roles-not-distinct",
+            "writer and peer runtime roles must be distinct",
+        ));
+    }
+    let mut transaction = client
+        .transaction()
+        .map_err(|error| postgres_error("postgres/runtime-grants-begin", error))?;
+    verify_schema_compatibility(&mut transaction)?;
+    let schema: String = transaction
+        .query_one("SELECT current_schema()", &[])
+        .map_err(|error| postgres_error("postgres/runtime-grants-schema", error))?
+        .get(0);
+    let database: String = transaction
+        .query_one("SELECT current_database()", &[])
+        .map_err(|error| postgres_error("postgres/runtime-grants-database", error))?
+        .get(0);
+    let public_can_create: bool = transaction
+        .query_one(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM pg_namespace n, \
+                      LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a \
+                  WHERE n.nspname = current_schema() \
+                    AND a.grantee = 0 AND a.privilege_type = 'CREATE'\
+             )",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/runtime-grants-public", error))?
+        .get(0);
+    if public_can_create {
+        return Err(SemanticError::incorrect(
+            "postgres/runtime-schema-public-create",
+            format!(
+                "schema {schema} grants CREATE to PUBLIC; revoke it before provisioning runtime roles"
+            ),
+        ));
+    }
+    for role in [writer_role, peer_role] {
+        validate_runtime_role(&mut transaction, role, &schema)?;
+    }
+
+    let schema_ident = quote_identifier(&schema)?;
+    let database_ident = quote_identifier(&database)?;
+    let peer_ident = quote_identifier(peer_role)?;
+    let writer_ident = quote_identifier(writer_role)?;
+    let all_tables = PEER_RUNTIME_TABLES
+        .iter()
+        .chain(WRITER_RUNTIME_TABLES)
+        .copied()
+        .collect::<Vec<_>>();
+    let all_relations = relation_list(&schema_ident, &all_tables);
+    for role_ident in [&writer_ident, &peer_ident] {
+        transaction
+            .batch_execute(&format!(
+                "REVOKE ALL PRIVILEGES ON TABLE {all_relations} FROM {role_ident}; \
+                 REVOKE CREATE ON SCHEMA {schema_ident} FROM {role_ident}; \
+                 GRANT CONNECT ON DATABASE {database_ident} TO {role_ident}; \
+                 GRANT USAGE ON SCHEMA {schema_ident} TO {role_ident}"
+            ))
+            .map_err(|error| postgres_error("postgres/runtime-grants-reset", error))?;
+    }
+    let peer_relations = relation_list(&schema_ident, PEER_RUNTIME_TABLES);
+    transaction
+        .batch_execute(&format!(
+            "GRANT SELECT ON TABLE {peer_relations} TO {peer_ident}; \
+             GRANT SELECT ON TABLE {peer_relations} TO {writer_ident}; \
+             GRANT SELECT ON TABLE {} TO {writer_ident}; \
+             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_heads\" TO {writer_ident}; \
+             GRANT INSERT ON TABLE {} TO {writer_ident}; \
+             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_transactor_leases\" TO {writer_ident}",
+            relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
+            relation_list(&schema_ident, WRITER_INSERT_TABLES),
+        ))
+        .map_err(|error| postgres_error("postgres/runtime-grants-apply", error))?;
+    transaction
+        .commit()
+        .map_err(|error| postgres_error("postgres/runtime-grants-commit", error))
+}
+
+fn validate_runtime_role<C: GenericClient>(
+    client: &mut C,
+    role: &str,
+    schema: &str,
+) -> Result<(), SemanticError> {
+    let row = client
+        .query_opt(
+            "SELECT r.oid, r.rolsuper, r.rolcreaterole, r.rolcreatedb, \
+                    r.rolreplication, r.rolbypassrls, \
+                    EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid), \
+                    EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                             WHERE c.relowner = r.oid AND n.nspname = $2 \
+                               AND c.relname LIKE 'atomic\\_%' ESCAPE '\\') \
+               FROM pg_roles r WHERE r.rolname = $1",
+            &[&role, &schema],
+        )
+        .map_err(|error| postgres_error("postgres/runtime-role-read", error))?
+        .ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::NotFound,
+                "postgres/runtime-role-not-found",
+                format!("PostgreSQL role {role} does not exist"),
+            )
+        })?;
+    let elevated = row.get::<_, bool>(1)
+        || row.get::<_, bool>(2)
+        || row.get::<_, bool>(3)
+        || row.get::<_, bool>(4)
+        || row.get::<_, bool>(5);
+    let inherits_membership: bool = row.get(6);
+    let owns_atomic_relation: bool = row.get(7);
+    if elevated || inherits_membership || owns_atomic_relation {
+        return Err(SemanticError::incorrect(
+            "postgres/runtime-role-not-least-privilege",
+            format!("role {role} is elevated, inherits another role, or owns an Atomic relation"),
+        ));
+    }
+    Ok(())
+}
+
+fn quote_identifier(identifier: &str) -> Result<String, SemanticError> {
+    if identifier.is_empty() || identifier.contains('\0') {
+        return Err(SemanticError::incorrect(
+            "postgres/invalid-role-name",
+            "PostgreSQL identifiers must be non-empty and contain no NUL",
+        ));
+    }
+    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
+}
+
+fn relation_list(schema_ident: &str, tables: &[&str]) -> String {
+    tables
+        .iter()
+        .map(|table| format!("{schema_ident}.\"{table}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn program_kind_i16(kind: ProgramKind) -> i16 {
     match kind {
@@ -719,8 +1071,13 @@ pub struct PostgresStore {
 
 impl PostgresStore {
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
-        let client = Client::connect(connection, NoTls)
-            .map_err(|error| postgres_error("postgres/connect", error))?;
+        Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
+    }
+
+    pub fn connect_configured(
+        connection: &PostgresConnectionConfig,
+    ) -> Result<Self, SemanticError> {
+        let client = connection.connect_for("postgres/connect")?;
         Ok(Self::from_client(client))
     }
 
@@ -776,107 +1133,17 @@ impl PostgresStore {
     }
 
     pub fn migrate(&mut self) -> Result<(), SemanticError> {
-        let mut transaction = self
-            .client
-            .transaction()
-            .map_err(|error| postgres_error("postgres/migration-begin", error))?;
-        transaction
-            .query_one("SELECT pg_advisory_xact_lock($1)", &[&0x41544f4d_i64])
-            .map_err(|error| postgres_error("postgres/migration-lock", error))?;
-        let mut migration_table_exists: bool = transaction
-            .query_one(
-                "SELECT to_regclass('atomic_schema_migrations') IS NOT NULL",
-                &[],
-            )
-            .map_err(|error| postgres_error("postgres/migration-discovery", error))?
-            .get(0);
-        for (version, sql) in MIGRATIONS {
-            let checksum = sha256(sql.as_bytes());
-            let stored = if migration_table_exists {
-                transaction
-                    .query_opt(
-                        "SELECT checksum FROM atomic_schema_migrations WHERE version = $1",
-                        &[version],
-                    )
-                    .map_err(|error| postgres_error("postgres/migration-read", error))?
-            } else {
-                None
-            };
-            if let Some(row) = stored {
-                let stored: Vec<u8> = row.get(0);
-                if stored.as_slice() != checksum {
-                    return Err(fault(
-                        "postgres/migration-checksum-mismatch",
-                        format!("installed migration {version} differs from this binary"),
-                    ));
-                }
-                continue;
-            } else {
-                transaction
-                    .batch_execute(sql)
-                    .map_err(|error| postgres_error("postgres/migration-ddl", error))?;
-                migration_table_exists = true;
-                transaction
-                    .execute(
-                        "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
-                        &[version, &&checksum[..]],
-                    )
-                    .map_err(|error| postgres_error("postgres/migration-record", error))?;
-            }
-        }
-        transaction
-            .commit()
-            .map_err(|error| postgres_error("postgres/migration-commit", error))
+        // Compatibility shim for existing administrative callers. New code
+        // should use `PostgresMigrator`, which cannot be mistaken for a
+        // transaction-service runtime handle.
+        apply_migrations(&mut self.client)
     }
 
     /// Read-only runtime compatibility gate. Schema installation is an
     /// explicit administrative action; a transactor never grants itself DDL
     /// authority while starting.
     pub fn verify_migrations(&mut self) -> Result<(), SemanticError> {
-        let exists: bool = self
-            .client
-            .query_one(
-                "SELECT to_regclass('atomic_schema_migrations') IS NOT NULL",
-                &[],
-            )
-            .map_err(|error| postgres_error("postgres/migration-discovery", error))?
-            .get(0);
-        if !exists {
-            return Err(SemanticError::new(
-                ErrorCategory::Unavailable,
-                "postgres/schema-not-installed",
-                "Atomic PostgreSQL migrations have not been installed",
-            ));
-        }
-        let rows = self
-            .client
-            .query(
-                "SELECT version, checksum FROM atomic_schema_migrations ORDER BY version",
-                &[],
-            )
-            .map_err(|error| postgres_error("postgres/migration-read", error))?;
-        if rows.len() != MIGRATIONS.len() {
-            return Err(SemanticError::new(
-                ErrorCategory::Unavailable,
-                "postgres/schema-version-mismatch",
-                format!(
-                    "database has {} migration records; binary requires {}",
-                    rows.len(),
-                    MIGRATIONS.len()
-                ),
-            ));
-        }
-        for (row, (expected_version, sql)) in rows.iter().zip(MIGRATIONS) {
-            let version: i64 = row.get(0);
-            let checksum: Vec<u8> = row.get(1);
-            if version != *expected_version || checksum.as_slice() != sha256(sql.as_bytes()) {
-                return Err(fault(
-                    "postgres/migration-checksum-mismatch",
-                    format!("installed migration {version} differs from this binary"),
-                ));
-            }
-        }
-        Ok(())
+        verify_schema_compatibility(&mut self.client)
     }
 
     pub(crate) fn activate_transactor_state(
@@ -2186,4 +2453,57 @@ pub(crate) fn postgres_error(code: &'static str, error: postgres::Error) -> Sema
         None => ErrorCategory::Unavailable,
     };
     SemanticError::new(category, code, error.to_string())
+}
+
+#[cfg(test)]
+mod migration_compatibility_tests {
+    use super::*;
+
+    fn known_rows() -> Vec<(i64, Vec<u8>)> {
+        MIGRATIONS
+            .iter()
+            .map(|(version, sql)| (*version, sha256(sql.as_bytes()).to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn runtime_requires_the_complete_exact_migration_prefix() {
+        let rows = known_rows();
+        validate_migration_rows(&rows, true).unwrap();
+
+        let error = validate_migration_rows(&rows[..rows.len() - 1], true).unwrap_err();
+        assert_eq!(error.code, "postgres/schema-upgrade-required");
+        validate_migration_rows(&rows[..rows.len() - 1], false).unwrap();
+
+        let mut corrupt = rows.clone();
+        corrupt[3].1[0] ^= 1;
+        let error = validate_migration_rows(&corrupt, true).unwrap_err();
+        assert_eq!(error.code, "postgres/migration-checksum-mismatch");
+
+        let mut gap = rows.clone();
+        gap.remove(3);
+        let error = validate_migration_rows(&gap, false).unwrap_err();
+        assert_eq!(error.code, "postgres/migration-history-invalid");
+    }
+
+    #[test]
+    fn every_old_binary_path_rejects_a_future_schema_version() {
+        let mut rows = known_rows();
+        rows.push((POSTGRES_SCHEMA_VERSION + 1, vec![0; 32]));
+        for require_complete in [false, true] {
+            let error = validate_migration_rows(&rows, require_complete).unwrap_err();
+            assert_eq!(error.code, "postgres/schema-too-new");
+            assert_eq!(error.category, ErrorCategory::Unavailable);
+        }
+    }
+
+    #[test]
+    fn runtime_role_names_are_quoted_as_identifiers() {
+        assert_eq!(quote_identifier("writer").unwrap(), "\"writer\"");
+        assert_eq!(quote_identifier("odd\"role").unwrap(), "\"odd\"\"role\"");
+        assert_eq!(
+            quote_identifier("").unwrap_err().code,
+            "postgres/invalid-role-name"
+        );
+    }
 }

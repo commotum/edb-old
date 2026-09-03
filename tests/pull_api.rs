@@ -320,22 +320,22 @@ fn unresolved_idents_and_lookup_refs_retain_only_requested_nil_db_id() {
     for identifier in unresolved {
         let explicit = db
             .pull(
-                &PullPattern::attributes(vec![PullAttribute::forward(
-                    AttributeName::Ident(db_id.clone()),
-                )]),
+                &PullPattern::attributes(vec![PullAttribute::forward(AttributeName::Ident(
+                    db_id.clone(),
+                ))]),
                 identifier.clone(),
             )
             .unwrap();
         assert_eq!(field(&explicit, &db_id), Some(&QueryValue::Nil));
 
-        let wildcard = db.pull(&PullPattern::wildcard(), identifier.clone()).unwrap();
+        let wildcard = db
+            .pull(&PullPattern::wildcard(), identifier.clone())
+            .unwrap();
         assert_eq!(field(&wildcard, &db_id), Some(&QueryValue::Nil));
 
         let name_only = db
             .pull(
-                &PullPattern::attributes(vec![PullAttribute::forward(
-                    AttributeName::Id(NAME),
-                )]),
+                &PullPattern::attributes(vec![PullAttribute::forward(AttributeName::Id(NAME))]),
                 identifier,
             )
             .unwrap();

@@ -17,6 +17,7 @@ mod operations;
 mod peer;
 pub mod persistent_tree;
 mod postgres;
+mod postgres_connection;
 #[cfg(test)]
 mod postgres_internal_tests;
 mod program;
@@ -59,7 +60,10 @@ pub use peer::{
     CacheStats, IndexBuildFault, IndexBuildReceipt, Peer, PeerCursorStats, PeerIndexCursor,
     PeerLoadStats, PeerSnapshot, PostgresIndexer, RecoveryStats,
 };
-pub use postgres::{CapacityLimits, PostgresStore, ProgramCacheStats};
+pub use postgres::{
+    CapacityLimits, POSTGRES_SCHEMA_VERSION, PostgresMigrator, PostgresStore, ProgramCacheStats,
+};
+pub use postgres_connection::PostgresConnectionConfig;
 pub use program::{
     CallableRef, Instruction, MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, PROGRAM_ABI_VERSION,
     Program, ProgramBudget, ProgramCall, ProgramControl, ProgramHash, ProgramInvocation,

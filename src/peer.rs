@@ -4,7 +4,7 @@ use crate::persistent_tree::{
     TreeNode, TreeNodeSet, TreeRangeResult, TreeReadStats, TreeSeekResult, build_tree,
     decode_tree_node, merge_tree,
 };
-use crate::postgres::{postgres_error, recover_to};
+use crate::postgres::{postgres_error, recover_to, verify_schema_compatibility};
 use crate::recent::{
     EndpointProjection, RecentCursor, RecentCursorStats, RecentLimits, RecentRange, RecentTier,
 };
@@ -12,14 +12,14 @@ use crate::state_commitment::{checkpoint_information, verify_checkpoint_state_ha
 use crate::{
     Database, DatabaseValue, Datom, Digest, DurableTransaction, Entity, EntityIdentifier,
     ErrorCategory, IndexManifest, IndexOrder, IndexPrefix, IndexSegment, ManifestTree,
-    PersistentTreeManifest, PostgresTreeStore, PullPattern, Query, QueryControl, QueryExtensions,
-    QueryInput, QueryOutcome, QueryValue, SemanticError, TreeManifestRecord, TreePublishOutcome,
-    TreeRootBinding, View, decode_index_manifest, decode_index_segment, decode_transaction,
-    encode_genesis, sha256, transaction_hash, tx_to_t,
+    PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, PullPattern, Query,
+    QueryControl, QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
+    TreeManifestRecord, TreePublishOutcome, TreeRootBinding, View, decode_index_manifest,
+    decode_index_segment, decode_transaction, encode_genesis, sha256, transaction_hash, tx_to_t,
 };
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
-use postgres::{Client, GenericClient, NoTls};
+use postgres::{Client, GenericClient};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -453,9 +453,18 @@ impl PostgresIndexer {
         connection: &str,
         database_id: impl Into<String>,
     ) -> Result<Self, SemanticError> {
-        let client = Client::connect(connection, NoTls)
-            .map_err(|error| postgres_error("index/connect", error))?;
-        let tree_store = PostgresTreeStore::connect(connection)?;
+        Self::connect_configured(
+            &PostgresConnectionConfig::plaintext(connection),
+            database_id,
+        )
+    }
+
+    pub fn connect_configured(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+    ) -> Result<Self, SemanticError> {
+        let client = connection.connect_for("index/connect")?;
+        let tree_store = PostgresTreeStore::connect_configured(connection)?;
         Ok(Self {
             client,
             tree_store,
@@ -2032,7 +2041,19 @@ impl Peer {
         database_id: impl Into<String>,
         cache_capacity: usize,
     ) -> Result<Self, SemanticError> {
-        Self::connect_with_cache_limits(
+        Self::connect_configured(
+            &PostgresConnectionConfig::plaintext(connection),
+            database_id,
+            cache_capacity,
+        )
+    }
+
+    pub fn connect_configured(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        cache_capacity: usize,
+    ) -> Result<Self, SemanticError> {
+        Self::connect_configured_with_cache_limits(
             connection,
             database_id,
             cache_capacity,
@@ -2046,7 +2067,21 @@ impl Peer {
         cache_entries: usize,
         cache_bytes: usize,
     ) -> Result<Self, SemanticError> {
-        Self::connect_with_limits(
+        Self::connect_configured_with_cache_limits(
+            &PostgresConnectionConfig::plaintext(connection),
+            database_id,
+            cache_entries,
+            cache_bytes,
+        )
+    }
+
+    pub fn connect_configured_with_cache_limits(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        cache_entries: usize,
+        cache_bytes: usize,
+    ) -> Result<Self, SemanticError> {
+        Self::connect_configured_with_limits(
             connection,
             database_id,
             cache_entries,
@@ -2062,9 +2097,27 @@ impl Peer {
         cache_bytes: usize,
         recent_limits: RecentLimits,
     ) -> Result<Self, SemanticError> {
+        Self::connect_configured_with_limits(
+            &PostgresConnectionConfig::plaintext(connection),
+            database_id,
+            cache_entries,
+            cache_bytes,
+            recent_limits,
+        )
+    }
+
+    pub fn connect_configured_with_limits(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        cache_entries: usize,
+        cache_bytes: usize,
+        recent_limits: RecentLimits,
+    ) -> Result<Self, SemanticError> {
         let database_id = database_id.into();
-        let mut client = Client::connect(connection, NoTls)
-            .map_err(|error| postgres_error("peer/connect", error))?;
+        let mut client = connection.connect_for("peer/connect")?;
+        // Fail before reading a head or any derived value when this peer does
+        // not understand the installed PostgreSQL schema.
+        verify_schema_compatibility(&mut client)?;
         let (head_basis, head_hash) = read_head(&mut client, &database_id)?;
         let excision_generation = read_excision_generation(&mut client, &database_id)?;
         let mut cache = SegmentCache::new(cache_entries);

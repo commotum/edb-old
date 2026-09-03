@@ -175,10 +175,13 @@ closed, and restart/catch-up results equal the reference model.
 
 ### 5. Query, pull, and entity conformance (`goal-14/`)
 
-**Status:** Active 2026-09-03. The source-backed scaffold is in `goal-14/`.
-The first repair establishes one immutable eager/native database value so
-patterns, extensions, lookup refs, pull, and entities cannot diverge by
-silently consulting the current eager database.
+**Status:** Complete 2026-09-03. See `goal-14/0-plan.md`. One immutable
+eager/native database value now governs patterns, lookup refs, helpers,
+extensions, rules, pull, and entities. Source-witness fixtures repaired the
+claimed primitive/pull defects and an independent closure audit exposed and
+closed five additional gaps. The focused semantic gates, all-target Clippy,
+full pure suite, and an 18-test live-PostgreSQL peer gate (including restart
+and generated eager/native/scan differential) pass.
 
 **Outcome:** Every claimed query/pull operation evaluates against its exact
 database value and matches documented/recovered semantics without artificial

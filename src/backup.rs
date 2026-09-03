@@ -1,8 +1,8 @@
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
-    Database, Digest, DurableTransaction, ErrorCategory, PostgresStore, Program, SemanticError,
-    decode_genesis, decode_program, decode_transaction, encode_genesis, encode_transaction, sha256,
-    transaction_hash,
+    Database, Digest, DurableTransaction, ErrorCategory, PostgresMigrator, PostgresStore, Program,
+    SemanticError, decode_genesis, decode_program, decode_transaction, encode_genesis,
+    encode_transaction, sha256, transaction_hash,
 };
 use postgres::{Client, IsolationLevel, NoTls};
 use std::collections::{BTreeMap, BTreeSet};
@@ -408,7 +408,7 @@ impl PortableBackup {
         let manifest_bytes = fs::read(snapshots(directory).join(format!("{basis:020}.atbk")))
             .map_err(io_error("backup/manifest-read"))?;
         let manifest = decode_manifest(&manifest_bytes)?;
-        let mut migrator = PostgresStore::connect(&self.connection)?;
+        let mut migrator = PostgresMigrator::connect(&self.connection)?;
         migrator.migrate()?;
         drop(migrator);
         let genesis = read_object(directory, manifest.genesis_hash)?;

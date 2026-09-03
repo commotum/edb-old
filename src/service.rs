@@ -3,11 +3,11 @@ use crate::postgres::{
     postgres_error, shared_program_cache_stats,
 };
 use crate::{
-    Database, Datom, Digest, ErrorCategory, IndexOrder, PersistentTreeManifest, PostgresIndexer,
-    ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp, decode_transaction,
-    sha256,
+    Database, Datom, Digest, ErrorCategory, IndexOrder, PersistentTreeManifest,
+    PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
+    SemanticError, TxForm, TxOp, decode_transaction, sha256,
 };
-use postgres::{Client, NoTls};
+use postgres::Client;
 use std::collections::{BTreeMap, VecDeque};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -511,7 +511,7 @@ struct Shared {
     subscribers: Mutex<BTreeMap<u64, mpsc::Sender<ServiceTransactionReport>>>,
     max_request_bytes: usize,
     indexing: Arc<BackgroundIndexing>,
-    connection: String,
+    connection: PostgresConnectionConfig,
     database_id: String,
 }
 
@@ -519,7 +519,7 @@ impl Shared {
     fn new(
         max_request_bytes: usize,
         indexing: Arc<BackgroundIndexing>,
-        connection: String,
+        connection: PostgresConnectionConfig,
         database_id: String,
     ) -> Self {
         Self {
@@ -561,8 +561,7 @@ impl Shared {
         let Some(limit) = self.indexing.limiting_error() else {
             return Ok(());
         };
-        let mut client = Client::connect(&self.connection, NoTls)
-            .map_err(|error| postgres_error("service/index-gate-connect", error))?;
+        let mut client = self.connection.connect_for("service/index-gate-connect")?;
         let row = client
             .query_opt(
                 "SELECT request_digest FROM atomic_requests \
@@ -790,6 +789,15 @@ impl TransactionStandby {
         config: TransactionServiceConfig,
         poll_interval: Duration,
     ) -> Result<Self, SemanticError> {
+        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
+        Self::start_configured(config, connection, poll_interval)
+    }
+
+    pub fn start_configured(
+        config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+        poll_interval: Duration,
+    ) -> Result<Self, SemanticError> {
         if poll_interval.is_zero() {
             return Err(SemanticError::incorrect(
                 "service/standby-poll",
@@ -803,7 +811,7 @@ impl TransactionStandby {
             .name(format!("atomic-standby-{}", config.holder_id))
             .spawn(move || {
                 while !worker_stop.load(Ordering::Acquire) {
-                    match TransactionService::start(config.clone()) {
+                    match TransactionService::start_configured(config.clone(), connection.clone()) {
                         Ok(service) => {
                             let _ = sender.send(Ok(service));
                             return;
@@ -868,11 +876,36 @@ impl Drop for TransactionStandby {
 
 impl TransactionService {
     pub fn start(config: TransactionServiceConfig) -> Result<Self, SemanticError> {
-        Self::start_with_indexing(config, BackgroundIndexingConfig::default())
+        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
+        Self::start_configured(config, connection)
+    }
+
+    /// Start every writer, lease, and background-index connection under one
+    /// explicit PostgreSQL transport policy. `config.connection` remains for
+    /// source compatibility with the original constructor; this argument is
+    /// the sole connection source used by this configured path.
+    pub fn start_configured(
+        config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+    ) -> Result<Self, SemanticError> {
+        Self::start_configured_with_indexing(
+            config,
+            connection,
+            BackgroundIndexingConfig::default(),
+        )
     }
 
     pub fn start_with_indexing(
         config: TransactionServiceConfig,
+        indexing_config: BackgroundIndexingConfig,
+    ) -> Result<Self, SemanticError> {
+        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
+        Self::start_configured_with_indexing(config, connection, indexing_config)
+    }
+
+    pub fn start_configured_with_indexing(
+        config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
         indexing_config: BackgroundIndexingConfig,
     ) -> Result<Self, SemanticError> {
         if config.database_id.is_empty()
@@ -888,7 +921,7 @@ impl TransactionService {
         }
         let indexing_config = indexing_config.validate()?;
         let lease_millis = duration_millis(config.lease_duration)?;
-        let mut store = PostgresStore::connect(&config.connection)?;
+        let mut store = PostgresStore::connect_configured(&connection)?;
         store.set_capacity_limits(config.capacity_limits)?;
         store.verify_migrations()?;
         let lease = store.acquire_lease(&config.database_id, &config.holder_id, lease_millis)?;
@@ -899,14 +932,14 @@ impl TransactionService {
                 return Err(error);
             }
         };
-        let seed = match load_indexing_seed(&config.connection, &config.database_id) {
+        let seed = match load_indexing_seed(&connection, &config.database_id) {
             Ok(seed) => seed,
             Err(error) => {
                 let _ = store.release_lease(&lease);
                 return Err(error);
             }
         };
-        let indexer = match PostgresIndexer::connect(&config.connection, &config.database_id) {
+        let indexer = match PostgresIndexer::connect_configured(&connection, &config.database_id) {
             Ok(indexer) => indexer,
             Err(error) => {
                 let _ = store.release_lease(&lease);
@@ -920,7 +953,7 @@ impl TransactionService {
         let shared = Arc::new(Shared::new(
             config.capacity_limits.max_transaction_bytes,
             Arc::clone(&indexing),
-            config.connection.clone(),
+            connection.clone(),
             config.database_id.clone(),
         ));
         let index_shared = Arc::clone(&shared);
@@ -942,7 +975,7 @@ impl TransactionService {
         let worker_shared = shared.clone();
         let renew_interval = config.renew_interval;
         let database_id = config.database_id.clone();
-        let cleanup_connection = config.connection.clone();
+        let cleanup_connection = connection;
         let cleanup_lease = lease.clone();
         let worker = match thread::Builder::new()
             .name(format!("atomic-transactor-{}", config.holder_id))
@@ -962,7 +995,7 @@ impl TransactionService {
                 shared.accepting.store(false, Ordering::Release);
                 indexing.shutdown();
                 let _ = index_worker.join();
-                if let Ok(mut cleanup) = PostgresStore::connect(&cleanup_connection) {
+                if let Ok(mut cleanup) = PostgresStore::connect_configured(&cleanup_connection) {
                     let _ = cleanup.release_lease(&cleanup_lease);
                 }
                 return Err(SemanticError::new(
@@ -1162,9 +1195,11 @@ fn decrement_queued(shared: &Shared) {
     shared.queued.fetch_sub(1, Ordering::AcqRel);
 }
 
-fn load_indexing_seed(connection: &str, database_id: &str) -> Result<IndexingSeed, SemanticError> {
-    let mut client = Client::connect(connection, NoTls)
-        .map_err(|error| postgres_error("service/index-seed-connect", error))?;
+fn load_indexing_seed(
+    connection: &PostgresConnectionConfig,
+    database_id: &str,
+) -> Result<IndexingSeed, SemanticError> {
+    let mut client = connection.connect_for("service/index-seed-connect")?;
     let row = client
         .query_opt(
             "SELECT h.basis_t, g.excision_generation \

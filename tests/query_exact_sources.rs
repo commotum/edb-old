@@ -110,10 +110,7 @@ fn changing_person() -> (Database, u64, u64) {
 #[test]
 fn named_as_of_and_since_sources_govern_patterns_missing_and_functions() {
     let (current, entity, old_t) = changing_person();
-    let old_lookup = lookup(
-        Keyword::new("person", "name"),
-        Value::String("Ada".into()),
-    );
+    let old_lookup = lookup(Keyword::new("person", "name"), Value::String("Ada".into()));
     let mut old_age = DataPattern::new(old_lookup.clone(), kw("person", "age"), v("old-age"));
     old_age.source = "$old".into();
     let mut new_age = DataPattern::new(val(Value::Ref(entity)), kw("person", "age"), v("new-age"));
@@ -147,11 +144,7 @@ fn named_as_of_and_since_sources_govern_patterns_missing_and_functions() {
             Clause::Function {
                 function: Function::GetSome,
                 source: "$old".into(),
-                args: vec![
-                    old_lookup,
-                    kw("person", "nickname"),
-                    kw("person", "name"),
-                ],
+                args: vec![old_lookup, kw("person", "nickname"), kw("person", "name")],
                 binding: Binding::Tuple(vec![
                     Some(var("found-attribute")),
                     Some(var("found-value")),

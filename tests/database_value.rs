@@ -1,7 +1,7 @@
 use atomic_core::{
     Attribute, AttributeName, Cardinality, DB_IDENT, Database, DatabaseValue, EntityIdentifier,
-    EntityRef, IndexOrder, IndexPrefix, Keyword, Schema, TupleSpec, TxOp, TxValue, Unique, Value,
-    ValueType, View,
+    EntityRef, EntityValue, IndexOrder, IndexPrefix, Keyword, Schema, TupleSpec, TxOp, TxValue,
+    Unique, Value, ValueType, View,
 };
 use bigdecimal::BigDecimal;
 use std::str::FromStr;
@@ -358,6 +358,46 @@ fn filtered_collapse_keeps_every_assertion_until_an_exact_retraction() {
             .collect::<Vec<_>>(),
         vec![4, 2]
     );
+}
+
+#[test]
+fn entity_many_navigation_collapses_representation_distinct_logical_equals() {
+    let report = Database::new(representation_schema())
+        .unwrap()
+        .with(
+            &[
+                TxOp::Add {
+                    entity: EntityRef::Temp("measurement".into()),
+                    attribute: AMOUNT,
+                    value: TxValue::Scalar(decimal("1.0")),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("measurement".into()),
+                    attribute: AMOUNT,
+                    value: TxValue::Scalar(decimal("1.00")),
+                },
+            ],
+            2_000,
+        )
+        .unwrap();
+    let measurement = report.tempids["measurement"];
+
+    // The immutable log retains both scale-distinct representations, while
+    // associative cardinality-many navigation has Datomic's set semantics.
+    assert_eq!(
+        report
+            .db_after
+            .database_value()
+            .values(measurement, AMOUNT)
+            .unwrap()
+            .len(),
+        2
+    );
+    let entity = report.db_after.entity(measurement).unwrap().unwrap();
+    let Some(EntityValue::Collection(amounts)) = entity.get(AMOUNT).unwrap() else {
+        panic!("cardinality-many values must remain a collection")
+    };
+    assert_eq!(amounts.len(), 1);
 }
 
 #[test]

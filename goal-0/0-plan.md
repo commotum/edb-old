@@ -136,9 +136,13 @@ production writer.
 
 ### 5. Query, pull, and native API
 
-**Status:** Reopened via `goal-9/`. Temporal source propagation, ident aliases,
-tuple nils, aggregate multiplicity, rule evaluation, and several documented
-function/pull boundaries need independent witness fixtures and correction.
+**Status:** Corrective acceptance established 2026-09-03 by Goal 14. Exact
+eager/native database values now propagate through patterns, helpers,
+extensions, invocation-scoped rules, lookup refs, pull, and entities. Claimed
+primitive/aggregate/pull behavior has source-backed fixtures; generated
+optimized/scan and eager/native PostgreSQL differentials pass without peer
+compatibility materialization. Deferred non-core APIs remain explicit for the
+integrated Goal 17 classification rather than being counted as implemented.
 
 **Outcome:** Applications can use an ergonomic Rust API to transact, navigate entities, pull graphs, and run the documented Datalog model locally at peers.
 

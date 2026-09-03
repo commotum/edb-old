@@ -6,8 +6,8 @@
 //! does not define a storage trait; PostgreSQL is the only durable boundary.
 
 use crate::postgres::postgres_error;
-use crate::{Digest, ErrorCategory, IndexOrder, SemanticError, sha256};
-use postgres::{Client, NoTls};
+use crate::{Digest, ErrorCategory, IndexOrder, PostgresConnectionConfig, SemanticError, sha256};
+use postgres::Client;
 
 const TREE_MANIFEST_VERSION: i16 = 4;
 const ROOT_BINDING_COUNT: usize = 8;
@@ -82,8 +82,13 @@ pub struct PostgresTreeStore {
 
 impl PostgresTreeStore {
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
-        let client = Client::connect(connection, NoTls)
-            .map_err(|error| postgres_error("tree/connect", error))?;
+        Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
+    }
+
+    pub fn connect_configured(
+        connection: &PostgresConnectionConfig,
+    ) -> Result<Self, SemanticError> {
+        let client = connection.connect_for("tree/connect")?;
         Ok(Self::from_client(client))
     }
 
