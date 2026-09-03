@@ -134,8 +134,9 @@ fn populated(
     no_history: bool,
     updates: i64,
 ) -> (PostgresStore, u64) {
+    let mut migrator = atomic_core::PostgresMigrator::connect(connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(database_id, schema(no_history))
         .unwrap();
@@ -1459,8 +1460,9 @@ fn avet_transition_waits_for_a_covering_native_publication() {
             Cardinality::One,
         ))
         .unwrap();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, application).unwrap();
     let service = common::start_service(&connection, &database_id);
     let inserted = common::transact(
@@ -1997,8 +1999,9 @@ fn generated_queries_match_eager_native_and_force_scan_references() {
         return;
     };
     let database_id = unique("native_query_differential");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema(false)).unwrap();
     let service = common::start_service(&connection, &database_id);
 

@@ -25,6 +25,15 @@ or whose migration checksum differs must not serve. Rollback means restoring a
 verified pre-upgrade backup into a separate cluster, not editing migration
 rows or committed data.
 
+The populated in-place SQL upgrade floor is version 6. Versions 6--8 are
+upgraded by canonical log replay so migration 9 can replace its zero
+state-commitment placeholders atomically. A populated version 1--5 catalog is
+not byte-compatible with that representation and returns
+`postgres/upgrade-rebuild-required` before DDL; export it with a compatible old
+decoder and import into a freshly provisioned catalog. Empty old catalogs may
+run the whole migration chain. This native SQL boundary is distinct from
+Datomic's logical `:upgrade-schema` operation.
+
 ## Leader loss and failover
 
 1. Stop routing new writes to an unhealthy leader. A timed-out caller treats
@@ -36,6 +45,13 @@ rows or committed data.
    acquires a strictly newer epoch before publishing.
 4. Confirm contiguous basis and a healthy deep integrity report. A stale owner
    returning `postgres/leadership-lost` is expected evidence that fencing held.
+
+Peers automatically reborrow PostgreSQL connections during sync and continue
+to expose their most recent immutable local value while storage is unavailable.
+Timed sync includes connection negotiation in its deadline. Store and tree
+maintenance handles can call their checked `reconnect` methods; index
+consolidation reselects and retries one whole idempotent build. Do not retry an
+arbitrary transaction automatically: resolve its idempotency key first.
 
 ## Physical backup and PostgreSQL PITR
 

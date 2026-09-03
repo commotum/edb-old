@@ -251,16 +251,36 @@ requirements are labeled rather than misrepresented as Datomic behavior.
 
 - **Docs:** SQL provisioning is explicit at
   `08_operations/00_architecture_and_storage/00_storage_services.md:107-131`;
-  upgrades are explicit/not every connection at
+  intentional version-ordered logical base-schema upgrades are explicit/not
+  every connection at
   `08_operations/00_architecture_and_storage/02_datomic_deployment.md:235-258`;
   SSL and trust configuration is documented in
   `00_architecture_and_storage/01_transactor_reference.md:17-27,81-132`.
 - **1.0.7705:** `kv_sql_ext.clj:113-170` builds/validates a runtime pool and
-  passes driver/TLS parameters; `sql.clj` performs CRUD/CAS rather than startup
-  DDL; `artemis_server.clj:71-112` supports TLS transport.
-- **Repair:** runtime roles do not execute DDL; check installed versions before
-  serving; make PostgreSQL TLS configurable. Exact checksum protocol and role
-  grants are native production mechanics.
+  passes driver/TLS parameters; `sql.clj` borrows connections around CRUD/CAS
+  rather than startup DDL; `artemis_server.clj:71-112` supports TLS transport.
+  The deployment docs require peers to reconnect without application action,
+  retain their latest consistent database value during outage, and let sync
+  wait for availability (`02_datomic_deployment.md:47-61`).
+- **Repair:** runtime roles do not execute DDL; every runtime constructor checks
+  the installed physical schema before reading data; a dedicated migrator owns
+  the native checksummed SQL protocol. Populated native schemas older than v6
+  require old-decoder export/rebuild because the recovered transaction/schema
+  representation changed; v6--v8 upgrades canonically replay the immutable log
+  to replace migration 9's zero state-commitment placeholders before any new
+  schema is committed. Runtime handles retain their concrete connection policy;
+  peers and standby startup reborrow through restart without discarding an
+  immutable peer value, and timed sync caps connection negotiation by its
+  remaining deadline. Arbitrary writes are never automatically retried.
+  Dedicated writer/peer roles reject
+  inherited, owning, schema-creating, PUBLIC, and column-level ambient
+  authority, clear direct grants across every actual `atomic_*` table rather
+  than only the positive whitelist, and then receive an exhaustively tested
+  effective ACL. PostgreSQL TLS uses configurable trust but always validates
+  when required. The checksum protocol and relational grants are native
+  production mechanics, and verified SQL TLS is deliberately stricter than
+  the documented non-validating example; neither is misattributed to Datomic's
+  logical `:upgrade-schema` operation.
 
 ### C20 — Preserve consistent, differential, root-last backup behavior
 

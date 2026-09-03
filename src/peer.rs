@@ -1,10 +1,13 @@
 use crate::idents::IdentIndex;
+use crate::operations::tree_manifest_advisory_key;
 use crate::persistent_tree::{
     ChildRef, DirectoryNode, LeafSegment, RootNode, TreeBuildStats, TreeConfig, TreeMergeEdits,
     TreeNode, TreeNodeSet, TreeRangeResult, TreeReadStats, TreeSeekResult, build_tree,
     decode_tree_node, merge_tree,
 };
-use crate::postgres::{postgres_error, recover_to, verify_schema_compatibility};
+use crate::postgres::{
+    is_postgres_connection_error, postgres_error, recover_to, verify_schema_compatibility,
+};
 use crate::recent::{
     EndpointProjection, RecentCursor, RecentCursorStats, RecentLimits, RecentRange, RecentTier,
 };
@@ -443,6 +446,7 @@ fn ident_assertion_cmp(left: &Datom, right: &Datom) -> std::cmp::Ordering {
 pub struct PostgresIndexer {
     client: Client,
     tree_store: PostgresTreeStore,
+    connection: PostgresConnectionConfig,
     database_id: String,
     segment_datoms: usize,
     tree_config: TreeConfig,
@@ -469,6 +473,7 @@ impl PostgresIndexer {
         Ok(Self {
             client,
             tree_store,
+            connection: connection.clone(),
             database_id: database_id.into(),
             segment_datoms: DEFAULT_SEGMENT_DATOMS,
             tree_config: TreeConfig::default(),
@@ -497,21 +502,39 @@ impl PostgresIndexer {
     }
 
     pub fn consolidate(&mut self) -> Result<IndexBuildReceipt, SemanticError> {
-        match self.consolidate_with_fault(IndexBuildFault::None) {
-            Err(error)
-                if matches!(
-                    error.code,
-                    "tree/publication-cas-lost" | "tree/publication-revision-conflict"
-                ) =>
-            {
-                // A physical-root race is expected background-index behavior,
-                // not a transaction failure. Reselect once so an identical
-                // winner becomes an idempotent/no-op receipt and a different
-                // winner becomes the new immutable base.
-                self.consolidate_with_fault(IndexBuildFault::None)
+        let mut retried_connection = false;
+        let mut retried_publication_race = false;
+        loop {
+            match self.consolidate_with_fault(IndexBuildFault::None) {
+                Err(error) if is_postgres_connection_error(&error) && !retried_connection => {
+                    // Reselect the entire immutable build after reconnect;
+                    // never resume a half-observed SQL transaction.
+                    self.reconnect()?;
+                    retried_connection = true;
+                }
+                Err(error)
+                    if matches!(
+                        error.code,
+                        "tree/publication-cas-lost" | "tree/publication-revision-conflict"
+                    ) && !retried_publication_race =>
+                {
+                    // A physical-root race is expected background-index
+                    // behavior. Reselect once so an identical winner becomes
+                    // an idempotent/no-op receipt and a different winner is
+                    // the next immutable base.
+                    retried_publication_race = true;
+                }
+                result => return result,
             }
-            result => result,
         }
+    }
+
+    pub fn reconnect(&mut self) -> Result<(), SemanticError> {
+        let mut client = self.connection.connect_for("index/reconnect")?;
+        verify_schema_compatibility(&mut client)?;
+        self.tree_store.reconnect()?;
+        self.client = client;
+        Ok(())
     }
 
     pub fn consolidate_with_fault(
@@ -1975,49 +1998,201 @@ struct PeerIo {
     tree_cache: TreeNodeCache,
 }
 
-type RootPinRegistry = Arc<Mutex<BTreeMap<Digest, u64>>>;
-
-struct RootPin {
-    registry: RootPinRegistry,
-    manifest_hash: Digest,
+struct RootPinState {
+    client: Option<Client>,
+    counts: BTreeMap<Digest, u64>,
 }
 
-impl RootPin {
+/// One PostgreSQL session per live PeerCore, regardless of how many immutable
+/// values it retains. PostgreSQL session advisory locks are reference counted
+/// here: the first state using a manifest acquires its shared lock and the last
+/// state drop releases it.
+struct RootPinManager {
+    connection: PostgresConnectionConfig,
+    application_name: String,
+    state: Mutex<RootPinState>,
+}
+
+impl RootPinManager {
+    fn connect(
+        connection: &PostgresConnectionConfig,
+        database_id: &str,
+    ) -> Result<Arc<Self>, SemanticError> {
+        let manager = Arc::new(Self {
+            connection: connection.clone(),
+            application_name: root_pin_application_name(database_id),
+            state: Mutex::new(RootPinState {
+                client: None,
+                counts: BTreeMap::new(),
+            }),
+        });
+        {
+            let mut state = lock(&manager.state);
+            manager.reconnect_locked(&mut state)?;
+        }
+        Ok(manager)
+    }
+
     fn acquire(
-        registry: &RootPinRegistry,
+        self: &Arc<Self>,
         tree: Option<&TreeBase>,
-    ) -> Result<Option<Arc<Self>>, SemanticError> {
+    ) -> Result<Option<Arc<RootPin>>, SemanticError> {
         let Some(tree) = tree else {
             return Ok(None);
         };
         let manifest_hash = tree.manifest.hash()?;
-        let mut pins = lock(registry);
-        *pins.entry(manifest_hash).or_default() += 1;
-        drop(pins);
-        Ok(Some(Arc::new(Self {
-            registry: Arc::clone(registry),
+        let mut state = lock(&self.state);
+        self.ensure_locked(&mut state)?;
+        if !state.counts.contains_key(&manifest_hash) {
+            acquire_root_pin(
+                state.client.as_mut().expect("root pin session was ensured"),
+                manifest_hash,
+            )?;
+        }
+        *state.counts.entry(manifest_hash).or_default() += 1;
+        drop(state);
+        Ok(Some(Arc::new(RootPin {
+            manager: Arc::clone(self),
             manifest_hash,
         })))
     }
+
+    fn ensure(&self) -> Result<(), SemanticError> {
+        let mut state = lock(&self.state);
+        self.ensure_locked(&mut state)
+    }
+
+    fn ensure_locked(&self, state: &mut RootPinState) -> Result<(), SemanticError> {
+        let healthy = if let Some(client) = state.client.as_mut() {
+            match client.simple_query("SELECT 1") {
+                Ok(_) => true,
+                Err(error) => {
+                    let error = postgres_error("peer/root-pin-health", error);
+                    if is_postgres_connection_error(&error) {
+                        false
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+        } else {
+            false
+        };
+        if healthy {
+            return Ok(());
+        }
+        state.client = None;
+        self.reconnect_locked(state)
+    }
+
+    fn reconnect_locked(&self, state: &mut RootPinState) -> Result<(), SemanticError> {
+        let mut client = self.connection.connect_for("peer/root-pin-connect")?;
+        verify_schema_compatibility(&mut client)?;
+        client
+            .query_one(
+                "SELECT set_config('application_name', $1, false)",
+                &[&self.application_name],
+            )
+            .map_err(|error| postgres_error("peer/root-pin-name", error))?;
+        client
+            .batch_execute("SET default_transaction_read_only = on")
+            .map_err(|error| postgres_error("peer/root-pin-read-only", error))?;
+        // PostgreSQL restart drops every advisory lock. Reacquire every live
+        // manifest before this manager is considered healthy. The mandatory
+        // grace period covers the unavoidable interval while the server was
+        // unavailable; if an operator nevertheless retired one, verification
+        // fails closed instead of serving a partial immutable value.
+        for hash in state.counts.keys() {
+            acquire_root_pin(&mut client, *hash)?;
+        }
+        state.client = Some(client);
+        Ok(())
+    }
+
+    fn hashes(&self) -> Vec<Digest> {
+        lock(&self.state).counts.keys().copied().collect()
+    }
+
+    fn release(&self, manifest_hash: Digest) {
+        let mut state = lock(&self.state);
+        let Some(count) = state.counts.get_mut(&manifest_hash) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count != 0 {
+            return;
+        }
+        state.counts.remove(&manifest_hash);
+        // Drop cannot report an unlock failure. A closed connection has
+        // already released every lock; any other failure leaves the shared
+        // lock held until this one manager session eventually closes, which is
+        // conservative retention rather than unsafe reclamation.
+        if let Some(client) = state.client.as_mut() {
+            let _ = client.query_one(
+                "SELECT pg_advisory_unlock_shared($1)",
+                &[&tree_manifest_advisory_key(&manifest_hash)],
+            );
+        }
+    }
+}
+
+fn acquire_root_pin(client: &mut Client, manifest_hash: Digest) -> Result<(), SemanticError> {
+    client
+        .query_one(
+            "SELECT pg_advisory_lock_shared($1)",
+            &[&tree_manifest_advisory_key(&manifest_hash)],
+        )
+        .map_err(|error| postgres_error("peer/root-pin-acquire", error))?;
+    // Close the load-versus-GC race. If GC obtained the exclusive lock first,
+    // this SELECT runs after its commit and refuses to expose a state whose
+    // publication has just been retired.
+    let published: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications \
+                            WHERE manifest_hash = $1)",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("peer/root-pin-verify", error))?
+        .get(0);
+    if !published {
+        let _ = client.query_one(
+            "SELECT pg_advisory_unlock_shared($1)",
+            &[&tree_manifest_advisory_key(&manifest_hash)],
+        );
+        return Err(fault(
+            "peer/root-retired-during-load",
+            "tree publication retired before the immutable peer value was pinned",
+        ));
+    }
+    Ok(())
+}
+
+fn root_pin_application_name(database_id: &str) -> String {
+    let digest = sha256(database_id.as_bytes());
+    let suffix: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("atomic-pin-{suffix}")
+}
+
+struct RootPin {
+    manager: Arc<RootPinManager>,
+    manifest_hash: Digest,
 }
 
 impl Drop for RootPin {
     fn drop(&mut self) {
-        let mut pins = lock(&self.registry);
-        if let Some(count) = pins.get_mut(&self.manifest_hash) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                pins.remove(&self.manifest_hash);
-            }
-        }
+        self.manager.release(self.manifest_hash);
     }
 }
 
 struct PeerCore {
     database_id: String,
+    connection: PostgresConnectionConfig,
     recent_limits: RecentLimits,
     load_counters: PeerLoadCounters,
-    root_pins: RootPinRegistry,
+    root_pins: Arc<RootPinManager>,
     /// Serializes catch-up/adoption work. Readers never take this lock.
     update: Mutex<()>,
     /// Explicit transaction-report observation channel. `None` is the normal
@@ -2026,6 +2201,26 @@ struct PeerCore {
     io: Mutex<PeerIo>,
     /// One publication cell for all peer-observable connection state.
     state: RwLock<Arc<PeerState>>,
+}
+
+fn reconnect_peer_io(core: &PeerCore, io: &mut PeerIo) -> Result<(), SemanticError> {
+    let mut client = core.connection.connect_for("peer/reconnect")?;
+    verify_schema_compatibility(&mut client)?;
+    io.client = client;
+    Ok(())
+}
+
+fn reconnect_peer_io_with_timeout(
+    core: &PeerCore,
+    io: &mut PeerIo,
+    timeout: Duration,
+) -> Result<(), SemanticError> {
+    let mut client = core
+        .connection
+        .connect_for_with_timeout("peer/reconnect", Some(timeout))?;
+    verify_schema_compatibility(&mut client)?;
+    io.client = client;
+    Ok(())
 }
 
 /// A cloneable live peer connection. Every clone shares one monotonically
@@ -2243,11 +2438,12 @@ impl Peer {
                 Arc::new(cell),
             )
         };
-        let root_pins = Arc::new(Mutex::new(BTreeMap::new()));
-        let root_pin = RootPin::acquire(&root_pins, tree_base.as_deref())?;
+        let root_pins = RootPinManager::connect(connection, &database_id)?;
+        let root_pin = root_pins.acquire(tree_base.as_deref())?;
         Ok(Self {
             core: Arc::new(PeerCore {
                 database_id,
+                connection: connection.clone(),
                 recent_limits,
                 load_counters,
                 root_pins,
@@ -2321,7 +2517,7 @@ impl Peer {
     /// connection or an older immutable snapshot. Goal 15's SQL GC can use
     /// this seam when it adds leases; Goal 13 deliberately owns no SQL policy.
     pub fn pinned_manifest_hashes(&self) -> Vec<Digest> {
-        lock(&self.core.root_pins).keys().copied().collect()
+        self.core.root_pins.hashes()
     }
     pub fn cache_stats(&self) -> CacheStats {
         let io = lock(&self.core.io);
@@ -2387,12 +2583,23 @@ impl Peer {
     }
 
     pub fn sync(&self) -> Result<Arc<Database>, SemanticError> {
+        match self.sync_once(true) {
+            Err(error) if is_postgres_connection_error(&error) => {
+                self.reconnect()?;
+                self.sync_once(true)
+            }
+            result => result,
+        }
+        .and_then(|state| compatibility_value(&state))
+    }
+
+    fn sync_once(&self, require_compatibility: bool) -> Result<Arc<PeerState>, SemanticError> {
+        self.core.root_pins.ensure()?;
         let _update = lock(&self.core.update);
         let mut io = lock(&self.core.io);
         self.refresh_after_excision_locked(&mut io)?;
         let (target, _) = read_head(&mut io.client, &self.core.database_id)?;
-        let state = self.advance_to_locked(&mut io, target, true)?;
-        compatibility_value(&state)
+        self.advance_to_locked(&mut io, target, require_compatibility)
     }
 
     pub fn sync_to(&self, target: u64, timeout: Duration) -> Result<Arc<Database>, SemanticError> {
@@ -2403,11 +2610,13 @@ impl Peer {
     /// Advance the shared native tree/recent value without constructing the
     /// legacy in-memory `Database`. This is the normal low-footprint sync path.
     pub fn sync_snapshot(&self) -> Result<PeerSnapshot, SemanticError> {
-        let _update = lock(&self.core.update);
-        let mut io = lock(&self.core.io);
-        self.refresh_after_excision_locked(&mut io)?;
-        let (target, _) = read_head(&mut io.client, &self.core.database_id)?;
-        let state = self.advance_to_locked(&mut io, target, false)?;
+        let state = match self.sync_once(false) {
+            Err(error) if is_postgres_connection_error(&error) => {
+                self.reconnect()?;
+                self.sync_once(false)?
+            }
+            result => result?,
+        };
         Ok(PeerSnapshot {
             core: Arc::clone(&self.core),
             state,
@@ -2434,30 +2643,82 @@ impl Peer {
     ) -> Result<Arc<PeerState>, SemanticError> {
         let deadline = Instant::now() + timeout;
         loop {
+            self.core.root_pins.ensure()?;
             // Never retain the updater or I/O/cache mutex across sleep. Lazy
             // readers can continue loading nodes while a waiter observes an
             // unchanged authoritative head.
-            let head = {
+            let observed_head = {
                 let mut io = lock(&self.core.io);
-                read_head(&mut io.client, &self.core.database_id)?.0
+                read_head(&mut io.client, &self.core.database_id).map(|head| head.0)
+            };
+            let head = match observed_head {
+                Ok(head) => head,
+                Err(error) if is_postgres_connection_error(&error) => {
+                    if !self.reconnect_before(deadline)? {
+                        return Err(sync_timeout(target));
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
             if head >= target {
-                let _update = lock(&self.core.update);
-                let mut io = lock(&self.core.io);
-                self.refresh_after_excision_locked(&mut io)?;
-                let (rechecked, _) = read_head(&mut io.client, &self.core.database_id)?;
-                if rechecked >= target {
-                    return self.advance_to_locked(&mut io, target, require_compatibility);
+                let attempt = {
+                    let _update = lock(&self.core.update);
+                    let mut io = lock(&self.core.io);
+                    self.refresh_after_excision_locked(&mut io).and_then(|_| {
+                        let (rechecked, _) = read_head(&mut io.client, &self.core.database_id)?;
+                        if rechecked >= target {
+                            self.advance_to_locked(&mut io, target, require_compatibility)
+                                .map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                };
+                match attempt {
+                    Ok(Some(state)) => return Ok(state),
+                    Ok(None) => {}
+                    Err(error) if is_postgres_connection_error(&error) => {
+                        if !self.reconnect_before(deadline)? {
+                            return Err(sync_timeout(target));
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             if Instant::now() >= deadline {
-                return Err(SemanticError::new(
-                    ErrorCategory::Unavailable,
-                    "peer/sync-timeout",
-                    format!("basis {target} is not yet committed"),
-                ));
+                return Err(sync_timeout(target));
             }
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Reborrow a checked PostgreSQL connection while retaining immutable
+    /// peer values, pinned roots, observation state, and bounded caches.
+    pub fn reconnect(&self) -> Result<(), SemanticError> {
+        self.core.root_pins.ensure()?;
+        let mut io = lock(&self.core.io);
+        reconnect_peer_io(&self.core, &mut io)
+    }
+
+    fn reconnect_before(&self, deadline: Instant) -> Result<bool, SemanticError> {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            let result = {
+                let mut io = lock(&self.core.io);
+                reconnect_peer_io_with_timeout(&self.core, &mut io, remaining)
+            };
+            match result {
+                Ok(()) => return Ok(true),
+                Err(error) if is_postgres_connection_error(&error) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -2501,6 +2762,17 @@ impl Peer {
     /// `notify-index`: it is optional for correctness and leaves old `Arc`
     /// snapshots untouched.
     pub fn refresh_index(&self) -> Result<bool, SemanticError> {
+        match self.refresh_index_once() {
+            Err(error) if is_postgres_connection_error(&error) => {
+                self.reconnect()?;
+                self.refresh_index_once()
+            }
+            result => result,
+        }
+    }
+
+    fn refresh_index_once(&self) -> Result<bool, SemanticError> {
+        self.core.root_pins.ensure()?;
         let _update = lock(&self.core.update);
         let mut io = lock(&self.core.io);
         self.refresh_after_excision_locked(&mut io)?;
@@ -2571,7 +2843,7 @@ impl Peer {
         )?);
         let mut successor = (*state).clone();
         successor.durable_base_t = tree_base.manifest.basis_t;
-        successor._root_pin = RootPin::acquire(&self.core.root_pins, Some(&tree_base))?;
+        successor._root_pin = self.core.root_pins.acquire(Some(&tree_base))?;
         successor.tree_base = Some(tree_base);
         successor.recent = recent;
         successor.metadata = metadata;
@@ -2648,6 +2920,7 @@ impl Peer {
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(Arc::clone(database));
         }
+        self.core.root_pins.ensure()?;
         let mut io = lock(&self.core.io);
         // Recheck after acquiring the single I/O lane so concurrent callers
         // coalesce into one materialization.
@@ -2658,7 +2931,14 @@ impl Peer {
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(Arc::clone(database));
         }
-        match self.counted_materialization_with_io(&mut io, state) {
+        let materialized = match self.counted_materialization_with_io(&mut io, state) {
+            Err(error) if is_postgres_connection_error(&error) => {
+                reconnect_peer_io(&self.core, &mut io)?;
+                self.counted_materialization_with_io(&mut io, state)
+            }
+            result => result,
+        };
+        match materialized {
             Ok(database) => {
                 let _ = state.compatibility.set(Arc::clone(&database));
                 Ok(state
@@ -2792,7 +3072,7 @@ impl Peer {
                 metadata.endpoint(),
                 self.core.recent_limits,
             )?);
-            let root_pin = RootPin::acquire(&self.core.root_pins, Some(base))?;
+            let root_pin = self.core.root_pins.acquire(Some(base))?;
             PeerState {
                 basis_t: basis,
                 eidx_frontier: tail.eidx_frontier,
@@ -3212,6 +3492,10 @@ impl PeerSnapshot {
         start: Option<&Datom>,
         end: Option<&Datom>,
     ) -> Result<PeerIndexCursor, SemanticError> {
+        // Amortize the session-pin health/reacquire check across the complete
+        // cursor. Individual directory/leaf loads must remain pure cache/SQL
+        // seeks, not add one PostgreSQL round trip per node.
+        self.core.root_pins.ensure()?;
         self.ensure_avet_ready(order, None)?;
         if let (Some(start), Some(end)) = (start, end)
             && !start.cmp_in(end, order).is_lt()
@@ -3275,6 +3559,7 @@ impl PeerSnapshot {
         history: bool,
         prefix: &IndexPrefix,
     ) -> Result<TreeRangeResult, SemanticError> {
+        self.core.root_pins.ensure()?;
         let requested_attribute = match prefix {
             IndexPrefix::Avet { attribute, .. } => Some(*attribute),
             _ => None,
@@ -3469,14 +3754,26 @@ impl PeerSnapshot {
         if let Some(node) = io.tree_cache.get(&hash) {
             return Ok(node);
         }
-        let row = io
+        let query = io
             .client
             .query_opt(
                 "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
                 &[&&hash[..]],
             )
-            .map_err(|error| postgres_error("peer/tree-node-read", error))?
-            .ok_or_else(|| fault("peer/missing-tree-node", "tree child is missing"))?;
+            .map_err(|error| postgres_error("peer/tree-node-read", error));
+        let row = match query {
+            Err(error) if is_postgres_connection_error(&error) => {
+                reconnect_peer_io(&self.core, &mut io)?;
+                io.client
+                    .query_opt(
+                        "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
+                        &[&&hash[..]],
+                    )
+                    .map_err(|error| postgres_error("peer/tree-node-read", error))?
+            }
+            result => result?,
+        }
+        .ok_or_else(|| fault("peer/missing-tree-node", "tree child is missing"))?;
         let bytes: Vec<u8> = row.get(0);
         let node = Arc::new(decode_tree_node(&hash, &bytes)?);
         stats.decoded_bytes = stats.decoded_bytes.saturating_add(bytes.len() as u64);
@@ -3514,6 +3811,14 @@ fn compatibility_value(state: &PeerState) -> Result<Arc<Database>, SemanticError
             "compatibility sync did not materialize its requested database value",
         )
     })
+}
+
+fn sync_timeout(target: u64) -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Unavailable,
+        "peer/sync-timeout",
+        format!("basis {target} is not yet committed"),
+    )
 }
 
 fn verify_materialized_endpoint(

@@ -77,6 +77,7 @@ pub enum TreePublishOutcome {
 /// Direct PostgreSQL owner for tree content and root publication.
 pub struct PostgresTreeStore {
     client: Client,
+    connection: PostgresConnectionConfig,
     stats: TreeStoreStats,
 }
 
@@ -90,14 +91,11 @@ impl PostgresTreeStore {
     ) -> Result<Self, SemanticError> {
         let mut client = connection.connect_for("tree/connect")?;
         verify_schema_compatibility(&mut client)?;
-        Ok(Self::from_client(client))
-    }
-
-    pub fn from_client(client: Client) -> Self {
-        Self {
+        Ok(Self {
             client,
+            connection: connection.clone(),
             stats: TreeStoreStats::default(),
-        }
+        })
     }
 
     pub fn into_client(self) -> Client {
@@ -110,6 +108,16 @@ impl PostgresTreeStore {
 
     pub fn reset_stats(&mut self) {
         self.stats = TreeStoreStats::default();
+    }
+
+    /// Reborrow a schema-checked session while retaining only local physical
+    /// work counters. Tree values and publications are immutable/idempotent;
+    /// callers may safely reselect and retry a complete operation afterward.
+    pub fn reconnect(&mut self) -> Result<(), SemanticError> {
+        let mut client = self.connection.connect_for("tree/reconnect")?;
+        verify_schema_compatibility(&mut client)?;
+        self.client = client;
+        Ok(())
     }
 
     /// Insert one immutable node or verify the identical value already stored

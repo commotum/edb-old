@@ -34,7 +34,7 @@ mod tree_store;
 mod value;
 mod vocabulary;
 
-pub use backup::{BackupPoint, BackupVerification, PortableBackup};
+pub use backup::{BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault};
 pub use database::{Database, EntityRef, TxOp, TxReport, TxValue, View};
 pub use database_value::DatabaseValue;
 pub use datom::{Datom, IndexOrder};
@@ -54,14 +54,16 @@ pub use identity::{
 pub use index::IndexPrefix;
 pub use operations::{
     ExcisionFault, ExcisionReceipt, ExcisionSpec, ExcisionTarget, GarbageInventory,
-    IntegrityProblem, IntegrityReport, OperationalMetrics, PostgresOperator,
+    IntegrityProblem, IntegrityReport, MIN_GARBAGE_COLLECTION_AGE, OperationalMetrics,
+    PostgresOperator, TreePublicationGarbage,
 };
 pub use peer::{
     CacheStats, IndexBuildFault, IndexBuildReceipt, Peer, PeerCursorStats, PeerIndexCursor,
     PeerLoadStats, PeerSnapshot, PostgresIndexer, RecoveryStats,
 };
 pub use postgres::{
-    CapacityLimits, POSTGRES_SCHEMA_VERSION, PostgresMigrator, PostgresStore, ProgramCacheStats,
+    CapacityLimits, POSTGRES_IN_PLACE_UPGRADE_FLOOR, POSTGRES_SCHEMA_VERSION, PostgresMigrator,
+    PostgresStore, ProgramCacheStats,
 };
 pub use postgres_connection::PostgresConnectionConfig;
 pub use program::{

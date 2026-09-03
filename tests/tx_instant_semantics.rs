@@ -152,8 +152,9 @@ fn service_owns_time_and_enforces_inclusive_tx_instant_bounds_atomically() {
         return;
     };
     let database_id = unique("tx_instant_bounds");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     assert_eq!(
         store
             .create_database(&database_id, Schema::new())

@@ -56,8 +56,9 @@ fn inspector_crosschecks_authoritative_and_derived_state_and_metrics() {
         return;
     };
     let database_id = unique("inspect");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let service = common::start_service(&connection, &database_id);
     let first = common::transact(&service, "one", created.basis_t(), &[add("one")], 1_000);
@@ -75,7 +76,8 @@ fn inspector_crosschecks_authoritative_and_derived_state_and_metrics() {
     assert_eq!(report.metrics.index_lag, 0);
     assert!(report.metrics.history_datoms >= 4);
     assert!(report.metrics.transaction_bytes > 0);
-    assert!(report.metrics.segments > 0);
+    assert!(report.metrics.tree_publications > 0);
+    assert!(report.metrics.tree_nodes > 0);
 
     let mut client = Client::connect(&connection, NoTls).unwrap();
     let corrupt_basis = i64::try_from(first.basis_t).unwrap();
@@ -133,8 +135,9 @@ fn configured_operation_byte_and_history_limits_fail_before_publication() {
         return;
     };
     let database_id = unique("capacity");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let initial_basis = created.basis_t();
     let op_limited = common::start_service_with_limits(

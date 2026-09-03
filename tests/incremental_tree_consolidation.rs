@@ -92,8 +92,9 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
         .unwrap()
         .as_nanos() as i64
         & 0x3fff_ffff_ffff_ffff;
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema(false, true))
         .unwrap();
@@ -224,8 +225,9 @@ fn no_history_pair_wholly_inside_tail_is_safe_and_job_time_only() {
         return;
     };
     let database_id = unique("incremental_nohistory_tail");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema(true, true))
         .unwrap();
@@ -284,8 +286,9 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         .unwrap()
         .as_nanos() as i64
         & 0x3fff_ffff_ffff_ffff;
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema(false, false))
         .unwrap();

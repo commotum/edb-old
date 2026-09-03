@@ -103,8 +103,9 @@ fn entity_excision_is_atomic_recursive_audited_and_invalidates_peers() {
     };
     let database_id = unique("excise_entity");
     let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let service = common::start_service(&connection, &database_id);
     let seeded = common::transact(
@@ -248,8 +249,9 @@ fn attribute_cutoff_backup_binding_and_protected_facts_are_enforced() {
     let other_database = unique("excise_other");
     let directory = backup_directory();
     let other_directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let service = common::start_service(&connection, &database_id);
     let old = common::transact(

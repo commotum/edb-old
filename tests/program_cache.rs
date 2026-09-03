@@ -85,8 +85,9 @@ fn authoritative_ident_calls_and_predicates_share_decoded_programs() {
         return;
     };
     let database_id = unique("authoritative_program_cache");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut setup = PostgresStore::connect(&connection).unwrap();
-    setup.migrate().unwrap();
     let created = setup.create_database(&database_id, schema()).unwrap();
     let setter_hash = setup.deploy_program_blob(&setter()).unwrap();
     let positive_hash = setup.deploy_program_blob(&positive()).unwrap();
@@ -181,8 +182,9 @@ fn cache_evicts_by_canonical_payload_bytes_and_preserves_lru_order() {
     let one_bytes = encode_program(&one_program).unwrap().len() + CACHE_ENTRY_OVERHEAD;
     let two_bytes = encode_program(&two_program).unwrap().len() + CACHE_ENTRY_OVERHEAD;
 
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut deployer = PostgresStore::connect(&connection).unwrap();
-    deployer.migrate().unwrap();
     let one = deployer.deploy_program_blob(&one_program).unwrap();
     let two = deployer.deploy_program_blob(&two_program).unwrap();
     drop(deployer);

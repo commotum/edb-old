@@ -70,8 +70,9 @@ fn config(
 }
 
 fn setup(connection: &str, database_id: &str) -> u64 {
+    let mut migrator = atomic_core::PostgresMigrator::connect(connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(connection).unwrap();
-    store.migrate().unwrap();
     store
         .create_database(database_id, schema())
         .unwrap()

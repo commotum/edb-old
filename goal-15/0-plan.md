@@ -52,10 +52,13 @@ prototype shortcuts with source-backed, database-scoped operational behavior.
 
 ### 1. Explicit upgrade and secure runtime boundary
 
-**Status:** Complete on PostgreSQL 15.11. The explicit live harness passed two
-migration/role tests and two TLS tests; the pure migration classifier passed
-three cases, existing idempotent migration passed, and warning-denying Clippy
-is green.
+**Status:** Complete and independently revalidated on PostgreSQL 15.11. In
+addition to the migration/role/ACL/TLS evidence below, four isolated live
+migration fixtures now prove a fresh idempotent install, pre-v6 rejection
+before mutation, populated v6 canonical replay through v12, and populated
+v11-to-v12 preservation. A dedicated process-stop/restart witness proves
+cached peer reads, wait-through-outage synchronization, standby recovery, and
+reborrowing by the same long-lived runtime handles.
 
 **Outcome:** Provisioning/upgrades are explicit, while least-privilege writer
 and peer startup perform only version checks and normal runtime SQL over
@@ -70,31 +73,93 @@ role; separately granted runtime writer/peer roles start and operate without
 DDL; a future schema version fails before service; required TLS succeeds and an
 insecure connection is rejected in a real PostgreSQL witness.
 
-**Evidence and decisions:** The docs make SQL provisioning and schema upgrades
-explicit (`00_storage_services.md:107-131`, `02_datomic_deployment.md:235-258`)
-and describe TLS/trust inputs (`01_transactor_reference.md:17-27,81-132`). The
-recovered `kv_sql_ext.clj:113-170` builds one validated configured data source,
-while `sql.clj` performs ordinary CRUD/CAS. Native code therefore uses the
-concrete `PostgresMigrator` plus `PostgresConnectionConfig`, not a backend
-trait. Runtime checks require the complete checksummed migration prefix and
-reject an unknown future version before any database read or publication.
-Role provisioning safely quotes identifiers, rejects elevated/inherited/
-owning roles and insecure PUBLIC schema creation, and grants only the reads,
-fenced log writes, lease updates, and immutable-tree inserts actually used.
+**Evidence and decisions:** The docs make SQL provisioning explicit
+(`00_storage_services.md:107-131`) and separately require an intentional,
+version-ordered logical base-schema upgrade
+(`02_datomic_deployment.md:235-258`). Atomic's checksummed relational migration
+protocol is PostgreSQL-native machinery inspired by those operational
+boundaries, not Datomic's `:upgrade-schema` representation. The recovered
+`kv_sql_ext.clj:113-170` builds one validated configured data source, while
+`sql.clj` performs ordinary CRUD/CAS. Native code therefore uses the concrete
+`PostgresMigrator` plus `PostgresConnectionConfig`, not a backend trait. Runtime
+checks require the complete checksummed migration prefix and reject an unknown
+future version before any database read or publication.
+
+`PostgresStore::connect[_configured]` is now a checked runtime constructor and
+the store has no migration method; `PostgresMigrator` is the only public
+unchecked/admin connection owner. The populated in-place floor is version 6.
+Recovered pre-v6 source used format-1 transactions with raw entity/transaction
+coordinates and separate schema changes, whereas migration 6 names the
+format-3 schema-information boundary; a populated pre-v6 catalog is therefore
+rejected transactionally with `postgres/upgrade-rebuild-required` and must be
+exported through a compatible old decoder. Migration 9 originally introduced
+zero state-commitment placeholders for old rows. The migrator now performs one
+locked canonical genesis/log replay, verifies every basis/hash/envelope/head,
+and backfills each commitment before admitting the upgrade; an incompatible or
+corrupt history rolls the entire schema change back. Migration 12 continues to
+discard only replaceable derived tree publications, never authoritative log
+bytes. Live isolated-schema tests establish nonzero commitments and exact
+current/history recovery after populated v6-to-v12, plus unchanged transaction
+hash/payload rows and exact recovery after populated v11-to-v12.
+
+The recovered datasource validates/reborrows connections, and the deployment
+docs require peers to reconnect automatically, keep serving their latest
+consistent local value, and let sync wait through storage/transactor outage
+(`02_datomic_deployment.md:47-61`). Native long-lived handles therefore retain
+their concrete connection policy. Transport and restart SQLSTATEs are tagged
+separately from semantic SQL failures; peer sync, lazy reads/materialization,
+and index adoption reborrow without replacing immutable `PeerState`, root pins,
+or caches. `sync_to` caps every reconnect attempt by its remaining deadline.
+Standby startup retries storage loss, while arbitrary writes are deliberately
+not retried. Store/tree handles expose explicit checked reborrow, and index
+consolidation safely retries one whole immutable/idempotent build. The dedicated
+restart test stops PostgreSQL after opening all handles, serves the cached old
+database while offline, blocks a sync, restarts storage, commits through the
+same standby object, and advances the same peer/store/tree/indexer instances;
+the old `Arc` database and snapshot retain their original basis. It passed 1/1
+in 1.29 seconds. A reserved unreachable-host witness passed in 0.05 seconds
+with a 50 ms connection cap. A second brand-new cluster run passed all 97
+nonignored unit tests (including the four migration witnesses) plus background
+indexing, backup/restore, database-value, identity, incremental-tree, and
+kernel suites before stopping at the already-owned Stage 5 obsolete
+legacy-manifest assertion in `operations_excision`; this is partial integrated
+evidence, not a claim that the full Goal 15 suite is green.
+
+Role provisioning safely quotes identifiers and requires dedicated roles: it
+rejects elevation or membership, non-system relation/schema or database
+ownership, effective database/schema CREATE outside the resettable Atomic
+schema grant, residual column grants, and PUBLIC CREATE or relation/column
+authority. It clears direct table grants from every discovered `atomic_*`
+ordinary/partitioned relation—including administrative and future relations—
+before applying a fixed positive whitelist of only the reads, fenced log
+writes, lease updates, and immutable-tree inserts actually used. A live
+catalog-matrix witness checks all table privileges and every column-capable
+privilege for every `atomic_*` relation, rather than inferring least privilege
+from a few denied statements.
 The writer's UPDATE privilege on `atomic_databases` exists solely because
 PostgreSQL requires it for the publication serialization row lock; the
-immutable trigger is independently proven to reject mutation. Required TLS
-forces verified TCP TLS even if parameters request disable, supports system
-and explicit PEM trust roots, redacts connection failures, and deliberately
-offers no non-validating mode. The live future-row fixture proved migrator,
-service, peer, standalone indexer, and standalone tree writer all fail with
+immutable trigger is independently proven to reject mutation. Verified
+PostgreSQL TLS is a deliberate native strengthening: the SQL-specific docs
+show configurable driver parameters, including a non-validating example
+(`01_transactor_reference.md:19-26`), while Atomic forces verified TCP TLS even
+if parameters request disable, supports system and explicit PEM trust roots,
+redacts connection failures, and offers no non-validating mode. The recorded
+live PostgreSQL 15.11 run executed both migration/role tests and both TLS tests;
+the isolated, panic-cleaned future-row fixture proved migrator, service, peer,
+standalone indexer, and standalone tree writer all fail with
 `postgres/schema-too-new`; the restricted-role fixture committed, published a
 tree, served a peer, and released its lease while DDL/history/peer writes were
-denied.
+denied. PostgreSQL 15.11 reruns executed 2/2 migration-boundary and 1/1
+adversarial-ACL tests over both keyword and URI connection syntax, with no
+generated roles or schemas left behind.
 
 ### 2. Coherent inspection and database-scoped failure
 
-**Status:** Pending.
+**Status:** Complete on PostgreSQL 15.11. Two focused live witnesses pass,
+including a deliberately blocked mid-report inspection racing a committed
+successor/root and cross-database native-manifest corruption during inspection,
+GC inventory, and excision. The existing integrity suite also passes with
+native-tree metrics, and all-target check plus warning-denying Clippy are green.
 
 **Outcome:** Integrity and capacity reports describe one repeatable database
 snapshot and isolate corrupt derived state to its owning database.
@@ -107,6 +172,49 @@ conservative treatment of undecodable shared roots.
 inspection report; corruption in database A is reported for A without aborting
 inspection or logical maintenance for B, and no uncertain shared content is
 declared collectible.
+
+**Evidence and decisions:** `inspect_database` now performs its head read,
+authoritative chain checks, legacy/native root inspection, metrics, temporal
+program scan, and exact `recover_to` under one read-only Repeatable Read SQL
+transaction. It no longer opens a second store connection for semantic
+recovery. Only published derived roots are eligible: uploaded-but-unpublished
+manifests remain harmless content-first orphans. Native inspection authenticates
+the monotonic physical publication revision, canonical v4 envelope, relational
+eight-root projection, authoritative transaction/state commitment, current
+excision generation for eligibility, and recursively reachable root/directory/
+leaf nodes; deep mode additionally validates complete tree topology and ranges.
+Legacy and native counts are separate so the old flat representation cannot
+silently stand in for the production tree representation.
+
+Global orphan accounting first proves complete reachability from every retained
+legacy and native publication, including canonical envelopes, authoritative
+coordinates, immutable payload hashes, segment descriptors, root bindings, and
+every referenced object. An undecodable/missing value in database A therefore
+sets B's `shared_reachability_uncertain` and withholds orphan counts without
+making B unhealthy; GC dry-run/apply returns
+`operations/reachability-uncertain`. Excision no longer runs opportunistic
+global segment cleanup at all, keeping its logical database rewrite independent
+of unrelated shared derived state. This follows the docs' log-versus-immutable-
+persistent-index split (`00_introduction.md:79-109`) and background durable tree
+model (`02_background_indexing.md:13-25`). Recovered 1.0.7705 writes content
+before conditionally publishing the root and marks old values only after the
+root CAS succeeds (`index.clj:6327`, `6427-6448`); its garbage path records
+exact newly unreachable value keys and applies an explicit age boundary
+(`garbage.clj:318-358`, `475-603`). PostgreSQL Repeatable Read and conservative
+global refusal are the direct native equivalents, not claims of byte/storage
+compatibility.
+
+Live evidence: `operations_inspection_scope` 2/2 proves the report remains at
+the old basis, transaction/request counts, recovered current/history values,
+and tree revision while a successor commits and consolidates before the
+blocked report finishes. Its second witness corrupts A's published v4 payload,
+observes a healthy B report with zero guessed orphan counts, an unhealthy A
+report, exact GC refusal, successful B excision, and preservation of an
+unrelated orphan. `operations_integrity` 2/2 passes after replacing its obsolete
+flat-segment assertion with native publication/node evidence. The older shared
+GC fixture database intentionally contains a retained corrupt root from prior
+fault tests, and now fails closed as designed; Stage 4 owns isolated complete
+root-retirement/GC evidence rather than weakening this boundary.
 
 ### 3. Differential root-last backup and exact restore
 

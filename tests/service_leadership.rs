@@ -78,8 +78,9 @@ fn service_owns_the_lease_and_takeover_advances_its_epoch() {
         return;
     };
     let database_id = unique("fenced_db");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut setup = PostgresStore::connect(&connection).unwrap();
-    setup.migrate().unwrap();
     let initial_basis = setup
         .create_database(&database_id, schema())
         .unwrap()
@@ -154,8 +155,9 @@ fn a_database_bound_service_cannot_redirect_a_request_to_another_database() {
     };
     let database_a = unique("lease_bound_a");
     let database_b = unique("lease_bound_b");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let initial_a = store
         .create_database(&database_a, schema())
         .unwrap()
@@ -187,8 +189,9 @@ fn concurrent_candidates_have_exactly_one_higher_epoch_winner() {
         return;
     };
     let database_id = unique("lease_race");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut setup = PostgresStore::connect(&connection).unwrap();
-    setup.migrate().unwrap();
     setup.create_database(&database_id, schema()).unwrap();
     let mut observer = Client::connect(&connection, NoTls).unwrap();
     observer

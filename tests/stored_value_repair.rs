@@ -84,8 +84,9 @@ fn scale_distinctions_survive_postgres_log_base_and_peer_recovery() {
     let database_id = format!("goal10_bigdec_{}_{}", std::process::id(), suffix);
     let entity = make_eid(USER_PARTITION, 42).unwrap();
 
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let service = common::start_service(&connection, &database_id);
     common::transact(

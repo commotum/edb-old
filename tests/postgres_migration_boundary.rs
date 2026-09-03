@@ -39,14 +39,66 @@ fn schema() -> Schema {
     schema
 }
 
-// The explicit PostgreSQL harness uses libpq keyword parameters. Appending a
-// parameter intentionally replaces any earlier user/password for this test.
+fn with_connection_parameter(connection: &str, key: &str, value: &str) -> String {
+    if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+        let separator = if connection.ends_with('?') || connection.ends_with('&') {
+            ""
+        } else if connection.contains('?') {
+            "&"
+        } else {
+            "?"
+        };
+        format!("{connection}{separator}{key}={value}")
+    } else {
+        // Values used by this harness are generated from ASCII identifiers and
+        // contain neither quotes nor backslashes. Keep the assertion adjacent
+        // to interpolation so this helper cannot quietly become SQL/libpq
+        // escaping infrastructure.
+        assert!(
+            !value.contains('\'')
+                && !value.contains('\\')
+                && !value.chars().any(char::is_whitespace)
+        );
+        format!("{connection} {key}='{value}'")
+    }
+}
+
 fn as_role(connection: &str, role: &str, password: &str) -> String {
-    assert!(
-        !connection.starts_with("postgres://") && !connection.starts_with("postgresql://"),
-        "role witness requires an ATOMIC_POSTGRES_URL in libpq keyword form"
-    );
-    format!("{connection} user={role} password={password}")
+    let connection = with_connection_parameter(connection, "user", role);
+    with_connection_parameter(&connection, "password", password)
+}
+
+struct IsolatedSchema {
+    admin: Client,
+    name: String,
+}
+
+impl IsolatedSchema {
+    fn create(connection: &str, name: String) -> (Self, String) {
+        assert!(
+            name.chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_'),
+            "generated schema name must be an unquoted PostgreSQL identifier"
+        );
+        let mut admin = Client::connect(connection, NoTls).unwrap();
+        admin
+            .batch_execute(&format!("CREATE SCHEMA \"{name}\""))
+            .unwrap();
+        let options = format!("-csearch_path={name},pg_catalog");
+        let scoped = with_connection_parameter(connection, "options", &options);
+        (Self { admin, name }, scoped)
+    }
+}
+
+impl Drop for IsolatedSchema {
+    fn drop(&mut self) {
+        // The unique schema contains only this fixture. Isolation makes the
+        // destructive future-version row harmless to the shared harness, and
+        // this best-effort cleanup also runs during panic unwinding.
+        let _ = self
+            .admin
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", self.name));
+    }
 }
 
 #[test]
@@ -54,6 +106,8 @@ fn future_schema_fails_before_peer_or_service_reads_database_state() {
     let Some(connection) = connection() else {
         return;
     };
+    let (_schema, connection) =
+        IsolatedSchema::create(&connection, unique("future_schema_boundary"));
     let mut migrator = PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
     let future = POSTGRES_SCHEMA_VERSION + 1;
@@ -117,6 +171,7 @@ fn granted_runtime_roles_start_and_operate_without_ddl_or_history_mutation() {
     let Some(connection) = connection() else {
         return;
     };
+    let (_schema, connection) = IsolatedSchema::create(&connection, unique("runtime_role_schema"));
     let database_id = unique("runtime_roles");
     let writer_role = unique("atomic_writer");
     let peer_role = unique("atomic_peer");
@@ -133,6 +188,7 @@ fn granted_runtime_roles_start_and_operate_without_ddl_or_history_mutation() {
              CREATE ROLE \"{peer_role}\" LOGIN PASSWORD '{password}'"
         ))
         .unwrap();
+
     migrator
         .grant_runtime_privileges(&writer_role, &peer_role)
         .unwrap();

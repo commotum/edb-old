@@ -46,8 +46,9 @@ fn standby_takes_over_abandoned_lease_while_peer_reads_remain_available() {
         return;
     };
     let database_id = unique("failover_db");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut setup = PostgresStore::connect(&connection).unwrap();
-    setup.migrate().unwrap();
     let created = setup.create_database(&database_id, schema()).unwrap();
     let initial_basis = created.basis_t();
     drop(setup);

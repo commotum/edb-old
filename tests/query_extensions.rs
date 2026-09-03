@@ -150,8 +150,9 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
         return;
     };
     let database_id = unique("query_program");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let service = common::start_service(&connection, &database_id);
     let committed = common::transact(

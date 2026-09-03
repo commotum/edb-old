@@ -1,6 +1,6 @@
 use crate::postgres::{
     CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
-    postgres_error, shared_program_cache_stats,
+    is_postgres_connection_error, postgres_error, shared_program_cache_stats,
 };
 use crate::{
     Database, Datom, Digest, ErrorCategory, IndexOrder, PersistentTreeManifest,
@@ -817,8 +817,9 @@ impl TransactionStandby {
                             return;
                         }
                         Err(error)
-                            if error.category == ErrorCategory::Unavailable
-                                && error.code == "postgres/lease-held" =>
+                            if (error.category == ErrorCategory::Unavailable
+                                && error.code == "postgres/lease-held")
+                                || is_postgres_connection_error(&error) =>
                         {
                             thread::sleep(poll_interval);
                         }
@@ -923,7 +924,6 @@ impl TransactionService {
         let lease_millis = duration_millis(config.lease_duration)?;
         let mut store = PostgresStore::connect_configured(&connection)?;
         store.set_capacity_limits(config.capacity_limits)?;
-        store.verify_migrations()?;
         let lease = store.acquire_lease(&config.database_id, &config.holder_id, lease_millis)?;
         let recovery_stats = match store.activate_transactor_state(&lease, lease_millis) {
             Ok(stats) => stats,

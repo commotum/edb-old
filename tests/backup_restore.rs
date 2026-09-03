@@ -1,7 +1,8 @@
 use atomic_core::{
-    Attribute, CallableRef, Cardinality, DB_FN, DB_IDENT, EntityRef, ErrorCategory, IndexOrder,
-    Instruction, Keyword, PortableBackup, PostgresStore, Program, ProgramCall, ProgramKind, Schema,
-    TransactionRequest, TxOp, TxValue, USER_PARTITION, Value, ValueType, View, make_eid, sha256,
+    Attribute, BackupFault, CallableRef, Cardinality, DB_FN, DB_IDENT, EntityRef, ErrorCategory,
+    IndexOrder, Instruction, Keyword, Peer, PortableBackup, PostgresIndexer, PostgresStore,
+    Program, ProgramCall, ProgramKind, RestoreFault, Schema, TransactionRequest, TxOp, TxValue,
+    USER_PARTITION, Value, ValueType, View, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::fs;
@@ -35,6 +36,34 @@ fn backup_directory() -> PathBuf {
     std::env::temp_dir().join(unique("atomic_backup"))
 }
 
+fn isolated_catalog(connection: &str, label: &str) -> String {
+    let schema = unique(label);
+    assert!(
+        schema
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    );
+    let mut client = Client::connect(connection, NoTls).unwrap();
+    client
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .unwrap();
+    let scoped = if connection.trim_start().starts_with("postgres://")
+        || connection.trim_start().starts_with("postgresql://")
+    {
+        let separator = if connection.contains('?') { '&' } else { '?' };
+        format!("{connection}{separator}options=-csearch_path%3D{schema}")
+    } else {
+        format!("{connection} options='-c search_path={schema}'")
+    };
+    let mut migrator = atomic_core::PostgresMigrator::connect(&scoped).unwrap();
+    migrator.migrate().unwrap();
+    scoped
+}
+
+fn hex_digest(hash: &[u8; 32]) -> String {
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn omit_first_program_from_manifest(path: &std::path::Path) {
     let mut bytes = fs::read(path).unwrap();
     let body_len = u64::from_be_bytes(bytes[6..14].try_into().unwrap()) as usize;
@@ -42,9 +71,13 @@ fn omit_first_program_from_manifest(path: &std::path::Path) {
     bytes.truncate(checksum_at);
     let mut at = 14;
     let string_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    at += 4 + string_len + 8 + 32;
+    at += 4 + string_len;
+    let lineage_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    at += 4 + lineage_len + 8 + 32;
     let transaction_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
     at += 4 + transaction_count * 32;
+    let state_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    at += 4 + state_count * 32;
     let request_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
     at += 4;
     for _ in 0..request_count {
@@ -85,6 +118,8 @@ fn add(value: &str) -> TxOp {
 
 fn assert_same_information(left: &atomic_core::Database, right: &atomic_core::Database) {
     assert_eq!(left.basis_t(), right.basis_t());
+    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
+    assert_eq!(left.schema(), right.schema());
     assert_eq!(
         left.datoms(View::Current, IndexOrder::Eavt),
         right.datoms(View::Current, IndexOrder::Eavt)
@@ -102,8 +137,9 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     };
     let source = unique("backup_source");
     let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&source, schema()).unwrap();
     let service = common::start_service(&connection, &source);
     let basis1 =
@@ -120,12 +156,15 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
         .deploy_program(&source, "answer", 1, &program)
         .unwrap();
     store.activate_program(&source, "answer", None, 1).unwrap();
+    let mut indexer = PostgresIndexer::connect(&connection, &source).unwrap();
+    indexer.consolidate().unwrap();
 
     let mut backup = PortableBackup::connect(&connection).unwrap();
     let first = backup.backup_database(&source, &directory).unwrap();
     assert_eq!(first.basis_t, basis1.basis_t());
     assert!(first.objects_written >= 3);
     let basis2 = common::transact(&service, "two", basis1.basis_t(), &[add("two")], 2_000).basis_t;
+    indexer.consolidate().unwrap();
     let second = backup.backup_database(&source, &directory).unwrap();
     assert_eq!(second.basis_t, basis2);
     assert!(second.objects_reused >= 3);
@@ -133,6 +172,27 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
         PortableBackup::list_backups(&directory).unwrap(),
         vec![basis1.basis_t(), basis2]
     );
+
+    let mut physical_catalog = Client::connect(&connection, NoTls).unwrap();
+    let root_hash: Vec<u8> = physical_catalog
+        .query_one(
+            "SELECT r.root_hash FROM atomic_tree_publications p \
+             JOIN atomic_tree_manifest_roots r ON r.manifest_hash = p.manifest_hash \
+             WHERE p.database_id = $1 ORDER BY p.publication_revision DESC LIMIT 1",
+            &[&source],
+        )
+        .unwrap()
+        .get(0);
+    let root_hash: [u8; 32] = root_hash.try_into().unwrap();
+    let root_object = directory.join("objects").join(hex_digest(&root_hash));
+    let root_bytes = fs::read(&root_object).unwrap();
+    let mut damaged_root = root_bytes.clone();
+    damaged_root[0] ^= 1;
+    fs::write(&root_object, &damaged_root).unwrap();
+    PortableBackup::verify_backup_presence(&directory, basis2).unwrap();
+    let error = PortableBackup::verify_backup(&directory, basis2, true).unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Fault);
+    fs::write(&root_object, root_bytes).unwrap();
 
     let verified1 = PortableBackup::verify_backup(&directory, basis1.basis_t(), true).unwrap();
     let verified2 = PortableBackup::verify_backup(&directory, basis2, true).unwrap();
@@ -142,26 +202,233 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
         vec![&Value::String("two".into())]
     );
 
+    let duplicate_name = unique("restore_same_catalog");
+    let identity_error = backup
+        .restore_backup(&directory, basis2, &duplicate_name)
+        .unwrap_err();
+    assert_eq!(
+        (identity_error.category, identity_error.code),
+        (ErrorCategory::Conflict, "backup/lineage-exists")
+    );
+
+    let target1_connection = isolated_catalog(&connection, "restore_catalog_one");
     let target1 = unique("restore_one");
-    let restored1 = backup
+    let mut target1_restore = PortableBackup::connect(&target1_connection).unwrap();
+    let restored1 = target1_restore
         .restore_backup(&directory, basis1.basis_t(), &target1)
         .unwrap();
     assert_same_information(&verified1.database, &restored1);
-    let (_, _, restored_program) = store.resolve_active_program(&target1, "answer").unwrap();
+    let mut target1_store = PostgresStore::connect(&target1_connection).unwrap();
+    let (_, _, restored_program) = target1_store
+        .resolve_active_program(&target1, "answer")
+        .unwrap();
     assert_eq!(restored_program, program);
+
+    let target2_connection = isolated_catalog(&connection, "restore_catalog_two");
     let target2 = unique("restore_two");
-    let restored2 = backup.restore_backup(&directory, basis2, &target2).unwrap();
-    assert_same_information(&verified2.database, &restored2);
-    let error = backup
+    let mut target2_restore = PortableBackup::connect(&target2_connection).unwrap();
+    let restored2 = target2_restore
         .restore_backup(&directory, basis2, &target2)
-        .unwrap_err();
+        .unwrap();
+    assert_same_information(&verified2.database, &restored2);
+    let mut catalog = Client::connect(&target2_connection, NoTls).unwrap();
+    let restored_tree_count: i64 = catalog
+        .query_one(
+            "SELECT count(*) FROM atomic_tree_publications WHERE database_id = $1",
+            &[&target2],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_tree_count, 1);
+    let restored_peer = Peer::connect(&target2_connection, &target2, 8).unwrap();
+    assert_eq!(restored_peer.basis_t(), basis2);
+    assert_eq!(restored_peer.durable_base_t(), basis2);
+    assert_eq!(restored_peer.durable_base_revision(), 1);
     assert_eq!(
-        (error.category, error.code),
-        (ErrorCategory::Conflict, "backup/target-exists")
+        restored_peer.db().values(user(42), ITEM_VALUE),
+        vec![&Value::String("two".into())]
     );
+    let source_states: Vec<Vec<u8>> = physical_catalog
+        .query(
+            "SELECT state_hash FROM atomic_transactions \
+             WHERE database_id = $1 AND basis_t <= $2 ORDER BY basis_t",
+            &[&source, &(basis2 as i64)],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    let target_states: Vec<Vec<u8>> = catalog
+        .query(
+            "SELECT state_hash FROM atomic_transactions \
+             WHERE database_id = $1 ORDER BY basis_t",
+            &[&target2],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(target_states, source_states);
+    let source_requests: Vec<(String, Vec<u8>, i64)> = physical_catalog
+        .query(
+            "SELECT request_key, request_digest, basis_t FROM atomic_requests \
+             WHERE database_id = $1 AND basis_t <= $2 ORDER BY basis_t",
+            &[&source, &(basis2 as i64)],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    let target_requests: Vec<(String, Vec<u8>, i64)> = catalog
+        .query(
+            "SELECT request_key, request_digest, basis_t FROM atomic_requests \
+             WHERE database_id = $1 ORDER BY basis_t",
+            &[&target2],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(target_requests, source_requests);
+    let replayed_restore = target2_restore
+        .restore_backup(&directory, basis2, &target2)
+        .unwrap();
+    assert_same_information(&verified2.database, &replayed_restore);
+    let target_service = common::start_service(&target2_connection, &target2);
+    let replayed_request = common::try_transact(
+        &target_service,
+        "two",
+        basis1.basis_t(),
+        &[add("two")],
+        2_000,
+    )
+    .unwrap();
+    assert!(replayed_request.replayed);
+    assert_eq!(replayed_request.basis_t, basis2);
+    target_service.shutdown();
 
     fs::remove_dir_all(&directory).unwrap();
     service.shutdown();
+}
+
+#[test]
+fn interrupted_root_publication_never_exposes_a_partial_point_and_retry_converges() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("backup_root_faults");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let database = store.create_database(&source, schema()).unwrap();
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+
+    for fault_at in [
+        BackupFault::AfterFirstObjectStaged,
+        BackupFault::AfterObjects,
+        BackupFault::AfterManifestStaged,
+    ] {
+        let directory = backup_directory();
+        let error = backup
+            .backup_database_with_fault(&source, &directory, fault_at)
+            .unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Interrupted);
+        assert!(PortableBackup::list_backups(&directory).unwrap().is_empty());
+        let point = backup.backup_database(&source, &directory).unwrap();
+        assert_eq!(point.basis_t, database.basis_t());
+        PortableBackup::verify_backup(&directory, point.basis_t, true).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    let directory = backup_directory();
+    let error = backup
+        .backup_database_with_fault(&source, &directory, BackupFault::AfterManifestPublished)
+        .unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Interrupted);
+    assert_eq!(
+        PortableBackup::list_backups(&directory).unwrap(),
+        vec![database.basis_t()]
+    );
+    let retry = backup.backup_database(&source, &directory).unwrap();
+    assert_eq!(retry.basis_t, database.basis_t());
+    PortableBackup::verify_backup(&directory, retry.basis_t, true).unwrap();
+    let other = unique("backup_claim_intruder");
+    store.create_database(&other, schema()).unwrap();
+    let claim_error = backup.backup_database(&other, &directory).unwrap_err();
+    assert_eq!(
+        (claim_error.category, claim_error.code),
+        (ErrorCategory::Conflict, "backup/claim-conflict")
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("backup_restore_faults");
+    let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&source, schema()).unwrap();
+    let service = common::start_service(&connection, &source);
+    let committed = common::transact(
+        &service,
+        "restore-fault-seed",
+        created.basis_t(),
+        &[add("durable")],
+        4_000,
+    );
+    service.shutdown();
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+    backup.backup_database(&source, &directory).unwrap();
+
+    let before_connection = isolated_catalog(&connection, "restore_before_catalog");
+    let mut before_restore = PortableBackup::connect(&before_connection).unwrap();
+    let before_commit = unique("restore_before_commit");
+    let error = before_restore
+        .restore_backup_with_fault(
+            &directory,
+            committed.basis_t,
+            &before_commit,
+            RestoreFault::BeforeCommit,
+    )
+    .unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Interrupted);
+    let mut client = Client::connect(&before_connection, NoTls).unwrap();
+    assert!(
+        client
+            .query_opt(
+                "SELECT 1 FROM atomic_databases WHERE database_id = $1",
+                &[&before_commit],
+            )
+            .unwrap()
+            .is_none()
+    );
+    let restored = before_restore
+        .restore_backup(&directory, committed.basis_t, &before_commit)
+        .unwrap();
+    assert_same_information(&committed.db_after, &restored);
+
+    let after_connection = isolated_catalog(&connection, "restore_after_catalog");
+    let mut after_restore = PortableBackup::connect(&after_connection).unwrap();
+    let after_commit = unique("restore_after_commit");
+    let error = after_restore
+        .restore_backup_with_fault(
+            &directory,
+            committed.basis_t,
+            &after_commit,
+            RestoreFault::AfterCommitBeforeResponse,
+    )
+    .unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Interrupted);
+    let replay = after_restore
+        .restore_backup(&directory, committed.basis_t, &after_commit)
+        .unwrap();
+    assert_same_information(&committed.db_after, &replay);
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -171,8 +438,9 @@ fn corrupted_external_object_fails_deep_verification() {
     };
     let source = unique("backup_corrupt");
     let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&source, schema()).unwrap();
     let service = common::start_service(&connection, &source);
     let basis =
@@ -208,8 +476,9 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
     let source = unique("backup_temporal_functions");
     let target = unique("restore_temporal_functions");
     let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store.create_database(&source, schema()).unwrap();
     let writer = |value: &str| Program {
         kind: ProgramKind::Transaction,
@@ -257,6 +526,22 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
     );
     let mut backup = PortableBackup::connect(&connection).unwrap();
     let point = backup.backup_database(&source, &directory).unwrap();
+    PortableBackup::verify_backup_presence(&directory, point.basis_t).unwrap();
+    let old_program_object = directory.join("objects").join(hex_digest(&old_hash));
+    let old_program_bytes = fs::read(&old_program_object).unwrap();
+    let mut damaged_program = old_program_bytes.clone();
+    damaged_program[0] ^= 1;
+    fs::write(&old_program_object, &damaged_program).unwrap();
+    // Presence verification does not read content, while deep verification
+    // authenticates every referenced program object.
+    PortableBackup::verify_backup_presence(&directory, point.basis_t).unwrap();
+    PortableBackup::verify_backup(&directory, point.basis_t, false).unwrap();
+    let error = PortableBackup::verify_backup(&directory, point.basis_t, true).unwrap_err();
+    assert_eq!(
+        (error.category, error.code),
+        (ErrorCategory::Fault, "backup/object-corrupt")
+    );
+    fs::write(&old_program_object, old_program_bytes).unwrap();
     PortableBackup::verify_backup(&directory, point.basis_t, true).unwrap();
     service.shutdown();
 

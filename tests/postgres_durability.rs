@@ -67,9 +67,9 @@ fn unique(prefix: &str) -> String {
 }
 
 fn migrated_store(connection: &str) -> PostgresStore {
-    let mut store = PostgresStore::connect(connection).unwrap();
-    store.migrate().unwrap();
-    store
+    let mut migrator = atomic_core::PostgresMigrator::connect(connection).unwrap();
+    migrator.migrate().unwrap();
+    PostgresStore::connect(connection).unwrap()
 }
 
 fn assert_database_eq(left: &Database, right: &Database) {
@@ -98,9 +98,9 @@ fn migrations_are_idempotent() {
     let Some(connection) = connection() else {
         return;
     };
-    let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
-    store.migrate().unwrap();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    migrator.migrate().unwrap();
 
     let mut client = Client::connect(&connection, NoTls).unwrap();
     let versions: i64 = client
@@ -117,7 +117,6 @@ fn migration_commit_recovery_and_idempotency_are_exact() {
     };
     let database_id = unique("exact");
     let mut store = migrated_store(&connection);
-    store.migrate().unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     assert_eq!(created.basis_t(), 1);
     assert_database_eq(&created, &store.recover(&database_id).unwrap());
@@ -380,9 +379,9 @@ fn concurrent_expected_basis_writers_cannot_fork() {
         let connection = connection.clone();
         let barrier = Arc::clone(&migration_barrier);
         migration_handles.push(std::thread::spawn(move || {
-            let mut store = PostgresStore::connect(&connection).unwrap();
+            let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
             barrier.wait();
-            store.migrate()
+            migrator.migrate()
         }));
     }
     migration_barrier.wait();

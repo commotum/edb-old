@@ -47,8 +47,9 @@ fn concurrent_load_stays_bounded_and_every_timeline_is_serial() {
     const PRODUCERS: usize = 12;
     const TRANSACTIONS: u64 = 20;
     const QUEUE_CAPACITY: usize = 4;
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut setup = PostgresStore::connect(&connection).unwrap();
-    setup.migrate().unwrap();
     let database_id = unique("stress");
     let initial_basis = setup
         .create_database(&database_id, schema())

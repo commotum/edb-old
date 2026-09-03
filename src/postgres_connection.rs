@@ -5,6 +5,7 @@ use postgres::{Client, Config, NoTls};
 use postgres_native_tls::{MakeTlsConnector, set_postgresql_alpn};
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// One concrete PostgreSQL connection policy shared by every runtime role.
 ///
@@ -92,11 +93,17 @@ impl PostgresConnectionConfig {
     }
 
     pub(crate) fn connect_for(&self, operation: &'static str) -> Result<Client, SemanticError> {
-        let Some(root_certificates) = &self.root_certificates else {
-            return Client::connect(&self.parameters, NoTls)
-                .map_err(|error| crate::postgres::postgres_error(operation, error));
-        };
+        self.connect_for_with_timeout(operation, None)
+    }
 
+    /// Open a connection whose socket-level attempt cannot exceed the caller's
+    /// remaining operation deadline. `None` preserves the configured/default
+    /// PostgreSQL timeout for constructors without an outer deadline.
+    pub(crate) fn connect_for_with_timeout(
+        &self,
+        operation: &'static str,
+        timeout: Option<Duration>,
+    ) -> Result<Client, SemanticError> {
         let mut config = self.parameters.parse::<Config>().map_err(|_| {
             SemanticError::incorrect(
                 "postgres/invalid-connection-config",
@@ -104,6 +111,14 @@ impl PostgresConnectionConfig {
             )
             .detail("operation", operation)
         })?;
+        if let Some(timeout) = timeout {
+            config.connect_timeout(timeout);
+        }
+        let Some(root_certificates) = &self.root_certificates else {
+            return config
+                .connect(NoTls)
+                .map_err(|error| crate::postgres::postgres_error(operation, error));
+        };
         if config
             .get_hosts()
             .iter()
@@ -141,6 +156,7 @@ impl PostgresConnectionConfig {
                     "verified PostgreSQL TLS connection failed",
                 )
                 .detail("operation", operation)
+                .detail("postgres_transport", "true")
             })
     }
 }
@@ -150,4 +166,33 @@ fn invalid_root_certificate() -> SemanticError {
         "postgres/invalid-tls-root-certificate",
         "PostgreSQL TLS root certificate is not valid PEM",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn caller_deadline_caps_an_unreachable_postgres_host() {
+        // TEST-NET-1 is reserved for documentation and must not host a server.
+        // Some CI networks reject it immediately; a blackholed route exercises
+        // the configured timeout. Both outcomes must remain inside the bound.
+        let config = PostgresConnectionConfig::plaintext(
+            "host=192.0.2.1 port=9 user=deadline dbname=deadline",
+        );
+        let started = Instant::now();
+        let error = match config
+            .connect_for_with_timeout("postgres/deadline-witness", Some(Duration::from_millis(50)))
+        {
+            Ok(_) => panic!("unreachable host unexpectedly accepted PostgreSQL"),
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+        assert!(crate::postgres::is_postgres_connection_error(&error));
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "unreachable host exceeded the caller's deadline envelope: {elapsed:?}"
+        );
+    }
 }

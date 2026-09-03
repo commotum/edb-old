@@ -41,8 +41,9 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
             Cardinality::One,
         ))
         .unwrap();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut kernel = PostgresStore::connect(&connection).unwrap();
-    kernel.migrate().unwrap();
     kernel.create_database(&database_id, schema).unwrap();
     drop(kernel);
 
@@ -283,8 +284,9 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
             Cardinality::One,
         ))
         .unwrap();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut kernel = PostgresStore::connect(&connection).unwrap();
-    kernel.migrate().unwrap();
     let database = kernel.create_database(&database_id, schema).unwrap();
     drop(kernel);
 

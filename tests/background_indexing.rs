@@ -34,8 +34,9 @@ fn setup(connection: &str, database_id: &str) -> u64 {
             Cardinality::One,
         ))
         .unwrap();
+    let mut migrator = atomic_core::PostgresMigrator::connect(connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(connection).unwrap();
-    store.migrate().unwrap();
     store
         .create_database(database_id, schema)
         .unwrap()
@@ -43,8 +44,9 @@ fn setup(connection: &str, database_id: &str) -> u64 {
 }
 
 fn setup_empty(connection: &str, database_id: &str) {
+    let mut migrator = atomic_core::PostgresMigrator::connect(connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(connection).unwrap();
-    store.migrate().unwrap();
     assert_eq!(
         store
             .create_database(database_id, Schema::new())

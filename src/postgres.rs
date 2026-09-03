@@ -166,7 +166,7 @@ pub(crate) fn shared_program_cache_stats(cache: &SharedProgramCache) -> ProgramC
     lock_program_cache(cache).stats()
 }
 
-const MIGRATIONS: &[(i64, &str)] = &[
+pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_atomic.sql")),
     (2, include_str!("../migrations/0002_peer_indexes.sql")),
     (3, include_str!("../migrations/0003_programs.sql")),
@@ -191,6 +191,16 @@ const MIGRATIONS: &[(i64, &str)] = &[
 ///
 /// This is an operator compatibility boundary, not a data-format version.
 pub const POSTGRES_SCHEMA_VERSION: i64 = 12;
+
+/// Oldest installed native SQL schema that this binary can upgrade in place
+/// when the catalog already contains a logical database.
+///
+/// Versions 1--5 stored a prototype logical representation that cannot be
+/// reinterpreted as the schema-information/log representation introduced by
+/// migration 6.  Those databases require an offline export through an old
+/// decoder followed by import into a freshly provisioned catalog. Empty
+/// catalogs may still run through the complete migration chain.
+pub const POSTGRES_IN_PLACE_UPGRADE_FLOOR: i64 = 6;
 
 const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_schema_migrations",
@@ -252,9 +262,15 @@ impl PostgresMigrator {
         apply_migrations(&mut self.client)
     }
 
-    /// Grant the exact table privileges used by the native peer and fenced
-    /// transaction service. Roles must already exist and must not be elevated,
-    /// own Atomic relations, or inherit another role's privileges.
+    /// Grant the exact privileges used on Atomic relations by the native peer
+    /// and fenced transaction service. Roles must be dedicated: they may not
+    /// be elevated, inherit another role, own database objects, or retain a
+    /// writable non-system schema that could shadow an unqualified relation.
+    ///
+    /// This boundary deliberately does not administer unrelated database-wide
+    /// policy such as PostgreSQL's `TEMP` grant. Operators that require a role
+    /// with no authority outside Atomic should use a dedicated database and
+    /// harden its database ACL separately.
     pub fn grant_runtime_privileges(
         &mut self,
         writer_role: &str,
@@ -288,11 +304,22 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
         Vec::new()
     };
     validate_migration_rows(&installed, false)?;
+    reject_unsupported_populated_upgrade(&mut transaction, &installed)?;
+    let installed_version = installed.last().map_or(0, |(version, _)| *version);
+    // An already-current catalog may still contain migration 9's historical
+    // zero placeholders if it was upgraded by an older binary. Schema-version
+    // equality is therefore not evidence that the data migration completed.
+    if installed_version >= 9 && state_commitment_backfill_required(&mut transaction)? {
+        backfill_state_commitments(&mut transaction).map_err(upgrade_rebuild_required)?;
+    }
 
     for (version, sql) in MIGRATIONS.iter().skip(installed.len()) {
         transaction
             .batch_execute(sql)
             .map_err(|error| postgres_error("postgres/migration-ddl", error))?;
+        if *version == 9 {
+            backfill_state_commitments(&mut transaction).map_err(upgrade_rebuild_required)?;
+        }
         let checksum = sha256(sql.as_bytes());
         transaction
             .execute(
@@ -304,6 +331,171 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     transaction
         .commit()
         .map_err(|error| postgres_error("postgres/migration-commit", error))
+}
+
+fn state_commitment_backfill_required<C: GenericClient>(
+    client: &mut C,
+) -> Result<bool, SemanticError> {
+    client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_transactions \
+             WHERE state_hash = decode(repeat('00', 32), 'hex'))",
+            &[],
+        )
+        .map(|row| row.get(0))
+        .map_err(|error| postgres_error("postgres/state-backfill-discovery", error))
+}
+
+fn upgrade_rebuild_required(cause: SemanticError) -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Unsupported,
+        "postgres/upgrade-rebuild-required",
+        "pre-commitment transaction history cannot be upgraded by canonical replay; export with a compatible old decoder and import into a freshly provisioned catalog",
+    )
+    .detail("cause", cause.code)
+}
+
+/// Migration 9 introduced authenticated materialized-state commitments. Its
+/// SQL DDL deliberately creates zero placeholders for existing immutable log
+/// rows; the administrative migration path replaces those placeholders by
+/// replaying the canonical v3 genesis/log once, in basis order, under the same
+/// transaction and advisory lock as the schema change.
+fn backfill_state_commitments<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
+    client
+        .batch_execute(
+            "ALTER TABLE atomic_transactions \
+             DISABLE TRIGGER atomic_transactions_immutable",
+        )
+        .map_err(|error| postgres_error("postgres/state-backfill-disable-guard", error))?;
+    let databases = client
+        .query(
+            "SELECT database_id, genesis, genesis_hash \
+             FROM atomic_databases ORDER BY database_id",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/state-backfill-catalog", error))?;
+    for catalog in databases {
+        let database_id: String = catalog.get(0);
+        let genesis: Vec<u8> = catalog.get(1);
+        let genesis_hash = digest(catalog.get(2), "migration genesis hash")?;
+        if sha256(&genesis) != genesis_hash {
+            return Err(fault(
+                "postgres/state-backfill-genesis-hash",
+                "migration genesis bytes do not match their hash",
+            ));
+        }
+        let mut database = Database::from_genesis(decode_genesis(&genesis)?)?;
+        let mut previous_hash = genesis_hash;
+        let rows = client
+            .query(
+                "SELECT basis_t, previous_hash, tx_hash, payload, state_hash \
+                 FROM atomic_transactions WHERE database_id = $1 ORDER BY basis_t",
+                &[&database_id],
+            )
+            .map_err(|error| postgres_error("postgres/state-backfill-log", error))?;
+        for row in rows {
+            let basis_t = pg_basis(row.get(0), "migration transaction")?;
+            let stored_previous = digest(row.get(1), "migration predecessor")?;
+            let tx_hash = digest(row.get(2), "migration transaction hash")?;
+            let payload: Vec<u8> = row.get(3);
+            let stored_state_hash = digest(row.get(4), "migration state hash")?;
+            if basis_t != database.basis_t().saturating_add(1)
+                || stored_previous != previous_hash
+                || transaction_hash(&payload) != tx_hash
+            {
+                return Err(fault(
+                    "postgres/state-backfill-log-chain",
+                    "migration transaction log is not one contiguous authenticated chain",
+                ));
+            }
+            let envelope = decode_transaction(&payload)?;
+            if envelope.database_id != database_id
+                || envelope.basis_t != basis_t
+                || envelope.previous_hash != stored_previous
+            {
+                return Err(fault(
+                    "postgres/state-backfill-envelope",
+                    "migration transaction envelope disagrees with its SQL row",
+                ));
+            }
+            database = database.apply_committed(&envelope)?;
+            let state_hash = checkpoint_state_hash(&database)?;
+            if stored_state_hash == [0; 32] {
+                let basis_sql = sql_basis(basis_t)?;
+                let updated = client
+                    .execute(
+                        "UPDATE atomic_transactions SET state_hash = $3 \
+                         WHERE database_id = $1 AND basis_t = $2 \
+                           AND state_hash = decode(repeat('00', 32), 'hex')",
+                        &[&database_id, &basis_sql, &&state_hash[..]],
+                    )
+                    .map_err(|error| postgres_error("postgres/state-backfill-write", error))?;
+                if updated != 1 {
+                    return Err(fault(
+                        "postgres/state-backfill-existing-value",
+                        "pre-commitment row changed during locked canonical replay",
+                    ));
+                }
+            } else if stored_state_hash != state_hash {
+                return Err(fault(
+                    "postgres/state-backfill-existing-value",
+                    "existing state commitment disagrees with canonical replay",
+                ));
+            }
+            previous_hash = tx_hash;
+        }
+        let head = client
+            .query_one(
+                "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
+                &[&database_id],
+            )
+            .map_err(|error| postgres_error("postgres/state-backfill-head", error))?;
+        let head_basis = pg_basis(head.get(0), "migration head")?;
+        let head_hash = digest(head.get(1), "migration head hash")?;
+        if head_basis != database.basis_t() || head_hash != previous_hash {
+            return Err(fault(
+                "postgres/state-backfill-head-mismatch",
+                "migration replay did not reach the published database head",
+            ));
+        }
+    }
+    client
+        .batch_execute(
+            "ALTER TABLE atomic_transactions \
+             ENABLE TRIGGER atomic_transactions_immutable",
+        )
+        .map_err(|error| postgres_error("postgres/state-backfill-enable-guard", error))
+}
+
+fn reject_unsupported_populated_upgrade<C: GenericClient>(
+    client: &mut C,
+    installed: &[(i64, Vec<u8>)],
+) -> Result<(), SemanticError> {
+    let installed_version = installed.last().map_or(0, |(version, _)| *version);
+    if installed_version >= POSTGRES_IN_PLACE_UPGRADE_FLOOR {
+        return Ok(());
+    }
+    let catalog_exists: bool = client
+        .query_one("SELECT to_regclass('atomic_databases') IS NOT NULL", &[])
+        .map_err(|error| postgres_error("postgres/migration-discovery", error))?
+        .get(0);
+    if !catalog_exists {
+        return Ok(());
+    }
+    let populated: bool = client
+        .query_one("SELECT EXISTS (SELECT 1 FROM atomic_databases)", &[])
+        .map_err(|error| postgres_error("postgres/migration-population-check", error))?
+        .get(0);
+    if populated {
+        return Err(SemanticError::new(
+            ErrorCategory::Unsupported,
+            "postgres/upgrade-rebuild-required",
+            format!(
+                "populated native SQL schema version {installed_version} predates the supported in-place upgrade floor {POSTGRES_IN_PLACE_UPGRADE_FLOOR}; export with a compatible old decoder and import into a freshly provisioned catalog"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn migration_table_exists<C: GenericClient>(client: &mut C) -> Result<bool, SemanticError> {
@@ -439,6 +631,44 @@ fn grant_runtime_privileges(
             ),
         ));
     }
+    let public_has_relation_privileges: bool = transaction
+        .query_one(
+            r#"SELECT EXISTS (
+                 SELECT 1
+                   FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace,
+                        LATERAL aclexplode(
+                            COALESCE(c.relacl, acldefault('r', c.relowner))
+                        ) a
+                  WHERE n.nspname = $1
+                    AND c.relkind IN ('r', 'p')
+                    AND c.relname LIKE 'atomic\_%' ESCAPE '\'
+                    AND a.grantee = 0
+                 UNION ALL
+                 SELECT 1
+                   FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                   JOIN pg_attribute column_acl ON column_acl.attrelid = c.oid,
+                        LATERAL aclexplode(column_acl.attacl) a
+                  WHERE n.nspname = $1
+                    AND c.relkind IN ('r', 'p')
+                    AND c.relname LIKE 'atomic\_%' ESCAPE '\'
+                    AND column_acl.attnum > 0
+                    AND NOT column_acl.attisdropped
+                    AND a.grantee = 0
+             )"#,
+            &[&schema],
+        )
+        .map_err(|error| postgres_error("postgres/runtime-grants-public-relations", error))?
+        .get(0);
+    if public_has_relation_privileges {
+        return Err(SemanticError::incorrect(
+            "postgres/runtime-relations-public-privileges",
+            format!(
+                "schema {schema} grants privileges on Atomic relations to PUBLIC; revoke them before provisioning runtime roles"
+            ),
+        ));
+    }
     for role in [writer_role, peer_role] {
         validate_runtime_role(&mut transaction, role, &schema)?;
     }
@@ -447,12 +677,38 @@ fn grant_runtime_privileges(
     let database_ident = quote_identifier(&database)?;
     let peer_ident = quote_identifier(peer_role)?;
     let writer_ident = quote_identifier(writer_role)?;
-    let all_tables = PEER_RUNTIME_TABLES
-        .iter()
-        .chain(WRITER_RUNTIME_TABLES)
-        .copied()
+    // Reset direct grants across the discovered namespace, not merely the
+    // current positive grant whitelist. Otherwise a privilege on an
+    // administrative table (or a table added by a future migration) would
+    // survive provisioning even though it is absent from the runtime policy.
+    let atomic_relations = transaction
+        .query(
+            "SELECT c.relname::text \
+               FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = $1 \
+                AND c.relkind IN ('r', 'p') \
+                AND c.relname LIKE 'atomic\\_%' ESCAPE '\\' \
+              ORDER BY c.relname",
+            &[&schema],
+        )
+        .map_err(|error| postgres_error("postgres/runtime-grants-relations", error))?
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
         .collect::<Vec<_>>();
-    let all_relations = relation_list(&schema_ident, &all_tables);
+    if atomic_relations.is_empty() {
+        return Err(fault(
+            "postgres/runtime-relations-missing",
+            "installed schema contains no Atomic runtime relations",
+        ));
+    }
+    let all_relations = atomic_relations
+        .iter()
+        .map(|relation| {
+            quote_identifier(relation).map(|relation| format!("{schema_ident}.{relation}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
     for role_ident in [&writer_ident, &peer_ident] {
         transaction
             .batch_execute(&format!(
@@ -464,6 +720,11 @@ fn grant_runtime_privileges(
             .map_err(|error| postgres_error("postgres/runtime-grants-reset", error))?;
     }
     let peer_relations = relation_list(&schema_ident, PEER_RUNTIME_TABLES);
+    // The tree-publication trigger takes `atomic_databases FOR UPDATE` as its
+    // database-scoped serialization point. PostgreSQL therefore requires the
+    // writer to hold UPDATE on that catalog relation. The immutable-catalog
+    // trigger remains the independent authority that rejects actual changes;
+    // this is a trusted-writer row-lock capability, not a mutable-catalog API.
     transaction
         .batch_execute(&format!(
             "GRANT SELECT ON TABLE {peer_relations} TO {peer_ident}; \
@@ -493,8 +754,31 @@ fn validate_runtime_role<C: GenericClient>(
                     r.rolreplication, r.rolbypassrls, \
                     EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid), \
                     EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-                             WHERE c.relowner = r.oid AND n.nspname = $2 \
-                               AND c.relname LIKE 'atomic\\_%' ESCAPE '\\') \
+                             WHERE c.relowner = r.oid \
+                               AND n.nspname !~ '^pg_' \
+                               AND n.nspname <> 'information_schema'), \
+                    EXISTS (SELECT 1 FROM pg_namespace n \
+                             WHERE n.nspowner = r.oid \
+                               AND n.nspname !~ '^pg_' \
+                               AND n.nspname <> 'information_schema'), \
+                    EXISTS (SELECT 1 FROM pg_database d WHERE d.datdba = r.oid), \
+                    EXISTS (SELECT 1 FROM pg_namespace n \
+                             WHERE n.nspname <> $2 \
+                               AND n.nspname !~ '^pg_' \
+                               AND n.nspname <> 'information_schema' \
+                               AND has_schema_privilege(r.oid, n.oid, 'CREATE')), \
+                    has_database_privilege(r.oid, current_database(), 'CREATE'), \
+                    EXISTS (SELECT 1 \
+                              FROM pg_class c \
+                              JOIN pg_namespace n ON n.oid = c.relnamespace \
+                              JOIN pg_attribute column_acl ON column_acl.attrelid = c.oid, \
+                                   LATERAL aclexplode(column_acl.attacl) a \
+                             WHERE n.nspname = $2 \
+                               AND c.relkind IN ('r', 'p') \
+                               AND c.relname LIKE 'atomic\\_%' ESCAPE '\\' \
+                               AND column_acl.attnum > 0 \
+                               AND NOT column_acl.attisdropped \
+                               AND a.grantee = r.oid) \
                FROM pg_roles r WHERE r.rolname = $1",
             &[&role, &schema],
         )
@@ -512,11 +796,26 @@ fn validate_runtime_role<C: GenericClient>(
         || row.get::<_, bool>(4)
         || row.get::<_, bool>(5);
     let inherits_membership: bool = row.get(6);
-    let owns_atomic_relation: bool = row.get(7);
-    if elevated || inherits_membership || owns_atomic_relation {
+    let owns_non_system_relation: bool = row.get(7);
+    let owns_non_system_schema: bool = row.get(8);
+    let owns_database: bool = row.get(9);
+    let can_create_in_other_schema: bool = row.get(10);
+    let can_create_schema: bool = row.get(11);
+    let has_atomic_column_privileges: bool = row.get(12);
+    if elevated
+        || inherits_membership
+        || owns_non_system_relation
+        || owns_non_system_schema
+        || owns_database
+        || can_create_in_other_schema
+        || can_create_schema
+        || has_atomic_column_privileges
+    {
         return Err(SemanticError::incorrect(
             "postgres/runtime-role-not-least-privilege",
-            format!("role {role} is elevated, inherits another role, or owns an Atomic relation"),
+            format!(
+                "role {role} is elevated, inherits another role, owns database objects, can create outside the Atomic schema, or holds column-level privileges on Atomic relations"
+            ),
         ));
     }
     Ok(())
@@ -1065,6 +1364,7 @@ impl Default for CapacityLimits {
 /// publication, retry resolution, and recovery around the kernel transition.
 pub struct PostgresStore {
     client: Client,
+    connection: Option<PostgresConnectionConfig>,
     current: BTreeMap<String, (Digest, Database)>,
     program_cache: SharedProgramCache,
     capacity_limits: CapacityLimits,
@@ -1078,13 +1378,29 @@ impl PostgresStore {
     pub fn connect_configured(
         connection: &PostgresConnectionConfig,
     ) -> Result<Self, SemanticError> {
-        let client = connection.connect_for("postgres/connect")?;
-        Ok(Self::from_client(client))
+        let mut client = connection.connect_for("postgres/connect")?;
+        verify_schema_compatibility(&mut client)?;
+        Ok(Self::from_configured_client(client, connection.clone()))
     }
 
-    pub fn from_client(client: Client) -> Self {
+    fn from_configured_client(client: Client, connection: PostgresConnectionConfig) -> Self {
         Self {
             client,
+            connection: Some(connection),
+            current: BTreeMap::new(),
+            program_cache: Arc::new(Mutex::new(ProgramCache::default())),
+            capacity_limits: CapacityLimits::default(),
+        }
+    }
+
+    /// Low-level construction for crate-owned migration/recovery fixtures that
+    /// already control the session and its schema. Runtime callers must use a
+    /// checked `connect` constructor.
+    #[cfg(test)]
+    pub(crate) fn from_client(client: Client) -> Self {
+        Self {
+            client,
+            connection: None,
             current: BTreeMap::new(),
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
@@ -1133,18 +1449,29 @@ impl PostgresStore {
         Arc::clone(&self.program_cache)
     }
 
-    pub fn migrate(&mut self) -> Result<(), SemanticError> {
-        // Compatibility shim for existing administrative callers. New code
-        // should use `PostgresMigrator`, which cannot be mistaken for a
-        // transaction-service runtime handle.
-        apply_migrations(&mut self.client)
-    }
-
     /// Read-only runtime compatibility gate. Schema installation is an
     /// explicit administrative action; a transactor never grants itself DDL
     /// authority while starting.
     pub fn verify_migrations(&mut self) -> Result<(), SemanticError> {
         verify_schema_compatibility(&mut self.client)
+    }
+
+    /// Replace a failed runtime connection without reusing potentially stale
+    /// mutable recovery state. This never retries a transaction: callers must
+    /// resolve an ambiguous write by request key before deciding what to do.
+    pub fn reconnect(&mut self) -> Result<(), SemanticError> {
+        let connection = self.connection.as_ref().ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Unsupported,
+                "postgres/reconnect-unconfigured",
+                "this PostgreSQL store was created from a caller-owned client",
+            )
+        })?;
+        let mut client = connection.connect_for("postgres/reconnect")?;
+        verify_schema_compatibility(&mut client)?;
+        self.client = client;
+        self.current.clear();
+        Ok(())
     }
 
     pub(crate) fn activate_transactor_state(
@@ -2447,13 +2774,36 @@ fn unknown_outcome(request_key: &str, message: impl Into<String>) -> SemanticErr
 }
 
 pub(crate) fn postgres_error(code: &'static str, error: postgres::Error) -> SemanticError {
-    let category = match error.as_db_error().map(|error| error.code().code()) {
+    let database_error = error.as_db_error().map(|error| error.code().code());
+    // PostgreSQL can report restart/failover as a server SQLSTATE before the
+    // socket disappears. Those are transport availability, not corrupt SQL.
+    let transport = database_error.is_none()
+        || database_error.is_some_and(|state| {
+            state.starts_with("08") || matches!(state, "57P01" | "57P02" | "57P03")
+        });
+    let category = match database_error {
         Some("23505" | "40001" | "40P01") => ErrorCategory::Conflict,
         Some("42501") => ErrorCategory::Forbidden,
+        Some(state) if state.starts_with("08") || matches!(state, "57P01" | "57P02" | "57P03") => {
+            ErrorCategory::Unavailable
+        }
         Some(_) => ErrorCategory::Fault,
         None => ErrorCategory::Unavailable,
     };
-    SemanticError::new(category, code, error.to_string())
+    let semantic = SemanticError::new(category, code, error.to_string());
+    if transport {
+        semantic.detail("postgres_transport", "true")
+    } else {
+        semantic
+    }
+}
+
+pub(crate) fn is_postgres_connection_error(error: &SemanticError) -> bool {
+    error.category == ErrorCategory::Unavailable
+        && error
+            .details
+            .get("postgres_transport")
+            .is_some_and(|value| value == "true")
 }
 
 #[cfg(test)]

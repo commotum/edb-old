@@ -154,8 +154,9 @@ fn persisted_entity_spec_predicate_validates_complete_db_after_via_service() {
         return;
     };
     let database_id = unique("entity_spec_predicate");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -285,8 +286,9 @@ fn persisted_functions_compose_on_db_before_and_predicates_guard_commit() {
         return;
     };
     let database_id = unique("program_tx");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -396,8 +398,9 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
         return;
     };
     let database_id = unique("program_retry");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -615,8 +618,9 @@ fn database_function_without_an_ident_is_callable_by_eid() {
         return;
     };
     let database_id = unique("eid_function");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -661,8 +665,9 @@ fn persisted_predicates_are_resolved_only_for_assessed_assertions() {
         return;
     };
     let database_id = unique("lazy_predicate");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -859,8 +864,9 @@ fn broken_or_wrong_role_predicate_bindings_fail_their_source_transaction() {
         return;
     };
     let database_id = unique("predicate_binding_validation");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();

@@ -8,7 +8,10 @@
   noncanonical encodings and checksum mismatches fail closed.
 - SQL migrations are monotonically numbered, transactional and checksum
   pinned. Changes to an applied migration are forbidden; evolution adds a new
-  migration and tests mixed persistent state through restart.
+  migration and tests mixed persistent state through restart. Populated v6 is
+  the current in-place floor; older populated native prototypes require
+  old-decoder export/rebuild, while v6--v8 history is canonically replayed to
+  backfill authenticated state commitments during upgrade.
 - PostgreSQL is the sole backend. Supported PostgreSQL major versions must be
   named and exercised by each release; current acceptance evidence is 15.11.
 - The semantic support boundary and deliberate omissions are recorded in the
@@ -32,6 +35,10 @@ peer table grants after rejecting elevated, inherited, owning, or non-distinct
 roles. Runtime service, peer, indexer, and tree-writer startup validates the
 complete checksummed migration prefix and refuses an unknown newer version
 before reading or publishing database state.
+`PostgresStore` has no DDL/migration entry point; only `PostgresMigrator` can
+open an unchecked administrative session. Runtime handles retain their
+connection policy for checked reborrow, but transaction submission is never
+blindly retried across an ambiguous connection loss.
 
 Require TLS across host boundaries, authenticate at the embedding service,
 rotate database credentials, restrict `pg_hba.conf`, and encrypt PostgreSQL,

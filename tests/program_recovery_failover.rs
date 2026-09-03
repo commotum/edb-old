@@ -280,8 +280,9 @@ fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
         return;
     };
     let database_id = unique("program_base_failover");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     store.create_database(&database_id, schema()).unwrap();
     let positive_hash = store.deploy_program_blob(&positive()).unwrap();
     let emitter_hash = store.deploy_program_blob(&emit_two_maps()).unwrap();
@@ -387,8 +388,9 @@ fn persisted_stage_four_control_flow_is_atomic_and_db_before_consistent() {
         return;
     };
     let database_id = unique("program_stage_four_witness");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     store
         .create_database(&database_id, stage_four_witness_schema())
         .unwrap();
@@ -603,8 +605,9 @@ fn configured_budget_is_shared_by_siblings_nested_calls_predicates_and_queries()
         return;
     };
     let database_id = unique("program_service_limits");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     store.create_database(&database_id, schema()).unwrap();
     let empty_hash = store.deploy_program_blob(&empty_transaction()).unwrap();
     let setter_hash = store.deploy_program_blob(&set_balance()).unwrap();

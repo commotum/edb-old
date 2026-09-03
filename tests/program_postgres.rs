@@ -42,8 +42,9 @@ fn immutable_deploy_activation_restart_and_bounded_cache() {
         return;
     };
     let database_id = unique("program_registry");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     store.create_database(&database_id, schema()).unwrap();
 
     let one = store
@@ -98,8 +99,9 @@ fn program_content_rows_reject_normal_mutation_and_deploy_replays() {
             .unwrap()
             .as_nanos() as i64,
     );
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     let hash = store.deploy_program_blob(&program).unwrap();
     assert_eq!(store.deploy_program_blob(&program).unwrap(), hash);
 
@@ -152,8 +154,9 @@ fn concurrent_conditional_activation_has_one_winner() {
         return;
     };
     let database_id = unique("program_race");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut setup = PostgresStore::connect(&connection).unwrap();
-    setup.migrate().unwrap();
     setup.create_database(&database_id, schema()).unwrap();
     for version in 1..=3 {
         setup
@@ -203,8 +206,9 @@ fn corrupt_persisted_program_fails_closed() {
         return;
     };
     let database_id = unique("program_corrupt");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    store.migrate().unwrap();
     store.create_database(&database_id, schema()).unwrap();
     let program = constant(
         SystemTime::now()

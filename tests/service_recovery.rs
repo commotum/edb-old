@@ -86,8 +86,9 @@ fn transactor_adopts_verified_base_and_replays_only_the_exact_tail() {
         return;
     };
     let database_id = unique("service_recovery");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
     let mut setup = PostgresStore::connect(&connection).unwrap();
-    setup.migrate().unwrap();
     setup.create_database(&database_id, schema()).unwrap();
     drop(setup);
 
