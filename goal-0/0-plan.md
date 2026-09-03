@@ -1,0 +1,101 @@
+# Goal 0 — Native Datomic-Inspired Database
+
+## Objective
+
+Build a production-quality database in Rust that preserves the central benefits and stated semantics described by `datomic_pro_docs`: immutable datoms and database values, declarative serialized transactions, durable history and time views, local peer query, useful ordered indexes, strong identity, and operationally sound durability. Reconstruct `1.0.7705` as faithfully as practical at the level of architecture, data flow, algorithms, invariants, and performance choices, translating it idiomatically into Rust rather than inheriting its JVM or Clojure runtime.
+
+PostgreSQL is the only storage system this project will support. The design should use PostgreSQL directly and well; portability to other storage backends is not an objective.
+
+## Constraints
+
+- Implement the system and its public/runtime-facing components in Rust; do not require a JVM or Clojure.
+- Treat `datomic_pro_docs` as the semantic authority and `1.0.7705` as the default architectural and algorithmic blueprint. Study its namespaces, class and type boundaries, data representations, control flow, caches, concurrency choices, and storage/index/query algorithms for both intent and performance implications.
+- Preserve recognizable implementation structure and behavior from `1.0.7705` wherever it remains sound in Rust and PostgreSQL. Deviate deliberately only when required by documented semantics or when a direct translation would add JVM/Clojure-specific machinery, obscure safety, or be materially less idiomatic or efficient in Rust.
+- Record significant deviations and their evidence. Resolve conflicts in favor of the documented model unless evidence justifies an explicit project decision.
+- Do not require compatibility with, or the ability to open, existing Datomic databases.
+- Support PostgreSQL only. Do not create a generic storage backend layer or spend effort preserving hypothetical backend portability.
+- Preserve the information model, observable guarantees, and useful internal design insight. Java/Clojure names, types, protocols, and serialized shapes are evidence to study and map, even when the final Rust API or byte encoding is not compatibility-identical.
+- Keep the authoritative write path small, deterministic, serialized, recoverable, and testable.
+- Keep query work and immutable-data caching at peers so reads can scale independently of the transactor.
+- Prefer explicit, versioned native formats and deterministic sandboxing for persisted behavior.
+
+## Architectural destination
+
+- **Value and datom model:** canonical native types, entity and transaction identifiers, total value ordering, immutable datoms, schema-as-data, and versioned encoding.
+- **PostgreSQL storage:** a concrete schema for immutable blocks, the transaction log, database roots, leader epochs, idempotency records, indexing progress, backup metadata, and atomic publication through PostgreSQL transactions and conditional updates.
+- **Transactor:** a deterministic state machine that resolves identity, expands transaction data and functions, validates the complete proposed information set, derives datoms and index roots, commits once, and emits transaction reports.
+- **Indexes:** EAVT, AEVT, AVET, VAET, history, and a recent transaction layer represented by immutable persistent structures with background consolidation.
+- **Peer:** immutable database snapshots, PostgreSQL-backed synchronization, permanent-safe caching of immutable data, local index access, local query and pull, and transaction submission.
+- **Query and pull:** native Datalog evaluation with set semantics, joins, rules, recursion, negation, aggregates, predicates, time views, and graph projection.
+- **Function runtime:** built-ins plus deterministic, resource-bounded persisted behavior through a versioned WASM ABI or comparably constrained DSL; no ambient filesystem, network, clock, or randomness.
+- **Operations:** fenced transactor failover, restart recovery, backups, restore verification, observability, garbage collection, excision, schema/index evolution, and structured errors.
+
+## Stages
+
+### 1. Semantic foundation
+
+**Outcome:** A precise, testable native contract for values, datoms, schema, identity, transactions, database views, errors, and ordering, including explicit decisions for behavior the source material leaves ambiguous.
+
+**Focus:** Extract normative behavior from `datomic_pro_docs`; map the corresponding types, namespaces, data flow, algorithms, and edge cases in `1.0.7705`; define canonical Rust-facing semantics, encodings, invariants, and conformance fixtures; document where an idiomatic Rust translation preserves or intentionally changes the recovered structure.
+
+**Completion signal:** The core semantic specification is internally consistent, disputed cases have recorded decisions, and executable fixtures or a minimal reference model can distinguish conforming from nonconforming behavior.
+
+### 2. Single-process transactional kernel
+
+**Outcome:** A correct in-memory database kernel can apply complete unordered transactions to immutable database values.
+
+**Focus:** Datoms and indexes; transaction expansion; tempids and lookup refs; uniqueness and upsert; cardinality; CAS and retractions; schema enforcement; transaction functions; history; and pure `with` behavior.
+
+**Completion signal:** The kernel passes the semantic conformance corpus, property tests preserve its invariants, and the same input database and transaction always produce the same result.
+
+### 3. PostgreSQL durability and recovery
+
+**Outcome:** The kernel commits durable database history exclusively through PostgreSQL and reconstructs correct state after clean or abrupt restart.
+
+**Focus:** Concrete SQL schema and migrations; immutable records or blocks; transaction log; root publication; checksums; transaction idempotency; isolation and locking choices; atomic conditional commit; indexing checkpoints; corruption detection; and recovery.
+
+**Completion signal:** Acknowledged commits survive injected crashes, ambiguous retries cannot double-commit, failed publications are invisible, and recovery reproduces the expected basis and indexes.
+
+### 4. Index and peer read architecture
+
+**Outcome:** Independent Rust peers maintain immutable database snapshots and answer indexed reads locally while synchronizing monotonically through PostgreSQL.
+
+**Focus:** EAVT, AEVT, AVET, VAET and history access; persistent and recent index layers; immutable segment caching; snapshot lifecycle; basis synchronization; `as-of`, `since`, and history views; transaction reports; and background consolidation.
+
+**Completion signal:** Multiple peers can lag, synchronize to requested transactions without gaps, retain valid old snapshots, and return identical indexed results across restart and consolidation.
+
+### 5. Query, pull, and native API
+
+**Outcome:** Applications can use an ergonomic Rust API to transact, navigate entities, pull graphs, and run the documented Datalog model locally at peers.
+
+**Focus:** Query inputs and relations; joins; rules and fixed-point recursion; negation and disjunction; predicates and functions; aggregates; bag behavior around `with`; pull recursion and components; cancellation; limits; and explainable execution.
+
+**Completion signal:** The supported query and pull surface passes semantic fixtures and differential tests against the simple reference evaluator, with no promised result ordering unless explicitly requested.
+
+### 6. Controlled programmability
+
+**Outcome:** Custom transaction and query behavior is expressive enough for application invariants without compromising determinism or transactor safety.
+
+**Focus:** Native built-ins; process-local Rust query extensions; sandboxed persisted functions; db-before and db-after evaluation rules; versioned ABI; resource metering; cancellation; deployment; and reproducibility.
+
+**Completion signal:** Persisted functions execute identically across nodes and restarts, reject forbidden effects, obey resource limits, and cannot bypass transaction validation.
+
+### 7. Availability and production transaction service
+
+**Outcome:** The serialized write service remains correct through concurrency, overload, timeout, process failure, and leader replacement.
+
+**Focus:** Request queues; backpressure; structured anomalies; unknown outcomes; durable idempotency keys; transaction reports; leader election; monotonically increasing epochs; fencing at publication; standby catch-up; and failure injection.
+
+**Completion signal:** At most one leader epoch can publish, failover never forks history, retry behavior is explicit, and stress/fault tests preserve serializable outcomes.
+
+### 8. Lifecycle and operational completion
+
+**Outcome:** The system can be operated, protected, upgraded, diagnosed, and retired responsibly in production.
+
+**Focus:** Backup and point-in-time recovery; restore verification; metrics and tracing; consistency inspection; capacity controls; garbage collection; privacy-oriented excision and cache invalidation; migrations; compatibility policy; security; and operator documentation.
+
+**Completion signal:** Rehearsed operational procedures meet declared recovery and privacy guarantees, long-running workloads remain bounded and observable, and the full acceptance suite passes in a production-shaped deployment.
+
+## Success condition
+
+Goal 0 is complete when the Rust transactor and peers, backed only by PostgreSQL, deliver the documented core benefits as one coherent, tested, recoverable system; the major guarantees hold under concurrency and injected failure; and remaining differences from Datomic are intentional and documented rather than accidental.
