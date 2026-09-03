@@ -243,7 +243,7 @@ boundary while every current, retained, backup-bound, or live-snapshot root
 remains readable.
 
 **Focus:** Root/node reachability; publication revision history; peer pins;
-backup/excision pins; grace age; dry-run/apply agreement; concurrent
+active backup/excision snapshots; grace age; dry-run/apply agreement; concurrent
 publication; conservative failure on uncertain reachability.
 
 **Completion signal:** Repeated same-basis and successor publications create
@@ -261,8 +261,9 @@ predicate, rewrites every affected derived value, and gives peers a precise
 synchronization boundary.
 
 **Focus:** Recovered keeper predicate; entity 42 and boot identities;
-component and inbound-reference closure; cutoff semantics; limits and backup
-gate; audit/query visibility; cache/root invalidation; restart and peer
+component and inbound-reference closure; cutoff semantics; precise limits and
+the documented backup recommendation without an authorization gate;
+audit/query visibility; cache/root invalidation; restart and peer
 adoption; WAL/external-backup disclosure.
 
 **Completion signal:** Independent fixtures prove exact retained/removed

@@ -223,10 +223,12 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_tree_nodes",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
-    "atomic_tree_manifest_nodes",
-    "atomic_tree_manifest_closures",
     "atomic_tree_publications",
+    "atomic_tree_publication_states",
+    "atomic_tree_live_sets",
+    "atomic_tree_live_nodes",
     "atomic_tree_retirements",
+    "atomic_tree_retired_nodes",
 ];
 
 const WRITER_RUNTIME_TABLES: &[&str] = &["atomic_transactor_leases"];
@@ -238,9 +240,8 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_tree_nodes",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
-    "atomic_tree_manifest_nodes",
-    "atomic_tree_manifest_closures",
-    "atomic_tree_publications",
+    "atomic_tree_delta_headers",
+    "atomic_tree_delta_nodes",
 ];
 
 /// Administrative PostgreSQL owner for schema installation and runtime-role
@@ -344,7 +345,7 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     // closures are rebuilt exactly and corrupt graphs retain an incomplete
     // marker that makes GC fail closed without hiding the authoritative log.
     if installed_version <= POSTGRES_SCHEMA_VERSION && POSTGRES_SCHEMA_VERSION >= 13 {
-        backfill_tree_manifest_closures(&mut transaction)?;
+        backfill_tree_live_sets(&mut transaction)?;
     }
     transaction
         .commit()
@@ -485,83 +486,66 @@ fn backfill_state_commitments<C: GenericClient>(client: &mut C) -> Result<(), Se
         .map_err(|error| postgres_error("postgres/state-backfill-enable-guard", error))
 }
 
-/// Authenticate the node graph of every v12 publication and persist exact
-/// closure metadata during migration 13. Derived corruption is scoped: an
-/// incomplete status blocks shared GC but does not make unrelated
-/// authoritative logs unopenable or prevent the catalog upgrade.
-fn backfill_tree_manifest_closures<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
+/// Authenticate only the newest v12 graph for each database and seed its one
+/// current live membership. Historical publications intentionally receive no
+/// inferred node garbage; future incremental merges maintain this set by
+/// exact changed-path deltas.
+fn backfill_tree_live_sets<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
     let manifests = client
         .query(
-            "SELECT DISTINCT manifest_hash FROM atomic_tree_publications \
-             ORDER BY manifest_hash",
+            "SELECT DISTINCT ON (database_id) database_id, manifest_hash \
+               FROM atomic_tree_publications \
+              ORDER BY database_id, publication_revision DESC",
             &[],
         )
-        .map_err(|error| postgres_error("postgres/tree-closure-publications", error))?;
+        .map_err(|error| postgres_error("postgres/tree-live-publications", error))?;
     for row in manifests {
-        let manifest_hash = digest(row.get(0), "closure manifest hash")?;
+        let database_id: String = row.get(0);
+        let manifest_hash = digest(row.get(1), "live manifest hash")?;
         let closure = authenticated_manifest_nodes(client, manifest_hash);
         client
-            .query_one(
-                "SELECT set_config('atomic.tree_gc_active', 'v13', true)",
-                &[],
-            )
-            .map_err(|error| postgres_error("postgres/tree-closure-repair-privilege", error))?;
-        client
             .execute(
-                "DELETE FROM atomic_tree_manifest_nodes WHERE manifest_hash = $1",
-                &[&&manifest_hash[..]],
+                "DELETE FROM atomic_tree_live_sets WHERE database_id = $1",
+                &[&database_id],
             )
-            .map_err(|error| postgres_error("postgres/tree-closure-repair-nodes", error))?;
-        client
-            .execute(
-                "DELETE FROM atomic_tree_manifest_closures WHERE manifest_hash = $1",
-                &[&&manifest_hash[..]],
-            )
-            .map_err(|error| postgres_error("postgres/tree-closure-repair-status", error))?;
-        client
-            .query_one(
-                "SELECT set_config('atomic.tree_gc_active', 'off', true)",
-                &[],
-            )
-            .map_err(|error| postgres_error("postgres/tree-closure-repair-guards", error))?;
+            .map_err(|error| postgres_error("postgres/tree-live-repair-status", error))?;
         match closure {
             Ok(nodes) => {
-                for hash in &nodes {
+                client
+                    .execute(
+                        "DELETE FROM atomic_tree_live_nodes WHERE database_id = $1",
+                        &[&database_id],
+                    )
+                    .map_err(|error| postgres_error("postgres/tree-live-repair-nodes", error))?;
+                let nodes = nodes.into_iter().collect::<Vec<_>>();
+                for chunk in nodes.chunks(512) {
+                    let batch = chunk.iter().map(|hash| hash.to_vec()).collect::<Vec<_>>();
                     client
                         .execute(
-                            "INSERT INTO atomic_tree_manifest_nodes \
-                                   (manifest_hash, node_hash) VALUES ($1, $2)",
-                            &[&&manifest_hash[..], &&hash[..]],
+                            "INSERT INTO atomic_tree_live_nodes (database_id, node_hash) \
+                             SELECT $1, node_hash FROM unnest($2::bytea[]) AS node_hash",
+                            &[&database_id, &batch],
                         )
-                        .map_err(|error| postgres_error("postgres/tree-closure-write", error))?;
+                        .map_err(|error| postgres_error("postgres/tree-live-write", error))?;
                 }
                 client
                     .execute(
-                        "INSERT INTO atomic_tree_manifest_closures \
-                               (manifest_hash, complete, node_count, problem_code) \
-                         VALUES ($1, true, $2, NULL)",
-                        &[
-                            &&manifest_hash[..],
-                            &i64::try_from(nodes.len()).map_err(|_| {
-                                SemanticError::new(
-                                    ErrorCategory::Unsupported,
-                                    "postgres/tree-closure-size",
-                                    "tree closure count exceeds PostgreSQL BIGINT",
-                                )
-                            })?,
-                        ],
+                        "INSERT INTO atomic_tree_live_sets \
+                               (database_id, manifest_hash, complete, problem_code) \
+                         VALUES ($1, $2, true, NULL)",
+                        &[&database_id, &&manifest_hash[..]],
                     )
-                    .map_err(|error| postgres_error("postgres/tree-closure-status", error))?;
+                    .map_err(|error| postgres_error("postgres/tree-live-status", error))?;
             }
             Err(error) => {
                 client
                     .execute(
-                        "INSERT INTO atomic_tree_manifest_closures \
-                               (manifest_hash, complete, node_count, problem_code) \
-                         VALUES ($1, false, 0, $2)",
-                        &[&&manifest_hash[..], &error.code],
+                        "INSERT INTO atomic_tree_live_sets \
+                               (database_id, manifest_hash, complete, problem_code) \
+                         VALUES ($1, $2, false, $3)",
+                        &[&database_id, &&manifest_hash[..], &error.code],
                     )
-                    .map_err(|error| postgres_error("postgres/tree-closure-status", error))?;
+                    .map_err(|error| postgres_error("postgres/tree-live-status", error))?;
             }
         }
     }
@@ -973,6 +957,8 @@ fn grant_runtime_privileges(
         transaction
             .batch_execute(&format!(
                 "REVOKE ALL PRIVILEGES ON TABLE {all_relations} FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea) FROM {role_ident}; \
+                 REVOKE ALL ON FUNCTION {schema_ident}.atomic_collect_tree_retirement(text, bigint, bytea, bigint) FROM {role_ident}; \
                  REVOKE CREATE ON SCHEMA {schema_ident} FROM {role_ident}; \
                  GRANT CONNECT ON DATABASE {database_ident} TO {role_ident}; \
                  GRANT USAGE ON SCHEMA {schema_ident} TO {role_ident}"
@@ -993,7 +979,8 @@ fn grant_runtime_privileges(
              GRANT UPDATE ON TABLE {schema_ident}.\"atomic_databases\", \
                                    {schema_ident}.\"atomic_heads\" TO {writer_ident}; \
              GRANT INSERT ON TABLE {} TO {writer_ident}; \
-             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_transactor_leases\" TO {writer_ident}",
+             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_transactor_leases\" TO {writer_ident}; \
+             GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea) TO {writer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
             relation_list(&schema_ident, WRITER_INSERT_TABLES),
         ))

@@ -17,8 +17,9 @@ use crate::{
     ErrorCategory, IndexManifest, IndexOrder, IndexPrefix, IndexSegment, ManifestTree,
     PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, PullPattern, Query,
     QueryControl, QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
-    TreeManifestRecord, TreePublishOutcome, TreeRootBinding, View, decode_index_manifest,
-    decode_index_segment, decode_transaction, encode_genesis, sha256, transaction_hash, tx_to_t,
+    TreeManifestRecord, TreePublicationDelta, TreePublishOutcome, TreeRootBinding, View,
+    decode_index_manifest, decode_index_segment, decode_transaction, encode_genesis, sha256,
+    transaction_hash, tx_to_t,
 };
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
@@ -575,6 +576,7 @@ impl PostgresIndexer {
         )?;
         if let Some((previous, _, _)) = selection.usable.as_ref()
             && previous.publication_revision == selection.newest_observed_revision
+            && selection.newest_live_complete
             && previous.basis_t == basis_t
             && previous.tx_hash == tx_hash
             && previous.state_hash == stored_state
@@ -610,7 +612,14 @@ impl PostgresIndexer {
                     )
                 })?;
 
-        let build = if let Some((previous, base_projection, old_cache)) = selection.usable {
+        let can_increment = selection.usable.as_ref().is_some_and(|(previous, _, _)| {
+            selection.newest_live_complete
+                && previous.publication_revision == selection.newest_observed_revision
+        });
+        let build = if can_increment {
+            let (previous, base_projection, old_cache) = selection
+                .usable
+                .expect("incremental eligibility requires a usable predecessor");
             let tail = load_authenticated_index_tail(
                 &mut transaction,
                 &self.database_id,
@@ -697,9 +706,11 @@ impl PostgresIndexer {
                 "injected failure after immutable tree-node insertion",
             ));
         }
-        let publication = self
-            .tree_store
-            .publish_manifest(&tree_record, expected_publication_revision)?;
+        let publication = self.tree_store.publish_manifest_with_delta(
+            &tree_record,
+            expected_publication_revision,
+            &build.publication_delta,
+        )?;
         let tree_store_stats = self.tree_store.stats();
         Ok(IndexBuildReceipt {
             publication_revision,
@@ -728,6 +739,7 @@ struct NativeIndexBuild {
     tail_datoms: u64,
     encoded_bytes: u64,
     reused_subtrees: u64,
+    publication_delta: TreePublicationDelta,
 }
 
 fn build_initial_native(
@@ -767,6 +779,7 @@ fn build_initial_native(
             }
         }
     }
+    let live_nodes = nodes.iter().map(|(hash, _)| *hash).collect();
     Ok(NativeIndexBuild {
         trees,
         nodes,
@@ -775,11 +788,13 @@ fn build_initial_native(
         tail_datoms: 0,
         encoded_bytes: stats.encoded_bytes,
         reused_subtrees: 0,
+        publication_delta: TreePublicationDelta::Replace { live_nodes },
     })
 }
 
 struct NativeManifestSelection {
     newest_observed_revision: u64,
+    newest_live_complete: bool,
     usable: Option<(PersistentTreeManifest, MetadataProjection, TreeNodeSet)>,
 }
 
@@ -794,6 +809,19 @@ fn load_latest_native_manifest<C: GenericClient>(
     // A corrupt newest candidate still consumed its revision and the repair
     // must CAS after it, never reuse its coordinate.
     let newest_observed_revision = tree_store.current_publication_revision(database_id)?;
+    let newest_live_complete = client
+        .query_opt(
+            "SELECT l.complete \
+               FROM atomic_tree_publications p \
+               LEFT JOIN atomic_tree_live_sets l \
+                 ON l.database_id = p.database_id \
+                AND l.manifest_hash = p.manifest_hash \
+              WHERE p.database_id = $1 \
+              ORDER BY p.publication_revision DESC LIMIT 1",
+            &[&database_id],
+        )
+        .map_err(|error| postgres_error("index/tree-live-membership", error))?
+        .is_some_and(|row| row.get::<_, Option<bool>>(0) == Some(true));
     let rows = client
         .query(
             "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
@@ -807,9 +835,6 @@ fn load_latest_native_manifest<C: GenericClient>(
                JOIN atomic_transactions t \
                  ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
                 AND t.tx_hash = m.tx_hash AND t.state_hash = m.state_hash \
-               JOIN atomic_tree_manifest_closures c \
-                 ON c.manifest_hash = m.manifest_hash \
-                AND c.complete AND c.problem_code IS NULL \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.excision_generation = $3 \
               ORDER BY p.publication_revision DESC",
@@ -896,12 +921,14 @@ fn load_latest_native_manifest<C: GenericClient>(
         if let Ok(base) = candidate {
             return Ok(NativeManifestSelection {
                 newest_observed_revision,
+                newest_live_complete,
                 usable: Some(base),
             });
         }
     }
     Ok(NativeManifestSelection {
         newest_observed_revision,
+        newest_live_complete,
         usable: None,
     })
 }
@@ -1211,6 +1238,7 @@ fn build_incremental_native(
     let mut trees = Vec::with_capacity(8);
     let mut encoded_bytes = 0_u64;
     let mut reused_subtrees = 0_u64;
+    let mut retired_nodes = BTreeSet::new();
     for history in [false, true] {
         for order in all_index_orders() {
             let old = previous.tree(order, history).ok_or_else(|| {
@@ -1256,6 +1284,7 @@ fn build_incremental_native(
                 .saturating_add(merged.stats.reused_directory_refs)
                 .saturating_add(merged.stats.reused_leaf_refs)
                 .saturating_add(merged.stats.reused_hashes);
+            retired_nodes.extend(merged.retired_nodes.iter().copied());
             trees.push(ManifestTree {
                 descriptor: merged.descriptor,
                 root_bytes,
@@ -1265,6 +1294,7 @@ fn build_incremental_native(
             }
         }
     }
+    let added_nodes = candidate_nodes.iter().map(|(hash, _)| *hash).collect();
     Ok(NativeIndexBuild {
         trees,
         nodes: candidate_nodes,
@@ -1273,6 +1303,11 @@ fn build_incremental_native(
         tail_datoms,
         encoded_bytes,
         reused_subtrees,
+        publication_delta: TreePublicationDelta::Incremental {
+            predecessor_manifest_hash: previous.hash()?,
+            added_nodes,
+            retired_nodes,
+        },
     })
 }
 
@@ -4036,9 +4071,6 @@ fn load_latest_tree_base<C: GenericClient>(
                JOIN atomic_transactions t \
                  ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
                 AND t.tx_hash = m.tx_hash AND t.state_hash = m.state_hash \
-               JOIN atomic_tree_manifest_closures c \
-                 ON c.manifest_hash = m.manifest_hash \
-                AND c.complete AND c.problem_code IS NULL \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.excision_generation = $3 \
               ORDER BY p.publication_revision DESC",

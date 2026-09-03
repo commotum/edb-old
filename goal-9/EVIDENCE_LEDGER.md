@@ -244,8 +244,11 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   `:174-266`, implements cutoff/component/ref closure; log/tree adoption is in
   `update.clj:2090-2117`.
 - **Repair:** remove the `<1000` heuristic, preserve the queryable/auditable
-  predicate, and state precisely what caches/backups/WAL remain. Atomic SQL
-  atomicity and a mandatory backup gate are stronger native policy, not Datomic.
+  predicate, and state precisely what caches/backups/WAL remain. Excision is
+  requested as ordinary database information and runs asynchronously; backup
+  is strongly recommended operational preparation, not a semantic prerequisite.
+  Atomic SQL/generation publication may strengthen crash atomicity, but may not
+  turn that recommendation into a mandatory gate.
 
 ### C19 — Separate migrations from runtime and allow secure connections
 
@@ -292,8 +295,9 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   `:1517-1563` reuses segments; `:1572-1632` copies nodes then roots last;
   `:1348-1420` restores; `:1890-1939` verifies reachability/readability.
 - **Repair:** stable database identity, exact restore state, and no arbitrary
-  one-million-transaction ceiling. Temp-file rename, directory fsync, opaque
-  proof types, and the mandatory deep excision gate are Atomic-specific safety.
+  one-million-transaction ceiling. Temp-file rename, directory fsync, and
+  opaque proof types are Atomic-specific safety. Deep verification is an
+  explicit backup operation; it is not an excision authorization token.
 
 ### C21 — Make database functions temporal information, not mutable deployment state
 

@@ -218,6 +218,10 @@ pub struct TreeMergeStats {
 pub struct TreeMerge {
     pub descriptor: TreeDescriptor,
     pub new_nodes: TreeNodeSet,
+    /// Old changed-path values no longer reachable from the successor root.
+    /// This is the exact post-CAS garbage set; untouched subtrees are never
+    /// traversed or guessed.
+    pub retired_nodes: BTreeSet<Digest>,
     pub stats: TreeMergeStats,
 }
 
@@ -1696,6 +1700,7 @@ pub fn merge_tree(
 
     let mut context = MergeContext::new(old_nodes);
     let old_root = context.load_root(descriptor)?;
+    context.retirement_candidates.insert(descriptor.root_hash);
     let removals = combined_removals(edits, descriptor.order)?;
     let points = affected_points(edits, descriptor.order);
     let pair_removals = pair_removals(edits, descriptor.order)?;
@@ -1781,6 +1786,7 @@ pub fn merge_tree(
 
             context.stats.affected_directories =
                 context.stats.affected_directories.saturating_add(1);
+            context.retirement_candidates.insert(directory_ref.hash);
             let directory =
                 context.load_directory(directory_ref, descriptor.order, descriptor.history)?;
             let mut output_leaves = Vec::new();
@@ -1817,6 +1823,7 @@ pub fn merge_tree(
                     inside_affected_run = true;
                 }
                 context.stats.affected_leaves = context.stats.affected_leaves.saturating_add(1);
+                context.retirement_candidates.insert(leaf_ref.hash);
                 let leaf = context.load_leaf(leaf_ref, descriptor.order, descriptor.history)?;
                 let removals =
                     datoms_in_interval(&removals, leaf_lower, leaf_upper, descriptor.order);
@@ -1914,12 +1921,18 @@ pub fn merge_tree(
         ));
     }
     let root_hash = context.insert_node(root_bytes, MergeNodeKind::Root)?;
+    context.output_nodes.insert(root_hash);
     context.stats.removals = applied.removals;
     context.stats.projection_removals = edits.projection_removals.len() as u64;
     context.stats.insertions = applied.insertions;
     context.stats.no_history_pairs = edits.no_history_pairs.len() as u64;
     context.stats.output_datoms = output_count;
 
+    let retired_nodes = context
+        .retirement_candidates
+        .difference(&context.output_nodes)
+        .copied()
+        .collect();
     Ok(TreeMerge {
         descriptor: TreeDescriptor {
             root_hash,
@@ -1930,6 +1943,7 @@ pub fn merge_tree(
             last_hash,
         },
         new_nodes: context.new_nodes,
+        retired_nodes,
         stats: context.stats,
     })
 }
@@ -2286,6 +2300,8 @@ struct MergeContext<'a> {
     old_nodes: &'a TreeNodeSet,
     new_nodes: TreeNodeSet,
     loaded_old: HashSet<Digest>,
+    retirement_candidates: HashSet<Digest>,
+    output_nodes: HashSet<Digest>,
     stats: TreeMergeStats,
 }
 
@@ -2295,6 +2311,8 @@ impl<'a> MergeContext<'a> {
             old_nodes,
             new_nodes: TreeNodeSet::default(),
             loaded_old: HashSet::new(),
+            retirement_candidates: HashSet::new(),
+            output_nodes: HashSet::new(),
             stats: TreeMergeStats::default(),
         }
     }
@@ -2923,6 +2941,7 @@ fn pack_merge_directories(
     let mut directories = Vec::new();
     let mut pending = Vec::new();
     for leaf in leaves {
+        context.output_nodes.insert(leaf.reference.hash);
         let routed = context.route_leaf_reference(pending.last(), &leaf, order, history)?;
         let would_exceed_count = pending.len() == config.max_leaves_per_directory;
         let would_exceed_bytes =
@@ -3637,7 +3656,10 @@ fn push_merge_directory_reference(
     context: &mut MergeContext<'_>,
 ) -> Result<(), SemanticError> {
     let reference = context.route_directory_reference(root.last(), &child, order, history)?;
-    push_directory_reference(reference, root, config)
+    let hash = reference.hash;
+    push_directory_reference(reference, root, config)?;
+    context.output_nodes.insert(hash);
+    Ok(())
 }
 
 fn push_built_directory_reference(

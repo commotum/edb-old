@@ -65,33 +65,19 @@ fn hex_digest(hash: &[u8; 32]) -> String {
     hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn omit_first_program_from_manifest(path: &std::path::Path) {
-    let mut bytes = fs::read(path).unwrap();
-    let body_len = u64::from_be_bytes(bytes[6..14].try_into().unwrap()) as usize;
-    let checksum_at = 14 + body_len;
-    bytes.truncate(checksum_at);
+fn manifest_v4_root_shape(path: &std::path::Path) -> (usize, bool) {
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(u16::from_be_bytes(bytes[4..6].try_into().unwrap()), 4);
     let mut at = 14;
     let lineage_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
     at += 4 + lineage_len + 8 + 32;
-    let transaction_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    at += 4 + transaction_count * 32;
-    let state_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    at += 4 + state_count * 32;
-    let request_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    at += 4;
-    for _ in 0..request_count {
-        let key_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-        at += 4 + key_len + 32 + 8 + 32;
-    }
-    let program_count = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
-    assert!(program_count > 0);
-    bytes[at..at + 4].copy_from_slice(&(program_count - 1).to_be_bytes());
-    bytes.drain(at + 4..at + 4 + 36);
-    let new_body_len = body_len - 36;
-    bytes[6..14].copy_from_slice(&(new_body_len as u64).to_be_bytes());
-    let checksum = sha256(&bytes);
-    bytes.extend_from_slice(&checksum);
-    fs::write(path, bytes).unwrap();
+    at += 32 + 32 + 32;
+    let has_tree = match bytes[at] {
+        0 => false,
+        1 => true,
+        value => panic!("invalid tree tag {value}"),
+    };
+    (bytes.len(), has_tree)
 }
 
 fn schema() -> Schema {
@@ -155,6 +141,18 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     let second = backup.backup_database(&source, &directory).unwrap();
     assert_eq!(second.basis_t, basis2);
     assert!(second.objects_reused >= 3);
+    let first_root_shape = manifest_v4_root_shape(
+        &directory
+            .join("snapshots")
+            .join(format!("{:020}.atbk", basis1.basis_t())),
+    );
+    let second_root_shape = manifest_v4_root_shape(
+        &directory
+            .join("snapshots")
+            .join(format!("{basis2:020}.atbk")),
+    );
+    assert_eq!(first_root_shape, second_root_shape);
+    assert!(second_root_shape.0 <= 256);
     assert_eq!(
         PortableBackup::list_backups(&directory).unwrap(),
         vec![basis1.basis_t(), basis2]
@@ -554,6 +552,110 @@ fn corrupted_external_object_fails_deep_verification() {
 }
 
 #[test]
+fn corrupt_derived_roots_fall_back_to_older_tree_then_log_only() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("backup_derived_fallback");
+    let tree_directory = backup_directory();
+    let log_directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&source, schema()).unwrap();
+    let service = common::start_service(&connection, &source);
+    let basis1 = common::transact(&service, "one", created.basis_t(), &[add("one")], 1_000).basis_t;
+    let mut indexer = PostgresIndexer::connect(&connection, &source).unwrap();
+    indexer.consolidate().unwrap();
+    let basis2 = common::transact(&service, "two", basis1, &[add("two")], 2_000).db_after;
+    indexer.consolidate().unwrap();
+
+    let mut catalog = Client::connect(&connection, NoTls).unwrap();
+    let manifests: Vec<Vec<u8>> = catalog
+        .query(
+            "SELECT manifest_hash FROM atomic_tree_publications \
+             WHERE database_id = $1 ORDER BY publication_revision DESC",
+            &[&source],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(manifests.len() >= 2);
+    let corrupt_manifest = |catalog: &mut Client, hash: &[u8]| {
+        let mut payload: Vec<u8> = catalog
+            .query_one(
+                "SELECT payload FROM atomic_tree_manifests WHERE manifest_hash = $1",
+                &[&hash],
+            )
+            .unwrap()
+            .get(0);
+        payload[0] ^= 1;
+        common::with_replica_triggers_disabled(catalog, |catalog| {
+            catalog.execute(
+                "UPDATE atomic_tree_manifests SET payload = $2 WHERE manifest_hash = $1",
+                &[&hash, &payload],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    };
+
+    // The newest physical revision is damaged, but the previous published
+    // tree remains a valid accelerator for the same authoritative log point.
+    corrupt_manifest(&mut catalog, &manifests[0]);
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+    let tree_point = backup.backup_database(&source, &tree_directory).unwrap();
+    assert_eq!(tree_point.basis_t, basis2.basis_t());
+    PortableBackup::verify_backup(&tree_directory, tree_point.basis_t, true).unwrap();
+    let tree_target_connection = isolated_catalog(&connection, "restore_older_tree");
+    let tree_target = unique("restore_older_tree");
+    let mut tree_restore = PortableBackup::connect(&tree_target_connection).unwrap();
+    let restored_from_tree = tree_restore
+        .restore_backup(&tree_directory, tree_point.basis_t, &tree_target)
+        .unwrap();
+    assert_same_information(&basis2, &restored_from_tree);
+    let mut tree_catalog = Client::connect(&tree_target_connection, NoTls).unwrap();
+    let restored_tree_basis: i64 = tree_catalog
+        .query_one(
+            "SELECT basis_t FROM atomic_tree_publications WHERE database_id = $1",
+            &[&tree_target],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_tree_basis as u64, basis1);
+
+    // When every derived root is damaged, the immutable transaction log is
+    // still sufficient authority. Backup succeeds without a tree accelerator
+    // and restore reconstructs exactly from genesis plus transactions.
+    for hash in manifests.iter().skip(1) {
+        corrupt_manifest(&mut catalog, hash);
+    }
+    let log_point = backup.backup_database(&source, &log_directory).unwrap();
+    PortableBackup::verify_backup(&log_directory, log_point.basis_t, true).unwrap();
+    let log_target_connection = isolated_catalog(&connection, "restore_log_only");
+    let log_target = unique("restore_log_only");
+    let mut log_restore = PortableBackup::connect(&log_target_connection).unwrap();
+    let restored_from_log = log_restore
+        .restore_backup(&log_directory, log_point.basis_t, &log_target)
+        .unwrap();
+    assert_same_information(&basis2, &restored_from_log);
+    let mut log_catalog = Client::connect(&log_target_connection, NoTls).unwrap();
+    let restored_tree_count: i64 = log_catalog
+        .query_one(
+            "SELECT count(*) FROM atomic_tree_publications WHERE database_id = $1",
+            &[&log_target],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_tree_count, 0);
+
+    fs::remove_dir_all(tree_directory).unwrap();
+    fs::remove_dir_all(log_directory).unwrap();
+    service.shutdown();
+}
+
+#[test]
 fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
     let Some(connection) = connection() else {
         return;
@@ -694,15 +796,17 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
         vec![&Value::String("current".into())]
     );
     target_service.shutdown();
-    omit_first_program_from_manifest(
-        &directory
-            .join("snapshots")
-            .join(format!("{:020}.atbk", point.basis_t)),
-    );
-    let error = PortableBackup::verify_backup(&directory, point.basis_t, false).unwrap_err();
+
+    // V4 roots name only the linked log heads. Program reachability is derived
+    // transitively from immutable datoms and program payloads, so removing a
+    // reachable object must fail even though no flattened program list exists.
+    let missing_program_object = old_program_object.with_extension("temporarily-missing");
+    fs::rename(&old_program_object, &missing_program_object).unwrap();
+    let error = PortableBackup::verify_backup_presence(&directory, point.basis_t).unwrap_err();
     assert_eq!(
         (error.category, error.code),
-        (ErrorCategory::Fault, "backup/missing-program")
+        (ErrorCategory::Unavailable, "backup/object-type")
     );
+    fs::rename(missing_program_object, old_program_object).unwrap();
     fs::remove_dir_all(&directory).unwrap();
 }

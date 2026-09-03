@@ -5,6 +5,7 @@
 //! deliberately contains no PostgreSQL, network, query, or pull machinery.
 
 mod backup;
+mod cow_generation;
 mod database;
 mod database_value;
 mod datom;
@@ -14,6 +15,7 @@ mod excision;
 mod identity;
 mod idents;
 mod index;
+mod log_generation;
 mod operations;
 mod peer;
 pub mod persistent_tree;
@@ -55,8 +57,8 @@ pub use identity::{
 pub use index::IndexPrefix;
 pub use operations::{
     ExcisionFault, ExcisionReceipt, ExcisionSpec, ExcisionTarget, GarbageInventory,
-    IntegrityProblem, IntegrityReport, MIN_GARBAGE_COLLECTION_AGE, OperationalMetrics,
-    PostgresOperator, TreePublicationGarbage,
+    IntegrityProblem, IntegrityReport, MAX_TREE_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC,
+    MIN_GARBAGE_COLLECTION_AGE, OperationalMetrics, PostgresOperator, TreePublicationGarbage,
 };
 pub use peer::{
     CacheStats, IndexBuildFault, IndexBuildReceipt, Peer, PeerCursorStats, PeerIndexCursor,
@@ -92,7 +94,8 @@ pub use service::{
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
 pub use tree_manifest::{ManifestTree, PersistentTreeManifest};
 pub use tree_store::{
-    PostgresTreeStore, TreeManifestRecord, TreePublishOutcome, TreeRootBinding, TreeStoreStats,
+    PostgresTreeStore, TreeManifestRecord, TreePublicationDelta, TreePublishOutcome,
+    TreeRootBinding, TreeStoreStats,
 };
 pub use value::{Keyword, Symbol, Value};
 pub use vocabulary::{

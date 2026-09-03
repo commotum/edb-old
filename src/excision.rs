@@ -6,8 +6,8 @@
 
 use crate::database::FrozenExcisionRequest;
 use crate::{
-    DB_PARTITION, Database, Datom, DurableTransaction, ErrorCategory, IndexOrder, SemanticError,
-    Value, View, eid_to_part, tx_to_t,
+    DB_PARTITION, Database, Datom, Digest, DurableTransaction, ErrorCategory, IndexOrder,
+    SemanticError, Value, View, eid_to_part, sha256, tx_to_t,
 };
 use std::collections::{BTreeSet, VecDeque};
 
@@ -53,6 +53,23 @@ struct ExcisionPredicate {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExcisionPlan {
     predicates: Vec<ExcisionPredicate>,
+}
+
+/// Fully frozen material predicate persisted beside a COW generation build.
+///
+/// Raw A=15 facts remain the semantic/audit authority. This projection also
+/// records every current-schema choice made while planning (target kind,
+/// effective cutoff, component extent, and reference classification), so a
+/// crash cannot resume an old build under a newly interpreted predicate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PlannedExcisionPredicate {
+    pub(crate) request: FrozenExcisionRequest,
+    pub(crate) kind: ExcisionTargetKind,
+    pub(crate) before_t: u64,
+    pub(crate) extent: BTreeSet<u64>,
+    pub(crate) reference_attributes: BTreeSet<u32>,
+    pub(crate) protected_entity_target: bool,
+    pub(crate) hash: Digest,
 }
 
 impl ExcisionPlan {
@@ -102,6 +119,32 @@ impl ExcisionPlan {
 
     pub(crate) fn requests(&self) -> impl Iterator<Item = &FrozenExcisionRequest> {
         self.predicates.iter().map(|predicate| &predicate.request)
+    }
+
+    pub(crate) fn frozen_predicates(&self) -> Vec<PlannedExcisionPredicate> {
+        self.predicates
+            .iter()
+            .map(ExcisionPredicate::frozen)
+            .collect()
+    }
+
+    /// One order-independent commitment to the exact predicates applied by a
+    /// physical generation. Individual hashes are sorted before aggregation,
+    /// matching declarative transaction/excision set semantics.
+    pub(crate) fn request_set_hash(&self) -> Digest {
+        let mut hashes = self
+            .predicates
+            .iter()
+            .map(ExcisionPredicate::canonical_hash)
+            .collect::<Vec<_>>();
+        hashes.sort_unstable();
+        let mut bytes = Vec::with_capacity(41 + hashes.len() * 32);
+        bytes.extend_from_slice(b"atomic/excision-request-set/v1\0");
+        bytes.extend_from_slice(&(hashes.len() as u64).to_be_bytes());
+        for hash in hashes {
+            bytes.extend_from_slice(&hash);
+        }
+        sha256(&bytes)
     }
 
     pub(crate) fn target_kind(
@@ -177,6 +220,56 @@ impl ExcisionPredicate {
             reference_attributes,
             protected_entity_target,
         })
+    }
+
+    fn frozen(&self) -> PlannedExcisionPredicate {
+        PlannedExcisionPredicate {
+            request: self.request.clone(),
+            kind: self.kind,
+            before_t: self.before_t,
+            extent: self.extent.clone(),
+            reference_attributes: self.reference_attributes.clone(),
+            protected_entity_target: self.protected_entity_target,
+            hash: self.canonical_hash(),
+        }
+    }
+
+    fn canonical_hash(&self) -> Digest {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"atomic/excision-predicate/v1\0");
+        bytes.extend_from_slice(&self.request.request_entity.to_be_bytes());
+        bytes.extend_from_slice(&self.request.request_t.to_be_bytes());
+        bytes.extend_from_slice(&self.request.target.to_be_bytes());
+        match self.request.cutoff {
+            None => bytes.push(0),
+            Some(crate::database::ExcisionCutoff::BeforeT(t)) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&t.to_be_bytes());
+            }
+            Some(crate::database::ExcisionCutoff::BeforeInstant(instant)) => {
+                bytes.push(2);
+                bytes.extend_from_slice(&instant.to_be_bytes());
+            }
+        }
+        bytes.push(match self.kind {
+            ExcisionTargetKind::Entity => 0,
+            ExcisionTargetKind::Attribute => 1,
+        });
+        bytes.extend_from_slice(&self.before_t.to_be_bytes());
+        bytes.push(u8::from(self.protected_entity_target));
+        bytes.extend_from_slice(&(self.request.attributes.len() as u64).to_be_bytes());
+        for attribute in &self.request.attributes {
+            bytes.extend_from_slice(&attribute.to_be_bytes());
+        }
+        bytes.extend_from_slice(&(self.extent.len() as u64).to_be_bytes());
+        for entity in &self.extent {
+            bytes.extend_from_slice(&entity.to_be_bytes());
+        }
+        bytes.extend_from_slice(&(self.reference_attributes.len() as u64).to_be_bytes());
+        for attribute in &self.reference_attributes {
+            bytes.extend_from_slice(&attribute.to_be_bytes());
+        }
+        sha256(&bytes)
     }
 
     fn removes(&self, datom: &Datom) -> bool {

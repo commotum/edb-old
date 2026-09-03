@@ -1,12 +1,13 @@
 use crate::persistent_tree::{TreeNode, TreeNodeSet, decode_tree_node, validate_tree};
+use crate::postgres::verify_schema_compatibility;
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
     BackupVerification, DB_PARTITION, Database, Digest, MAX_EIDX, PersistentTreeManifest,
-    SemanticError, Value, View, decode_genesis, decode_index_manifest, decode_index_segment,
-    decode_transaction, eid_to_part, encode_genesis, encode_transaction, sha256, transaction_hash,
-    tx_to_t,
+    PostgresConnectionConfig, SemanticError, Value, View, decode_genesis, decode_index_manifest,
+    decode_index_segment, decode_transaction, eid_to_part, encode_genesis, encode_transaction,
+    sha256, transaction_hash, tx_to_t,
 };
-use postgres::{Client, IsolationLevel, NoTls};
+use postgres::{Client, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -19,6 +20,13 @@ use std::time::Duration;
 /// values old by backdating their PostgreSQL timestamps, never by weakening
 /// this boundary.
 pub const MIN_GARBAGE_COLLECTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// One operator call retires at most one oldest root per database and no more
+/// than this many roots globally. Repeated calls make deterministic progress.
+pub const MAX_TREE_RETIREMENTS_PER_GC: usize = 128;
+
+/// Maximum exact immutable values drained in one operator transaction.
+pub const MAX_TREE_NODES_PER_GC: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegrityProblem {
@@ -76,10 +84,10 @@ pub struct GarbageInventory {
     /// becomes old when its successor was published, not when this root was
     /// first written.
     pub tree_publications: Vec<TreePublicationGarbage>,
-    /// Published or abandoned immutable manifests safe to remove after their
-    /// roots cease to be eligible.
+    /// Manifests removed with the superseded root publications above.
     pub tree_manifest_hashes: Vec<Digest>,
-    /// Aged native values unreachable from every retained root publication.
+    /// Exact post-publication garbage marks drained after all current and
+    /// pending memberships have ceased to retain them.
     pub tree_node_hashes: Vec<Digest>,
     pub applied: bool,
 }
@@ -89,6 +97,9 @@ pub struct TreePublicationGarbage {
     pub database_id: String,
     pub publication_revision: u64,
     pub manifest_hash: Digest,
+    /// False means this root can retire as metadata but carried no trustworthy
+    /// old-minus-new node witness (for example a legacy or repair transition).
+    pub garbage_complete: bool,
 }
 
 #[derive(Default)]
@@ -157,13 +168,23 @@ impl IntegrityReport {
 
 pub struct PostgresOperator {
     client: Client,
+    _connection: PostgresConnectionConfig,
 }
 
 impl PostgresOperator {
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
-        let client = Client::connect(connection, NoTls)
-            .map_err(|error| operation_error("operations/connect", error))?;
-        Ok(Self { client })
+        Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
+    }
+
+    pub fn connect_configured(
+        connection: &PostgresConnectionConfig,
+    ) -> Result<Self, SemanticError> {
+        let mut client = connection.connect_for("operations/connect")?;
+        verify_schema_compatibility(&mut client)?;
+        Ok(Self {
+            client,
+            _connection: connection.clone(),
+        })
     }
 
     pub fn inspect_database(
@@ -533,11 +554,11 @@ impl PostgresOperator {
             .isolation_level(IsolationLevel::RepeatableRead)
             .start()
             .map_err(|error| operation_error("operations/gc-begin", error))?;
-        let candidates = garbage_candidates(&mut transaction, millis)?;
+        let mut candidates = garbage_candidates(&mut transaction, millis)?;
         for publication in &candidates.tree_publications {
             let collected: bool = transaction
                 .query_one(
-                    "SELECT atomic_collect_tree_manifest($1, $2, $3, $4)",
+                    "SELECT atomic_collect_tree_retirement($1, $2, $3, $4)",
                     &[
                         &publication.database_id,
                         &sql_u64(publication.publication_revision, "publication revision")?,
@@ -549,24 +570,18 @@ impl PostgresOperator {
                 .get(0);
             require_gc_collected(collected, "tree publication")?;
         }
-        let published_manifests = candidates
-            .tree_publications
-            .iter()
-            .map(|publication| publication.manifest_hash)
-            .collect::<BTreeSet<_>>();
-        for hash in &candidates.tree_manifests {
-            if published_manifests.contains(hash) {
-                continue;
-            }
-            let collected: bool = transaction
-                .query_one(
-                    "SELECT atomic_collect_unpublished_tree_manifest($1, $2)",
-                    &[&&hash[..], &millis],
-                )
-                .map_err(|error| operation_error("operations/gc-tree-manifest", error))?
-                .get(0);
-            require_gc_collected(collected, "unpublished tree manifest")?;
-        }
+        // Raw values are selected only from the durable exact-mark ledger by
+        // the fixed-path owner function. Replace the dry prediction with the
+        // hashes actually deleted under this same snapshot.
+        candidates.tree_nodes = transaction
+            .query(
+                "SELECT node_hash FROM atomic_collect_tree_garbage($1) AS node_hash",
+                &[&(MAX_TREE_NODES_PER_GC as i64)],
+            )
+            .map_err(|error| operation_error("operations/gc-tree-nodes", error))?
+            .into_iter()
+            .map(|row| digest(row.get(0), "collected tree node hash"))
+            .collect::<Result<Vec<_>, _>>()?;
         transaction
             .commit()
             .map_err(|error| operation_error("operations/gc-commit", error))?;
@@ -1005,12 +1020,16 @@ fn inspect_native_trees<C: postgres::GenericClient>(
     metrics.tree_publications = publications.len() as u64;
     let mut previous_revision = None;
     let mut all_nodes = BTreeMap::<Digest, Vec<u8>>::new();
+    let mut newest_manifest_hash = None;
+    let mut newest_authenticated_nodes = None;
 
     for publication in publications {
         let revision = positive_or_zero(publication.get(0), "tree publication revision")?;
         let basis = positive_or_zero(publication.get(1), "tree publication basis")?;
         let published_tx = digest(publication.get(2), "tree publication transaction hash")?;
         let manifest_hash = digest(publication.get(3), "tree publication manifest hash")?;
+        newest_manifest_hash = Some(manifest_hash);
+        newest_authenticated_nodes = None;
         metrics.tree_publication_revision = metrics.tree_publication_revision.max(revision);
         if let Some(previous) = previous_revision
             && revision != previous + 1
@@ -1150,16 +1169,9 @@ fn inspect_native_trees<C: postgres::GenericClient>(
                 }
             }
         }
-        let expected_closure = manifest_nodes.keys().copied().collect::<BTreeSet<_>>();
-        if !native_manifest_closure_matches(client, manifest_hash, &expected_closure)? {
-            publication_valid = false;
-            problem(
-                problems,
-                "integrity/tree-closure-mismatch",
-                format!(
-                    "tree revision {revision} closure metadata disagrees with authenticated reachability"
-                ),
-            );
+        if publication_valid {
+            newest_authenticated_nodes =
+                Some(manifest_nodes.keys().copied().collect::<BTreeSet<_>>());
         }
         all_nodes.extend(manifest_nodes);
         // A prior excision generation remains retained physical history, but
@@ -1168,43 +1180,63 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             metrics.index_basis_t = metrics.index_basis_t.max(basis);
         }
     }
+    if !native_live_membership_matches(
+        client,
+        database_id,
+        newest_manifest_hash,
+        newest_authenticated_nodes.as_ref(),
+    )? {
+        problem(
+            problems,
+            "integrity/tree-live-membership-mismatch",
+            "current native live membership is absent, incomplete, or disagrees with authenticated reachability",
+        );
+    }
     metrics.tree_nodes = all_nodes.len() as u64;
     metrics.tree_node_bytes = all_nodes.values().map(|bytes| bytes.len() as u64).sum();
     Ok(())
 }
 
-fn native_manifest_closure_matches<C: postgres::GenericClient>(
+fn native_live_membership_matches<C: postgres::GenericClient>(
     client: &mut C,
-    manifest_hash: Digest,
-    expected: &BTreeSet<Digest>,
+    database_id: &str,
+    newest_manifest_hash: Option<Digest>,
+    expected: Option<&BTreeSet<Digest>>,
 ) -> Result<bool, SemanticError> {
     let Some(status) = client
         .query_opt(
-            "SELECT complete, node_count, problem_code \
-               FROM atomic_tree_manifest_closures WHERE manifest_hash = $1",
-            &[&&manifest_hash[..]],
+            "SELECT manifest_hash, complete, problem_code \
+               FROM atomic_tree_live_sets WHERE database_id = $1",
+            &[&database_id],
         )
-        .map_err(|error| operation_error("operations/tree-closure-status", error))?
+        .map_err(|error| operation_error("operations/tree-live-status", error))?
     else {
-        return Ok(false);
+        let stored_nodes: i64 = client
+            .query_one(
+                "SELECT count(*) FROM atomic_tree_live_nodes WHERE database_id = $1",
+                &[&database_id],
+            )
+            .map_err(|error| operation_error("operations/tree-live-nodes", error))?
+            .get(0);
+        return Ok(newest_manifest_hash.is_none() && stored_nodes == 0);
     };
-    let complete: bool = status.get(0);
-    let count = positive_or_zero(status.get(1), "tree closure count")?;
+    let manifest_hash = digest(status.get(0), "tree live manifest hash")?;
+    let complete: bool = status.get(1);
     let problem_code: Option<String> = status.get(2);
     let stored = client
         .query(
-            "SELECT node_hash FROM atomic_tree_manifest_nodes \
-              WHERE manifest_hash = $1 ORDER BY node_hash",
-            &[&&manifest_hash[..]],
+            "SELECT node_hash FROM atomic_tree_live_nodes \
+             WHERE database_id = $1 ORDER BY node_hash",
+            &[&database_id],
         )
-        .map_err(|error| operation_error("operations/tree-closure-nodes", error))?
+        .map_err(|error| operation_error("operations/tree-live-nodes", error))?
         .into_iter()
-        .map(|row| digest(row.get(0), "tree closure node hash"))
+        .map(|row| digest(row.get(0), "tree live node hash"))
         .collect::<Result<BTreeSet<_>, _>>()?;
     Ok(complete
         && problem_code.is_none()
-        && count == u64::try_from(expected.len()).unwrap_or(u64::MAX)
-        && &stored == expected)
+        && newest_manifest_hash == Some(manifest_hash)
+        && expected.is_some_and(|expected| &stored == expected))
 }
 
 fn native_manifest_roots_match<C: postgres::GenericClient>(
@@ -1565,114 +1597,18 @@ fn sql_u64(value: u64, label: &str) -> Result<i64, SemanticError> {
     })
 }
 
-/// Read only immutable manifest→node metadata populated before root
-/// publication. `published_only` is used for the preflight that refuses to GC
-/// through corrupt published state; the retained pass also protects young
-/// unpublished build intents.
-fn tree_closure_reachability<C: postgres::GenericClient>(
-    client: &mut C,
-    excluded_manifests: &BTreeSet<Digest>,
-    published_only: bool,
-) -> Result<Option<BTreeSet<Digest>>, SemanticError> {
-    let mut reachable = BTreeSet::new();
-    for row in client
-        .query(
-            "SELECT m.manifest_hash, c.complete, c.node_count, c.problem_code, \
-                    EXISTS (SELECT 1 FROM atomic_tree_publications p \
-                            WHERE p.manifest_hash = m.manifest_hash) AS published \
-               FROM atomic_tree_manifests m \
-               LEFT JOIN atomic_tree_manifest_closures c \
-                 ON c.manifest_hash = m.manifest_hash \
-              ORDER BY m.manifest_hash",
-            &[],
-        )
-        .map_err(|error| operation_error("operations/gc-tree-closures", error))?
-    {
-        let manifest_hash = digest(row.get(0), "tree closure manifest hash")?;
-        let published: bool = row.get(4);
-        if excluded_manifests.contains(&manifest_hash) || (published_only && !published) {
-            continue;
-        }
-        let complete: Option<bool> = row.get(1);
-        let node_count: Option<i64> = row.get(2);
-        let problem: Option<String> = row.get(3);
-        if complete != Some(true) || problem.is_some() {
-            return Ok(None);
-        }
-        let expected = positive_or_zero(
-            node_count.ok_or_else(|| {
-                SemanticError::new(
-                    crate::ErrorCategory::Fault,
-                    "operations/missing-tree-closure-count",
-                    "complete tree closure has no node count",
-                )
-            })?,
-            "tree closure count",
-        )?;
-        let nodes = client
-            .query(
-                "SELECT c.node_hash, n.node_hash \
-                   FROM atomic_tree_manifest_nodes c \
-                   LEFT JOIN atomic_tree_nodes n ON n.node_hash = c.node_hash \
-                  WHERE c.manifest_hash = $1 ORDER BY c.node_hash",
-                &[&&manifest_hash[..]],
-            )
-            .map_err(|error| operation_error("operations/gc-tree-closure-nodes", error))?;
-        if nodes.len() as u64 != expected {
-            return Ok(None);
-        }
-        let mut manifest_nodes = BTreeSet::new();
-        for node in nodes {
-            let hash = digest(node.get(0), "tree closure node hash")?;
-            let Some(stored) = node.get::<_, Option<Vec<u8>>>(1) else {
-                return Ok(None);
-            };
-            if digest(stored, "stored tree node hash")? != hash {
-                return Ok(None);
-            }
-            manifest_nodes.insert(hash);
-        }
-        let covered_roots: i64 = client
-            .query_one(
-                "SELECT count(*) FROM atomic_tree_manifest_roots r \
-                  WHERE r.manifest_hash = $1 \
-                    AND EXISTS (SELECT 1 FROM atomic_tree_manifest_nodes c \
-                                WHERE c.manifest_hash = r.manifest_hash \
-                                  AND c.node_hash = r.root_hash)",
-                &[&&manifest_hash[..]],
-            )
-            .map_err(|error| operation_error("operations/gc-tree-closure-roots", error))?
-            .get(0);
-        if covered_roots != 8 {
-            return Ok(None);
-        }
-        reachable.extend(manifest_nodes);
-    }
-    Ok(Some(reachable))
-}
-
 fn garbage_candidates<C: postgres::GenericClient>(
     client: &mut C,
     older_than_millis: i64,
 ) -> Result<GarbageCandidates, SemanticError> {
-    // Exact closure was authenticated while content was still a publication
-    // candidate. Collection verifies only immutable metadata and never reads
-    // live tree-node payloads.
-    tree_closure_reachability(client, &BTreeSet::new(), true)?.ok_or_else(|| {
-        SemanticError::new(
-            crate::ErrorCategory::Fault,
-            "operations/reachability-uncertain",
-            "a published tree has missing or incomplete closure metadata; refusing shared garbage collection",
-        )
-    })?;
-
+    // Retire only one oldest root per database in this call. This is a
+    // contiguous prefix by construction, bounds transaction work, and means a
+    // pin collision on an earlier root blocks every later root of that DB.
     let mut tree_publications = Vec::new();
-    let mut excluded_publications = BTreeSet::new();
-    // The owner trigger records this timestamp in the successor's root-last
-    // publication transaction; runtime writers cannot forge an older mark.
     for row in client
         .query(
-            "SELECT r.database_id, r.publication_revision, r.manifest_hash \
+            "SELECT r.database_id, r.publication_revision, r.manifest_hash, \
+                    r.garbage_complete \
                FROM atomic_tree_retirements r \
                JOIN atomic_tree_publications p \
                  ON p.database_id = r.database_id \
@@ -1683,8 +1619,12 @@ fn garbage_candidates<C: postgres::GenericClient>(
                 AND EXISTS (SELECT 1 FROM atomic_tree_publications newer \
                             WHERE newer.database_id = r.database_id \
                               AND newer.publication_revision > r.publication_revision) \
-              ORDER BY r.database_id, r.publication_revision",
-            &[&older_than_millis],
+                AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications older \
+                                WHERE older.database_id = r.database_id \
+                                  AND older.publication_revision < r.publication_revision) \
+              ORDER BY r.database_id, r.publication_revision \
+              LIMIT $2",
+            &[&older_than_millis, &(MAX_TREE_RETIREMENTS_PER_GC as i64)],
         )
         .map_err(|error| operation_error("operations/gc-tree-publications", error))?
     {
@@ -1692,94 +1632,157 @@ fn garbage_candidates<C: postgres::GenericClient>(
             database_id: row.get(0),
             publication_revision: positive_or_zero(row.get(1), "tree publication revision")?,
             manifest_hash: digest(row.get(2), "tree publication manifest hash")?,
+            garbage_complete: row.get(3),
         };
         // A live immutable PeerState holds the matching session-level shared
         // lock. Advisory-key collisions only make this return false, retaining
         // extra data conservatively.
         if try_lock_tree_manifest_for_gc(client, publication.manifest_hash)? {
-            excluded_publications.insert(publication.manifest_hash);
             tree_publications.push(publication);
         }
     }
+    let tree_manifests = tree_publications
+        .iter()
+        .map(|publication| publication.manifest_hash)
+        .collect::<Vec<_>>();
+    let tree_nodes = predicted_tree_node_garbage(client, &tree_publications)?;
 
-    let mut tree_manifests = excluded_publications.clone();
-    // Content-first publication normally leaves nodes, not manifest rows, on
-    // interruption because manifest/root/publication share one transaction.
-    // Direct operational repair may nevertheless leave an unpublished
-    // manifest. Once its own grace has elapsed it is equally replaceable.
-    for row in client
-        .query(
-            "SELECT m.manifest_hash FROM atomic_tree_manifests m \
-              WHERE m.created_at < clock_timestamp() - \
-                                   $1::bigint * interval '1 millisecond' \
-                AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications p \
-                                WHERE p.manifest_hash = m.manifest_hash) \
-              ORDER BY m.manifest_hash",
-            &[&older_than_millis],
-        )
-        .map_err(|error| operation_error("operations/gc-tree-manifests", error))?
-    {
-        let hash = digest(row.get(0), "unpublished tree manifest hash")?;
-        if try_lock_tree_manifest_for_gc(client, hash)? {
-            tree_manifests.insert(hash);
-        }
-    }
-
-    // Retained publications and young unpublished build intents protect their
-    // exact closure. An incomplete status blocks deletion without touching a
-    // live node payload.
-    let tree_nodes_reachable = tree_closure_reachability(client, &tree_manifests, false)?
-        .ok_or_else(|| {
-            SemanticError::new(
-                crate::ErrorCategory::Fault,
-                "operations/reachability-uncertain",
-                "a retained tree has incomplete closure metadata; refusing shared garbage collection",
-            )
-        })?;
-
-    // The legacy flat index and program blob formats predate an exact
-    // post-publication retirement ledger. Conservatively retain them rather
-    // than locking the authoritative transaction tables or guessing from an
-    // age scan. Native tree values below have an explicit successor mark and
-    // authenticated manifest closure.
+    // The legacy flat index and program formats have no exact post-CAS
+    // retirement witness. Age is not reachability, so they remain retained.
     let segments = Vec::new();
     let programs = Vec::new();
-    let candidate_manifest_set = tree_manifests.iter().copied().collect::<BTreeSet<_>>();
-    let tree_nodes = client
-        .query(
-            "SELECT c.manifest_hash, c.node_hash \
-               FROM atomic_tree_manifest_nodes c \
-               JOIN atomic_tree_nodes n USING (node_hash) \
-              WHERE n.created_at < clock_timestamp() - \
-                                   $1::bigint * interval '1 millisecond' \
-              ORDER BY c.manifest_hash, c.node_hash",
-            &[&older_than_millis],
-        )
-        .map_err(|error| operation_error("operations/gc-tree-nodes", error))?
-        .into_iter()
-        .map(|row| {
-            Ok((
-                digest(row.get(0), "tree node manifest hash")?,
-                digest(row.get(1), "tree node hash")?,
-            ))
-        })
-        .collect::<Result<Vec<_>, SemanticError>>()?
-        .into_iter()
-        .filter_map(|(manifest_hash, node_hash)| {
-            (candidate_manifest_set.contains(&manifest_hash)
-                && !tree_nodes_reachable.contains(&node_hash))
-            .then_some(node_hash)
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
     Ok(GarbageCandidates {
         segments,
         programs,
         tree_publications,
-        tree_manifests: tree_manifests.into_iter().collect(),
+        tree_manifests,
         tree_nodes,
     })
+}
+
+/// Predict the exact bounded value drain after the selected root prefix has
+/// hypothetically retired. This is the dry-run counterpart of the owner SQL
+/// function; it never scans node payloads or treats unmarked old content as
+/// garbage.
+fn predicted_tree_node_garbage<C: postgres::GenericClient>(
+    client: &mut C,
+    selected: &[TreePublicationGarbage],
+) -> Result<Vec<Digest>, SemanticError> {
+    let database_ids = selected
+        .iter()
+        .map(|publication| publication.database_id.clone())
+        .collect::<Vec<_>>();
+    let revisions = selected
+        .iter()
+        .map(|publication| sql_u64(publication.publication_revision, "publication revision"))
+        .collect::<Result<Vec<_>, _>>()?;
+    client
+        .query(
+            "WITH selected(database_id, publication_revision) AS ( \
+                 SELECT * FROM unnest($1::text[], $2::bigint[]) \
+             ), selected_roots AS ( \
+                 SELECT r.database_id, r.publication_revision, r.manifest_hash \
+                   FROM atomic_tree_retirements r \
+                   JOIN selected s USING (database_id, publication_revision) \
+             ), pending(node_hash) AS ( \
+                 SELECT node_hash FROM atomic_tree_garbage_nodes \
+                 UNION \
+                 SELECT r.node_hash \
+                   FROM atomic_tree_retired_nodes r \
+                   JOIN selected s USING (database_id, publication_revision) \
+             ) \
+             SELECT p.node_hash \
+               FROM pending p \
+              WHERE NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_live_nodes l \
+                         WHERE l.node_hash = p.node_hash \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_retired_nodes r \
+                         WHERE r.node_hash = p.node_hash \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM selected s \
+                                WHERE s.database_id = r.database_id \
+                                  AND s.publication_revision = r.publication_revision \
+                           ) \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_delta_nodes d \
+                         WHERE d.node_hash = p.node_hash \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_manifest_roots r \
+                         WHERE r.root_hash = p.node_hash \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM selected_roots s \
+                                WHERE s.manifest_hash = r.manifest_hash \
+                           ) \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 \
+                          FROM ( \
+                                SELECT DISTINCT ON (database_id) \
+                                       database_id, manifest_hash \
+                                  FROM atomic_tree_publications \
+                                 ORDER BY database_id, publication_revision DESC \
+                               ) current_root \
+                          LEFT JOIN atomic_tree_live_sets l \
+                            ON l.database_id = current_root.database_id \
+                         WHERE l.database_id IS NULL \
+                            OR l.manifest_hash <> current_root.manifest_hash \
+                            OR NOT l.complete \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 \
+                          FROM atomic_tree_manifest_roots r \
+                          JOIN atomic_tree_live_sets l ON l.manifest_hash = r.manifest_hash \
+                         WHERE l.complete \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM atomic_tree_live_nodes n \
+                                WHERE n.database_id = l.database_id \
+                                  AND n.node_hash = r.root_hash \
+                           ) \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_retirements r \
+                         WHERE NOT r.garbage_complete \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM selected s \
+                                WHERE s.database_id = r.database_id \
+                                  AND s.publication_revision = r.publication_revision \
+                           ) \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_publications publication \
+                         WHERE EXISTS ( \
+                                   SELECT 1 FROM atomic_tree_publications newer \
+                                    WHERE newer.database_id = publication.database_id \
+                                      AND newer.publication_revision > publication.publication_revision \
+                               ) \
+                           AND NOT EXISTS ( \
+                                   SELECT 1 FROM selected s \
+                                    WHERE s.database_id = publication.database_id \
+                                      AND s.publication_revision = publication.publication_revision \
+                               ) \
+                           AND NOT EXISTS ( \
+                                   SELECT 1 FROM atomic_tree_retirements r \
+                                    WHERE r.database_id = publication.database_id \
+                                      AND r.publication_revision = publication.publication_revision \
+                                      AND r.manifest_hash = publication.manifest_hash \
+                               ) \
+                    ) \
+              ORDER BY p.node_hash \
+              LIMIT $3",
+            &[
+                &database_ids,
+                &revisions,
+                &(MAX_TREE_NODES_PER_GC as i64),
+            ],
+        )
+        .map_err(|error| operation_error("operations/gc-tree-node-candidates", error))?
+        .into_iter()
+        .map(|row| digest(row.get(0), "tree garbage node hash"))
+        .collect()
 }
 
 fn try_lock_tree_manifest_for_gc<C: postgres::GenericClient>(

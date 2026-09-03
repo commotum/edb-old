@@ -5,17 +5,17 @@
 //! the append-only publication row is inserted last.  This module deliberately
 //! does not define a storage trait; PostgreSQL is the only durable boundary.
 
-use crate::persistent_tree::{TreeNode, TreeNodeSet, decode_tree_node, validate_tree};
 use crate::postgres::{postgres_error, verify_schema_compatibility};
 use crate::{
     Digest, ErrorCategory, IndexOrder, PersistentTreeManifest, PostgresConnectionConfig,
     SemanticError, sha256,
 };
 use postgres::Client;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 const TREE_MANIFEST_VERSION: i16 = 4;
 const ROOT_BINDING_COUNT: usize = 8;
+const DELTA_INSERT_BATCH: usize = 512;
 
 /// Measured physical work performed by one tree-store handle.
 ///
@@ -37,6 +37,8 @@ pub struct TreeStoreStats {
     pub manifest_writes: u64,
     pub root_binding_writes: u64,
     pub publication_writes: u64,
+    pub delta_insert_batches: u64,
+    pub delta_node_writes: u64,
 }
 
 /// One of the eight roots named by a persistent-tree manifest.
@@ -67,6 +69,25 @@ pub struct TreeManifestRecord {
     pub manifest_hash: Digest,
     pub payload: Vec<u8>,
     pub roots: Vec<TreeRootBinding>,
+}
+
+/// Exact physical membership change installed with a root publication.
+///
+/// Initial/full repair builds replace the one current membership once.
+/// Incremental copy-on-write builds carry only changed-path additions and the
+/// source-shaped old-minus-new garbage set. Unknown callers may publish a
+/// root conservatively, but make no node collectible.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TreePublicationDelta {
+    Unknown,
+    Replace {
+        live_nodes: BTreeSet<Digest>,
+    },
+    Incremental {
+        predecessor_manifest_hash: Digest,
+        added_nodes: BTreeSet<Digest>,
+        retired_nodes: BTreeSet<Digest>,
+    },
 }
 
 /// Result of conditionally advancing the append-only physical root reference.
@@ -204,8 +225,22 @@ impl PostgresTreeStore {
         manifest: &TreeManifestRecord,
         expected_revision: u64,
     ) -> Result<TreePublishOutcome, SemanticError> {
+        self.publish_manifest_with_delta(
+            manifest,
+            expected_revision,
+            &TreePublicationDelta::Unknown,
+        )
+    }
+
+    pub fn publish_manifest_with_delta(
+        &mut self,
+        manifest: &TreeManifestRecord,
+        expected_revision: u64,
+        delta: &TreePublicationDelta,
+    ) -> Result<TreePublishOutcome, SemanticError> {
         self.stats.manifest_write_attempts = self.stats.manifest_write_attempts.saturating_add(1);
         validate_manifest(manifest)?;
+        validate_publication_delta(manifest, expected_revision, delta)?;
         let required_revision = expected_revision.checked_add(1).ok_or_else(|| {
             SemanticError::new(
                 ErrorCategory::Unsupported,
@@ -286,8 +321,7 @@ impl PostgresTreeStore {
             for root in &manifest.roots {
                 verify_root_row(&mut transaction, manifest.manifest_hash, root)?;
             }
-            let closure = derive_manifest_closure(&mut transaction, manifest)?;
-            verify_manifest_closure(&mut transaction, manifest.manifest_hash, &closure)?;
+            verify_published_delta(&mut transaction, manifest, delta)?;
             transaction
                 .commit()
                 .map_err(|error| postgres_error("tree/publication-retry-commit", error))?;
@@ -381,43 +415,17 @@ impl PostgresTreeStore {
             verify_root_row(&mut transaction, manifest.manifest_hash, root)?;
         }
 
-        // Traverse and validate the exact immutable graph before the root-last
-        // publication. Closure rows are derived metadata, but once recorded
-        // they are immutable and let GC avoid reading live tree payloads.
-        let closure = derive_manifest_closure(&mut transaction, manifest)?;
-        for hash in &closure {
-            transaction
-                .execute(
-                    "INSERT INTO atomic_tree_manifest_nodes (manifest_hash, node_hash) \
-                     VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    &[&&manifest.manifest_hash[..], &&hash[..]],
-                )
-                .map_err(|error| postgres_error("tree/closure-node-insert", error))?;
-        }
-        transaction
-            .execute(
-                "INSERT INTO atomic_tree_manifest_closures \
-                       (manifest_hash, complete, node_count, problem_code) \
-                 VALUES ($1, true, $2, NULL) ON CONFLICT DO NOTHING",
-                &[
-                    &&manifest.manifest_hash[..],
-                    &sql_u64(
-                        u64::try_from(closure.len())
-                            .map_err(|_| fault("tree/closure-size", "tree closure exceeds u64"))?,
-                        "tree closure count",
-                    )?,
-                ],
-            )
-            .map_err(|error| postgres_error("tree/closure-insert", error))?;
-        verify_manifest_closure(&mut transaction, manifest.manifest_hash, &closure)?;
+        // The source-shaped delta is produced while the changed paths are
+        // already resident. It is staged in this same transaction and the
+        // root trigger consumes it only after the compare-and-set succeeds.
+        let (delta_insert_batches, delta_node_writes) =
+            stage_publication_delta(&mut transaction, manifest, delta)?;
 
         // This is intentionally the final write. A crash or rollback before
         // here cannot make the candidate discoverable by a peer.
-        let publication_inserted = transaction
-            .execute(
-                "INSERT INTO atomic_tree_publications \
-                   (database_id, publication_revision, basis_t, tx_hash, manifest_hash) \
-                 VALUES ($1, $2, $3, $4, $5)",
+        transaction
+            .query_one(
+                "SELECT atomic_publish_tree($1, $2, $3, $4, $5)",
                 &[
                     &manifest.database_id,
                     &revision,
@@ -427,6 +435,7 @@ impl PostgresTreeStore {
                 ],
             )
             .map_err(|error| postgres_error("tree/publication-insert", error))?;
+        let publication_inserted = 1;
         verify_publication_row(&mut transaction, manifest)?;
         transaction
             .commit()
@@ -441,6 +450,14 @@ impl PostgresTreeStore {
             .stats
             .publication_writes
             .saturating_add(publication_inserted);
+        self.stats.delta_insert_batches = self
+            .stats
+            .delta_insert_batches
+            .saturating_add(delta_insert_batches);
+        self.stats.delta_node_writes = self
+            .stats
+            .delta_node_writes
+            .saturating_add(delta_node_writes);
         Ok(TreePublishOutcome::Published)
     }
 
@@ -512,9 +529,6 @@ impl PostgresTreeStore {
                      ON t.database_id = m.database_id AND t.basis_t = m.basis_t \
                    LEFT JOIN atomic_database_generations g \
                      ON g.database_id = m.database_id \
-                   JOIN atomic_tree_manifest_closures c \
-                     ON c.manifest_hash = m.manifest_hash \
-                    AND c.complete AND c.problem_code IS NULL \
                   WHERE p.database_id = $1 AND p.publication_revision = $2",
                 &[&database_id, &revision],
             )
@@ -578,107 +592,192 @@ impl PostgresTreeStore {
     }
 }
 
-fn derive_manifest_closure(
-    client: &mut postgres::Transaction<'_>,
+fn validate_publication_delta(
     manifest: &TreeManifestRecord,
-) -> Result<BTreeSet<Digest>, SemanticError> {
-    let envelope = PersistentTreeManifest::decode(&manifest.payload)?;
-    if envelope.database_id != manifest.database_id
-        || envelope.publication_revision != manifest.publication_revision
-        || envelope.basis_t != manifest.basis_t
-        || envelope.tx_hash != manifest.tx_hash
-        || envelope.state_hash != manifest.state_hash
-        || envelope.excision_generation != manifest.excision_generation
-        || envelope.eidx_frontier != manifest.eidx_frontier
-        || envelope.trees.len() != manifest.roots.len()
-        || !envelope.trees.iter().all(|tree| {
-            manifest.roots.iter().any(|root| {
-                root.order == tree.descriptor.order
-                    && root.history == tree.descriptor.history
-                    && root.root_hash == tree.descriptor.root_hash
-                    && root.datom_count == tree.descriptor.count
-                    && root.encoded_bytes == tree.root_bytes
-            })
-        })
-    {
-        return Err(fault(
-            "tree/closure-manifest-mismatch",
-            "canonical tree manifest disagrees with publication metadata or roots",
-        ));
-    }
-    let mut pending = envelope
-        .trees
-        .iter()
-        .map(|tree| tree.descriptor.root_hash)
-        .collect::<Vec<_>>();
-    let mut nodes = BTreeMap::new();
-    while let Some(hash) = pending.pop() {
-        if nodes.contains_key(&hash) {
-            continue;
-        }
-        let payload: Vec<u8> = client
-            .query_opt(
-                "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
-                &[&&hash[..]],
-            )
-            .map_err(|error| postgres_error("tree/closure-node-read", error))?
-            .ok_or_else(|| {
-                fault(
-                    "tree/closure-missing-node",
-                    "tree closure references an absent immutable node",
-                )
-            })?
-            .get(0);
-        match decode_tree_node(&hash, &payload)? {
-            TreeNode::Root(root) => {
-                pending.extend(root.directories.into_iter().map(|child| child.hash));
+    expected_revision: u64,
+    delta: &TreePublicationDelta,
+) -> Result<(), SemanticError> {
+    match delta {
+        TreePublicationDelta::Unknown => Ok(()),
+        TreePublicationDelta::Replace { live_nodes } => {
+            if manifest
+                .roots
+                .iter()
+                .any(|root| !live_nodes.contains(&root.root_hash))
+            {
+                return Err(SemanticError::incorrect(
+                    "tree/replacement-delta-missing-root",
+                    "complete replacement membership must contain all eight roots",
+                ));
             }
-            TreeNode::Directory(directory) => {
-                pending.extend(directory.leaves.into_iter().map(|child| child.hash));
-            }
-            TreeNode::Leaf(_) => {}
+            Ok(())
         }
-        nodes.insert(hash, payload);
+        TreePublicationDelta::Incremental {
+            added_nodes,
+            retired_nodes,
+            ..
+        } => {
+            if expected_revision == 0 {
+                return Err(SemanticError::incorrect(
+                    "tree/incremental-delta-without-predecessor",
+                    "incremental membership requires a predecessor root",
+                ));
+            }
+            if !added_nodes.is_disjoint(retired_nodes) {
+                return Err(SemanticError::incorrect(
+                    "tree/overlapping-node-delta",
+                    "one content hash cannot be both added and retired",
+                ));
+            }
+            Ok(())
+        }
     }
-    let node_set = TreeNodeSet::from_nodes(nodes);
-    for tree in &envelope.trees {
-        validate_tree(&tree.descriptor, &node_set)?;
-    }
-    Ok(node_set.iter().map(|(hash, _)| *hash).collect())
 }
 
-fn verify_manifest_closure(
+fn stage_publication_delta(
+    client: &mut postgres::Transaction<'_>,
+    manifest: &TreeManifestRecord,
+    delta: &TreePublicationDelta,
+) -> Result<(u64, u64), SemanticError> {
+    let predecessor = client
+        .query_opt(
+            "SELECT manifest_hash FROM atomic_tree_publications \
+              WHERE database_id = $1 ORDER BY publication_revision DESC LIMIT 1",
+            &[&manifest.database_id],
+        )
+        .map_err(|error| postgres_error("tree/delta-predecessor", error))?
+        .map(|row| digest(row.get(0), "delta predecessor manifest"))
+        .transpose()?;
+    let empty = BTreeSet::new();
+    let (mode, claimed_predecessor, added, retired): (
+        i16,
+        Option<Digest>,
+        &BTreeSet<Digest>,
+        Option<&BTreeSet<Digest>>,
+    ) = match delta {
+        TreePublicationDelta::Unknown => (0, predecessor, &empty, None),
+        TreePublicationDelta::Replace { live_nodes } => (1, predecessor, live_nodes, None),
+        TreePublicationDelta::Incremental {
+            predecessor_manifest_hash,
+            added_nodes,
+            retired_nodes,
+        } => (
+            2,
+            Some(*predecessor_manifest_hash),
+            added_nodes,
+            Some(retired_nodes),
+        ),
+    };
+    client
+        .execute(
+            "INSERT INTO atomic_tree_delta_headers \
+                   (manifest_hash, predecessor_manifest_hash, delta_mode) \
+             VALUES ($1, $2, $3)",
+            &[
+                &&manifest.manifest_hash[..],
+                &claimed_predecessor.as_ref().map(|hash| &hash[..]),
+                &mode,
+            ],
+        )
+        .map_err(|error| postgres_error("tree/delta-header-insert", error))?;
+    let mut batches = 0_u64;
+    let mut writes = 0_u64;
+    let (one_batches, one_writes) = insert_delta_nodes(client, manifest.manifest_hash, added, 1)?;
+    batches = batches.saturating_add(one_batches);
+    writes = writes.saturating_add(one_writes);
+    if let Some(retired) = retired {
+        let (one_batches, one_writes) =
+            insert_delta_nodes(client, manifest.manifest_hash, retired, -1)?;
+        batches = batches.saturating_add(one_batches);
+        writes = writes.saturating_add(one_writes);
+    }
+    Ok((batches, writes))
+}
+
+fn insert_delta_nodes(
     client: &mut postgres::Transaction<'_>,
     manifest_hash: Digest,
-    expected: &BTreeSet<Digest>,
+    hashes: &BTreeSet<Digest>,
+    direction: i16,
+) -> Result<(u64, u64), SemanticError> {
+    let mut batches = 0_u64;
+    let mut writes = 0_u64;
+    let hashes = hashes.iter().collect::<Vec<_>>();
+    for chunk in hashes.chunks(DELTA_INSERT_BATCH) {
+        let batch = chunk.iter().map(|hash| hash.to_vec()).collect::<Vec<_>>();
+        let inserted = client
+            .execute(
+                "INSERT INTO atomic_tree_delta_nodes (manifest_hash, node_hash, direction) \
+                 SELECT $1, node_hash, $3 \
+                   FROM unnest($2::bytea[]) AS node_hash",
+                &[&&manifest_hash[..], &batch, &direction],
+            )
+            .map_err(|error| postgres_error("tree/delta-node-insert", error))?;
+        batches = batches.saturating_add(1);
+        writes = writes.saturating_add(inserted);
+    }
+    Ok((batches, writes))
+}
+
+fn verify_published_delta(
+    client: &mut postgres::Transaction<'_>,
+    manifest: &TreeManifestRecord,
+    delta: &TreePublicationDelta,
 ) -> Result<(), SemanticError> {
-    let status = client
+    let row = client
         .query_opt(
-            "SELECT complete, node_count, problem_code \
-             FROM atomic_tree_manifest_closures WHERE manifest_hash = $1",
-            &[&&manifest_hash[..]],
+            "SELECT s.predecessor_manifest_hash, s.delta_mode, \
+                    NOT EXISTS (SELECT 1 FROM atomic_tree_publications newer \
+                                WHERE newer.database_id = p.database_id \
+                                  AND newer.publication_revision > p.publication_revision), \
+                    l.manifest_hash, l.complete \
+               FROM atomic_tree_publications p \
+               JOIN atomic_tree_publication_states s \
+                 ON s.manifest_hash = p.manifest_hash \
+               LEFT JOIN atomic_tree_live_sets l ON l.database_id = p.database_id \
+              WHERE p.database_id = $1 AND p.publication_revision = $2 \
+                AND p.manifest_hash = $3",
+            &[
+                &manifest.database_id,
+                &sql_u64(manifest.publication_revision, "publication revision")?,
+                &&manifest.manifest_hash[..],
+            ],
         )
-        .map_err(|error| postgres_error("tree/closure-status-read", error))?
-        .ok_or_else(|| fault("tree/missing-closure", "tree manifest closure is absent"))?;
-    let complete: bool = status.get(0);
-    let count = pg_u64(status.get(1), "tree closure count")?;
-    let problem: Option<String> = status.get(2);
-    let stored = client
-        .query(
-            "SELECT node_hash FROM atomic_tree_manifest_nodes \
-             WHERE manifest_hash = $1 ORDER BY node_hash",
-            &[&&manifest_hash[..]],
-        )
-        .map_err(|error| postgres_error("tree/closure-nodes-read", error))?
-        .into_iter()
-        .map(|row| digest(row.get(0), "stored closure node hash"))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    let expected_count = u64::try_from(expected.len())
-        .map_err(|_| fault("tree/closure-size", "tree closure exceeds u64"))?;
-    if !complete || problem.is_some() || count != expected_count || stored != *expected {
+        .map_err(|error| postgres_error("tree/publication-delta-verify", error))?
+        .ok_or_else(|| {
+            fault(
+                "tree/publication-delta-missing",
+                "published tree is missing its delta provenance",
+            )
+        })?;
+    let stored_predecessor = row
+        .get::<_, Option<Vec<u8>>>(0)
+        .map(|bytes| digest(bytes, "stored delta predecessor"))
+        .transpose()?;
+    let stored_mode: i16 = row.get(1);
+    let is_current: bool = row.get(2);
+    let live_manifest = row
+        .get::<_, Option<Vec<u8>>>(3)
+        .map(|bytes| digest(bytes, "current live manifest"))
+        .transpose()?;
+    let live_complete: Option<bool> = row.get(4);
+    let (expected_mode, expected_predecessor, expects_complete) = match delta {
+        TreePublicationDelta::Unknown => (0, None, None),
+        TreePublicationDelta::Replace { .. } => (1, None, Some(true)),
+        TreePublicationDelta::Incremental {
+            predecessor_manifest_hash,
+            ..
+        } => (2, Some(*predecessor_manifest_hash), Some(true)),
+    };
+    if stored_mode != expected_mode
+        || expected_predecessor.is_some_and(|expected| stored_predecessor != Some(expected))
+        || (is_current
+            && (live_manifest != Some(manifest.manifest_hash)
+                || expects_complete.is_some_and(|expected| live_complete != Some(expected))))
+    {
         return Err(fault(
-            "tree/closure-mismatch",
-            "stored tree closure is incomplete or disagrees with exact reachability",
+            "tree/publication-delta-mismatch",
+            "published tree delta provenance or current live membership is inconsistent",
         ));
     }
     Ok(())
