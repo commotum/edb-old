@@ -11,8 +11,10 @@ contracts, and implement those contracts in Rust.
 
 ## Start here
 
-- [`rust-port.md`](rust-port.md) explains what the recovered code can teach us,
-  what is still implicit, and a practical order for the port.
+- [`goal-0/0-plan.md`](goal-0/0-plan.md) is the full PostgreSQL-only Rust reconstruction roadmap.
+- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the semantic-foundation milestone.
+- [`goal-1/SEMANTICS.md`](goal-1/SEMANTICS.md) is the native semantic contract now implemented by the kernel in [`src/`](src/) and checked in [`tests/`](tests/).
+- [`goal-2/0-plan.md`](goal-2/0-plan.md) records the completed single-process Rust transactional kernel and its deliberate boundaries.
 - [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and
   Transactor reference corpus.
 - [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference
@@ -25,10 +27,16 @@ artifact-provenance boundaries. Neither is structurally subordinate to the
 other.
 
 The active tree deliberately does **not** contain a runnable recovered Datomic
-distribution or a conformance suite. Those should be rebuilt in small,
-Rust-facing pieces as concrete questions arise. Do not restore an old recovery
-workflow wholesale: that would reintroduce thousands of historical requirements
-that are unrelated to the port.
+distribution or the old broad recovery validation apparatus. Conformance is
+being rebuilt in small, Rust-facing pieces as concrete porting questions arise.
+Do not restore the old workflow wholesale: that would reintroduce thousands of
+historical requirements unrelated to the port.
+
+The semantic and kernel conformance suites now run with:
+
+```sh
+cargo test --offline
+```
 
 ## Working boundary
 

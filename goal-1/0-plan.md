@@ -28,6 +28,8 @@ This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract 
 
 ### 1. Evidence map and decision discipline
 
+**Status:** Complete. `SEMANTICS.md` maps each foundation area to its documentation, recovered implementation path, native artifact, and translation rule.
+
 **Outcome:** Every semantic area has an identified source of truth and a consistent method for handling omissions or conflicts.
 
 **Focus:** Map `datomic_pro_docs` sections to the reconstructed capabilities; trace the corresponding types, names, boundaries, representations, concepts, and algorithms in `1.0.7705`; classify rules and design choices as documented, faithfully translated, idiomatically adapted, inferred, or newly decided; establish a compact decision-record format.
@@ -35,6 +37,8 @@ This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract 
 **Completion signal:** The semantic inventory covers all foundation areas, high-risk ambiguities are listed, and contributors can trace material rules to evidence or an explicit project decision.
 
 ### 2. Canonical values, identifiers, and datoms
+
+**Status:** Complete. `src/value.rs`, `src/datom.rs`, and their law/edge-case tests define all supported variants, comparison, stored equality, tuple nils, index order, limits, and float decisions.
 
 **Outcome:** The system has a stable logical vocabulary with deterministic equality, hashing, comparison, and representation rules.
 
@@ -44,6 +48,8 @@ This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract 
 
 ### 3. Schema, identity, and entity semantics
 
+**Status:** Complete. `src/schema.rs`, schema-change validation, identity resolution, composite derivation, and conformance fixtures cover the transition-critical rules; `SEMANTICS.md` fixes the remaining schema-evolution contract for the later schema-as-data implementation.
+
 **Outcome:** Schema-as-data and entity identity have complete rules for both ordinary use and evolution.
 
 **Focus:** Attribute definitions; cardinality; uniqueness and identity; lookup refs; idents and aliases; tempids; upsert unification; references and components; tuples and derived composite tuples; attribute and entity predicates; schema changes; no-history; indexing flags; discontinuation; and validation timing.
@@ -51,6 +57,8 @@ This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract 
 **Completion signal:** Fixtures cover legal and illegal schema states, identity resolution and conflicts, schema evolution, same-transaction schema/data cases, and composite identity behavior with deterministic outcomes.
 
 ### 4. Declarative transaction semantics
+
+**Status:** Complete. `Database::with` is the small pure reference transition. Conformance fixtures cover order independence, atomic failure, lookup timing, tempids/upsert, collisions, redundancy, CAS, replacements, components, composites, entity ensures, and transaction reification.
 
 **Outcome:** Every supported transaction form reduces to a deterministic proposed information set and either produces one immutable successor database or fails atomically.
 
@@ -60,6 +68,8 @@ This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract 
 
 ### 5. Database values, time, and read semantics
 
+**Status:** Complete at the foundation boundary. `View` fixtures distinguish current, as-of, since, and history; `SEMANTICS.md` fixes entity, query, and pull behavior for the later evaluator milestone without pretending those production evaluators exist now.
+
 **Outcome:** Immutable snapshots and their observable read views are precisely defined for later peer, index, query, and pull implementations.
 
 **Focus:** Basis and total transaction order; current and historical datoms; `as-of`, `since`, history, and filtered views; interaction with current schema; entity lookup; index membership and ordering; query relation set semantics; `with` bag behavior; pull omission, recursion, components, and cycles; and snapshot validity boundaries such as future excision.
@@ -67,6 +77,8 @@ This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract 
 **Completion signal:** Fixtures distinguish each view and its compositions, specify snapshot/entity/pull behavior, and define the contracts later indexes and query evaluators must preserve without prescribing their optimized implementation.
 
 ### 6. Errors and conformance corpus
+
+**Status:** Complete. `SemanticError` supplies stable categories/codes/details, deterministic validation selects the same error across input permutations, and the Rust test corpus is the executable acceptance boundary for Goal 0 Stage 2.
 
 **Outcome:** The foundation is consumable as a stable contract by the transactional-kernel milestone.
 
@@ -77,3 +89,5 @@ This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract 
 ## Foundation exit condition
 
 Goal 1 is complete when a new implementation can be judged for semantic correctness without consulting hidden JVM behavior: the native contract is traceable to the documentation, ambiguous cases have explicit decisions, and an executable model or fixtures verify the complete transition from `db-before` plus transaction to either `db-after` plus report or a structured atomic failure.
+
+**Status:** Achieved on 2026-09-02. The authoritative artifacts are `SEMANTICS.md`, `src/`, and `tests/semantic_conformance.rs`. This completion claims the semantic foundation only; the EDN/API parser, full query and pull evaluators, persisted function runtime, production indexes, PostgreSQL durability, and services remain in their existing Goal 0 stages.

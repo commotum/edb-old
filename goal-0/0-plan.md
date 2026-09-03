@@ -34,6 +34,8 @@ PostgreSQL is the only storage system this project will support. The design shou
 
 ### 1. Semantic foundation
 
+**Status:** Complete via `goal-1/`. The semantic contract, pure Rust reference transition, structured errors, and conformance suite establish the acceptance boundary for Stage 2.
+
 **Outcome:** A precise, testable native contract for values, datoms, schema, identity, transactions, database views, errors, and ordering, including explicit decisions for behavior the source material leaves ambiguous.
 
 **Focus:** Extract normative behavior from `datomic_pro_docs`; map the corresponding types, namespaces, data flow, algorithms, and edge cases in `1.0.7705`; define canonical Rust-facing semantics, encodings, invariants, and conformance fixtures; document where an idiomatic Rust translation preserves or intentionally changes the recovered structure.
@@ -41,6 +43,8 @@ PostgreSQL is the only storage system this project will support. The design shou
 **Completion signal:** The core semantic specification is internally consistent, disputed cases have recorded decisions, and executable fixtures or a minimal reference model can distinguish conforming from nonconforming behavior.
 
 ### 2. Single-process transactional kernel
+
+**Status:** Complete via `goal-2/`. The Rust kernel now provides immutable indexed database values, the declarative transaction pipeline, schema/identity evolution, typed map and native function expansion, temporal/filtered reads, and invariant/permutation verification. PostgreSQL remains absent as required by this stage.
 
 **Outcome:** A correct in-memory database kernel can apply complete unordered transactions to immutable database values.
 
