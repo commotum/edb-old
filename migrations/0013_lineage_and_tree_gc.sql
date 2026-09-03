@@ -1250,7 +1250,7 @@ BEGIN
                   FROM atomic_tree_publications
                  ORDER BY database_id, publication_revision DESC
                ) current_root
-          LEFT JOIN atomic_tree_live_sets l
+         LEFT JOIN atomic_tree_live_sets l
             ON l.database_id = current_root.database_id
          WHERE l.database_id IS NULL
             OR l.manifest_hash <> current_root.manifest_hash

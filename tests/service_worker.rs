@@ -387,7 +387,9 @@ fn queue_is_bounded_and_timeout_is_unknown_then_reconcilable() {
     );
     let unknown = first.wait(Duration::from_millis(20)).unwrap_err();
     assert_eq!(unknown.category, ErrorCategory::UnknownOutcome);
-    assert_eq!(unknown.details["request_key"], "one");
+    assert!(!unknown.details.contains_key("request_key"));
+    assert_eq!(unknown.details["request_key_hash"].len(), 64);
+    assert_ne!(unknown.details["request_key_hash"], "one");
     lock.commit().unwrap();
 
     let second_report = second.wait(Duration::from_secs(2)).unwrap();

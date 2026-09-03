@@ -57,6 +57,7 @@ pub use identity::{
 pub use index::IndexPrefix;
 pub use operations::{
     ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
+    LogGenerationGarbage, MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC,
     MAX_PROGRAMS_PER_GC, MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_BUILD_INTENTS_PER_GC,
     MAX_TREE_NODES_PER_GC, MAX_TREE_RETIREMENT_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC,
     OperationalMetrics, PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE,

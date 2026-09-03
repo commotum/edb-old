@@ -386,7 +386,7 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     if POSTGRES_SCHEMA_VERSION >= 14 {
         backfill_program_generation_refs(&mut transaction)?;
     }
-    repair_atomic_security_definer_paths(&mut transaction, &schema)?;
+    repair_atomic_routine_paths(&mut transaction, &schema)?;
     transaction
         .commit()
         .map_err(|error| postgres_error("postgres/migration-commit", error))
@@ -1137,7 +1137,7 @@ fn grant_runtime_privileges(
         .map_err(|error| postgres_error("postgres/runtime-grants-begin", error))?;
     let schema = pin_current_schema(&mut transaction)?;
     verify_schema_compatibility(&mut transaction)?;
-    repair_atomic_security_definer_paths(&mut transaction, &schema)?;
+    repair_atomic_routine_paths(&mut transaction, &schema)?;
     let database: String = transaction
         .query_one("SELECT current_database()", &[])
         .map_err(|error| postgres_error("postgres/runtime-grants-database", error))?
@@ -1327,32 +1327,46 @@ fn pin_current_schema<C: GenericClient>(client: &mut C) -> Result<String, Semant
 }
 
 /// Migration and role provisioning are repair boundaries for functions
-/// installed by older binaries. Every Atomic SECURITY DEFINER routine gets
-/// the owner-controlled schema first and the temporary schema last.
-fn repair_atomic_security_definer_paths<C: GenericClient>(
+/// installed by older binaries. Every Atomic routine gets the installation
+/// schema first and the temporary schema last. This is required even for
+/// SECURITY INVOKER trigger functions: they otherwise inherit a runtime
+/// writer's implicit `pg_temp` precedence and can validate direct DML against
+/// attacker-controlled temporary relations.
+fn repair_atomic_routine_paths<C: GenericClient>(
     client: &mut C,
     schema: &str,
 ) -> Result<(), SemanticError> {
     let schema_ident = quote_identifier(schema)?;
     let routines = client
         .query(
-            "SELECT p.proname::text, pg_get_function_identity_arguments(p.oid) \
+            "SELECT p.proname::text, pg_get_function_identity_arguments(p.oid), \
+                    p.prokind::text \
                FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
-              WHERE n.nspname = $1 AND p.prosecdef \
+              WHERE n.nspname = $1 \
                 AND p.proname LIKE 'atomic\\_%' ESCAPE '\\' \
               ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
             &[&schema],
         )
-        .map_err(|error| postgres_error("postgres/security-definer-discovery", error))?;
+        .map_err(|error| postgres_error("postgres/routine-path-discovery", error))?;
     for row in routines {
         let function = quote_identifier(&row.get::<_, String>(0))?;
         let arguments: String = row.get(1);
+        let routine_kind = match row.get::<_, String>(2).as_str() {
+            "f" | "w" => "FUNCTION",
+            "p" => "PROCEDURE",
+            _ => {
+                return Err(fault(
+                    "postgres/routine-path-kind",
+                    "Atomic namespace contains a routine kind whose lookup path cannot be pinned",
+                ));
+            }
+        };
         client
             .batch_execute(&format!(
-                "ALTER FUNCTION {schema_ident}.{function}({arguments}) \
+                "ALTER {routine_kind} {schema_ident}.{function}({arguments}) \
                  SET search_path TO {schema_ident}, pg_catalog, pg_temp"
             ))
-            .map_err(|error| postgres_error("postgres/security-definer-path", error))?;
+            .map_err(|error| postgres_error("postgres/routine-path", error))?;
     }
     Ok(())
 }
@@ -1369,6 +1383,10 @@ fn validate_runtime_role<C: GenericClient>(
                     EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid), \
                     EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
                              WHERE c.relowner = r.oid \
+                               AND n.nspname !~ '^pg_' \
+                               AND n.nspname <> 'information_schema'), \
+                    EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+                             WHERE p.proowner = r.oid \
                                AND n.nspname !~ '^pg_' \
                                AND n.nspname <> 'information_schema'), \
                     EXISTS (SELECT 1 FROM pg_namespace n \
@@ -1411,14 +1429,16 @@ fn validate_runtime_role<C: GenericClient>(
         || row.get::<_, bool>(5);
     let inherits_membership: bool = row.get(6);
     let owns_non_system_relation: bool = row.get(7);
-    let owns_non_system_schema: bool = row.get(8);
-    let owns_database: bool = row.get(9);
-    let can_create_in_other_schema: bool = row.get(10);
-    let can_create_schema: bool = row.get(11);
-    let has_atomic_column_privileges: bool = row.get(12);
+    let owns_non_system_routine: bool = row.get(8);
+    let owns_non_system_schema: bool = row.get(9);
+    let owns_database: bool = row.get(10);
+    let can_create_in_other_schema: bool = row.get(11);
+    let can_create_schema: bool = row.get(12);
+    let has_atomic_column_privileges: bool = row.get(13);
     if elevated
         || inherits_membership
         || owns_non_system_relation
+        || owns_non_system_routine
         || owns_non_system_schema
         || owns_database
         || can_create_in_other_schema
@@ -2930,9 +2950,12 @@ impl PostgresStore {
                     idem_key_hash,
                 )?)
             };
-            transaction
-                .commit()
-                .map_err(|error| unknown_outcome(request_key, error.to_string()))?;
+            transaction.commit().map_err(|_error| {
+                unknown_outcome(
+                    idem_key_hash,
+                    "PostgreSQL did not acknowledge the idempotent outcome read",
+                )
+            })?;
             let receipt = receipt_with_tempids(recovered, db_before, true, receipt_tempids);
             if basis == head_basis && hash == head_hash {
                 self.current
@@ -3198,12 +3221,15 @@ impl PostgresStore {
             std::process::abort();
         }
 
-        transaction
-            .commit()
-            .map_err(|error| unknown_outcome(request_key, error.to_string()))?;
+        transaction.commit().map_err(|_error| {
+            unknown_outcome(
+                idem_key_hash,
+                "PostgreSQL did not acknowledge the transaction commit",
+            )
+        })?;
         if fault_point == CommitFault::AfterCommitBeforeResponse {
             return Err(unknown_outcome(
-                request_key,
+                idem_key_hash,
                 "injected acknowledgment loss after PostgreSQL commit",
             ));
         }
@@ -3874,13 +3900,22 @@ fn injected(point: &str) -> SemanticError {
     )
 }
 
-fn unknown_outcome(request_key: &str, message: impl Into<String>) -> SemanticError {
+fn unknown_outcome(request_key_hash: Digest, message: impl Into<String>) -> SemanticError {
     SemanticError::new(
         ErrorCategory::UnknownOutcome,
         "postgres/unknown-outcome",
         message,
     )
-    .detail("request_key", request_key)
+    .detail("request_key_hash", digest_hex(&request_key_hash))
+}
+
+fn digest_hex(digest: &Digest) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 pub(crate) fn postgres_error(code: &'static str, error: postgres::Error) -> SemanticError {

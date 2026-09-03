@@ -62,6 +62,7 @@ pub(crate) struct GenerationLogRow {
     pub(crate) request_digest: Digest,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct GenerationRewrite {
     pub(crate) database: Database,
@@ -90,12 +91,8 @@ pub(crate) struct GenerationRewriter {
 
 #[derive(Clone, Debug)]
 pub(crate) struct GenerationRewriteOutcome {
-    pub(crate) database: Database,
-    pub(crate) predicates: Vec<PlannedExcisionPredicate>,
-    pub(crate) request_set_hash: Digest,
     pub(crate) removed_datoms: u64,
     pub(crate) head_hash: Digest,
-    pub(crate) state_hash: Digest,
 }
 
 impl GenerationRewriter {
@@ -294,15 +291,30 @@ impl GenerationRewriter {
     }
 
     pub(crate) fn finish(self) -> Result<GenerationRewriteOutcome, SemanticError> {
+        self.ensure_complete()?;
+        Ok(GenerationRewriteOutcome {
+            removed_datoms: self.removed_datoms,
+            head_hash: self.previous_hash,
+        })
+    }
+
+    fn ensure_complete(&self) -> Result<(), SemanticError> {
         if self.database.basis_t() != self.expected_basis {
             return Err(fault(
                 "excision/source-prefix",
                 "source rows do not cover the complete captured database prefix",
             ));
         }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn finish_test(self, rows: Vec<GenerationLogRow>) -> Result<GenerationRewrite, SemanticError> {
+        self.ensure_complete()?;
         let state_hash = checkpoint_state_hash(&self.database)?;
-        Ok(GenerationRewriteOutcome {
+        Ok(GenerationRewrite {
             database: self.database,
+            rows,
             predicates: self.plan.frozen_predicates(),
             request_set_hash: self.plan.request_set_hash(),
             removed_datoms: self.removed_datoms,
@@ -317,6 +329,7 @@ impl GenerationRewriter {
 /// `completed_requests` names A=15 assertions already reflected by the source
 /// generation. Every other currently asserted request is frozen against the
 /// supplied source database. The source rows must cover exactly bases 1..=t.
+#[cfg(test)]
 pub(crate) fn rewrite_excision_generation(
     lineage_id: &str,
     generation: u64,
@@ -336,16 +349,7 @@ pub(crate) fn rewrite_excision_generation(
     for source in source_rows {
         rows.push(rewriter.rewrite_row(source.clone())?);
     }
-    let outcome = rewriter.finish()?;
-    Ok(GenerationRewrite {
-        database: outcome.database,
-        rows,
-        predicates: outcome.predicates,
-        request_set_hash: outcome.request_set_hash,
-        removed_datoms: outcome.removed_datoms,
-        head_hash: outcome.head_hash,
-        state_hash: outcome.state_hash,
-    })
+    rewriter.finish_test(rows)
 }
 
 fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {

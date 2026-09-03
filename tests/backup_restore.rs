@@ -1,11 +1,12 @@
 use atomic_core::{
-    Attribute, BackupFault, CallableRef, Cardinality, DB_FN, DB_IDENT, EntityRef, ErrorCategory,
-    IndexOrder, Instruction, Keyword, Peer, PersistentTreeManifest, PortableBackup,
-    PostgresIndexer, PostgresStore, PostgresTreeStore, Program, ProgramCall, ProgramKind,
-    RestoreFault, Schema, TransactionRequest, TreeManifestRecord, TxOp, TxValue, USER_PARTITION,
-    Value, ValueType, View, make_eid, sha256,
+    Attribute, BackupFault, CallableRef, Cardinality, DB_EXCISE, DB_FN, DB_IDENT, EntityRef,
+    ErrorCategory, IndexOrder, Instruction, Keyword, Peer, PersistentTreeManifest, PortableBackup,
+    PostgresIndexer, PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramCall,
+    ProgramKind, RestoreFault, Schema, TransactionRequest, TreeManifestRecord, TxOp, TxValue,
+    USER_PARTITION, Value, ValueType, View, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -352,7 +353,10 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
         .backup_database(&target2, &directory)
         .unwrap();
     assert_eq!(continued_backup.basis_t, continued.basis_t);
-    assert!(continued_backup.objects_reused >= 3);
+    // A true incremental successor references the authenticated parent root;
+    // it need not reopen/copy prefix objects merely to increment a reuse
+    // counter. Only the new tail has to be published.
+    assert!(continued_backup.objects_written > 0);
     let continued_verified =
         PortableBackup::verify_backup(&directory, continued.basis_t, true).unwrap();
     assert_same_information(&continued.db_after, &continued_verified.database);
@@ -360,6 +364,230 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
 
     fs::remove_dir_all(&directory).unwrap();
     service.shutdown();
+}
+
+#[test]
+fn same_basis_generations_are_exact_points_and_restore_remains_lineage_local() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("backup_generation_source");
+    let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&source, schema()).unwrap();
+    let service = common::start_service(&connection, &source);
+    let seeded = common::transact(
+        &service,
+        "generation-secret",
+        created.basis_t(),
+        &[add("erase-me")],
+        10_000,
+    );
+    let requested = common::transact(
+        &service,
+        "generation-a15",
+        seeded.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("privacy-request".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(42))),
+        }],
+        11_000,
+    );
+    let request_entity = requested.tempids["privacy-request"];
+    service.shutdown();
+
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+    let before = backup.backup_database(&source, &directory).unwrap();
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    let excision = operator.process_excision_requests(&source).unwrap();
+    assert_eq!(excision.basis_t, before.basis_t);
+    assert_eq!(excision.generation, before.log_generation + 1);
+    let after = backup.backup_database(&source, &directory).unwrap();
+    assert_eq!(after.basis_t, before.basis_t);
+    assert_eq!(after.log_generation, excision.generation);
+    assert_ne!(after.manifest_hash, before.manifest_hash);
+    assert!(after.objects_reused >= 2);
+
+    let points = PortableBackup::list_backup_points(&directory).unwrap();
+    assert_eq!(
+        points
+            .iter()
+            .map(|point| (point.basis_t, point.log_generation))
+            .collect::<Vec<_>>(),
+        vec![
+            (before.basis_t, before.log_generation),
+            (after.basis_t, after.log_generation),
+        ]
+    );
+    assert_eq!(
+        PortableBackup::list_backups(&directory).unwrap(),
+        vec![before.basis_t]
+    );
+    let exact_before = PortableBackup::verify_backup_point(
+        &directory,
+        before.basis_t,
+        before.log_generation,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        exact_before.database.values(user(42), ITEM_VALUE),
+        vec![&Value::String("erase-me".into())]
+    );
+    let latest = PortableBackup::verify_backup(&directory, before.basis_t, true).unwrap();
+    assert_eq!(latest.point.log_generation, after.log_generation);
+    assert!(latest.database.values(user(42), ITEM_VALUE).is_empty());
+
+    // Unrelated databases make the destination catalog busy but cannot
+    // perturb this lineage's generation coordinate. Initial positive restore
+    // preserves the archive generation and therefore its exact backup root.
+    let target_connection = isolated_catalog(&connection, "restore_generation_catalog");
+    let target = unique("restore_generation_target");
+    let mut target_store = PostgresStore::connect(&target_connection).unwrap();
+    for ordinal in 0..4 {
+        target_store
+            .create_database(&unique(&format!("restore_noise_{ordinal}")), Schema::new())
+            .unwrap();
+    }
+    let mut target_restore = PortableBackup::connect(&target_connection).unwrap();
+    let restored_after = target_restore
+        .restore_backup_point(&directory, after.basis_t, after.log_generation, &target)
+        .unwrap();
+    assert_same_information(&latest.database, &restored_after);
+    let mut target_catalog = Client::connect(&target_connection, NoTls).unwrap();
+    let restored_generation: i64 = target_catalog
+        .query_one(
+            "SELECT log_generation FROM atomic_heads WHERE database_id = $1",
+            &[&target],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_generation as u64, after.log_generation);
+    let renamed = target_restore.backup_database(&target, &directory).unwrap();
+    assert_eq!(renamed.manifest_hash, after.manifest_hash);
+    assert_eq!(renamed.objects_written, 0);
+
+    // Point restore is a new local information publication. Rewinding to the
+    // pre-excision generation hides the future completion set, and ordinary
+    // tree consolidation must work at that older logical t on the new local
+    // generation.
+    let restored_before = target_restore
+        .restore_backup_point(&directory, before.basis_t, before.log_generation, &target)
+        .unwrap();
+    assert_same_information(&exact_before.database, &restored_before);
+    let rewind_generation: i64 = target_catalog
+        .query_one(
+            "SELECT log_generation FROM atomic_heads WHERE database_id = $1",
+            &[&target],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(rewind_generation as u64, after.log_generation + 1);
+    let mut target_operator = PostgresOperator::connect(&target_connection).unwrap();
+    assert!(
+        !target_operator
+            .sync_excise(&target, before.basis_t)
+            .unwrap()
+    );
+    let mut indexer = PostgresIndexer::connect(&target_connection, &target).unwrap();
+    let consolidated = indexer.consolidate().unwrap();
+    assert_eq!(consolidated.basis_t, before.basis_t);
+    let consolidated_generation: i64 = target_catalog
+        .query_one(
+            "SELECT excision_generation FROM atomic_tree_manifests WHERE manifest_hash = $1",
+            &[&&consolidated.manifest_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(consolidated_generation, rewind_generation);
+    drop(indexer);
+
+    let restored_latest = target_restore
+        .restore_backup_point(&directory, after.basis_t, after.log_generation, &target)
+        .unwrap();
+    assert_same_information(&latest.database, &restored_latest);
+    assert!(target_operator.sync_excise(&target, after.basis_t).unwrap());
+    let completion_rows: Vec<(i64, i64)> = target_catalog
+        .query(
+            "SELECT c.request_t, c.request_entity \
+               FROM atomic_heads h JOIN atomic_completed_excision_requests c \
+                 ON c.database_id = h.database_id AND c.generation = h.log_generation \
+              WHERE h.database_id = $1 ORDER BY c.request_t, c.request_entity",
+            &[&target],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        completion_rows,
+        vec![(before.basis_t as i64, request_entity as i64)]
+    );
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn live_backup_generation_pin_blocks_point_restore_cutover_and_retry_converges() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("backup_pin_source");
+    let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&source, schema()).unwrap();
+    let service = common::start_service(&connection, &source);
+    let first = common::transact(
+        &service,
+        "backup-pin-one",
+        created.basis_t(),
+        &[add("one")],
+        20_000,
+    );
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+    let old_point = backup.backup_database(&source, &directory).unwrap();
+    let second = common::transact(
+        &service,
+        "backup-pin-two",
+        first.basis_t,
+        &[add("two")],
+        21_000,
+    );
+    service.shutdown();
+
+    let mut competing_restore = PortableBackup::connect(&connection).unwrap();
+    let current_point = backup
+        .backup_database_with_pin_probe(&source, &directory, || {
+            let error = competing_restore
+                .restore_backup_point(
+                    &directory,
+                    old_point.basis_t,
+                    old_point.log_generation,
+                    &source,
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "backup/restore-activate");
+            assert!(error.message.contains("blocked by a live peer or backup"));
+        })
+        .unwrap();
+    assert_eq!(current_point.basis_t, second.basis_t);
+    let still_current = store.recover(&source).unwrap();
+    assert_same_information(&second.db_after, &still_current);
+
+    let retried = competing_restore
+        .restore_backup_point(
+            &directory,
+            old_point.basis_t,
+            old_point.log_generation,
+            &source,
+        )
+        .unwrap();
+    assert_same_information(&first.db_after, &retried);
+    fs::remove_dir_all(&directory).unwrap();
 }
 
 #[test]
@@ -373,6 +601,41 @@ fn interrupted_root_publication_never_exposes_a_partial_point_and_retry_converge
     let mut store = PostgresStore::connect(&connection).unwrap();
     let database = store.create_database(&source, schema()).unwrap();
     let mut backup = PortableBackup::connect(&connection).unwrap();
+
+    let pin_directory = backup_directory();
+    let error = backup
+        .backup_database_with_fault(&source, &pin_directory, BackupFault::AfterGenerationPinned)
+        .unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Interrupted);
+    assert_eq!(
+        fs::read_dir(pin_directory.join("snapshots"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let mut lock_probe = Client::connect(&connection, NoTls).unwrap();
+    let pin_key: i64 = lock_probe
+        .query_one(
+            "SELECT atomic_log_generation_pin_key(database_id, log_generation) \
+               FROM atomic_heads WHERE database_id = $1",
+            &[&source],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        lock_probe
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&pin_key])
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    assert!(
+        lock_probe
+            .query_one("SELECT pg_advisory_unlock($1)", &[&pin_key])
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    backup.backup_database(&source, &pin_directory).unwrap();
+    fs::remove_dir_all(pin_directory).unwrap();
 
     for fault_at in [
         BackupFault::AfterFirstObjectStaged,
@@ -447,6 +710,39 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
     let mut backup = PortableBackup::connect(&connection).unwrap();
     backup.backup_database(&source, &directory).unwrap();
 
+    let batch_connection = isolated_catalog(&connection, "restore_batch_catalog");
+    let mut batch_restore = PortableBackup::connect(&batch_connection).unwrap();
+    let batch_target = unique("restore_batch_atomicity");
+    let batch_error = batch_restore
+        .restore_backup_with_fault(
+            &directory,
+            committed.basis_t,
+            &batch_target,
+            RestoreFault::AfterFirstContentInserted,
+        )
+        .unwrap_err();
+    assert_eq!(batch_error.category, ErrorCategory::Interrupted);
+    let mut batch_catalog = Client::connect(&batch_connection, NoTls).unwrap();
+    let unowned_contents: i64 = batch_catalog
+        .query_one(
+            "SELECT count(*) FROM atomic_transaction_contents c \
+              WHERE c.lineage_id = (SELECT lineage_id FROM atomic_databases \
+                                     WHERE database_id = $1) \
+                AND NOT EXISTS (SELECT 1 FROM atomic_generation_transactions t \
+                                 WHERE t.content_hash = c.content_hash)",
+            &[&batch_target],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        unowned_contents, 0,
+        "failed restore leaked an ownerless ATLC value"
+    );
+    let batch_retried = batch_restore
+        .restore_backup(&directory, committed.basis_t, &batch_target)
+        .unwrap();
+    assert_same_information(&committed.db_after, &batch_retried);
+
     let before_connection = isolated_catalog(&connection, "restore_before_catalog");
     let mut before_restore = PortableBackup::connect(&before_connection).unwrap();
     let before_commit = unique("restore_before_commit");
@@ -485,6 +781,88 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
         .unwrap();
     assert_same_information(&committed.db_after, &restored);
 
+    // A second faulted first-time restore is deliberately abandoned instead
+    // of resumed. The first GC pass installs the permanent claim; restore
+    // must then fail Busy, bounded phases drain only generation-owned rows,
+    // and the unpublished catalog locator becomes reusable at the end.
+    let abandoned_connection = isolated_catalog(&connection, "restore_abandoned_initial_catalog");
+    let abandoned_target = unique("restore_abandoned_initial");
+    let mut abandoned_restore = PortableBackup::connect(&abandoned_connection).unwrap();
+    let error = abandoned_restore
+        .restore_backup_with_fault(
+            &directory,
+            committed.basis_t,
+            &abandoned_target,
+            RestoreFault::BeforeCommit,
+        )
+        .unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Interrupted);
+    let mut abandoned_catalog = Client::connect(&abandoned_connection, NoTls).unwrap();
+    let abandoned_identity = abandoned_catalog
+        .query_one(
+            "SELECT d.lineage_id, g.generation \
+               FROM atomic_databases d JOIN atomic_log_generations g \
+                 ON g.database_id = d.database_id \
+              WHERE d.database_id = $1 AND g.build_kind = 0",
+            &[&abandoned_target],
+        )
+        .unwrap();
+    let abandoned_lineage: String = abandoned_identity.get(0);
+    let abandoned_generation: i64 = abandoned_identity.get(1);
+    let mut abandoned_operator = PostgresOperator::connect(&abandoned_connection).unwrap();
+    let first_collection = abandoned_operator.collect_garbage(Duration::ZERO).unwrap();
+    assert!(first_collection.log_generations.iter().any(|candidate| {
+        candidate.database_id == abandoned_target
+            && candidate.generation == abandoned_generation as u64
+            && candidate.abandoned
+    }));
+    let busy = abandoned_restore
+        .restore_backup(&directory, committed.basis_t, &abandoned_target)
+        .unwrap_err();
+    assert_eq!(
+        (busy.category, busy.code),
+        (ErrorCategory::Busy, "backup/restore-target-abandoning")
+    );
+    let mut collected = false;
+    for _ in 0..32 {
+        if abandoned_catalog
+            .query_opt(
+                "SELECT 1 FROM atomic_databases WHERE database_id = $1",
+                &[&abandoned_target],
+            )
+            .unwrap()
+            .is_none()
+        {
+            collected = true;
+            break;
+        }
+        abandoned_operator.collect_garbage(Duration::ZERO).unwrap();
+    }
+    assert!(
+        collected,
+        "headless restore was not reclaimed in bounded phases"
+    );
+    let leaked_contents: i64 = abandoned_catalog
+        .query_one(
+            "SELECT count(*) FROM atomic_transaction_contents WHERE lineage_id = $1",
+            &[&abandoned_lineage],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(leaked_contents, 0);
+    let mut replacement_store = PostgresStore::connect(&abandoned_connection).unwrap();
+    replacement_store
+        .create_database(&abandoned_target, schema())
+        .unwrap();
+    let replacement_lineage: String = abandoned_catalog
+        .query_one(
+            "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
+            &[&abandoned_target],
+        )
+        .unwrap()
+        .get(0);
+    assert_ne!(replacement_lineage, abandoned_lineage);
+
     let after_connection = isolated_catalog(&connection, "restore_after_catalog");
     let mut after_restore = PortableBackup::connect(&after_connection).unwrap();
     let after_commit = unique("restore_after_commit");
@@ -501,6 +879,96 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
         .restore_backup(&directory, committed.basis_t, &after_commit)
         .unwrap();
     assert_same_information(&committed.db_after, &replay);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn permanently_claimed_restore_build_is_never_resumed_or_activated() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("backup_abandoned_restore_source");
+    let directory = backup_directory();
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&source, schema()).unwrap();
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+    backup.backup_database(&source, &directory).unwrap();
+    let service = common::start_service(&connection, &source);
+    let latest = common::transact(
+        &service,
+        "abandoned-restore-seed",
+        created.basis_t(),
+        &[add("latest")],
+        4_100,
+    );
+    service.shutdown();
+    backup.backup_database(&source, &directory).unwrap();
+
+    let target_connection = isolated_catalog(&connection, "restore_abandoned_catalog");
+    let target = unique("restore_abandoned_target");
+    let mut restore = PortableBackup::connect(&target_connection).unwrap();
+    restore
+        .restore_backup(&directory, latest.basis_t, &target)
+        .unwrap();
+
+    // Leave a fully staged rewind candidate, then model the durable claim
+    // installed by the abandonment worker after its captured source ceased to
+    // be current. A claim is a one-way ownership transfer: restore must skip
+    // the old build and allocate a new database-local successor.
+    let interrupted = restore
+        .restore_backup_with_fault(
+            &directory,
+            created.basis_t(),
+            &target,
+            RestoreFault::BeforeCommit,
+        )
+        .unwrap_err();
+    assert_eq!(interrupted.category, ErrorCategory::Interrupted);
+    let mut catalog = Client::connect(&target_connection, NoTls).unwrap();
+    let claimed_generation: i64 = catalog
+        .query_one(
+            "SELECT b.generation FROM atomic_log_generation_builds b \
+              WHERE b.database_id = $1 \
+                AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                                 WHERE a.database_id = b.database_id \
+                                   AND a.generation = b.generation)",
+            &[&target],
+        )
+        .unwrap()
+        .get(0);
+    catalog
+        .execute(
+            "INSERT INTO atomic_log_generation_abandonment_progress \
+                 (database_id, generation) VALUES ($1, $2)",
+            &[&target, &claimed_generation],
+        )
+        .unwrap();
+
+    let rewound = restore
+        .restore_backup(&directory, created.basis_t(), &target)
+        .unwrap();
+    assert_same_information(&created, &rewound);
+    let active_generation: i64 = catalog
+        .query_one(
+            "SELECT log_generation FROM atomic_heads WHERE database_id = $1",
+            &[&target],
+        )
+        .unwrap()
+        .get(0);
+    assert!(active_generation > claimed_generation);
+    let claim_state = catalog
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_log_generation_abandonment_progress \
+                              WHERE database_id = $1 AND generation = $2), \
+                    EXISTS (SELECT 1 FROM atomic_log_generation_activations \
+                              WHERE database_id = $1 AND generation = $2)",
+            &[&target, &claimed_generation],
+        )
+        .unwrap();
+    assert!(claim_state.get::<_, bool>(0));
+    assert!(!claim_state.get::<_, bool>(1));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -754,6 +1222,32 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
         restored.values(function, DB_FN as u32),
         vec![&Value::Function(current_hash)]
     );
+    let mut target_catalog = Client::connect(&target_connection, NoTls).unwrap();
+    let restored_program_marks = target_catalog
+        .query(
+            "SELECT r.program_hash FROM atomic_heads h \
+               JOIN atomic_program_generation_refs r \
+                 ON r.database_id = h.database_id \
+                AND r.log_generation = h.log_generation \
+              WHERE h.database_id = $1 ORDER BY r.program_hash",
+            &[&target],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<_, Vec<u8>>(0))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        restored_program_marks,
+        [old_hash, current_hash, nested_hash]
+            .into_iter()
+            .map(Vec::from)
+            .collect()
+    );
+    // Newly restored blobs are immediately old enough at a zero threshold.
+    // The exact active-generation marks, not a mutable alias, must keep the
+    // whole temporal/transitive graph alive.
+    let mut target_operator = PostgresOperator::connect(&target_connection).unwrap();
+    target_operator.collect_garbage(Duration::ZERO).unwrap();
     let mut restored_store = PostgresStore::connect(&target_connection).unwrap();
     assert_eq!(
         restored_store.resolve_program(old_hash).unwrap(),
@@ -796,5 +1290,21 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
         (ErrorCategory::Unavailable, "backup/object-type")
     );
     fs::rename(missing_program_object, old_program_object).unwrap();
+    // The source corruption above is deliberate, but this suite shares its
+    // installation schema. Put the immutable values back so a later explicit
+    // migration/repair is not correctly forced to fail closed on our debris.
+    let mut repair = PostgresStore::connect(&connection).unwrap();
+    assert_eq!(
+        repair.deploy_program_blob(&writer("old")).unwrap(),
+        old_hash
+    );
+    assert_eq!(
+        repair.deploy_program_blob(&current_wrapper).unwrap(),
+        current_hash
+    );
+    assert_eq!(
+        repair.deploy_program_blob(&writer("current")).unwrap(),
+        nested_hash
+    );
     fs::remove_dir_all(&directory).unwrap();
 }

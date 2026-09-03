@@ -73,6 +73,7 @@ pub(crate) struct PlannedExcisionPredicate {
 }
 
 impl ExcisionPlan {
+    #[cfg(test)]
     pub(crate) fn pending_after(
         database: &Database,
         processed_through_t: u64,
@@ -117,6 +118,7 @@ impl ExcisionPlan {
         self.predicates.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn requests(&self) -> impl Iterator<Item = &FrozenExcisionRequest> {
         self.predicates.iter().map(|predicate| &predicate.request)
     }
@@ -147,6 +149,7 @@ impl ExcisionPlan {
         sha256(&bytes)
     }
 
+    #[cfg(test)]
     pub(crate) fn target_kind(
         &self,
         request_entity: u64,
@@ -167,6 +170,7 @@ impl ExcisionPlan {
             .any(|predicate| predicate.removes(datom))
     }
 
+    #[cfg(test)]
     pub(crate) fn removed_count<'a>(&self, datoms: impl IntoIterator<Item = &'a Datom>) -> u64 {
         datoms
             .into_iter()

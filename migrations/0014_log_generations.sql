@@ -296,6 +296,21 @@ CREATE TABLE atomic_log_generation_collection_progress (
         ON DELETE CASCADE
 );
 
+-- A crashed inactive rewrite is resumable while its source remains active.
+-- If a later restore/rewrite replaces that source, the candidate can never be
+-- published; this separate durable cursor reclaims it without manufacturing a
+-- fake activation/retirement edge.
+CREATE TABLE atomic_log_generation_abandonment_progress (
+    database_id TEXT NOT NULL,
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    phase SMALLINT NOT NULL DEFAULT 0 CHECK (phase BETWEEN 0 AND 10),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (database_id, generation),
+    FOREIGN KEY (database_id, generation)
+        REFERENCES atomic_log_generations(database_id, generation)
+);
+
 -- One session-level lock coordinate per logical lineage/generation. Immutable
 -- peer values and active backups take SHARE before exposure; the collector
 -- takes EXCLUSIVE before permanently closing admission and draining rows.
@@ -737,6 +752,44 @@ $$;
 CREATE TRIGGER atomic_log_generations_immutable
 BEFORE UPDATE OR DELETE ON atomic_log_generations
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_log_generation_gc_mutation();
+-- A headless initial restore owns a durable catalog locator before it owns a
+-- head. Its terminal abandonment transaction is the sole path that may
+-- remove that locator. Runtime roles are not relation owners and cannot use
+-- either transaction-local owner marker accepted by this narrow trigger.
+CREATE OR REPLACE FUNCTION atomic_reject_database_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    relation_owner NAME;
+BEGIN
+    SELECT pg_catalog.pg_get_userbyid(relowner) INTO relation_owner
+      FROM pg_catalog.pg_class WHERE oid = TG_RELID;
+    IF TG_OP = 'DELETE'
+       AND pg_catalog.current_setting('atomic.log_generation_gc', true) = 'v14'
+       AND pg_catalog.current_setting('atomic.log_generation_activation', true) = 'v14'
+       AND current_user = relation_owner
+       AND NOT EXISTS (
+            SELECT 1 FROM atomic_heads
+             WHERE database_id = OLD.database_id
+       )
+       AND NOT EXISTS (
+            SELECT 1 FROM atomic_log_generations
+             WHERE database_id = OLD.database_id
+       ) THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'Atomic database records are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+REVOKE ALL ON FUNCTION atomic_reject_database_mutation() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION atomic_reject_database_mutation() TO CURRENT_USER;
+
+DROP TRIGGER atomic_databases_immutable ON atomic_databases;
+CREATE TRIGGER atomic_databases_immutable
+BEFORE UPDATE OR DELETE ON atomic_databases
+FOR EACH ROW EXECUTE FUNCTION atomic_reject_database_mutation();
 CREATE TRIGGER atomic_transaction_contents_immutable
 BEFORE UPDATE OR DELETE ON atomic_transaction_contents
 FOR EACH ROW EXECUTE FUNCTION atomic_reject_log_generation_gc_mutation();
@@ -1422,6 +1475,14 @@ BEGIN
         RAISE EXCEPTION 'Atomic initial restore target is already published or missing'
             USING ERRCODE = '55000';
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM atomic_log_generation_abandonment_progress
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation
+    ) THEN
+        RAISE EXCEPTION 'Atomic initial restore generation is permanently claimed for abandonment'
+            USING ERRCODE = '55000';
+    END IF;
     IF NOT EXISTS (
         SELECT 1
           FROM atomic_log_generations g
@@ -1509,6 +1570,14 @@ BEGIN
     IF NOT FOUND OR generation_row.build_kind = 0 THEN
         RAISE EXCEPTION 'Atomic generation is not an activatable rewrite'
             USING ERRCODE = '23503';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM atomic_log_generation_abandonment_progress
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation
+    ) THEN
+        RAISE EXCEPTION 'Atomic generation is permanently claimed for abandonment'
+            USING ERRCODE = '55000';
     END IF;
     SELECT log_generation, basis_t, tx_hash
       INTO current_generation, current_basis, current_hash
@@ -1860,8 +1929,9 @@ BEGIN
         RAISE EXCEPTION 'Atomic log generation is not retired'
             USING ERRCODE = '23503';
     END IF;
-    IF retirement_row.retired_at + older_than_millis * interval '1 millisecond'
-       > clock_timestamp() THEN
+    IF retirement_row.collecting_at IS NULL
+       AND retirement_row.retired_at + older_than_millis * interval '1 millisecond'
+           > clock_timestamp() THEN
         RAISE EXCEPTION 'Atomic log generation has not reached its retention age'
             USING ERRCODE = '55000';
     END IF;
@@ -2128,6 +2198,355 @@ BEGIN
 END;
 $$;
 
+-- Reclaim one inactive generation that can no longer be published. A rewrite
+-- whose captured source remains active is exactly resumable and is never an
+-- abandonment candidate. A headless initial restore is reclaimable only in
+-- its authenticated build-kind-zero shape; its catalog row is removed last so
+-- the alias can be safely reused. Database-scoped builder, restore, and worker
+-- locks ensure the one-way claim cannot race a live restore/excision session.
+CREATE OR REPLACE FUNCTION atomic_abandon_log_generation(
+    candidate_database_id TEXT,
+    candidate_generation BIGINT,
+    older_than_millis BIGINT,
+    maximum_rows BIGINT
+)
+RETURNS TABLE(rows_removed BIGINT, abandonment_phase SMALLINT, is_complete BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+    generation_row atomic_log_generations%ROWTYPE;
+    build_row atomic_log_generation_builds%ROWTYPE;
+    progress_phase SMALLINT;
+    builder_pin_key BIGINT;
+    worker_pin_key BIGINT;
+    generation_pin_key BIGINT;
+    restore_pin_key BIGINT;
+    durable_lineage TEXT;
+    durable_genesis_hash BYTEA;
+    removed BIGINT := 0;
+    ignored BIGINT;
+    content_candidate RECORD;
+    already_claimed BOOLEAN;
+BEGIN
+    IF candidate_generation <= 0 OR older_than_millis < 0
+       OR maximum_rows < 1 OR maximum_rows > 4096 THEN
+        RAISE EXCEPTION 'Invalid Atomic inactive-generation garbage boundary'
+            USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO generation_row
+      FROM atomic_log_generations
+     WHERE database_id = candidate_database_id
+       AND generation = candidate_generation
+       AND build_kind IN (0, 1, 2)
+     FOR UPDATE;
+    IF FOUND THEN
+        SELECT * INTO build_row
+          FROM atomic_log_generation_builds
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation
+         FOR UPDATE;
+    END IF;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Atomic log generation is not an inactive rewrite build'
+            USING ERRCODE = '23503';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM atomic_log_generation_activations
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation
+    ) OR EXISTS (
+        SELECT 1 FROM atomic_heads
+         WHERE database_id = candidate_database_id
+           AND log_generation = candidate_generation
+    ) THEN
+        RAISE EXCEPTION 'Published Atomic log generation cannot be abandoned'
+            USING ERRCODE = '55000';
+    END IF;
+    SELECT EXISTS (
+        SELECT 1 FROM atomic_log_generation_abandonment_progress
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation
+    ) INTO already_claimed;
+    SELECT lineage_id, genesis_hash INTO durable_lineage, durable_genesis_hash
+      FROM atomic_databases WHERE database_id = candidate_database_id;
+    IF generation_row.build_kind = 0 AND (
+        build_row.source_generation IS NOT NULL
+        OR build_row.captured_basis_t <> 0
+        OR build_row.captured_head_hash <> durable_genesis_hash
+        OR build_row.frozen_plan_hash IS NULL
+        OR build_row.restore_manifest_hash IS NOT NULL
+        OR build_row.restore_basis_t IS NOT NULL
+        OR build_row.restore_head_hash IS NOT NULL
+        OR EXISTS (
+            SELECT 1 FROM atomic_heads
+             WHERE database_id = candidate_database_id
+        )
+        OR EXISTS (
+            SELECT 1 FROM atomic_log_generations other
+             WHERE other.database_id = candidate_database_id
+               AND other.generation <> candidate_generation
+        )
+    ) THEN
+        RAISE EXCEPTION 'Atomic initial restore is not an isolated authenticated headless build'
+            USING ERRCODE = '55000';
+    ELSIF generation_row.build_kind <> 0
+          AND build_row.source_generation IS NULL THEN
+        RAISE EXCEPTION 'Atomic rewrite abandonment has no captured source generation'
+            USING ERRCODE = '23503';
+    END IF;
+    IF NOT already_claimed AND build_row.source_generation IS NOT NULL AND EXISTS (
+        SELECT 1 FROM atomic_heads
+         WHERE database_id = candidate_database_id
+           AND log_generation = build_row.source_generation
+    ) THEN
+        RAISE EXCEPTION 'Atomic inactive generation remains exactly resumable'
+            USING ERRCODE = '55000';
+    END IF;
+    IF NOT already_claimed AND generation_row.created_at
+       + older_than_millis * interval '1 millisecond' > clock_timestamp() THEN
+        RAISE EXCEPTION 'Atomic inactive generation has not reached its retention age'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT atomic_tree_database_build_pin_key(candidate_database_id)
+      INTO builder_pin_key;
+    worker_pin_key := hashtextextended(
+        'atomic/excision-worker/v1/' || durable_lineage,
+        4707476001900298240::bigint
+    );
+    SELECT atomic_log_generation_pin_key(candidate_database_id, candidate_generation)
+      INTO generation_pin_key;
+    restore_pin_key := hashtextextended(
+        'atomic/restore/' || candidate_database_id,
+        0
+    );
+    IF builder_pin_key IS NULL OR worker_pin_key IS NULL OR generation_pin_key IS NULL
+       OR restore_pin_key IS NULL
+       OR NOT pg_catalog.pg_try_advisory_xact_lock(builder_pin_key)
+       OR NOT pg_catalog.pg_try_advisory_xact_lock(worker_pin_key)
+       OR NOT pg_catalog.pg_try_advisory_xact_lock(generation_pin_key)
+       OR NOT pg_catalog.pg_try_advisory_xact_lock(restore_pin_key) THEN
+        RAISE EXCEPTION 'Atomic inactive generation is pinned by a live builder or reader'
+            USING ERRCODE = '55006';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM atomic_tree_build_intents
+         WHERE database_id = candidate_database_id
+           AND log_generation = candidate_generation
+    ) OR EXISTS (
+        SELECT 1 FROM atomic_tree_manifests
+         WHERE database_id = candidate_database_id
+           AND log_generation = candidate_generation
+    ) OR EXISTS (
+        SELECT 1 FROM atomic_tree_publications
+         WHERE database_id = candidate_database_id
+           AND log_generation = candidate_generation
+    ) OR EXISTS (
+        SELECT 1 FROM atomic_tree_retirements
+         WHERE database_id = candidate_database_id
+           AND log_generation = candidate_generation
+    ) OR EXISTS (
+        SELECT 1 FROM atomic_log_generation_builds dependent
+         WHERE dependent.database_id = candidate_database_id
+           AND dependent.source_generation = candidate_generation
+           AND dependent.generation <> candidate_generation
+    ) THEN
+        RAISE EXCEPTION 'Atomic inactive generation still has a derived root or build dependency'
+            USING ERRCODE = '55000';
+    END IF;
+
+    PERFORM set_config('atomic.log_generation_gc', 'v14', true);
+    PERFORM set_config('atomic.log_generation_activation', 'v14', true);
+    INSERT INTO atomic_log_generation_abandonment_progress(database_id, generation)
+    VALUES (candidate_database_id, candidate_generation)
+    ON CONFLICT DO NOTHING;
+    SELECT phase INTO progress_phase
+      FROM atomic_log_generation_abandonment_progress
+     WHERE database_id = candidate_database_id
+       AND generation = candidate_generation
+     FOR UPDATE;
+
+    IF progress_phase = 0 THEN
+        WITH victims AS (
+            SELECT ctid FROM atomic_generation_request_tempids
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+             ORDER BY request_key_hash, tempid_name LIMIT maximum_rows
+        )
+        DELETE FROM atomic_generation_request_tempids t
+         USING victims v WHERE t.ctid = v.ctid;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+    ELSIF progress_phase = 1 THEN
+        WITH victims AS (
+            SELECT ctid FROM atomic_generation_requests
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+             ORDER BY basis_t LIMIT maximum_rows
+        )
+        DELETE FROM atomic_generation_requests r
+         USING victims v WHERE r.ctid = v.ctid;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+    ELSIF progress_phase = 2 THEN
+        WITH victims AS MATERIALIZED (
+            SELECT ctid, content_hash FROM atomic_generation_transactions
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+             ORDER BY basis_t LIMIT maximum_rows
+        ), marked AS (
+            INSERT INTO atomic_log_generation_garbage_contents
+                   (database_id, generation, content_hash)
+            SELECT candidate_database_id, candidate_generation, content_hash
+              FROM victims ON CONFLICT DO NOTHING RETURNING 1
+        ), deleted AS (
+            DELETE FROM atomic_generation_transactions t
+             USING victims v WHERE t.ctid = v.ctid RETURNING 1
+        )
+        SELECT count(*), (SELECT count(*) FROM marked)
+          INTO removed, ignored FROM deleted;
+    ELSIF progress_phase = 3 THEN
+        WITH victims AS (
+            SELECT ctid FROM atomic_program_generation_refs
+             WHERE database_id = candidate_database_id
+               AND log_generation = candidate_generation
+             ORDER BY program_hash LIMIT maximum_rows
+        )
+        DELETE FROM atomic_program_generation_refs r
+         USING victims v WHERE r.ctid = v.ctid;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+    ELSIF progress_phase = 4 THEN
+        FOR content_candidate IN
+            SELECT content_hash FROM atomic_log_generation_garbage_contents
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+             ORDER BY content_hash LIMIT maximum_rows
+             FOR UPDATE SKIP LOCKED
+        LOOP
+            DELETE FROM atomic_log_generation_garbage_contents
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+               AND content_hash = content_candidate.content_hash;
+            IF NOT EXISTS (
+                SELECT 1 FROM atomic_generation_transactions
+                 WHERE content_hash = content_candidate.content_hash
+            ) AND NOT EXISTS (
+                SELECT 1 FROM atomic_log_generation_garbage_contents
+                 WHERE content_hash = content_candidate.content_hash
+            ) THEN
+                DELETE FROM atomic_transaction_contents
+                 WHERE content_hash = content_candidate.content_hash;
+            END IF;
+            removed := removed + 1;
+        END LOOP;
+    ELSIF progress_phase = 5 THEN
+        WITH victims AS (
+            SELECT ctid FROM atomic_completed_excision_requests
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+             ORDER BY request_t, request_entity LIMIT maximum_rows
+        )
+        DELETE FROM atomic_completed_excision_requests r
+         USING victims v WHERE r.ctid = v.ctid;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+    ELSIF progress_phase = 6 THEN
+        WITH victims AS (
+            SELECT ctid FROM atomic_generation_excision_predicates
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+             ORDER BY request_t, request_entity LIMIT maximum_rows
+        )
+        DELETE FROM atomic_generation_excision_predicates p
+         USING victims v WHERE p.ctid = v.ctid;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+    ELSIF progress_phase = 7 THEN
+        WITH victims AS (
+            SELECT ctid FROM atomic_log_generation_checkpoints
+             WHERE database_id = candidate_database_id
+               AND generation = candidate_generation
+             ORDER BY through_basis_t LIMIT maximum_rows
+        )
+        DELETE FROM atomic_log_generation_checkpoints c
+         USING victims v WHERE c.ctid = v.ctid;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+    ELSIF progress_phase = 8 THEN
+        DELETE FROM atomic_log_generation_completion_stages
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+    ELSIF progress_phase = 9 THEN
+        -- Keep the build coordinate until the terminal transaction. It is
+        -- the authenticated owner row used to resume this durable phase
+        -- cursor after a crash.
+        removed := 0;
+    ELSE
+        DELETE FROM atomic_log_generation_builds
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation;
+        DELETE FROM atomic_log_generation_abandonment_progress
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation;
+        DELETE FROM atomic_log_generations
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation;
+        GET DIAGNOSTICS removed = ROW_COUNT;
+        IF removed <> 1 THEN
+            RAISE EXCEPTION 'Atomic abandoned generation lost its terminal owner row'
+                USING ERRCODE = '55000';
+        END IF;
+        IF generation_row.build_kind = 0 THEN
+            -- Every committed restore value is generation-owned. The earlier
+            -- phases have therefore removed all database-scoped dependants;
+            -- this guarded delete is both the final integrity check and the
+            -- point at which the previously unpublished alias becomes free.
+            DELETE FROM atomic_databases d
+             WHERE d.database_id = candidate_database_id
+               AND d.lineage_id = durable_lineage
+               AND NOT EXISTS (
+                    SELECT 1 FROM atomic_heads h
+                     WHERE h.database_id = d.database_id
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM atomic_log_generations g
+                     WHERE g.database_id = d.database_id
+               );
+            GET DIAGNOSTICS removed = ROW_COUNT;
+            IF removed <> 1 THEN
+                RAISE EXCEPTION 'Atomic headless restore catalog is no longer isolated'
+                    USING ERRCODE = '55000';
+            END IF;
+        END IF;
+        PERFORM set_config('atomic.log_generation_activation', 'off', true);
+        PERFORM set_config('atomic.log_generation_gc', 'off', true);
+        rows_removed := removed;
+        abandonment_phase := 10;
+        is_complete := true;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    IF removed = 0 THEN
+        UPDATE atomic_log_generation_abandonment_progress
+           SET phase = phase + 1, updated_at = clock_timestamp()
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation;
+        progress_phase := progress_phase + 1;
+    ELSE
+        UPDATE atomic_log_generation_abandonment_progress
+           SET updated_at = clock_timestamp()
+         WHERE database_id = candidate_database_id
+           AND generation = candidate_generation;
+    END IF;
+    PERFORM set_config('atomic.log_generation_activation', 'off', true);
+    PERFORM set_config('atomic.log_generation_gc', 'off', true);
+    rows_removed := removed;
+    abandonment_phase := progress_phase;
+    is_complete := false;
+    RETURN NEXT;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION atomic_activate_log_generation(
     TEXT, BIGINT, BIGINT, BYTEA, BYTEA, BYTEA
 ) FROM PUBLIC;
@@ -2159,6 +2578,9 @@ TO CURRENT_USER;
 REVOKE ALL ON FUNCTION atomic_collect_log_generation(TEXT, BIGINT, BIGINT, BIGINT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION atomic_collect_log_generation(TEXT, BIGINT, BIGINT, BIGINT)
 TO CURRENT_USER;
+REVOKE ALL ON FUNCTION atomic_abandon_log_generation(TEXT, BIGINT, BIGINT, BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION atomic_abandon_log_generation(TEXT, BIGINT, BIGINT, BIGINT)
+TO CURRENT_USER;
 
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generations FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_builds FROM PUBLIC;
@@ -2174,4 +2596,5 @@ REVOKE UPDATE, DELETE, TRUNCATE ON atomic_completed_excision_requests FROM PUBLI
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_retirements FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_completion_stages FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_collection_progress FROM PUBLIC;
+REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_abandonment_progress FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON atomic_log_generation_garbage_contents FROM PUBLIC;

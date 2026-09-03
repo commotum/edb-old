@@ -242,7 +242,7 @@ fn grant_matrix(
                    JOIN pg_namespace n ON n.oid = c.relnamespace \
                   CROSS JOIN (VALUES {privilege_values}) privilege(name) \
                   WHERE n.nspname = current_schema() \
-                    AND c.relkind IN ('r', 'p') \
+                    AND c.relkind IN ('r', 'p', 'v') \
                     AND c.relname LIKE 'atomic\\_%' ESCAPE '\\' \
                     AND {predicate} \
                   ORDER BY c.relname, privilege.name"
@@ -301,6 +301,24 @@ fn writable_schemas(client: &mut Client, role: &str) -> Vec<String> {
         .collect()
 }
 
+fn executable_definer_functions(client: &mut Client, role: &str) -> BTreeSet<String> {
+    client
+        .query(
+            "SELECT p.proname::text || '(' || \
+                    replace(oidvectortypes(p.proargtypes), ' ', '') || ')' \
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = current_schema() AND p.prosecdef \
+                AND p.proname LIKE 'atomic\\_%' ESCAPE '\\' \
+                AND has_function_privilege($1::name, p.oid, 'EXECUTE') \
+              ORDER BY 1",
+            &[&role],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
 fn assert_error_code(error: atomic_core::SemanticError, expected: &str) {
     assert_eq!(
         error.code, expected,
@@ -317,6 +335,12 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
     let (_schema, connection) = IsolatedSchema::create(&connection, unique("runtime_acl_schema"));
     let mut migrator = PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
+    let shadow_database = unique("runtime_acl_trigger_target");
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    store
+        .create_database(&shadow_database, Schema::new())
+        .unwrap();
+    drop(store);
 
     let writer = unique("atomic_acl_writer");
     let peer = unique("atomic_acl_peer");
@@ -395,6 +419,39 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
         ))
         .unwrap();
 
+    // A runtime role that owns a routine can replace its body after
+    // provisioning; owning a SECURITY DEFINER routine would be an immediate
+    // privilege escalation. Reject retained routine ownership independently
+    // of the role's current CREATE grants.
+    roles
+        .admin
+        .batch_execute(&format!(
+            "GRANT CREATE ON SCHEMA {} TO {}; \
+             CREATE FUNCTION {}.runtime_owned_probe() RETURNS BOOLEAN \
+                 LANGUAGE SQL AS 'SELECT true'; \
+             ALTER FUNCTION {}.runtime_owned_probe() OWNER TO {}; \
+             REVOKE CREATE ON SCHEMA {} FROM {}",
+            quote_identifier(&shadow_schema),
+            quote_identifier(&writer),
+            quote_identifier(&shadow_schema),
+            quote_identifier(&shadow_schema),
+            quote_identifier(&writer),
+            quote_identifier(&shadow_schema),
+            quote_identifier(&writer),
+        ))
+        .unwrap();
+    let error = migrator
+        .grant_runtime_privileges(&writer, &peer)
+        .unwrap_err();
+    assert_error_code(error, "postgres/runtime-role-not-least-privilege");
+    roles
+        .admin
+        .batch_execute(&format!(
+            "DROP FUNCTION {}.runtime_owned_probe()",
+            quote_identifier(&shadow_schema)
+        ))
+        .unwrap();
+
     roles
         .admin
         .batch_execute(&format!(
@@ -447,16 +504,18 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
         .admin
         .batch_execute(&format!(
             "CREATE TABLE atomic_future_extension (id BIGINT PRIMARY KEY); \
-             GRANT DELETE ON atomic_excisions, atomic_future_extension TO {}",
+             GRANT DELETE ON atomic_log_generation_collection_progress, \
+                             atomic_future_extension TO {}",
             quote_identifier(&writer)
         ))
         .unwrap();
     migrator.grant_runtime_privileges(&writer, &peer).unwrap();
 
     // Runtime roles deliberately retain the database's ordinary TEMP
-    // capability. SECURITY DEFINER functions must therefore capture the
-    // trusted Atomic schema first and spell pg_temp explicitly last; otherwise
-    // PostgreSQL's implicit temp-first lookup redirects owner reads here.
+    // capability. Every Atomic routine must therefore capture the trusted
+    // schema first and spell pg_temp explicitly last. This protects both
+    // owner functions and SECURITY INVOKER validation triggers, which inherit
+    // the writer's lookup path.
     let writer_connection = with_connection_parameter(
         &with_connection_parameter(&connection, "user", &writer),
         "password",
@@ -467,8 +526,20 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
         .batch_execute(
             "CREATE TEMP TABLE atomic_databases \
                  (database_id TEXT PRIMARY KEY, lineage_id TEXT NOT NULL); \
-             INSERT INTO atomic_databases VALUES \
+             CREATE TEMP TABLE atomic_generation_transactions \
+                 (database_id TEXT NOT NULL, generation BIGINT NOT NULL, \
+                  basis_t BIGINT NOT NULL, tx_hash BYTEA NOT NULL, \
+                  state_hash BYTEA NOT NULL); \
+             CREATE TEMP TABLE atomic_heads \
+                 (database_id TEXT PRIMARY KEY, log_generation BIGINT NOT NULL, \
+                  basis_t BIGINT NOT NULL)",
+        )
+        .unwrap();
+    runtime_writer
+        .execute(
+            "INSERT INTO atomic_databases VALUES \
                  ('temp-shadow', '00000000-0000-4000-8000-000000000000')",
+            &[],
         )
         .unwrap();
     let shadow_error = runtime_writer
@@ -487,7 +558,76 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
         "SECURITY DEFINER lookup was redirected through pg_temp"
     );
 
-    for relation in ["atomic_excisions", "atomic_future_extension"] {
+    // The manifest table deliberately relies on an invoker trigger for the
+    // generation/state binding that PostgreSQL cannot express as a foreign
+    // key. Populate a complete counterfeit view in pg_temp. An unpinned
+    // trigger would accept this direct insert; the repaired trigger must read
+    // the real empty generation and reject it.
+    let durable_lineage: String = roles
+        .admin
+        .query_one(
+            "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
+            &[&shadow_database],
+        )
+        .unwrap()
+        .get(0);
+    let forged_tx = vec![0x41_u8; 32];
+    let forged_state = vec![0x42_u8; 32];
+    runtime_writer
+        .execute(
+            "INSERT INTO atomic_databases VALUES ($1, $2)",
+            &[&shadow_database, &durable_lineage],
+        )
+        .unwrap();
+    runtime_writer
+        .execute(
+            "INSERT INTO atomic_generation_transactions \
+                 (database_id, generation, basis_t, tx_hash, state_hash) \
+             VALUES ($1, 1, 1, $2, $3)",
+            &[&shadow_database, &forged_tx, &forged_state],
+        )
+        .unwrap();
+    runtime_writer
+        .execute(
+            "INSERT INTO atomic_heads (database_id, log_generation, basis_t) \
+             VALUES ($1, 1, 1)",
+            &[&shadow_database],
+        )
+        .unwrap();
+    let forged_manifest = vec![0x43_u8; 32];
+    let forged_payload = vec![0x01_u8];
+    let trigger_error = runtime_writer
+        .execute(
+            "INSERT INTO atomic_tree_manifests \
+                 (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+                  excision_generation, eidx_frontier, manifest_version, manifest_hash, \
+                  payload, log_generation, lineage_id) \
+             VALUES ($1, 1, 1, $2, $3, 1, 1000, 4, $4, $5, 1, $6)",
+            &[
+                &shadow_database,
+                &forged_tx,
+                &forged_state,
+                &forged_manifest,
+                &forged_payload,
+                &durable_lineage,
+            ],
+        )
+        .unwrap_err();
+    let trigger_database_error = trigger_error
+        .as_db_error()
+        .expect("invoker validation trigger returned a PostgreSQL error");
+    assert_eq!(trigger_database_error.code().code(), "23503");
+    assert!(
+        trigger_database_error
+            .message()
+            .contains("complete lineage build"),
+        "invoker trigger did not validate against the durable Atomic schema"
+    );
+
+    for relation in [
+        "atomic_log_generation_collection_progress",
+        "atomic_future_extension",
+    ] {
         let retained: bool = roles
             .admin
             .query_one(
@@ -516,6 +656,61 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
     assert_eq!(
         grant_matrix(&mut roles.admin, &writer, COLUMN_PRIVILEGES, true),
         expected_column_grants(&writer_expected)
+    );
+    assert_eq!(
+        executable_definer_functions(&mut roles.admin, &peer),
+        PEER_FUNCTIONS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    );
+    assert_eq!(
+        executable_definer_functions(&mut roles.admin, &writer),
+        WRITER_FUNCTIONS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    );
+    let expected_path = format!("{}, pg_catalog, pg_temp", _schema.name);
+    let definer_paths = roles
+        .admin
+        .query(
+            "SELECT p.proname::text, \
+                    (SELECT option_value FROM pg_options_to_table(p.proconfig) \
+                      WHERE option_name = 'search_path') \
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = current_schema() AND p.prosecdef \
+                AND p.proname LIKE 'atomic\\_%' ESCAPE '\\'",
+            &[],
+        )
+        .unwrap();
+    assert!(!definer_paths.is_empty());
+    assert!(
+        definer_paths
+            .iter()
+            .all(|row| row.get::<_, Option<String>>(1).as_deref() == Some(&expected_path))
+    );
+    let routine_paths = roles
+        .admin
+        .query(
+            "SELECT p.prosecdef, \
+                    (SELECT option_value FROM pg_options_to_table(p.proconfig) \
+                      WHERE option_name = 'search_path') \
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = current_schema() \
+                AND p.proname LIKE 'atomic\\_%' ESCAPE '\\'",
+            &[],
+        )
+        .unwrap();
+    assert!(!routine_paths.is_empty());
+    assert!(
+        routine_paths.iter().any(|row| !row.get::<_, bool>(0)),
+        "fixture must include SECURITY INVOKER routines"
+    );
+    assert!(
+        routine_paths
+            .iter()
+            .all(|row| row.get::<_, Option<String>>(1).as_deref() == Some(&expected_path))
     );
     assert!(writable_schemas(&mut roles.admin, &peer).is_empty());
     assert!(writable_schemas(&mut roles.admin, &writer).is_empty());

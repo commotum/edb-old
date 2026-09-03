@@ -604,8 +604,7 @@ impl PostgresTreeStore {
                     format!("database {} does not exist", manifest.database_id),
                 )
             })?;
-        let manifest_lineage =
-            (manifest.excision_generation > 0).then_some(lineage_id.as_str());
+        let manifest_lineage = (manifest.excision_generation > 0).then_some(lineage_id.as_str());
         let mut transaction = self
             .client
             .transaction()
@@ -972,8 +971,10 @@ impl PostgresTreeStore {
     }
 
     /// Advance one already-visible publication's derived liveness by at most
-    /// one fixed batch. `true` means the fold is sealed (or was already
-    /// sealed); `false` means another bounded call remains.
+    /// one fixed batch. `true` means the fold is now sealed as the current
+    /// live set. `false` means either another bounded call remains or this
+    /// manifest was already sealed and subsequently superseded; callers that
+    /// resume work select manifests from the durable delta-header ledger.
     pub fn advance_publication_work(
         &mut self,
         manifest_hash: Digest,

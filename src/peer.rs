@@ -640,7 +640,7 @@ impl PostgresIndexer {
             let (previous, base_projection, old_cache) = selection
                 .usable
                 .expect("incremental eligibility requires a usable predecessor");
-            let tail = load_authenticated_index_tail(
+            let authenticated_tail = load_authenticated_index_tail(
                 &mut transaction,
                 &self.database_id,
                 excision_generation,
@@ -649,6 +649,14 @@ impl PostgresIndexer {
                 basis_t,
                 tx_hash,
             )?;
+            let tail = authenticated_tail
+                .iter()
+                .map(|(_, transaction)| transaction.clone())
+                .collect::<Vec<_>>();
+            let tail_hashes = authenticated_tail
+                .iter()
+                .map(|(hash, _)| *hash)
+                .collect::<Vec<_>>();
             let endpoint_projection = base_projection.apply(&tail)?;
             let eidx_frontier = tail.last().map_or(previous.eidx_frontier, |transaction| {
                 transaction.eidx_frontier
@@ -658,6 +666,7 @@ impl PostgresIndexer {
                 &mut self.tree_store,
                 &previous,
                 &tail,
+                &tail_hashes,
                 &base_projection,
                 endpoint_projection,
                 eidx_frontier,
@@ -834,6 +843,81 @@ fn build_initial_native(
     })
 }
 
+/// Prepare the derived tree for an inactive log generation without exposing
+/// its root. The caller deliberately keeps this store's build-intent session
+/// pin through log activation and root-last tree publication.
+pub(crate) fn stage_full_generation_tree(
+    store: &mut PostgresTreeStore,
+    database_id: &str,
+    log_generation: u64,
+    tx_hash: Digest,
+    state_hash: Digest,
+    database: &Database,
+) -> Result<Digest, SemanticError> {
+    let expected_revision = store.current_publication_revision(database_id)?;
+    let publication_revision = expected_revision.checked_add(1).ok_or_else(|| {
+        SemanticError::new(
+            ErrorCategory::Unsupported,
+            "tree/publication-revision-exhausted",
+            "persistent tree publication revision is exhausted",
+        )
+    })?;
+    let build = build_initial_native(database, &TreeConfig::default())?;
+    let manifest = PersistentTreeManifest {
+        database_id: database_id.to_owned(),
+        publication_revision,
+        basis_t: database.basis_t(),
+        tx_hash,
+        state_hash,
+        excision_generation: log_generation,
+        eidx_frontier: build.eidx_frontier,
+        trees: build.trees,
+    };
+    let payload = manifest.encode()?;
+    let manifest_hash = sha256(&payload);
+    let record = TreeManifestRecord {
+        database_id: database_id.to_owned(),
+        publication_revision,
+        basis_t: manifest.basis_t,
+        tx_hash,
+        state_hash,
+        excision_generation: log_generation,
+        eidx_frontier: manifest.eidx_frontier,
+        manifest_hash,
+        payload,
+        roots: manifest
+            .trees
+            .iter()
+            .map(|tree| TreeRootBinding {
+                order: tree.descriptor.order,
+                history: tree.descriptor.history,
+                root_hash: tree.descriptor.root_hash,
+                datom_count: tree.descriptor.count,
+                encoded_bytes: tree.root_bytes,
+            })
+            .collect(),
+    };
+    let upload_hashes = build.nodes.iter().map(|(hash, _)| *hash).collect();
+    store.begin_build_intent(
+        database_id,
+        log_generation,
+        expected_revision,
+        manifest_hash,
+        &upload_hashes,
+    )?;
+    let staged = (|| {
+        for (hash, bytes) in build.nodes.iter() {
+            store.insert_node(*hash, bytes)?;
+        }
+        store.stage_manifest_with_delta(&record, expected_revision, &build.publication_delta)
+    })();
+    if let Err(error) = staged {
+        store.release_build_intent()?;
+        return Err(error);
+    }
+    Ok(manifest_hash)
+}
+
 struct NativeManifestSelection {
     newest_observed_revision: u64,
     newest_live_complete: bool,
@@ -991,7 +1075,7 @@ fn load_authenticated_index_tail<C: GenericClient>(
     base_hash: Digest,
     target_t: u64,
     target_hash: Digest,
-) -> Result<Vec<DurableTransaction>, SemanticError> {
+) -> Result<Vec<(Digest, DurableTransaction)>, SemanticError> {
     if base_t > target_t {
         return Err(fault(
             "index/tree-base-ahead",
@@ -1013,7 +1097,10 @@ fn load_authenticated_index_tail<C: GenericClient>(
             "tree base plus authenticated tail does not reach the captured head",
         ));
     }
-    Ok(rows.into_iter().map(|row| row.transaction).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.tx_hash, row.transaction))
+        .collect())
 }
 
 #[derive(Clone)]
@@ -1030,6 +1117,7 @@ fn build_incremental_native(
     store: &mut PostgresTreeStore,
     previous: &PersistentTreeManifest,
     tail: &[DurableTransaction],
+    tail_hashes: &[Digest],
     base_projection: &MetadataProjection,
     endpoint_projection: MetadataProjection,
     eidx_frontier: u64,
@@ -1042,11 +1130,11 @@ fn build_incremental_native(
         hard_datoms: u64::MAX,
         hard_bytes: u64::MAX,
     };
-    let recent = RecentTier::new(
+    let recent = RecentTier::new_authenticated(
         previous.database_id.clone(),
         previous.basis_t,
         previous.tx_hash,
-        tail.iter().cloned(),
+        tail_hashes.iter().copied().zip(tail.iter().cloned()),
         endpoint_projection.endpoint(),
         limits,
     )?;
@@ -2101,10 +2189,21 @@ impl RootPinManager {
         let mut state = lock(&self.state);
         self.ensure_locked(&mut state)?;
         if !state.counts.contains_key(&manifest_hash) {
-            acquire_root_pin(
+            if let Err(error) = acquire_root_pin(
                 state.client.as_mut().expect("root pin session was ensured"),
                 manifest_hash,
-            )?;
+            ) {
+                // The server may have accepted the session lock before a
+                // later verification statement failed. Discarding the whole
+                // session is the only unconditional way to release an
+                // advisory lock whose stack depth is now uncertain.
+                state.client = None;
+                // Existing immutable values may already own counted pins on
+                // this manager. Re-establish those locks before returning the
+                // new acquisition error whenever PostgreSQL is reachable.
+                let _ = self.reconnect_locked(&mut state);
+                return Err(error);
+            }
         }
         *state.counts.entry(manifest_hash).or_default() += 1;
         drop(state);
@@ -2121,11 +2220,15 @@ impl RootPinManager {
         let mut state = lock(&self.state);
         self.ensure_locked(&mut state)?;
         if !state.generation_counts.contains_key(&generation) {
-            acquire_generation_pin(
+            if let Err(error) = acquire_generation_pin(
                 state.client.as_mut().expect("root pin session was ensured"),
                 &self.database_id,
                 generation,
-            )?;
+            ) {
+                state.client = None;
+                let _ = self.reconnect_locked(&mut state);
+                return Err(error);
+            }
         }
         *state.generation_counts.entry(generation).or_default() += 1;
         drop(state);
@@ -2259,17 +2362,21 @@ fn acquire_generation_pin(
     client
         .query_one("SELECT pg_advisory_lock_shared($1)", &[&key])
         .map_err(|error| postgres_error("peer/generation-pin-acquire", error))?;
-    let available: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM atomic_heads \
+    let available: bool = match client.query_one(
+        "SELECT EXISTS (SELECT 1 FROM atomic_heads \
                               WHERE database_id = $1 AND log_generation = $2) \
                     OR EXISTS (SELECT 1 FROM atomic_log_generation_retirements \
                                 WHERE database_id = $1 AND generation = $2 \
                                   AND collecting_at IS NULL)",
-            &[&database_id, &generation_sql],
-        )
-        .map_err(|error| postgres_error("peer/generation-pin-verify", error))?
-        .get(0);
+        &[&database_id, &generation_sql],
+    ) {
+        Ok(row) => row.get(0),
+        Err(error) => {
+            let error = postgres_error("peer/generation-pin-verify", error);
+            let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
+            return Err(error);
+        }
+    };
     if !available {
         let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
         return Err(fault(
@@ -2290,21 +2397,23 @@ fn acquire_root_pin(client: &mut Client, manifest_hash: Digest) -> Result<(), Se
     // Close the load-versus-GC race. If GC obtained the exclusive lock first,
     // this SELECT runs after its commit and refuses to expose a state whose
     // publication has just been retired.
-    let published: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications \
+    let key = tree_manifest_advisory_key(&manifest_hash);
+    let published: bool = match client.query_one(
+        "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications \
                             WHERE manifest_hash = $1) \
                     AND NOT EXISTS (SELECT 1 FROM atomic_tree_retirement_progress \
                                     WHERE manifest_hash = $1)",
-            &[&&manifest_hash[..]],
-        )
-        .map_err(|error| postgres_error("peer/root-pin-verify", error))?
-        .get(0);
+        &[&&manifest_hash[..]],
+    ) {
+        Ok(row) => row.get(0),
+        Err(error) => {
+            let error = postgres_error("peer/root-pin-verify", error);
+            let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
+            return Err(error);
+        }
+    };
     if !published {
-        let _ = client.query_one(
-            "SELECT pg_advisory_unlock_shared($1)",
-            &[&tree_manifest_advisory_key(&manifest_hash)],
-        );
+        let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
         return Err(fault(
             "peer/root-retired-during-load",
             "tree publication retired before the immutable peer value was pinned",
@@ -2517,15 +2626,16 @@ impl Peer {
             let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
             let AuthenticatedTail {
                 transactions,
+                transaction_hashes,
                 end_hash,
                 end_state_hash,
                 eidx_frontier,
             } = tail;
-            let recent = Arc::new(RecentTier::new(
+            let recent = Arc::new(RecentTier::new_authenticated(
                 &database_id,
                 base.manifest.basis_t,
                 base.manifest.tx_hash,
-                transactions,
+                transaction_hashes.into_iter().zip(transactions),
                 metadata.endpoint(),
                 recent_limits,
             )?);
@@ -2999,11 +3109,11 @@ impl Peer {
         let base_metadata = Arc::clone(&tree_base.metadata);
         let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
         let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
-        let recent = Arc::new(RecentTier::new(
+        let recent = Arc::new(RecentTier::new_authenticated(
             &self.core.database_id,
             tree_base.manifest.basis_t,
             tree_base.manifest.tx_hash,
-            tail.transactions,
+            tail.transaction_hashes.into_iter().zip(tail.transactions),
             metadata.endpoint(),
             self.core.recent_limits,
         )?);
@@ -3046,9 +3156,13 @@ impl Peer {
         let metadata = Arc::new(state.metadata.apply(&tail.transactions)?);
         let mut avet_unready = (*state.avet_unready).clone();
         avet_unready.extend(state.metadata.avet_unready_after(&metadata));
-        let recent = state
-            .recent
-            .extend(tail.transactions.iter().cloned(), metadata.endpoint())?;
+        let recent = state.recent.extend_authenticated(
+            tail.transaction_hashes
+                .iter()
+                .copied()
+                .zip(tail.transactions.iter().cloned()),
+            metadata.endpoint(),
+        )?;
         let mut successor = (*state).clone();
         successor.basis_t = target;
         successor.eidx_frontier = tail.eidx_frontier;
@@ -3238,11 +3352,11 @@ impl Peer {
             }
             let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
             let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
-            let recent = Arc::new(RecentTier::new(
+            let recent = Arc::new(RecentTier::new_authenticated(
                 &self.core.database_id,
                 base.manifest.basis_t,
                 base.manifest.tx_hash,
-                tail.transactions,
+                tail.transaction_hashes.into_iter().zip(tail.transactions),
                 metadata.endpoint(),
                 self.core.recent_limits,
             )?);
@@ -4362,6 +4476,7 @@ fn load_latest_tree_base<C: GenericClient>(
 
 struct AuthenticatedTail {
     transactions: Vec<DurableTransaction>,
+    transaction_hashes: Vec<Digest>,
     end_hash: Digest,
     end_state_hash: Digest,
     eidx_frontier: u64,
@@ -4402,6 +4517,7 @@ fn read_authenticated_tail<C: GenericClient>(
         base_hash,
     )?;
     let mut transactions = Vec::with_capacity(rows.len());
+    let mut transaction_hashes = Vec::with_capacity(rows.len());
     for row in rows {
         let state_hash = row.state_hash;
         if state_hash == [0; 32] {
@@ -4420,10 +4536,12 @@ fn read_authenticated_tail<C: GenericClient>(
         eidx_frontier = transaction.eidx_frontier;
         end_hash = row.tx_hash;
         end_state_hash = state_hash;
+        transaction_hashes.push(row.tx_hash);
         transactions.push(transaction);
     }
     Ok(AuthenticatedTail {
         transactions,
+        transaction_hashes,
         end_hash,
         end_state_hash,
         eidx_frontier,

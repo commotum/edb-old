@@ -1,14 +1,16 @@
 use atomic_core::{
-    Attribute, Cardinality, DB_FN, DB_IDENT, Digest, EntityRef, IndexBuildFault, IndexOrder,
-    IndexSegment, Instruction, Keyword, MAX_TREE_BUILD_INTENT_NODES_PER_GC,
-    MAX_TREE_RETIREMENT_NODES_PER_GC, Peer, PersistentTreeManifest, PostgresIndexer,
-    PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramKind,
-    RECOMMENDED_GARBAGE_COLLECTION_AGE, Schema, TreeManifestRecord, TreePublicationDelta,
-    TreePublishOutcome, TreeRootBinding, TxOp, TxValue, USER_PARTITION, Value, ValueType, View,
-    encode_index_segment, encode_program, make_eid, sha256,
+    Attribute, Cardinality, DB_EXCISE, DB_FN, DB_IDENT, Digest, EntityRef, ExcisionFault,
+    GarbageInventory, IndexBuildFault, IndexOrder, IndexSegment, Instruction, Keyword,
+    MAX_LOG_GENERATION_ROWS_PER_GC, MAX_TREE_BUILD_INTENT_NODES_PER_GC,
+    MAX_TREE_RETIREMENT_NODES_PER_GC, Peer, PersistentTreeManifest, PortableBackup,
+    PostgresIndexer, PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramKind,
+    RECOMMENDED_GARBAGE_COLLECTION_AGE, RestoreFault, Schema, TreeManifestRecord,
+    TreePublicationDelta, TreePublishOutcome, TreeRootBinding, TxOp, TxValue, USER_PARTITION,
+    Value, ValueType, View, encode_index_segment, encode_program, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::collections::BTreeSet;
+use std::fs;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -35,6 +37,30 @@ fn unique(prefix: &str) -> String {
     )
 }
 
+fn isolated_catalog(connection: &str, label: &str) -> String {
+    let schema = unique(label);
+    assert!(
+        schema
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    );
+    let mut client = Client::connect(connection, NoTls).unwrap();
+    client
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .unwrap();
+    let scoped = if connection.trim_start().starts_with("postgres://")
+        || connection.trim_start().starts_with("postgresql://")
+    {
+        let separator = if connection.contains('?') { '&' } else { '?' };
+        format!("{connection}{separator}options=-csearch_path%3D{schema}")
+    } else {
+        format!("{connection} options='-c search_path={schema}'")
+    };
+    let mut migrator = atomic_core::PostgresMigrator::connect(&scoped).unwrap();
+    migrator.migrate().unwrap();
+    scoped
+}
+
 fn unique_long() -> i64 {
     (SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -54,6 +80,46 @@ fn schema() -> Schema {
         ))
         .unwrap();
     schema
+}
+
+fn assert_same_information(left: &atomic_core::Database, right: &atomic_core::Database) {
+    assert_eq!(left.basis_t(), right.basis_t());
+    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
+    assert_eq!(left.schema(), right.schema());
+    assert_eq!(
+        left.datoms(View::Current, IndexOrder::Eavt),
+        right.datoms(View::Current, IndexOrder::Eavt)
+    );
+    assert_eq!(
+        left.datoms(View::History, IndexOrder::Eavt),
+        right.datoms(View::History, IndexOrder::Eavt)
+    );
+}
+
+fn provision_generation_zero_database(
+    connection: &str,
+    store: &mut PostgresStore,
+    database_id: &str,
+) {
+    // New catalogs correctly start in the native positive-generation format.
+    // This owner-level fixture recreates the supported upgrade shape: an
+    // existing v13 catalog row and basis-zero head that migration 14 leaves as
+    // generation zero until its first COW activation.
+    let donor = unique("generation_zero_donor");
+    store.create_database(&donor, Schema::new()).unwrap();
+    let mut raw = Client::connect(connection, NoTls).unwrap();
+    raw.execute(
+        "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) \
+         SELECT $1, genesis, genesis_hash FROM atomic_databases WHERE database_id = $2",
+        &[&database_id, &donor],
+    )
+    .unwrap();
+    raw.execute(
+        "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) \
+         SELECT $1, 0, genesis_hash, 0 FROM atomic_databases WHERE database_id = $1",
+        &[&database_id],
+    )
+    .unwrap();
 }
 
 fn add(value: i64) -> TxOp {
@@ -122,13 +188,27 @@ fn republish_with_forged_old_timestamp(connection: &str, database_id: &str) -> T
     drop(trees);
 
     let mut client = Client::connect(connection, NoTls).unwrap();
+    let manifest_lineage = if successor.excision_generation > 0 {
+        Some(
+            client
+                .query_one(
+                    "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
+                    &[&successor.database_id],
+                )
+                .unwrap()
+                .get::<_, String>(0),
+        )
+    } else {
+        None
+    };
     let mut transaction = client.transaction().unwrap();
     transaction
         .execute(
             "INSERT INTO atomic_tree_manifests \
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
-                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9)",
+                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
+                log_generation, lineage_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11)",
             &[
                 &successor.database_id,
                 &(successor.publication_revision as i64),
@@ -139,6 +219,8 @@ fn republish_with_forged_old_timestamp(connection: &str, database_id: &str) -> T
                 &(successor.eidx_frontier as i64),
                 &&successor.manifest_hash[..],
                 &&successor.payload[..],
+                &(successor.excision_generation as i64),
+                &manifest_lineage,
             ],
         )
         .unwrap();
@@ -180,14 +262,16 @@ fn republish_with_forged_old_timestamp(connection: &str, database_id: &str) -> T
     transaction
         .execute(
             "INSERT INTO atomic_tree_publications \
-                   (database_id, publication_revision, basis_t, tx_hash, manifest_hash, published_at) \
-             VALUES ($1, $2, $3, $4, $5, clock_timestamp() - interval '31 days')",
+                   (database_id, publication_revision, basis_t, tx_hash, manifest_hash, \
+                    published_at, log_generation) \
+             VALUES ($1, $2, $3, $4, $5, clock_timestamp() - interval '31 days', $6)",
             &[
                 &successor.database_id,
                 &(successor.publication_revision as i64),
                 &(successor.basis_t as i64),
                 &&successor.tx_hash[..],
                 &&successor.manifest_hash[..],
+                &(successor.excision_generation as i64),
             ],
         )
         .unwrap();
@@ -202,6 +286,163 @@ fn pin_application_name(database_id: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!("atomic-pin-{suffix}")
+}
+
+fn inventory_has_work(inventory: &GarbageInventory) -> bool {
+    !inventory.segment_hashes.is_empty()
+        || !inventory.program_hashes.is_empty()
+        || !inventory.tree_publications.is_empty()
+        || !inventory.tree_build_intents.is_empty()
+        || !inventory.tree_manifest_hashes.is_empty()
+        || !inventory.tree_node_hashes.is_empty()
+        || !inventory.log_generations.is_empty()
+}
+
+fn apply_exact_inventory(operator: &mut PostgresOperator, dry: &GarbageInventory) {
+    let mut expected = dry.clone();
+    expected.applied = true;
+    assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+}
+
+fn preview_next_tree_build_intent(
+    operator: &mut PostgresOperator,
+    database_id: &str,
+    manifest_hash: Digest,
+) -> GarbageInventory {
+    for attempt in 0..4_096 {
+        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        if dry.tree_build_intents.iter().any(|candidate| {
+            candidate.database_id == database_id && candidate.manifest_hash == manifest_hash
+        }) {
+            return dry;
+        }
+        assert!(
+            inventory_has_work(&dry),
+            "target build intent is not eligible and no unrelated work can advance it: \
+             database={database_id}, manifest={manifest_hash:?}, attempt={attempt}, \
+             inventory={dry:?}"
+        );
+        apply_exact_inventory(operator, &dry);
+    }
+    panic!(
+        "target build intent did not become collectible after 4096 exact GC steps: \
+         database={database_id}, manifest={manifest_hash:?}"
+    );
+}
+
+fn drain_tree_build_intents_for_database(
+    operator: &mut PostgresOperator,
+    client: &mut Client,
+    database_id: &str,
+) {
+    for attempt in 0..4_096 {
+        let remaining: i64 = client
+            .query_one(
+                "SELECT count(*) FROM atomic_tree_build_intents WHERE database_id = $1",
+                &[&database_id],
+            )
+            .unwrap()
+            .get(0);
+        if remaining == 0 {
+            return;
+        }
+        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        assert!(
+            inventory_has_work(&dry),
+            "database still has {remaining} build intent(s), but no GC work is eligible: \
+             database={database_id}, attempt={attempt}, inventory={dry:?}"
+        );
+        apply_exact_inventory(operator, &dry);
+    }
+    let remaining: i64 = client
+        .query_one(
+            "SELECT count(*) FROM atomic_tree_build_intents WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    panic!(
+        "database still has {remaining} build intent(s) after 4096 exact GC steps: \
+         database={database_id}"
+    );
+}
+
+fn preview_next_tree_retirement(
+    operator: &mut PostgresOperator,
+    database_id: &str,
+    publication_revision: u64,
+) -> GarbageInventory {
+    for _ in 0..4_096 {
+        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        if dry.tree_publications.iter().any(|candidate| {
+            candidate.database_id == database_id
+                && candidate.publication_revision == publication_revision
+        }) {
+            return dry;
+        }
+        assert!(
+            inventory_has_work(&dry),
+            "target retirement is not eligible and no unrelated work can advance it: \
+             database={database_id}, revision={publication_revision}, inventory={dry:?}"
+        );
+        apply_exact_inventory(operator, &dry);
+    }
+    panic!("target tree retirement did not become collectible");
+}
+
+fn preview_next_log_generation(
+    operator: &mut PostgresOperator,
+    database_id: &str,
+    generation: u64,
+) -> GarbageInventory {
+    preview_next_log_generation_at_age(operator, database_id, generation, Duration::ZERO)
+}
+
+fn preview_next_log_generation_at_age(
+    operator: &mut PostgresOperator,
+    database_id: &str,
+    generation: u64,
+    minimum_age: Duration,
+) -> GarbageInventory {
+    for _ in 0..8_192 {
+        let dry = operator.garbage_inventory(minimum_age).unwrap();
+        if dry.log_generations.iter().any(|candidate| {
+            candidate.database_id == database_id && candidate.generation == generation
+        }) {
+            return dry;
+        }
+        assert!(
+            inventory_has_work(&dry),
+            "target log generation is not eligible and no unrelated work can advance it: \
+             database={database_id}, generation={generation}, inventory={dry:?}"
+        );
+        let mut expected = dry.clone();
+        expected.applied = true;
+        assert_eq!(operator.collect_garbage(minimum_age).unwrap(), expected);
+    }
+    panic!("target log generation did not become collectible");
+}
+
+fn collect_log_generation_to_completion(
+    operator: &mut PostgresOperator,
+    database_id: &str,
+    generation: u64,
+) {
+    for _ in 0..128 {
+        let dry = preview_next_log_generation(operator, database_id, generation);
+        let complete = dry.log_generations.iter().any(|candidate| {
+            candidate.database_id == database_id
+                && candidate.generation == generation
+                && candidate.is_complete
+        });
+        let mut expected = dry.clone();
+        expected.applied = true;
+        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+        if complete {
+            return;
+        }
+    }
+    panic!("target log generation collection did not converge");
 }
 
 #[test]
@@ -350,6 +591,641 @@ fn gc_reclaims_proven_unreferenced_values_but_retains_untracked_legacy_segments(
 }
 
 #[test]
+fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("gc_log_generation");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    provision_generation_zero_database(&connection, &mut store, &database_id);
+    let service = common::start_service(&connection, &database_id);
+    let schema_ops = schema()
+        .attributes()
+        .cloned()
+        .map(TxOp::InstallAttribute)
+        .collect::<Vec<_>>();
+    let installed = common::transact(
+        &service,
+        "generation-gc-install-schema",
+        0,
+        &schema_ops,
+        500,
+    );
+    let seeded = common::transact(
+        &service,
+        "generation-gc-seed",
+        installed.basis_t,
+        &[add(unique_long())],
+        1_000,
+    );
+    let requested = common::transact(
+        &service,
+        "generation-gc-excision",
+        seeded.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("generation-gc-request".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(42))),
+        }],
+        2_000,
+    );
+    service.shutdown();
+
+    // This immutable value has no tree root, so its generation session pin is
+    // the only thing standing between a lazy reader and retired log bytes.
+    let peer = Peer::connect(&connection, &database_id, 0).unwrap();
+    let old_snapshot = peer.snapshot();
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    let receipt = operator.process_excision_requests(&database_id).unwrap();
+    assert_eq!(receipt.source_generation, 0);
+    assert_eq!(receipt.basis_t, requested.basis_t);
+
+    let mut raw = Client::connect(&connection, NoTls).unwrap();
+    let legacy_endpoint = raw
+        .query_one(
+            "SELECT basis_t, tx_hash FROM atomic_transactions \
+              WHERE database_id = $1 ORDER BY basis_t DESC LIMIT 1",
+            &[&database_id],
+        )
+        .unwrap();
+    let legacy_basis: i64 = legacy_endpoint.get(0);
+    let legacy_tx_hash: Vec<u8> = legacy_endpoint.get(1);
+    let legacy_manifest_payload = vec![0x5a; 64];
+    let legacy_manifest_hash = sha256(&legacy_manifest_payload);
+    raw.execute(
+        "INSERT INTO atomic_index_manifests \
+                (database_id, basis_t, tx_hash, manifest_hash, payload) \
+         VALUES ($1, $2, $3, $4, $5)",
+        &[
+            &database_id,
+            &legacy_basis,
+            &legacy_tx_hash,
+            &&legacy_manifest_hash[..],
+            &legacy_manifest_payload,
+        ],
+    )
+    .unwrap();
+    raw.execute(
+        "INSERT INTO atomic_index_publications \
+                (database_id, basis_t, tx_hash, manifest_hash) \
+         VALUES ($1, $2, $3, $4)",
+        &[
+            &database_id,
+            &legacy_basis,
+            &legacy_tx_hash,
+            &&legacy_manifest_hash[..],
+        ],
+    )
+    .unwrap();
+
+    // A large exact reference ledger exercises the wrapper's fixed batch,
+    // without manufacturing hundreds of authoritative transactions.
+    let programs = (0..MAX_LOG_GENERATION_ROWS_PER_GC + 1)
+        .map(|ordinal| Program {
+            kind: ProgramKind::Query,
+            arity: 0,
+            instructions: vec![
+                Instruction::PushConstant(Value::Long(ordinal as i64)),
+                Instruction::Return,
+            ],
+        })
+        .map(|program| encode_program(&program).unwrap())
+        .map(|payload| (sha256(&payload), payload))
+        .collect::<Vec<_>>();
+    let program_hashes = programs
+        .iter()
+        .map(|(hash, _)| hash.to_vec())
+        .collect::<Vec<_>>();
+    let program_payloads = programs
+        .iter()
+        .map(|(_, payload)| payload.clone())
+        .collect::<Vec<_>>();
+    raw.execute(
+        "INSERT INTO atomic_programs (program_hash, kind, arity, payload) \
+         SELECT program_hash, 2, 0, payload \
+           FROM unnest($1::bytea[], $2::bytea[]) AS values(program_hash, payload) \
+         ON CONFLICT DO NOTHING",
+        &[&program_hashes, &program_payloads],
+    )
+    .unwrap();
+    raw.execute(
+        "INSERT INTO atomic_program_generation_refs \
+                (database_id, log_generation, program_hash) \
+         SELECT $1, 0, program_hash FROM unnest($2::bytea[]) AS program_hash \
+         ON CONFLICT DO NOTHING",
+        &[&database_id, &program_hashes],
+    )
+    .unwrap();
+
+    assert!(
+        operator
+            .garbage_inventory(Duration::ZERO)
+            .unwrap()
+            .log_generations
+            .iter()
+            .all(|candidate| candidate.database_id != database_id)
+    );
+    assert_eq!(
+        old_snapshot
+            .database_value()
+            .values(user(42), ITEM_VALUE)
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(old_snapshot);
+    drop(peer);
+    assert!(
+        operator
+            .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+            .unwrap()
+            .log_generations
+            .iter()
+            .all(|candidate| candidate.database_id != database_id)
+    );
+
+    let first = preview_next_log_generation(&mut operator, &database_id, 0);
+    let first_candidate = first
+        .log_generations
+        .iter()
+        .find(|candidate| candidate.database_id == database_id && candidate.generation == 0)
+        .unwrap();
+    assert_eq!(
+        (
+            first_candidate.collection_phase,
+            first_candidate.rows_removed,
+            first_candidate.is_complete,
+        ),
+        (0, 1, false)
+    );
+    let mut expected_first = first.clone();
+    expected_first.applied = true;
+    assert_eq!(
+        operator.collect_garbage(Duration::ZERO).unwrap(),
+        expected_first
+    );
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_index_publications WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_index_manifests WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    assert!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_transactions WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get::<_, i64>(0)
+            > 0
+    );
+
+    // A new operator process resumes from the durable phase row; no
+    // in-memory cursor participates in collection correctness. Once the
+    // first phase has claimed the generation and closed new readers, changing
+    // back to the normal retention policy cannot strand the durable cursor.
+    drop(operator);
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    let resumed_at_normal_age = preview_next_log_generation_at_age(
+        &mut operator,
+        &database_id,
+        0,
+        RECOMMENDED_GARBAGE_COLLECTION_AGE,
+    );
+    apply_exact_inventory(&mut operator, &resumed_at_normal_age);
+    let mut phase_five_batches = Vec::new();
+    let mut completed = false;
+    for _ in 0..64 {
+        let dry = preview_next_log_generation(&mut operator, &database_id, 0);
+        let candidate = dry
+            .log_generations
+            .iter()
+            .find(|candidate| candidate.database_id == database_id && candidate.generation == 0)
+            .unwrap()
+            .clone();
+        if candidate.collection_phase < 4
+            || (candidate.collection_phase == 4 && candidate.rows_removed == 0)
+        {
+            assert!(
+                raw.query_one(
+                    "SELECT count(*) FROM atomic_transactions WHERE database_id = $1",
+                    &[&database_id],
+                )
+                .unwrap()
+                .get::<_, i64>(0)
+                    > 0,
+                "legacy transactions outlived their flat-index prerequisites"
+            );
+        }
+        if candidate.collection_phase == 5 && candidate.rows_removed > 0 {
+            phase_five_batches.push(candidate.rows_removed);
+        }
+        let mut expected = dry.clone();
+        expected.applied = true;
+        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+        if candidate.is_complete {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed);
+    assert_eq!(
+        phase_five_batches,
+        vec![MAX_LOG_GENERATION_ROWS_PER_GC as u64, 1]
+    );
+    for table in [
+        "atomic_index_publications",
+        "atomic_index_manifests",
+        "atomic_requests",
+        "atomic_transactions",
+        "atomic_program_generation_refs",
+        "atomic_log_generation_retirements",
+    ] {
+        let count: i64 = raw
+            .query_one(
+                &format!("SELECT count(*) FROM {table} WHERE database_id = $1"),
+                &[&database_id],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 0, "{table} retained generation-zero rows");
+    }
+    assert_eq!(
+        store.recover(&database_id).unwrap().basis_t(),
+        receipt.basis_t
+    );
+}
+
+#[test]
+fn retired_generation_collection_preserves_shared_atlc_content() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("gc_shared_atlc");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&database_id, schema()).unwrap();
+    let service = common::start_service(&connection, &database_id);
+    let seeded = common::transact(
+        &service,
+        "shared-atlc-seed",
+        created.basis_t(),
+        &[
+            add(unique_long()),
+            TxOp::Add {
+                entity: EntityRef::Id(user(43)),
+                attribute: ITEM_VALUE,
+                value: TxValue::Scalar(Value::Long(unique_long())),
+            },
+        ],
+        1_000,
+    );
+    let first_request = common::transact(
+        &service,
+        "shared-atlc-first-excision",
+        seeded.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("shared-atlc-first-request".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(42))),
+        }],
+        2_000,
+    );
+    service.shutdown();
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    let first = operator.process_excision_requests(&database_id).unwrap();
+    assert_eq!(first.basis_t, first_request.basis_t);
+
+    let service = common::start_service(&connection, &database_id);
+    let second_request = common::transact(
+        &service,
+        "shared-atlc-second-excision",
+        first.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("shared-atlc-second-request".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(43))),
+        }],
+        3_000,
+    );
+    service.shutdown();
+    let old_peer = Peer::connect(&connection, &database_id, 0).unwrap();
+    let old_snapshot = old_peer.snapshot();
+    let second = operator.process_excision_requests(&database_id).unwrap();
+    assert_eq!(second.source_generation, first.generation);
+    assert_eq!(second.basis_t, second_request.basis_t);
+
+    let mut raw = Client::connect(&connection, NoTls).unwrap();
+    let shared_hash: Vec<u8> = raw
+        .query_one(
+            "SELECT old.content_hash \
+               FROM atomic_generation_transactions old \
+               JOIN atomic_generation_transactions new \
+                 ON new.content_hash = old.content_hash \
+              WHERE old.database_id = $1 AND old.generation = $2 \
+                AND new.database_id = $1 AND new.generation = $3 \
+              ORDER BY old.content_hash LIMIT 1",
+            &[
+                &database_id,
+                &(first.generation as i64),
+                &(second.generation as i64),
+            ],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        operator
+            .garbage_inventory(Duration::ZERO)
+            .unwrap()
+            .log_generations
+            .iter()
+            .all(|candidate| candidate.database_id != database_id
+                || candidate.generation != first.generation),
+        "the live old-generation snapshot must block physical membership deletion"
+    );
+    assert_eq!(
+        old_snapshot
+            .database_value()
+            .values(user(43), ITEM_VALUE)
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(old_snapshot);
+    drop(old_peer);
+
+    // The first native generation must retire before its successor can do so;
+    // then collect the generation that shares this exact ATLC value with the
+    // active branch.
+    collect_log_generation_to_completion(&mut operator, &database_id, first.source_generation);
+    collect_log_generation_to_completion(&mut operator, &database_id, first.generation);
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_transaction_contents WHERE content_hash = $1",
+            &[&shared_hash],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_generation_transactions \
+              WHERE database_id = $1 AND generation = $2 AND content_hash = $3",
+            &[&database_id, &(second.generation as i64), &shared_hash],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        store.recover(&database_id).unwrap().basis_t(),
+        second.basis_t
+    );
+}
+
+#[test]
+fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("gc_abandoned_generation");
+    let backup_directory = std::env::temp_dir().join(unique("gc_abandoned_generation_backup"));
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&database_id, schema()).unwrap();
+    let service = common::start_service(&connection, &database_id);
+    let seeded = common::transact(
+        &service,
+        "abandoned-generation-seed",
+        created.basis_t(),
+        &[add(unique_long())],
+        1_000,
+    );
+    service.shutdown();
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+    let point = backup
+        .backup_database(&database_id, &backup_directory)
+        .unwrap();
+
+    let service = common::start_service(&connection, &database_id);
+    let request = common::transact(
+        &service,
+        "abandoned-generation-request",
+        seeded.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("abandoned-generation-request".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(42))),
+        }],
+        2_000,
+    );
+    service.shutdown();
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    let interrupted = operator
+        .process_excision_requests_with_fault(&database_id, ExcisionFault::AfterCandidateStaged)
+        .unwrap_err();
+    assert_eq!(interrupted.code, "excision/injected-fault");
+    let mut raw = Client::connect(&connection, NoTls).unwrap();
+    let candidate_generation: i64 = raw
+        .query_one(
+            "SELECT g.generation \
+               FROM atomic_log_generations g \
+               JOIN atomic_log_generation_builds b \
+                 ON b.database_id = g.database_id AND b.generation = g.generation \
+              WHERE g.database_id = $1 AND g.build_kind = 1 \
+                AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                                 WHERE a.database_id = g.database_id \
+                                   AND a.generation = g.generation) \
+              ORDER BY g.generation DESC LIMIT 1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        operator
+            .garbage_inventory(Duration::ZERO)
+            .unwrap()
+            .log_generations
+            .iter()
+            .all(|candidate| candidate.database_id != database_id
+                || candidate.generation != candidate_generation as u64),
+        "a candidate remains resumable while its captured source is active"
+    );
+
+    // A same-lineage point restore publishes a different generation. The old
+    // inactive rewrite can no longer win activation and must not leak forever.
+    let restored = backup
+        .restore_backup_point(
+            &backup_directory,
+            point.basis_t,
+            point.log_generation,
+            &database_id,
+        )
+        .unwrap();
+    assert_eq!(restored.basis_t(), point.basis_t);
+    assert!(restored.basis_t() < request.basis_t);
+    assert!(
+        operator
+            .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+            .unwrap()
+            .log_generations
+            .iter()
+            .all(|candidate| candidate.database_id != database_id
+                || candidate.generation != candidate_generation as u64)
+    );
+
+    let first =
+        preview_next_log_generation(&mut operator, &database_id, candidate_generation as u64);
+    let first_candidate = first
+        .log_generations
+        .iter()
+        .find(|candidate| {
+            candidate.database_id == database_id
+                && candidate.generation == candidate_generation as u64
+        })
+        .unwrap();
+    assert!(first_candidate.abandoned);
+    let mut expected = first.clone();
+    expected.applied = true;
+    assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+    drop(operator);
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    collect_log_generation_to_completion(&mut operator, &database_id, candidate_generation as u64);
+    for table in [
+        "atomic_log_generations",
+        "atomic_log_generation_builds",
+        "atomic_log_generation_abandonment_progress",
+        "atomic_generation_transactions",
+        "atomic_generation_requests",
+    ] {
+        let count: i64 = raw
+            .query_one(
+                &format!("SELECT count(*) FROM {table} WHERE database_id = $1 AND generation = $2"),
+                &[&database_id, &candidate_generation],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(count, 0, "{table} retained an abandoned generation row");
+    }
+    assert_eq!(
+        store.recover(&database_id).unwrap().basis_t(),
+        point.basis_t
+    );
+    fs::remove_dir_all(&backup_directory).unwrap();
+}
+
+#[test]
+fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("gc_initial_restore_source");
+    let target = unique("gc_initial_restore_target");
+    let backup_directory = std::env::temp_dir().join(unique("gc_initial_restore_backup"));
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&source, schema()).unwrap();
+    let service = common::start_service(&connection, &source);
+    let value = unique_long();
+    let committed = common::transact(
+        &service,
+        "initial-restore-abandonment-seed",
+        created.basis_t(),
+        &[add(value)],
+        1_000,
+    );
+    service.shutdown();
+    let mut backup = PortableBackup::connect(&connection).unwrap();
+    backup.backup_database(&source, &backup_directory).unwrap();
+
+    // A separate catalog is the supported renamed-restore shape: lineage IDs
+    // are unique inside a catalog, while the portable archive preserves the
+    // source lineage in the target catalog.
+    let target_connection = isolated_catalog(&connection, "gc_initial_restore_catalog");
+    let mut restore = PortableBackup::connect(&target_connection).unwrap();
+    let interrupted = restore
+        .restore_backup_with_fault(
+            &backup_directory,
+            committed.basis_t,
+            &target,
+            RestoreFault::BeforeCommit,
+        )
+        .unwrap_err();
+    assert_eq!(interrupted.code, "backup/restore-before-activation");
+    let mut raw = Client::connect(&target_connection, NoTls).unwrap();
+    let generation: i64 = raw
+        .query_one(
+            "SELECT g.generation \
+               FROM atomic_log_generations g \
+               JOIN atomic_log_generation_builds b \
+                 ON b.database_id = g.database_id AND b.generation = g.generation \
+              WHERE g.database_id = $1 AND g.build_kind = 0 \
+                AND b.source_generation IS NULL \
+                AND NOT EXISTS (SELECT 1 FROM atomic_heads h \
+                                 WHERE h.database_id = g.database_id)",
+            &[&target],
+        )
+        .unwrap()
+        .get(0);
+    let mut operator = PostgresOperator::connect(&target_connection).unwrap();
+    assert!(
+        operator
+            .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+            .unwrap()
+            .log_generations
+            .iter()
+            .all(|candidate| candidate.database_id != target),
+        "the normal retention age must protect a newly interrupted initial restore"
+    );
+    let first = preview_next_log_generation(&mut operator, &target, generation as u64);
+    assert!(first.log_generations.iter().any(|candidate| {
+        candidate.database_id == target
+            && candidate.generation == generation as u64
+            && candidate.abandoned
+    }));
+    apply_exact_inventory(&mut operator, &first);
+    drop(operator);
+
+    // The durable abandonment cursor survives a process boundary. Its final
+    // transaction removes generation ownership first and the unpublished
+    // catalog identity last, making the alias genuinely free rather than
+    // leaving a poison row that every later restore collides with.
+    let mut operator = PostgresOperator::connect(&target_connection).unwrap();
+    collect_log_generation_to_completion(&mut operator, &target, generation as u64);
+    assert!(
+        raw.query_opt(
+            "SELECT 1 FROM atomic_databases WHERE database_id = $1",
+            &[&target],
+        )
+        .unwrap()
+        .is_none()
+    );
+    let restored = restore
+        .restore_backup(&backup_directory, committed.basis_t, &target)
+        .unwrap();
+    assert_same_information(&restored, &committed.db_after);
+    fs::remove_dir_all(&backup_directory).unwrap();
+}
+
+#[test]
 fn forged_publication_time_cannot_backdate_the_retirement_mark() {
     let Some(connection) = connection() else {
         return;
@@ -468,17 +1344,32 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
     migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
+    let baseline_service = common::start_service(&connection, &database_id);
+    let baseline_value = unique_long();
+    let baseline = common::transact(
+        &baseline_service,
+        "abandoned-build-baseline",
+        created.basis_t(),
+        &[add(baseline_value)],
+        1_000,
+    );
+    baseline_service.shutdown();
+
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+    let baseline_publication = indexer.consolidate().unwrap();
+    let value = baseline_value + 1;
     let service = common::start_service(&connection, &database_id);
-    let value = unique_long();
     common::transact(
         &service,
         "abandoned-build",
-        created.basis_t(),
+        baseline.basis_t,
         &[add(value)],
-        1_000,
+        2_000,
     );
-
-    let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+    // With a current physical root, this tiny commit remains below the
+    // background novelty threshold. Stop the service before invoking the
+    // direct fault-injected indexer so the test has exactly one builder.
+    service.shutdown();
     let interrupted = indexer
         .consolidate_with_fault(IndexBuildFault::AfterSegments)
         .unwrap_err();
@@ -509,14 +1400,11 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
         )
         .unwrap()
         .get::<_, i64>(0),
-        0
+        baseline_publication.publication_revision as i64
     );
 
     let mut operator = PostgresOperator::connect(&connection).unwrap();
-    let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
-    assert!(dry.tree_build_intents.iter().any(|candidate| {
-        candidate.database_id == database_id && candidate.manifest_hash == manifest_hash
-    }));
+    let dry = preview_next_tree_build_intent(&mut operator, &database_id, manifest_hash);
     let predicted = dry
         .tree_node_hashes
         .iter()
@@ -551,9 +1439,12 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
     }
 
     // Rebuilding the same deterministic candidate after GC must simply
-    // re-upload its immutable values and publish revision one once.
+    // re-upload its immutable values and publish the next revision once.
     let retried = indexer.consolidate().unwrap();
-    assert_eq!(retried.publication_revision, 1);
+    assert_eq!(
+        retried.publication_revision,
+        baseline_publication.publication_revision + 1
+    );
     assert_eq!(retried.manifest_hash, manifest_hash);
     assert_eq!(
         raw.query_one(
@@ -562,14 +1453,13 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
         )
         .unwrap()
         .get::<_, i64>(0),
-        1
+        retried.publication_revision as i64
     );
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
     assert_eq!(
         peer.db().values(user(42), ITEM_VALUE),
         vec![&Value::Long(value)]
     );
-    service.shutdown();
 }
 
 #[test]
@@ -732,6 +1622,64 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         publication_three.publication_revision
     );
 
+    // Publication is root-first and membership folding is deliberately
+    // bounded. Finish both small folds explicitly so an empty GC inventory
+    // below can only be caused by the live snapshot pin, not by unfinished
+    // retirement bookkeeping.
+    let mut tree_work = PostgresTreeStore::connect(&connection).unwrap();
+    let mut sealed = false;
+    for _ in 0..64 {
+        if tree_work
+            .advance_publication_work(publication_three.manifest_hash)
+            .unwrap()
+        {
+            sealed = true;
+            break;
+        }
+    }
+    assert!(sealed);
+    let mut bookkeeping = Client::connect(&connection, NoTls).unwrap();
+    assert_eq!(
+        bookkeeping
+            .query_one(
+                "SELECT count(*) FROM atomic_tree_retirements \
+                  WHERE database_id = $1 AND bookkeeping_complete \
+                    AND publication_revision = ANY($2)",
+                &[
+                    &database_id,
+                    &vec![
+                        publication_one.publication_revision as i64,
+                        publication_two.publication_revision as i64,
+                    ],
+                ],
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+
+    // Database creation may already have published a genesis tree. The
+    // snapshot opened at publication_one does not read that predecessor, so
+    // collect every earlier root before isolating publication_one's pin.
+    let earlier_revisions = bookkeeping
+        .query(
+            "SELECT publication_revision FROM atomic_tree_publications \
+              WHERE database_id = $1 AND publication_revision < $2 \
+              ORDER BY publication_revision",
+            &[&database_id, &(publication_one.publication_revision as i64)],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<_, i64>(0) as u64)
+        .collect::<Vec<_>>();
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    for revision in earlier_revisions {
+        let dry = preview_next_tree_retirement(&mut operator, &database_id, revision);
+        let mut expected = dry.clone();
+        expected.applied = true;
+        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+    }
+
     // One PeerCore uses exactly one pin backend even while two physical roots
     // and many snapshot handles remain live.
     let mut raw = Client::connect(&connection, NoTls).unwrap();
@@ -745,7 +1693,6 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     assert_eq!(pin_backends, 1);
     assert_eq!(peer.pinned_manifest_hashes().len(), 2);
 
-    let mut operator = PostgresOperator::connect(&connection).unwrap();
     let dry_pinned = operator.garbage_inventory(Duration::ZERO).unwrap();
     let pinned_candidates = dry_pinned
         .tree_publications
@@ -753,7 +1700,57 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         .filter(|candidate| candidate.database_id == database_id)
         .map(|candidate| candidate.publication_revision)
         .collect::<BTreeSet<_>>();
-    assert!(pinned_candidates.is_empty());
+    if !pinned_candidates.is_empty() {
+        let retirement_debug = raw
+            .query(
+                "SELECT r.publication_revision, encode(r.manifest_hash, 'hex'), \
+                        r.bookkeeping_complete, r.garbage_complete, \
+                        EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
+                                 WHERE progress.database_id = r.database_id \
+                                   AND progress.publication_revision = r.publication_revision \
+                                   AND progress.manifest_hash = r.manifest_hash) \
+                   FROM atomic_tree_retirements r \
+                  WHERE r.database_id = $1 ORDER BY r.publication_revision",
+                &[&database_id],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, i64>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, bool>(2),
+                    row.get::<_, bool>(3),
+                    row.get::<_, bool>(4),
+                )
+            })
+            .collect::<Vec<_>>();
+        let advisory_lock_debug = raw
+            .query(
+                "SELECT pid, mode, granted, classid::bigint, objid::bigint, objsubid \
+                   FROM pg_locks WHERE locktype = 'advisory' ORDER BY pid, mode, classid, objid",
+                &[],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, i32>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, bool>(2),
+                    row.get::<_, i64>(3),
+                    row.get::<_, i64>(4),
+                    row.get::<_, i16>(5),
+                )
+            })
+            .collect::<Vec<_>>();
+        panic!(
+            "pinned roots became collectible: candidates={pinned_candidates:?}, \
+             peer_hashes={:?}, retirements={retirement_debug:?}, \
+             advisory_locks={advisory_lock_debug:?}",
+            peer.pinned_manifest_hashes()
+        );
+    }
     // Prefix retirement is intentional: a pin on revision one also blocks
     // revision two, so no later root can be reclaimed out of order.
     let mut expected_pinned = dry_pinned.clone();
@@ -781,7 +1778,11 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     drop(old_snapshot);
     assert_eq!(peer.pinned_manifest_hashes().len(), 1);
 
-    let dry_released = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry_released = preview_next_tree_retirement(
+        &mut operator,
+        &database_id,
+        publication_one.publication_revision,
+    );
     assert_eq!(
         dry_released
             .tree_publications
@@ -809,7 +1810,11 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         2
     );
 
-    let dry_changed = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry_changed = preview_next_tree_retirement(
+        &mut operator,
+        &database_id,
+        publication_two.publication_revision,
+    );
     assert_eq!(
         dry_changed
             .tree_publications
@@ -829,16 +1834,6 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         .into_iter()
         .map(|row| <Digest>::try_from(row.get::<_, Vec<u8>>(0)).unwrap())
         .collect::<BTreeSet<_>>();
-    let deleted_nodes = dry_changed
-        .tree_node_hashes
-        .iter()
-        .copied()
-        .filter(|hash| retired_nodes.contains(hash))
-        .collect::<BTreeSet<_>>();
-    assert!(
-        !deleted_nodes.is_empty(),
-        "a changed successor must leave at least one old physical tree value"
-    );
     let mut expected_changed = dry_changed.clone();
     expected_changed.applied = true;
     let changed = operator.collect_garbage(Duration::ZERO).unwrap();
@@ -847,6 +1842,29 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         candidate.database_id == database_id
             && candidate.publication_revision == publication_two.publication_revision
     }));
+    // Root metadata can retire before successful build-intent ledgers finish
+    // their own bounded cleanup. Those ledgers are deliberate liveness pins;
+    // once drained, at least one changed-path value becomes exact garbage.
+    let mut deleted_nodes = BTreeSet::new();
+    for _ in 0..4_096 {
+        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        deleted_nodes.extend(
+            dry.tree_node_hashes
+                .iter()
+                .copied()
+                .filter(|hash| retired_nodes.contains(hash)),
+        );
+        let mut expected = dry.clone();
+        expected.applied = true;
+        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+        if !deleted_nodes.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        !deleted_nodes.is_empty(),
+        "a changed successor must eventually release an old physical tree value"
+    );
     for hash in deleted_nodes {
         assert_eq!(
             raw.query_one(
@@ -898,18 +1916,8 @@ fn large_replacement_publishes_root_before_bounded_membership_fold() {
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
     let mut kernel = PostgresStore::connect(&connection).unwrap();
-    let created = kernel.create_database(&database_id, schema()).unwrap();
+    let database = kernel.create_database(&database_id, schema()).unwrap();
     drop(kernel);
-    let service = common::start_service(&connection, &database_id);
-    let database = common::transact(
-        &service,
-        "bounded-publication-seed",
-        created.basis_t(),
-        &[],
-        1_000,
-    )
-    .db_after;
-    service.shutdown();
 
     let mut raw = Client::connect(&connection, NoTls).unwrap();
     let head = raw
@@ -1128,7 +2136,7 @@ fn abandoned_intent_ledger_is_staged_and_collected_in_bounded_batches() {
     assert_eq!(staged.get::<_, i64>(2), values.len() as i64);
 
     let mut operator = PostgresOperator::connect(&connection).unwrap();
-    let dry_first = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry_first = preview_next_tree_build_intent(&mut operator, &database_id, manifest_hash);
     assert!(dry_first.tree_build_intents.iter().any(|intent| {
         intent.database_id == database_id
             && intent.manifest_hash == manifest_hash
@@ -1160,7 +2168,7 @@ fn abandoned_intent_ledger_is_staged_and_collected_in_bounded_batches() {
     assert_eq!(after_first.get::<_, i16>(0), 3);
     assert_eq!(after_first.get::<_, i64>(1), 1);
 
-    let dry_second = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry_second = preview_next_tree_build_intent(&mut operator, &database_id, manifest_hash);
     assert_eq!(
         dry_second
             .tree_node_hashes
@@ -1224,18 +2232,7 @@ fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     // Successful intent ledgers are bookkeeping, not garbage. Drain them
     // while the old root is pinned so this test isolates retirement work.
-    for _ in 0..8 {
-        if !operator
-            .garbage_inventory(Duration::ZERO)
-            .unwrap()
-            .tree_build_intents
-            .iter()
-            .any(|intent| intent.database_id == database_id)
-        {
-            break;
-        }
-        operator.collect_garbage(Duration::ZERO).unwrap();
-    }
+    drain_tree_build_intents_for_database(&mut operator, &mut raw, &database_id);
     assert_eq!(
         raw.query_one(
             "SELECT count(*) FROM atomic_tree_build_intents WHERE database_id = $1",
@@ -1289,7 +2286,11 @@ fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
     drop(old_snapshot);
     drop(peer);
 
-    let dry_first = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry_first = preview_next_tree_retirement(
+        &mut operator,
+        &database_id,
+        publication_one.publication_revision,
+    );
     assert!(dry_first.tree_publications.iter().any(|publication| {
         publication.database_id == database_id
             && publication.publication_revision == publication_one.publication_revision
@@ -1334,7 +2335,11 @@ fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
         1
     );
 
-    let dry_second = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry_second = preview_next_tree_retirement(
+        &mut operator,
+        &database_id,
+        publication_one.publication_revision,
+    );
     assert!(
         dry_second
             .tree_manifest_hashes

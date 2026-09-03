@@ -212,6 +212,11 @@ struct Novelty {
 
 #[derive(Debug)]
 struct IndexingSeed {
+    /// Stable database identity used to make client request identifiers
+    /// opaque before they can enter diagnostics.  A lineage survives
+    /// generation replacement, so tickets remain reconcilable across an
+    /// excision or restore race without retaining plaintext in an error.
+    lineage_id: String,
     /// Newest fully authenticated publication selected for replay.
     published_revision: u64,
     published_basis_t: u64,
@@ -515,6 +520,7 @@ struct Shared {
     indexing: Arc<BackgroundIndexing>,
     connection: PostgresConnectionConfig,
     database_id: String,
+    lineage_id: String,
 }
 
 impl Shared {
@@ -523,6 +529,7 @@ impl Shared {
         indexing: Arc<BackgroundIndexing>,
         connection: PostgresConnectionConfig,
         database_id: String,
+        lineage_id: String,
     ) -> Self {
         Self {
             accepting: AtomicBool::new(true),
@@ -537,6 +544,7 @@ impl Shared {
             indexing,
             connection,
             database_id,
+            lineage_id,
         }
     }
 
@@ -664,6 +672,7 @@ impl TransactionClient {
             self.shared.max_request_bytes,
         )?;
         let request_key = request.request_key.clone();
+        let request_key_hash = request_key_hash(&self.shared.lineage_id, &request_key)?;
         self.shared.check_index_gate(&request_key, request_hash)?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let _admission = self
@@ -681,6 +690,7 @@ impl TransactionClient {
                 self.shared.max_queued.fetch_max(queued, Ordering::Relaxed);
                 Ok(TransactionTicket {
                     request_key,
+                    request_key_hash,
                     receiver,
                 })
             }
@@ -747,6 +757,7 @@ impl TransactionClient {
 #[derive(Debug)]
 pub struct TransactionTicket {
     request_key: String,
+    request_key_hash: Digest,
     receiver: mpsc::Receiver<Result<ServiceTransactionReport, SemanticError>>,
 }
 
@@ -755,11 +766,11 @@ impl TransactionTicket {
         match self.receiver.recv_timeout(timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => Err(unknown_outcome(
-                &self.request_key,
+                self.request_key_hash,
                 "timed out waiting for an admitted transaction",
             )),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(unknown_outcome(
-                &self.request_key,
+                self.request_key_hash,
                 "transaction worker disconnected after admission",
             )),
         }
@@ -988,6 +999,7 @@ impl TransactionService {
         };
         let program_cache = store.program_cache_handle();
         let (index_sender, index_receiver) = mpsc::sync_channel(1);
+        let lineage_id = seed.lineage_id.clone();
         let indexing = Arc::new(BackgroundIndexing::new(indexing_config, seed, index_sender));
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
         let shared = Arc::new(Shared::new(
@@ -995,6 +1007,7 @@ impl TransactionService {
             Arc::clone(&indexing),
             connection.clone(),
             config.database_id.clone(),
+            lineage_id,
         ));
         let index_shared = Arc::clone(&shared);
         let index_worker = match thread::Builder::new()
@@ -1242,7 +1255,7 @@ fn load_indexing_seed(
     let mut client = connection.connect_for("service/index-seed-connect")?;
     let row = client
         .query_opt(
-            "SELECT h.basis_t, h.log_generation, h.tx_hash, d.genesis_hash \
+            "SELECT h.basis_t, h.log_generation, h.tx_hash, d.genesis_hash, d.lineage_id \
                FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
               WHERE h.database_id = $1",
             &[&database_id],
@@ -1271,6 +1284,7 @@ fn load_indexing_seed(
             "database genesis has an invalid hash",
         )
     })?;
+    let lineage_id: String = row.get(4);
     let newest_observed_revision = client
         .query_opt(
             "SELECT publication_revision FROM atomic_tree_publications \
@@ -1375,6 +1389,7 @@ fn load_indexing_seed(
         ));
     }
     Ok(IndexingSeed {
+        lineage_id,
         published_revision,
         published_basis_t,
         newest_observed_revision,
@@ -1531,13 +1546,24 @@ fn duration_millis(duration: Duration) -> Result<u64, SemanticError> {
     })
 }
 
-fn unknown_outcome(request_key: &str, message: &str) -> SemanticError {
+fn unknown_outcome(request_key_hash: Digest, message: &str) -> SemanticError {
     SemanticError::new(
         ErrorCategory::UnknownOutcome,
         "service/unknown-outcome",
         message,
     )
-    .detail("request_key", request_key)
+    .detail("request_key_hash", hex_digest(&request_key_hash))
+}
+
+fn hex_digest(digest: &Digest) -> String {
+    use std::fmt::Write;
+
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to String cannot fail");
+            hex
+        })
 }
 
 #[cfg(test)]
@@ -1558,6 +1584,7 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
+                lineage_id: "lineage".to_owned(),
                 published_revision: 0,
                 published_basis_t: 0,
                 newest_observed_revision: 0,
@@ -1586,6 +1613,7 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
+                lineage_id: "lineage".to_owned(),
                 published_revision: 0,
                 published_basis_t: 0,
                 newest_observed_revision: 1,
@@ -1639,6 +1667,7 @@ mod tests {
                 memory_index_max_bytes: canonical_only_account.saturating_add(1),
             },
             IndexingSeed {
+                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 newest_observed_revision: 1,

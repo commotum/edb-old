@@ -1,8 +1,7 @@
 use atomic_core::{
-    Attribute, Cardinality, EntityRef, ErrorCategory, ExcisionSpec, ExcisionTarget, Keyword,
-    PortableBackup, PostgresIndexer, PostgresMigrator, PostgresOperator, PostgresStore,
-    RECOMMENDED_GARBAGE_COLLECTION_AGE, Schema, TxOp, TxValue, USER_PARTITION, Value, ValueType,
-    make_eid, sha256,
+    Attribute, Cardinality, DB_EXCISE, EntityRef, Keyword, PortableBackup, PostgresIndexer,
+    PostgresMigrator, PostgresOperator, PostgresStore, RECOMMENDED_GARBAGE_COLLECTION_AGE, Schema,
+    TxOp, TxValue, USER_PARTITION, Value, ValueType, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::fs;
@@ -209,6 +208,17 @@ fn corrupt_tree_in_a_is_scoped_and_makes_shared_reclamation_conservative() {
         &[add("forget-b")],
         1_000,
     );
+    let requested_b = common::transact(
+        &service_b,
+        "ordinary-a15-scope-request",
+        committed_b.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("scope-excision".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(u64::from(ITEM_VALUE))),
+        }],
+        2_000,
+    );
     service_a.shutdown();
     service_b.shutdown();
     PostgresIndexer::connect(&connection, &database_a)
@@ -220,8 +230,7 @@ fn corrupt_tree_in_a_is_scoped_and_makes_shared_reclamation_conservative() {
     backup
         .backup_database(&database_b, &backup_directory)
         .unwrap();
-    let verified =
-        PortableBackup::verify_backup(&backup_directory, committed_b.basis_t, true).unwrap();
+    PortableBackup::verify_backup(&backup_directory, requested_b.basis_t, true).unwrap();
 
     let mut raw = Client::connect(&connection, NoTls).unwrap();
     let manifest_row = raw
@@ -261,15 +270,7 @@ fn corrupt_tree_in_a_is_scoped_and_makes_shared_reclamation_conservative() {
     let report_b = operator.inspect_database(&database_b, true);
     let report_a = operator.inspect_database(&database_a, true);
     let garbage = operator.garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE);
-    let excision = operator.excise_database(
-        &database_b,
-        &ExcisionSpec {
-            excision_id: "scope-corrupt-derived-a".into(),
-            target: ExcisionTarget::Attribute(ITEM_VALUE),
-            before_t: None,
-        },
-        &verified,
-    );
+    let excision = operator.process_excision_requests(&database_b);
     let orphan_survived: i64 = raw
         .query_one(
             "SELECT count(*) FROM atomic_index_segments WHERE segment_hash = $1",
@@ -307,10 +308,13 @@ fn corrupt_tree_in_a_is_scoped_and_makes_shared_reclamation_conservative() {
             .iter()
             .any(|problem| problem.code.contains("manifest") || problem.code.contains("checksum"))
     );
-    let garbage = garbage.unwrap_err();
-    assert_eq!(
-        (garbage.category, garbage.code),
-        (ErrorCategory::Fault, "operations/reachability-uncertain")
+    let garbage = garbage.unwrap();
+    assert!(
+        garbage
+            .tree_publications
+            .iter()
+            .all(|candidate| candidate.database_id != database_a),
+        "a corrupt live root must never become a reclamation candidate"
     );
     let excision = excision.unwrap();
     assert_eq!(excision.database_id, database_b);

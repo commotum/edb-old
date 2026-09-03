@@ -360,7 +360,9 @@ impl RecentTier {
             database_id,
             base_t,
             base_hash,
-            transactions.into_iter().map(|transaction| (None, transaction)),
+            transactions
+                .into_iter()
+                .map(|transaction| (None, transaction)),
             endpoint_projection,
             limits,
         )
@@ -494,7 +496,9 @@ impl RecentTier {
         endpoint_projection: EndpointProjection,
     ) -> Result<Self, SemanticError> {
         self.extend_entries(
-            transactions.into_iter().map(|transaction| (None, transaction)),
+            transactions
+                .into_iter()
+                .map(|transaction| (None, transaction)),
             endpoint_projection,
         )
     }

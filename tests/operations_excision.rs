@@ -3,6 +3,7 @@ use atomic_core::{
     Keyword, Peer, PostgresOperator, PostgresStore, Schema, TxOp, TxValue, USER_PARTITION, Value,
     ValueType, View, make_eid,
 };
+use postgres::NoTls;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod common;
@@ -110,7 +111,43 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         vec![&Value::String("erase-this-secret".into())]
     );
     let mut operator = PostgresOperator::connect(&connection).unwrap();
-    assert!(!operator.sync_excise(&database_id, requested.basis_t).unwrap());
+    assert!(
+        !operator
+            .sync_excise(&database_id, requested.basis_t)
+            .unwrap()
+    );
+
+    let captured = operator
+        .process_excision_requests_with_fault(&database_id, ExcisionFault::AfterCapture)
+        .unwrap_err();
+    assert_eq!(
+        (captured.category, captured.code),
+        (ErrorCategory::Interrupted, "excision/injected-fault")
+    );
+    let catchup_service = common::start_service(&connection, &database_id);
+    let catchup = common::transact(
+        &catchup_service,
+        "transaction-during-excision-build",
+        requested.basis_t,
+        &[add(user(44), RETAINED, Value::Long(9))],
+        3_000,
+    );
+    catchup_service.shutdown();
+
+    let staged = operator
+        .process_excision_requests_with_fault(&database_id, ExcisionFault::AfterCandidateStaged)
+        .unwrap_err();
+    assert_eq!(
+        (staged.category, staged.code),
+        (ErrorCategory::Interrupted, "excision/injected-fault")
+    );
+    assert!(
+        !store
+            .recover(&database_id)
+            .unwrap()
+            .values(user(42), SECRET)
+            .is_empty()
+    );
 
     let interrupted = operator
         .process_excision_requests_with_fault(&database_id, ExcisionFault::AfterActivation)
@@ -119,18 +156,60 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         (interrupted.category, interrupted.code),
         (ErrorCategory::Interrupted, "excision/injected-fault")
     );
+    let mut evidence = postgres::Client::connect(&connection, NoTls).unwrap();
+    let generation_count: i64 = evidence
+        .query_one(
+            "SELECT count(*) FROM atomic_log_generations WHERE database_id=$1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        generation_count, 2,
+        "retry must resume, not leak a candidate"
+    );
     // Head activation is authoritative, but sync-excise remains false until
     // the separate root-last completion marker is durable.
     let switched = store.recover(&database_id).unwrap();
     assert!(switched.values(user(42), SECRET).is_empty());
-    assert!(!operator.sync_excise(&database_id, requested.basis_t).unwrap());
+    assert!(
+        !operator
+            .sync_excise(&database_id, requested.basis_t)
+            .unwrap()
+    );
 
     let receipt = operator.process_excision_requests(&database_id).unwrap();
     assert!(receipt.resumed);
     assert_eq!(receipt.request_count, 1);
     assert!(receipt.removed_datoms >= 3);
     assert_ne!(receipt.source_generation, receipt.generation);
-    assert!(operator.sync_excise(&database_id, requested.basis_t).unwrap());
+    assert_eq!(receipt.old_head_hash, catchup.tx_hash);
+    let reused_content: i64 = evidence
+        .query_one(
+            "SELECT count(*) FROM atomic_generation_transactions old \
+               JOIN atomic_generation_transactions new \
+                 ON new.content_hash=old.content_hash \
+              WHERE old.database_id=$1 AND old.generation=$2 \
+                AND new.database_id=$1 AND new.generation=$3",
+            &[
+                &database_id,
+                &(receipt.source_generation as i64),
+                &(receipt.generation as i64),
+            ],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        reused_content >= 2,
+        "unaffected immutable content should be shared"
+    );
+    assert!(
+        operator
+            .sync_excise(&database_id, requested.basis_t)
+            .unwrap()
+    );
+    let integrity = operator.inspect_database(&database_id, true).unwrap();
+    assert!(integrity.healthy(), "{:?}", integrity.problems);
 
     // Existing immutable peer values retain their old branch. Refresh chooses
     // the new generation and no query-visible history contains the secret.
@@ -142,17 +221,22 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
     assert!(refreshed.values(user(42), SECRET).is_empty());
     assert!(refreshed.values(user(42), RETAINED).is_empty());
     assert!(refreshed.values(user(43), RELATED).is_empty());
-    assert!(!refreshed
-        .datoms(View::History, IndexOrder::Eavt)
-        .iter()
-        .any(|datom| datom.value == Value::String("erase-this-secret".into())));
+    assert_eq!(refreshed.values(user(44), RETAINED), vec![&Value::Long(9)]);
+    assert!(
+        !refreshed
+            .datoms(View::History, IndexOrder::Eavt)
+            .iter()
+            .any(|datom| datom.value == Value::String("erase-this-secret".into()))
+    );
     // The ordinary A=15 assertion remains the permanent semantic audit fact.
-    assert!(refreshed
-        .datoms(View::History, IndexOrder::Eavt)
-        .iter()
-        .any(|datom| datom.entity == request_entity
-            && datom.attribute == DB_EXCISE as u32
-            && datom.value == Value::Ref(user(42))));
+    assert!(
+        refreshed
+            .datoms(View::History, IndexOrder::Eavt)
+            .iter()
+            .any(|datom| datom.entity == request_entity
+                && datom.attribute == DB_EXCISE as u32
+                && datom.value == Value::Ref(user(42)))
+    );
 
     let restarted = PostgresStore::connect(&connection)
         .unwrap()

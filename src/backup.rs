@@ -185,6 +185,7 @@ struct LoadedBackupLog {
 pub enum BackupFault {
     #[default]
     None,
+    AfterGenerationPinned,
     AfterFirstObjectStaged,
     AfterObjects,
     AfterManifestStaged,
@@ -197,6 +198,10 @@ pub enum BackupFault {
 pub enum RestoreFault {
     #[default]
     None,
+    /// Stop inside the first SQL staging batch after its content value is
+    /// inserted but before its generation membership is inserted. The batch
+    /// must roll back both sides and leave no ownerless immutable value.
+    AfterFirstContentInserted,
     /// Stop after the inactive generation and its authenticated checkpoint
     /// are durable, but before the small root-publication transaction.
     BeforeCommit,
@@ -294,12 +299,7 @@ impl PortableBackup {
     where
         F: FnOnce(),
     {
-        self.backup_database_once_with_pin_probe(
-            database_id,
-            directory,
-            BackupFault::None,
-            probe,
-        )
+        self.backup_database_once_with_pin_probe(database_id, directory, BackupFault::None, probe)
     }
 
     fn backup_database_once_with_pin_probe<F>(
@@ -312,13 +312,21 @@ impl PortableBackup {
     where
         F: FnOnce(),
     {
-        prepare_directory(directory)?;
+        // Serializing writers to one repository makes stale staging cleanup
+        // safe: a retry never unlinks a file that another current backup is
+        // still filling. The file lock is released automatically on every
+        // return path, including injected failures and panics.
+        let _directory_guard = prepare_directory(directory)?;
         // The repeatable-read snapshot makes SQL rows stable, while this
         // session lock keeps the selected immutable generation eligible for
         // reads until every reachable object and the root-last manifest are
         // durable. In particular, privacy collection cannot win the narrow
         // head-read-versus-pin race and erase source values mid-copy.
         let pin = acquire_backup_generation_pin(&mut self.client, database_id)?;
+        if fault_at == BackupFault::AfterGenerationPinned {
+            release_backup_generation_pin(&mut self.client, pin)?;
+            return Err(injected("backup/after-generation-pinned"));
+        }
         probe();
         let result = self.backup_database_pinned(database_id, directory, fault_at, pin);
         let release = release_backup_generation_pin(&mut self.client, pin);
@@ -827,7 +835,7 @@ impl PortableBackup {
         }
         let completed_excisions = load_completed_excisions(directory, &manifest)?;
         let request_identities = database
-            .pending_excision_requests_after(0)?
+            .historical_excision_requests()?
             .into_iter()
             .map(|request| (request.request_t, request.request_entity))
             .collect::<BTreeSet<_>>();
@@ -837,7 +845,7 @@ impl PortableBackup {
         {
             return Err(fault(
                 "backup/completed-excision-fact",
-                "completed excision identity has no protected A=15 request fact",
+                "completed excision identity has no historical A=15 request fact",
             ));
         }
         objects_read = objects_read.saturating_add(completed_excisions.len());
@@ -987,19 +995,25 @@ impl PortableBackup {
             );
         }
 
-        // Copy immutable values first in bounded commits. None of these rows
-        // is observable through the active head. The candidate generation is
-        // likewise resumable and invisible until the final root transaction.
+        // Decode values before taking the builder pin, then durably create the
+        // candidate ownership root before uploading any of them. Each content
+        // value commits in the same batch as its generation membership, and
+        // each program commits with its generation mark. None is observable
+        // through the active head until the final root transaction.
         let rows = prepare_restore_rows(directory, &manifest, &log)?;
         let build_pin = acquire_restore_build_pin(&mut self.client, target_database_id)?;
         let staged = (|| {
-            stage_restored_programs(&mut self.client, &restored_programs)?;
-            stage_restore_contents(&mut self.client, &manifest, &rows)?;
             let candidate = ensure_restore_candidate(
                 &mut self.client,
                 &manifest,
                 manifest_hash,
                 target_database_id,
+            )?;
+            stage_restored_programs(
+                &mut self.client,
+                &restored_programs,
+                target_database_id,
+                candidate.generation,
             )?;
             let restored = stage_restore_generation(
                 &mut self.client,
@@ -1008,6 +1022,7 @@ impl PortableBackup {
                 &completed_excisions,
                 target_database_id,
                 candidate,
+                fault_at,
             )?;
             Ok((candidate, restored))
         })();
@@ -1079,21 +1094,47 @@ fn acquire_backup_generation_pin(
         let Some(key) = key else {
             return Err(not_found(database_id));
         };
-        client
-            .query_one("SELECT pg_advisory_lock_shared($1)", &[&key])
-            .map_err(|error| crate::postgres::postgres_error("backup/pin-acquire", error))?;
-        let still_active: bool = client
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM atomic_heads \
-                                  WHERE database_id = $1 AND log_generation = $2)",
-                &[&database_id, &generation_sql],
-            )
-            .map_err(|error| crate::postgres::postgres_error("backup/pin-verify", error))?
-            .get(0);
+        if let Err(error) = client.query_one("SELECT pg_advisory_lock_shared($1)", &[&key]) {
+            let original = crate::postgres::postgres_error("backup/pin-acquire", error);
+            // A lost acknowledgement does not tell us whether PostgreSQL
+            // acquired the session lock. Clear the session before returning;
+            // a dead connection has already released it server-side.
+            let _ = client.batch_execute("SELECT pg_advisory_unlock_all()");
+            return Err(original);
+        }
+        let still_active: bool = match client.query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_heads \
+                              WHERE database_id = $1 AND log_generation = $2)",
+            &[&database_id, &generation_sql],
+        ) {
+            Ok(row) => row.get(0),
+            Err(error) => {
+                let original = crate::postgres::postgres_error("backup/pin-verify", error);
+                // Session advisory locks survive statement errors. Always
+                // unwind the pin before returning a still-live connection;
+                // if the session itself died PostgreSQL releases its locks.
+                let released = client
+                    .query_one("SELECT pg_advisory_unlock_shared($1)", &[&key])
+                    .is_ok_and(|row| row.get::<_, bool>(0));
+                if !released {
+                    let _ = client.batch_execute("SELECT pg_advisory_unlock_all()");
+                }
+                return Err(original);
+            }
+        };
         if still_active {
             return Ok(BackupGenerationPin { generation, key });
         }
-        let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
+        let unlocked: bool = client
+            .query_one("SELECT pg_advisory_unlock_shared($1)", &[&key])
+            .map_err(|error| crate::postgres::postgres_error("backup/pin-race-release", error))?
+            .get(0);
+        if !unlocked {
+            return Err(fault(
+                "backup/pin-race-release",
+                "backup generation pin disappeared while resolving a head race",
+            ));
+        }
     }
     Err(SemanticError::conflict(
         "backup/generation-race",
@@ -1105,10 +1146,18 @@ fn release_backup_generation_pin(
     client: &mut Client,
     pin: BackupGenerationPin,
 ) -> Result<(), SemanticError> {
-    let unlocked: bool = client
-        .query_one("SELECT pg_advisory_unlock_shared($1)", &[&pin.key])
-        .map_err(|error| crate::postgres::postgres_error("backup/pin-release", error))?
-        .get(0);
+    let unlocked: bool = match client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&pin.key])
+    {
+        Ok(row) => row.get(0),
+        Err(error) => {
+            let original = crate::postgres::postgres_error("backup/pin-release", error);
+            // A statement-level failure can leave a session advisory lock
+            // alive. This operator session owns no unrelated long-lived
+            // locks, so fail closed and clear its lock set before reuse.
+            let _ = client.batch_execute("SELECT pg_advisory_unlock_all()");
+            return Err(original);
+        }
+    };
     if unlocked {
         Ok(())
     } else {
@@ -1131,21 +1180,24 @@ fn acquire_restore_build_pin(
         .map_err(|error| crate::postgres::postgres_error("backup/restore-build-pin-key", error))?
         .get(0);
     let key = key.ok_or_else(|| not_found(target_database_id))?;
-    client
-        .query_one("SELECT pg_advisory_lock_shared($1)", &[&key])
-        .map_err(|error| {
-            crate::postgres::postgres_error("backup/restore-build-pin-acquire", error)
-        })?;
+    if let Err(error) = client.query_one("SELECT pg_advisory_lock_shared($1)", &[&key]) {
+        let original = crate::postgres::postgres_error("backup/restore-build-pin-acquire", error);
+        let _ = client.batch_execute("SELECT pg_advisory_unlock_all()");
+        return Err(original);
+    }
     Ok(key)
 }
 
 fn release_restore_build_pin(client: &mut Client, key: i64) -> Result<(), SemanticError> {
-    let unlocked: bool = client
-        .query_one("SELECT pg_advisory_unlock_shared($1)", &[&key])
-        .map_err(|error| {
-            crate::postgres::postgres_error("backup/restore-build-pin-release", error)
-        })?
-        .get(0);
+    let unlocked: bool = match client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]) {
+        Ok(row) => row.get(0),
+        Err(error) => {
+            let original =
+                crate::postgres::postgres_error("backup/restore-build-pin-release", error);
+            let _ = client.batch_execute("SELECT pg_advisory_unlock_all()");
+            return Err(original);
+        }
+    };
     if unlocked {
         Ok(())
     } else {
@@ -1313,7 +1365,10 @@ fn prepare_restore_rows(
 fn stage_restored_programs(
     client: &mut Client,
     programs: &BTreeMap<Digest, (Program, Vec<u8>)>,
+    target_database_id: &str,
+    generation: u64,
 ) -> Result<(), SemanticError> {
+    let generation_sql = sql_u64(generation, "restored program generation")?;
     let programs = programs.iter().collect::<Vec<_>>();
     for chunk in programs.chunks(RESTORE_BATCH_ROWS) {
         let mut transaction = client.transaction().map_err(|error| {
@@ -1321,6 +1376,22 @@ fn stage_restored_programs(
         })?;
         for (program_hash, (program, payload)) in chunk {
             install_restored_program(&mut transaction, program_hash, program, payload)?;
+            // Candidate creation precedes uploads. Install the content and
+            // its exact generation mark atomically so an interrupted restore
+            // is either retained by this build or remains only as a
+            // pre-existing globally shared value. The ordinary age-gated
+            // program candidate ledger handles deletion after abandonment
+            // removes the last generation mark.
+            transaction
+                .execute(
+                    "INSERT INTO atomic_program_generation_refs \
+                         (database_id, log_generation, program_hash) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                    &[&target_database_id, &generation_sql, &&program_hash[..]],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-program-reference", error)
+                })?;
         }
         transaction.commit().map_err(|error| {
             crate::postgres::postgres_error("backup/restore-program-commit", error)
@@ -1329,59 +1400,45 @@ fn stage_restored_programs(
     Ok(())
 }
 
-fn stage_restore_contents(
-    client: &mut Client,
+fn install_restored_content<C: postgres::GenericClient>(
+    client: &mut C,
     manifest: &Manifest,
-    prepared: &PreparedRestore,
+    row: &PreparedRestoreRow,
 ) -> Result<(), SemanticError> {
-    for chunk in prepared.rows.chunks(RESTORE_BATCH_ROWS) {
-        let mut transaction = client.transaction().map_err(|error| {
-            crate::postgres::postgres_error("backup/restore-content-begin", error)
-        })?;
-        for row in chunk {
-            let basis_sql = sql_u64(row.basis_t, "restored content basis")?;
-            let frontier_sql = sql_u64(row.eidx_frontier, "restored content frontier")?;
-            transaction
-                .execute(
-                    "INSERT INTO atomic_transaction_contents \
+    let basis_sql = sql_u64(row.basis_t, "restored content basis")?;
+    let frontier_sql = sql_u64(row.eidx_frontier, "restored content frontier")?;
+    client
+        .execute(
+            "INSERT INTO atomic_transaction_contents \
                          (content_hash, lineage_id, basis_t, eidx_frontier, payload) \
                      VALUES ($1, $2, $3, $4, $5) \
                      ON CONFLICT (content_hash) DO NOTHING",
-                    &[
-                        &&row.content_hash[..],
-                        &manifest.lineage_id,
-                        &basis_sql,
-                        &frontier_sql,
-                        &&row.content_payload[..],
-                    ],
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-content-insert", error)
-                })?;
-            let stored = transaction
-                .query_one(
-                    "SELECT lineage_id, basis_t, eidx_frontier, envelope_version, payload \
+            &[
+                &&row.content_hash[..],
+                &manifest.lineage_id,
+                &basis_sql,
+                &frontier_sql,
+                &&row.content_payload[..],
+            ],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-content-insert", error))?;
+    let stored = client
+        .query_one(
+            "SELECT lineage_id, basis_t, eidx_frontier, envelope_version, payload \
                        FROM atomic_transaction_contents WHERE content_hash = $1",
-                    &[&&row.content_hash[..]],
-                )
-                .map_err(|error| {
-                    crate::postgres::postgres_error("backup/restore-content-verify", error)
-                })?;
-            if stored.get::<_, String>(0) != manifest.lineage_id
-                || stored.get::<_, i64>(1) != basis_sql
-                || stored.get::<_, i64>(2) != frontier_sql
-                || stored.get::<_, i16>(3) != 1
-                || stored.get::<_, Vec<u8>>(4) != row.content_payload
-            {
-                return Err(fault(
-                    "backup/restore-content-conflict",
-                    "content hash resolves to different immutable transaction information",
-                ));
-            }
-        }
-        transaction.commit().map_err(|error| {
-            crate::postgres::postgres_error("backup/restore-content-commit", error)
-        })?;
+            &[&&row.content_hash[..]],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-content-verify", error))?;
+    if stored.get::<_, String>(0) != manifest.lineage_id
+        || stored.get::<_, i64>(1) != basis_sql
+        || stored.get::<_, i64>(2) != frontier_sql
+        || stored.get::<_, i16>(3) != 1
+        || stored.get::<_, Vec<u8>>(4) != row.content_payload
+    {
+        return Err(fault(
+            "backup/restore-content-conflict",
+            "content hash resolves to different immutable transaction information",
+        ));
     }
     Ok(())
 }
@@ -1428,6 +1485,26 @@ fn ensure_restore_candidate(
             ))
         })
         .transpose()?;
+    if current_coordinate.is_none() {
+        let abandonment_claimed: bool = transaction
+            .query_one(
+                "SELECT EXISTS ( \
+                     SELECT 1 FROM atomic_log_generation_abandonment_progress \
+                      WHERE database_id = $1)",
+                &[&target_database_id],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-abandonment-claim", error)
+            })?
+            .get(0);
+        if abandonment_claimed {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "backup/restore-target-abandoning",
+                "headless restore target is being reclaimed; retry after abandonment completes",
+            ));
+        }
+    }
     let builds = transaction
         .query(
             "SELECT g.generation, g.build_kind, b.source_generation, b.captured_basis_t, \
@@ -1440,6 +1517,9 @@ fn ensure_restore_candidate(
                 AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
                                  WHERE a.database_id = b.database_id \
                                    AND a.generation = b.generation) \
+                AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_abandonment_progress p \
+                                 WHERE p.database_id = b.database_id \
+                                   AND p.generation = b.generation) \
               ORDER BY g.generation",
             &[&target_database_id],
         )
@@ -1533,8 +1613,9 @@ fn ensure_restore_candidate(
                 &build_kind,
             ],
         )
-        .map_err(|error| crate::postgres::postgres_error("backup/restore-generation-stage", error))?
-        ;
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-generation-stage", error)
+        })?;
     if let Some((current_basis, current_hash, current_generation)) = current_coordinate {
         transaction
             .execute(
@@ -1591,6 +1672,7 @@ fn stage_restore_generation(
     completed_excisions: &[(u64, u64)],
     target_database_id: &str,
     candidate: RestoreCandidate,
+    fault_at: RestoreFault,
 ) -> Result<RestoredGenerationHead, SemanticError> {
     let generation_sql = sql_u64(candidate.generation, "restored log generation")?;
     let mut previous = manifest.genesis_hash;
@@ -1603,6 +1685,12 @@ fn stage_restore_generation(
         for row in chunk {
             let basis_sql = sql_u64(row.basis_t, "restored transaction basis")?;
             let frontier_sql = sql_u64(row.eidx_frontier, "restored transaction frontier")?;
+            install_restored_content(&mut transaction, manifest, row)?;
+            if fault_at == RestoreFault::AfterFirstContentInserted
+                && row.basis_t == prepared.rows[0].basis_t
+            {
+                return Err(injected("backup/restore-after-content-insert"));
+            }
             let tx_hash = crate::log_generation::generation_transaction_hash(
                 &manifest.lineage_id,
                 candidate.generation,
@@ -1767,10 +1855,17 @@ fn stage_restore_generation(
             crate::postgres::postgres_error("backup/restore-generation-commit", error)
         })?;
     }
-    if previous != manifest.head_transaction_hash || state_hash != manifest.head_state_hash {
+    // Membership hashes bind the local generation number. Initial restore of
+    // a positive-generation archive can preserve its hash chain, but every
+    // rewind or forward restore deliberately allocates a new local generation
+    // and therefore has a different head hash for identical transaction
+    // content. The portable endpoint commitment that must remain equal is the
+    // database state; `previous` is the newly rebound generation head passed
+    // to the atomic activation below.
+    if state_hash != manifest.head_state_hash {
         return Err(fault(
             "backup/restore-generation-state",
-            "staged restore generation does not reproduce the backup endpoint",
+            "staged restore generation does not reproduce the backup endpoint state",
         ));
     }
     stage_restore_checkpoint(
@@ -3657,7 +3752,12 @@ fn target_matches_backup<C: postgres::GenericClient>(
     Ok(true)
 }
 
-fn prepare_directory(directory: &Path) -> Result<(), SemanticError> {
+#[derive(Debug)]
+struct BackupDirectoryGuard {
+    _lock: File,
+}
+
+fn prepare_directory(directory: &Path) -> Result<BackupDirectoryGuard, SemanticError> {
     let root_existed = fs::symlink_metadata(directory).is_ok();
     if root_existed {
         require_private_directory(directory, "backup/directory")?;
@@ -3666,13 +3766,145 @@ fn prepare_directory(directory: &Path) -> Result<(), SemanticError> {
     create_private_directory(&objects(directory), "backup/create-objects")?;
     create_private_directory(&snapshots(directory), "backup/create-snapshots")?;
     validate_backup_directory(directory, false)?;
+    let guard = lock_backup_directory(directory)?;
+    // An abrupt process exit can strand at most the currently staged file.
+    // Sweep only our exact private staging-name grammar, only in the three
+    // directories where publication occurs, and only when the entry itself
+    // is a regular file. `symlink_metadata` and `remove_file` never traverse
+    // a matching symlink.
+    cleanup_stale_publish_temps(directory)?;
     sync_directory(&objects(directory), "backup/sync-objects-directory")?;
     sync_directory(&snapshots(directory), "backup/sync-snapshots-directory")?;
     sync_directory(directory, "backup/sync-directory")?;
     if !root_existed && let Some(parent) = directory.parent() {
         sync_directory(parent, "backup/sync-parent-directory")?;
     }
+    Ok(guard)
+}
+
+fn lock_backup_directory(directory: &Path) -> Result<BackupDirectoryGuard, SemanticError> {
+    let path = directory.join(".atomic-lock");
+    let file = match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err(SemanticError::new(
+                    ErrorCategory::Forbidden,
+                    "backup/lock-type",
+                    "backup repository lock is not a regular file",
+                ));
+            }
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(io_error("backup/open-lock"))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        require_regular_file(&path, "backup/lock-type")?;
+                        OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&path)
+                            .map_err(io_error("backup/open-lock"))?
+                    }
+                    Err(error) => return Err(io_error("backup/create-lock")(error)),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        require_regular_file(&path, "backup/lock-type")?;
+                        OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&path)
+                            .map_err(io_error("backup/open-lock"))?
+                    }
+                    Err(error) => return Err(io_error("backup/create-lock")(error)),
+                }
+            }
+        }
+        Err(error) => return Err(io_error("backup/lock-metadata")(error)),
+    };
+    if !file
+        .metadata()
+        .map_err(io_error("backup/lock-metadata"))?
+        .is_file()
+    {
+        return Err(SemanticError::new(
+            ErrorCategory::Forbidden,
+            "backup/lock-type",
+            "backup repository lock is not a regular file",
+        ));
+    }
+    file.lock().map_err(io_error("backup/lock"))?;
+    Ok(BackupDirectoryGuard { _lock: file })
+}
+
+fn cleanup_stale_publish_temps(directory: &Path) -> Result<(), SemanticError> {
+    for parent in [
+        directory.to_path_buf(),
+        objects(directory),
+        snapshots(directory),
+    ] {
+        let mut removed = false;
+        for entry in fs::read_dir(&parent).map_err(io_error("backup/temp-list"))? {
+            let entry = entry.map_err(io_error("backup/temp-list-entry"))?;
+            if !is_publish_temp_name(&entry.file_name()) {
+                continue;
+            }
+            let metadata =
+                fs::symlink_metadata(entry.path()).map_err(io_error("backup/temp-metadata"))?;
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            fs::remove_file(entry.path()).map_err(io_error("backup/remove-stale-temp"))?;
+            removed = true;
+        }
+        if removed {
+            sync_directory(&parent, "backup/sync-temp-cleanup-directory")?;
+        }
+    }
     Ok(())
+}
+
+fn is_publish_temp_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix(".atomic-tmp-") else {
+        return false;
+    };
+    let Some((pid, sequence)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    let Ok(parsed_pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    pid == parsed_pid.to_string()
+        && sequence.len() == 16
+        && sequence
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn create_private_directory(path: &Path, code: &'static str) -> Result<(), SemanticError> {
@@ -4265,8 +4497,14 @@ fn reusable_existing_point(
         Err(error) => return Err(io_error("backup/root-metadata")(error)),
     }
 
-    let verified = PortableBackup::verify_backup(directory, candidate.basis, true)?;
-    let (existing, manifest_hash) = load_manifest(directory, candidate.basis)?;
+    let verified = PortableBackup::verify_backup_point(
+        directory,
+        candidate.basis,
+        candidate.log_generation,
+        true,
+    )?;
+    let (existing, manifest_hash) =
+        load_manifest_generation(directory, candidate.basis, candidate.log_generation)?;
     if manifest_hash != verified.point.manifest_hash {
         return Err(fault(
             "backup/root-changed",
@@ -5222,24 +5460,39 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir(&path).expect("create test directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .expect("make test directory private");
+        }
         path
     }
 
     #[test]
     fn staged_file_is_never_visible_under_its_final_name_and_retry_converges() {
         let directory = temporary_directory("staged");
+        let guard = prepare_directory(&directory).unwrap();
         let path = directory.join("root.atbk");
         let error = publish_exact(&path, b"complete-root", PublishFault::AfterStaged)
             .expect_err("injected interruption");
         assert_eq!(error.category, ErrorCategory::Interrupted);
         assert!(!path.exists());
-        assert!(fs::read_dir(&directory).unwrap().all(|entry| {
-            entry
+        assert!(
+            fs::read_dir(&directory)
                 .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with('.')
-        }));
+                .any(|entry| is_publish_temp_name(&entry.unwrap().file_name()))
+        );
+        drop(guard);
+
+        // The next repository publication owns the directory lock, removes
+        // the abandoned complete staging file, and then proceeds normally.
+        let _retry_guard = prepare_directory(&directory).unwrap();
+        assert!(
+            !fs::read_dir(&directory)
+                .unwrap()
+                .any(|entry| is_publish_temp_name(&entry.unwrap().file_name()))
+        );
 
         assert!(publish_exact(&path, b"complete-root", PublishFault::None).unwrap());
         assert_eq!(fs::read(&path).unwrap(), b"complete-root");
@@ -5458,5 +5711,29 @@ mod tests {
         );
         fs::remove_file(link).unwrap();
         fs::remove_dir_all(real).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_temp_cleanup_never_follows_or_removes_matching_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temporary_directory("stale-symlink");
+        let guard = prepare_directory(&directory).unwrap();
+        let target = directory.join("operator-file");
+        fs::write(&target, b"must survive").unwrap();
+        let link = objects(&directory).join(".atomic-tmp-1234-0000000000000001");
+        symlink(&target, &link).unwrap();
+        drop(guard);
+
+        let _retry_guard = prepare_directory(&directory).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"must survive");
+        fs::remove_dir_all(directory).unwrap();
     }
 }
