@@ -469,7 +469,8 @@ fn grant_runtime_privileges(
             "GRANT SELECT ON TABLE {peer_relations} TO {peer_ident}; \
              GRANT SELECT ON TABLE {peer_relations} TO {writer_ident}; \
              GRANT SELECT ON TABLE {} TO {writer_ident}; \
-             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_heads\" TO {writer_ident}; \
+             GRANT UPDATE ON TABLE {schema_ident}.\"atomic_databases\", \
+                                   {schema_ident}.\"atomic_heads\" TO {writer_ident}; \
              GRANT INSERT ON TABLE {} TO {writer_ident}; \
              GRANT UPDATE ON TABLE {schema_ident}.\"atomic_transactor_leases\" TO {writer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),

@@ -27,6 +27,12 @@ Use separate least-privilege PostgreSQL roles:
 - migration/operator performs DDL, verified restore, GC and excision and is
   never exposed through the application transaction API.
 
+`PostgresMigrator::grant_runtime_privileges` installs the concrete writer and
+peer table grants after rejecting elevated, inherited, owning, or non-distinct
+roles. Runtime service, peer, indexer, and tree-writer startup validates the
+complete checksummed migration prefix and refuses an unknown newer version
+before reading or publishing database state.
+
 Require TLS across host boundaries, authenticate at the embedding service,
 rotate database credentials, restrict `pg_hba.conf`, and encrypt PostgreSQL,
 WAL archives and portable backups at rest using deployment-owned facilities.
@@ -46,4 +52,3 @@ rewrite otherwise immutable rows. They must run only in the audited operator
 process after target resolution and backup verification. Exported immutable
 snapshots, replicas, backups and logs are outside the live cache invalidation
 boundary and require explicit inventory/retention handling.
-

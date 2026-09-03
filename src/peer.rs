@@ -463,7 +463,8 @@ impl PostgresIndexer {
         connection: &PostgresConnectionConfig,
         database_id: impl Into<String>,
     ) -> Result<Self, SemanticError> {
-        let client = connection.connect_for("index/connect")?;
+        let mut client = connection.connect_for("index/connect")?;
+        verify_schema_compatibility(&mut client)?;
         let tree_store = PostgresTreeStore::connect_configured(connection)?;
         Ok(Self {
             client,

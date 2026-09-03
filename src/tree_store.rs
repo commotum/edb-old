@@ -5,7 +5,7 @@
 //! the append-only publication row is inserted last.  This module deliberately
 //! does not define a storage trait; PostgreSQL is the only durable boundary.
 
-use crate::postgres::postgres_error;
+use crate::postgres::{postgres_error, verify_schema_compatibility};
 use crate::{Digest, ErrorCategory, IndexOrder, PostgresConnectionConfig, SemanticError, sha256};
 use postgres::Client;
 
@@ -88,7 +88,8 @@ impl PostgresTreeStore {
     pub fn connect_configured(
         connection: &PostgresConnectionConfig,
     ) -> Result<Self, SemanticError> {
-        let client = connection.connect_for("tree/connect")?;
+        let mut client = connection.connect_for("tree/connect")?;
+        verify_schema_compatibility(&mut client)?;
         Ok(Self::from_client(client))
     }
 

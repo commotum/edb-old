@@ -1,8 +1,8 @@
 use crate::{ErrorCategory, SemanticError};
-use native_tls::{Certificate, TlsConnector};
+use native_tls::{Certificate, Protocol, TlsConnector};
 use postgres::config::{Host, SslMode};
 use postgres::{Client, Config, NoTls};
-use postgres_native_tls::MakeTlsConnector;
+use postgres_native_tls::{MakeTlsConnector, set_postgresql_alpn};
 use std::fmt;
 use std::sync::Arc;
 
@@ -11,8 +11,9 @@ use std::sync::Arc;
 /// The legacy string constructors remain available and deliberately select
 /// `plaintext`. Production callers can instead select `require_tls`, which
 /// forces PostgreSQL TLS negotiation even if the parameter string says
-/// `sslmode=disable`. Server certificates and hostnames are always verified;
-/// there is intentionally no "accept invalid certificate" switch.
+/// `sslmode=disable`. TLS 1.2 is the minimum; server certificates and
+/// hostnames are always verified, and there is intentionally no "accept
+/// invalid certificate" switch.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PostgresConnectionConfig {
     parameters: Arc<str>,
@@ -117,6 +118,8 @@ impl PostgresConnectionConfig {
         config.ssl_mode(SslMode::Require);
 
         let mut builder = TlsConnector::builder();
+        builder.min_protocol_version(Some(Protocol::Tlsv12));
+        set_postgresql_alpn(&mut builder);
         for certificate_pem in root_certificates.iter() {
             let certificate =
                 Certificate::from_pem(certificate_pem).map_err(|_| invalid_root_certificate())?;

@@ -35,9 +35,9 @@ prototype shortcuts with source-backed, database-scoped operational behavior.
 - Goals 10–14 established collision-free identity, information-derived
   schema/idents, one fenced writer, authenticated persistent trees, and exact
   lazy peer/query values.
-- Existing migration calls are mixed into ordinary startup paths; role/TLS and
-  forward-version behavior need direct evidence rather than documentation-only
-  claims.
+- `PostgresMigrator` now owns explicit upgrade/runtime-grant authority. Service,
+  peer, indexer, and tree-writer startup only validate the installed schema and
+  use one configurable PostgreSQL connection policy.
 - Existing operations tests were written for flat segments. Native tree roots,
   revisions, pins, and cross-database corrupt-manifest behavior are not fully
   reflected in inspection, backup, GC, or excision.
@@ -52,7 +52,10 @@ prototype shortcuts with source-backed, database-scoped operational behavior.
 
 ### 1. Explicit upgrade and secure runtime boundary
 
-**Status:** Pending.
+**Status:** Complete on PostgreSQL 15.11. The explicit live harness passed two
+migration/role tests and two TLS tests; the pure migration classifier passed
+three cases, existing idempotent migration passed, and warning-denying Clippy
+is green.
 
 **Outcome:** Provisioning/upgrades are explicit, while least-privilege writer
 and peer startup perform only version checks and normal runtime SQL over
@@ -66,6 +69,28 @@ configuration; stable startup anomalies.
 role; separately granted runtime writer/peer roles start and operate without
 DDL; a future schema version fails before service; required TLS succeeds and an
 insecure connection is rejected in a real PostgreSQL witness.
+
+**Evidence and decisions:** The docs make SQL provisioning and schema upgrades
+explicit (`00_storage_services.md:107-131`, `02_datomic_deployment.md:235-258`)
+and describe TLS/trust inputs (`01_transactor_reference.md:17-27,81-132`). The
+recovered `kv_sql_ext.clj:113-170` builds one validated configured data source,
+while `sql.clj` performs ordinary CRUD/CAS. Native code therefore uses the
+concrete `PostgresMigrator` plus `PostgresConnectionConfig`, not a backend
+trait. Runtime checks require the complete checksummed migration prefix and
+reject an unknown future version before any database read or publication.
+Role provisioning safely quotes identifiers, rejects elevated/inherited/
+owning roles and insecure PUBLIC schema creation, and grants only the reads,
+fenced log writes, lease updates, and immutable-tree inserts actually used.
+The writer's UPDATE privilege on `atomic_databases` exists solely because
+PostgreSQL requires it for the publication serialization row lock; the
+immutable trigger is independently proven to reject mutation. Required TLS
+forces verified TCP TLS even if parameters request disable, supports system
+and explicit PEM trust roots, redacts connection failures, and deliberately
+offers no non-validating mode. The live future-row fixture proved migrator,
+service, peer, standalone indexer, and standalone tree writer all fail with
+`postgres/schema-too-new`; the restricted-role fixture committed, published a
+tree, served a peer, and released its lease while DDL/history/peer writes were
+denied.
 
 ### 2. Coherent inspection and database-scoped failure
 

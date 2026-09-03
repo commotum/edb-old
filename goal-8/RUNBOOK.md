@@ -11,8 +11,10 @@ retention values. Never put credentials in command history or source control.
    critical Atomic database.
 2. Stop transaction-service leaders. Peers may continue serving immutable old
    snapshots during this read-only window.
-3. Run `PostgresStore::migrate()` once using the migration role. It takes a
-   transaction-scoped advisory lock and rejects a changed checksum.
+3. Run `PostgresMigrator::migrate()` once using the migration role. It takes a
+   transaction-scoped advisory lock and rejects changed, gapped, or future
+   migration history. Use `grant_runtime_privileges` to provision distinct
+   pre-created writer and peer roles after securing the containing schema.
 4. Start one `TransactionService` or `TransactionStandby`, confirm it owns a
    fresh lease epoch, then start remaining standbys and peers.
 5. Run `PostgresOperator::inspect_database(database_id, true)` and require a
@@ -53,7 +55,7 @@ For PITR, restore a base backup to an empty data directory, set
 targets (time, LSN or restore point), create `recovery.signal`, and start the
 isolated instance. After recovery promotes or pauses at the requested target:
 
-1. run `PostgresStore::migrate()` only if intentionally upgrading;
+1. run `PostgresMigrator::migrate()` only if intentionally upgrading;
 2. deep-inspect every Atomic database;
 3. recover representative current and historical bases;
 4. connect a peer and run application query/pull smoke tests;
@@ -150,4 +152,3 @@ record an explicit waiver; revoke application, backup and operator roles;
 drop the explicitly named PostgreSQL database/cluster with native tooling;
 expire replicas, WAL archives, physical/portable backups and exports under the
 same retention decision; and retain only the permitted non-sensitive audit.
-
