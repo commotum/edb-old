@@ -30,6 +30,19 @@ PostgreSQL is the only storage system this project will support. The design shou
 - **Function runtime:** built-ins plus deterministic, resource-bounded persisted behavior through a versioned WASM ABI or comparably constrained DSL; no ambient filesystem, network, clock, or randomness.
 - **Operations:** fenced transactor failover, restart recovery, backups, restore verification, observability, garbage collection, excision, schema/index evolution, and structured errors.
 
+## Execution model
+
+Goal 0 is the persistent parent loop, not a direct implementation stage. For each first unfinished numbered stage, it owns this cycle:
+
+1. Reconcile the parent plan and repository with actual artifacts, tests, source evidence, and completed child-goal findings.
+2. Create the matching `goal-N/` scaffold with `$scaffold-goal` if it does not exist, or reconcile and resume it if it does. A child scaffold contains `0-plan.md`, `0-loop.md`, and `0-prompt.md` and inherits this objective and all applicable constraints.
+3. Execute that child goal through its observable completion signal. Creating its scaffold, writing a plan, or completing only an internal stage does not complete the parent stage.
+4. Fold material evidence, decisions, deviations, limitations, and truthful status into both the child plan and this plan.
+5. Return to Goal 0, reread the whole parent plan, and revise unfinished stages when new evidence changes their best boundaries or acceptance criteria; preserve the original objective and do not renumber completed stages.
+6. Repeat with the new first unfinished stage until every stage and the Goal 0 success condition are verified.
+
+Only one child goal is active at a time. If its scaffold already exists but is incomplete, continue it rather than replacing it or creating the following scaffold. If blocked, record the concrete blocker in both plans and stop truthfully instead of advancing the parent stage.
+
 ## Stages
 
 ### 1. Semantic foundation
@@ -63,6 +76,8 @@ PostgreSQL is the only storage system this project will support. The design shou
 **Completion signal:** Acknowledged commits survive injected crashes, ambiguous retries cannot double-commit, failed publications are invisible, and recovery reproduces the expected basis and indexes.
 
 ### 4. Index and peer read architecture
+
+**Status:** Scaffolded in `goal-4/`; execution has not yet established this stage's completion signal.
 
 **Outcome:** Independent Rust peers maintain immutable database snapshots and answer indexed reads locally while synchronizing monotonically through PostgreSQL.
 
