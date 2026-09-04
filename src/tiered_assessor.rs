@@ -375,6 +375,19 @@ pub(crate) fn assess_tiered_with_limits(
             "transaction assessment read limits must be positive",
         ));
     }
+    assess_tiered_with_remaining_limits(base, ops, tx_instant, limits)
+}
+
+/// Assess against the exact allowance left by an enclosing transaction read
+/// budget. Unlike the standalone bounded entry point, zero is meaningful
+/// here: an assessment that yields no logical datoms may proceed, while the
+/// first datom read is rejected by [`Reader::charge`].
+pub(crate) fn assess_tiered_with_remaining_limits(
+    base: &DatabaseValue,
+    ops: &[TxOp],
+    tx_instant: i64,
+    limits: AssessmentLimits,
+) -> Result<TieredAssessment, SemanticError> {
     if base
         .last_tx_instant()?
         .is_some_and(|prior| tx_instant < prior)
@@ -2656,6 +2669,41 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(invalid.code, "transaction/invalid-read-capacity");
+
+        let zero_read = assess_tiered_with_remaining_limits(
+            &DatabaseValue::eager(Arc::new(initial)),
+            &[],
+            10,
+            AssessmentLimits {
+                max_read_datoms: 0,
+                max_read_bytes: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(zero_read.read_work.datoms, 0);
+        assert_eq!(zero_read.read_work.retained_bytes, 0);
+
+        let seeded = Database::new(schema())
+            .unwrap()
+            .with(&add("one", 1), 10)
+            .unwrap()
+            .db_after;
+        let entity = seeded
+            .lookup(NAME, &Value::String("one".into()))
+            .unwrap()
+            .unwrap();
+        let exhausted = assess_tiered_with_remaining_limits(
+            &DatabaseValue::eager(Arc::new(seeded)),
+            &[TxOp::RetractEntity(EntityRef::Id(entity))],
+            11,
+            AssessmentLimits {
+                max_read_datoms: 0,
+                max_read_bytes: 0,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(exhausted.category, ErrorCategory::Busy);
+        assert_eq!(exhausted.code, "transaction/read-capacity");
     }
 
     #[test]
