@@ -1,12 +1,13 @@
 use atomic_core::persistent_tree::{TreeNode, decode_tree_node};
 use atomic_core::{
-    Attribute, AttributeName, Binding, Cardinality, Clause, DataPattern, EntityRef, EntityValue,
-    FindElement, FindSpec, Function, IndexBuildFault, IndexOrder, IndexPrefix, InputSpec,
-    Instruction, Keyword, Peer, PostgresIndexer, PostgresStore, Program, ProgramKind,
-    PullAttribute, PullPattern, Query, QueryControl, QueryEngine, QueryExtensions, QueryInput,
-    QueryOutcome, QueryResult, QuerySource, QueryValue, Schema, Term, TransactionRequest,
-    TransactionService, TransactionServiceConfig, TxOp, TxValue, Unique, Value, ValueType,
-    Variable, View, decode_index_manifest, encode_index_manifest, sha256,
+    Attribute, AttributeName, Binding, Cardinality, Clause, DataPattern, Datom, Digest, EntityRef,
+    EntityValue, FindElement, FindSpec, Function, IndexBuildFault, IndexOrder, IndexPrefix,
+    InputSpec, Instruction, Keyword, Peer, PeerSnapshot, PostgresIndexer, PostgresOperator,
+    PostgresStore, PostgresTreeStore, Program, ProgramKind, PullAttribute, PullPattern, Query,
+    QueryControl, QueryEngine, QueryExtensions, QueryInput, QueryOutcome, QueryResult, QuerySource,
+    QueryValue, Schema, Term, TransactionRequest, TransactionService, TransactionServiceConfig,
+    TxOp, TxValue, Unique, Value, ValueType, Variable, View, decode_index_manifest,
+    encode_index_manifest, sha256,
 };
 use postgres::{Client, NoTls};
 use std::process::Command;
@@ -64,8 +65,26 @@ fn schema(no_history: bool) -> Schema {
         Cardinality::One,
     );
     parent.indexed = true;
+    parent.no_history = no_history;
     schema.install(parent).unwrap();
     schema
+}
+
+fn retained_attribute_history(
+    snapshot: &PeerSnapshot,
+    order: IndexOrder,
+    entity: u64,
+    attribute: u32,
+) -> Vec<Datom> {
+    let mut datoms = snapshot
+        .datoms(true, order)
+        .unwrap()
+        .datoms
+        .into_iter()
+        .filter(|datom| datom.entity == entity && datom.attribute == attribute)
+        .collect::<Vec<_>>();
+    datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+    datoms
 }
 
 fn assert_current_eq(left: &impl InformationSource, right: &impl InformationSource) {
@@ -182,6 +201,16 @@ fn populated(
     }
     service.shutdown();
     (store, entity)
+}
+
+fn finish_publication_work(connection: &str, manifest_hash: Digest) {
+    let mut tree_store = PostgresTreeStore::connect(connection).unwrap();
+    for _ in 0..10_000 {
+        if tree_store.advance_publication_work(manifest_hash).unwrap() {
+            return;
+        }
+    }
+    panic!("native publication work did not quiesce within its bounded test fence");
 }
 
 #[test]
@@ -314,6 +343,7 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
     let built = indexer.consolidate().unwrap();
     assert_eq!(built.basis_t, expected.basis_t());
     assert!(built.segment_count > 8);
+    finish_publication_work(&connection, built.manifest_hash);
     assert!(indexer.consolidate().unwrap().reused);
 
     assert!(before_index.refresh_index().unwrap());
@@ -968,6 +998,29 @@ fn no_history_consolidation_forgets_old_values_without_changing_current_state() 
     };
     let database_id = unique("nohistory");
     let (mut store, entity) = populated(&connection, &database_id, true, 5);
+    let before_parent_replacement = store.recover(&database_id).unwrap();
+    let service = common::start_service(&connection, &database_id);
+    let parent_replacement = common::transact(
+        &service,
+        "replace-nohistory-parent",
+        before_parent_replacement.basis_t(),
+        &[
+            TxOp::Add {
+                entity: EntityRef::Temp("replacement-parent".into()),
+                attribute: ITEM_NAME,
+                value: TxValue::Scalar(Value::String(format!("{database_id}-parent"))),
+            },
+            TxOp::Add {
+                entity: EntityRef::Id(entity),
+                attribute: ITEM_PARENT,
+                value: TxValue::Entity(EntityRef::Temp("replacement-parent".into())),
+            },
+        ],
+        2_000,
+    );
+    let replacement_parent = parent_replacement.tempids["replacement-parent"];
+    drop(parent_replacement);
+    service.shutdown();
     let expected = store.recover(&database_id).unwrap();
     let authoritative_old: Vec<_> = expected
         .datoms(View::History, IndexOrder::Eavt)
@@ -975,6 +1028,15 @@ fn no_history_consolidation_forgets_old_values_without_changing_current_state() 
         .filter(|d| d.entity == entity && d.attribute == ITEM_COUNT)
         .collect();
     assert!(authoritative_old.len() > 1);
+    let authoritative_parent: Vec<_> = expected
+        .datoms(View::History, IndexOrder::Eavt)
+        .into_iter()
+        .filter(|d| d.entity == entity && d.attribute == ITEM_PARENT)
+        .collect();
+    assert!(
+        authoritative_parent.len() > 1,
+        "parent replacement did not create a noHistory omission pair"
+    );
     PostgresIndexer::connect(&connection, &database_id)
         .unwrap()
         .with_segment_datoms(2)
@@ -983,17 +1045,56 @@ fn no_history_consolidation_forgets_old_values_without_changing_current_state() 
         .unwrap();
     let peer = Peer::connect(&connection, &database_id, 8).unwrap();
     assert_current_eq(&peer.db(), &expected);
-    let retained: Vec<_> = peer
-        .snapshot()
-        .datoms(true, IndexOrder::Eavt)
-        .unwrap()
-        .datoms
-        .into_iter()
-        .filter(|d| d.entity == entity && d.attribute == ITEM_COUNT)
-        .collect();
+    let snapshot = peer.snapshot();
+    let retained = retained_attribute_history(&snapshot, IndexOrder::Eavt, entity, ITEM_COUNT);
     assert_eq!(retained.len(), 1);
     assert!(retained[0].added);
     assert_eq!(retained[0].value, Value::Long(5));
+
+    // Every applicable physical history order must retain the same logical
+    // facts even though each tree has different keys and leaf boundaries.
+    for order in [IndexOrder::Aevt, IndexOrder::Avet] {
+        let ordered = retained_attribute_history(&snapshot, order, entity, ITEM_COUNT);
+        assert_eq!(ordered, retained, "noHistory diverged in {order:?}");
+    }
+    let retained_parent =
+        retained_attribute_history(&snapshot, IndexOrder::Eavt, entity, ITEM_PARENT);
+    assert_eq!(retained_parent.len(), 1);
+    assert!(retained_parent[0].added);
+    assert_eq!(retained_parent[0].value, Value::Ref(replacement_parent));
+    for order in [IndexOrder::Aevt, IndexOrder::Avet, IndexOrder::Vaet] {
+        assert_eq!(
+            retained_attribute_history(&snapshot, order, entity, ITEM_PARENT),
+            retained_parent,
+            "reference noHistory omission diverged in {order:?}"
+        );
+    }
+    drop(peer);
+
+    let reopened = Peer::connect(&connection, &database_id, 8).unwrap();
+    let reopened = reopened.snapshot();
+    for order in [IndexOrder::Eavt, IndexOrder::Aevt, IndexOrder::Avet] {
+        assert_eq!(
+            retained_attribute_history(&reopened, order, entity, ITEM_COUNT),
+            retained,
+            "reopened count noHistory diverged in {order:?}"
+        );
+    }
+    for order in [
+        IndexOrder::Eavt,
+        IndexOrder::Aevt,
+        IndexOrder::Avet,
+        IndexOrder::Vaet,
+    ] {
+        assert_eq!(
+            retained_attribute_history(&reopened, order, entity, ITEM_PARENT),
+            retained_parent,
+            "reopened reference noHistory diverged in {order:?}"
+        );
+    }
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    let inspection = operator.inspect_database(&database_id, true).unwrap();
+    assert!(inspection.healthy(), "{:?}", inspection.problems);
 }
 
 #[test]
@@ -1304,20 +1405,63 @@ fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
         )
         .unwrap()
         .get(0);
-    let latest_revision: i64 = client
+    let publication_summary = client
         .query_one(
-            "SELECT max(publication_revision) FROM atomic_tree_publications \
+            "SELECT count(*), count(DISTINCT publication_revision), \
+                    min(publication_revision), max(publication_revision) \
+               FROM atomic_tree_publications \
               WHERE database_id = $1",
             &[&database_id],
         )
-        .unwrap()
-        .get(0);
+        .unwrap();
+    let publication_count: i64 = publication_summary.get(0);
+    let distinct_revisions: i64 = publication_summary.get(1);
+    let first_revision: i64 = publication_summary.get(2);
+    let latest_revision: i64 = publication_summary.get(3);
     assert_eq!(
         latest_revision,
         i64::try_from(receipts[0].publication_revision + 1).unwrap()
     );
-    assert_eq!(manifest_count, latest_revision);
+    assert_eq!(first_revision, 1);
+    assert_eq!(publication_count, distinct_revisions);
+    assert_eq!(publication_count, latest_revision);
+
+    // A losing content-first builder may have committed an immutable manifest
+    // before it lost root publication. Such content is not a publication and
+    // must remain attached to its exact sealed abandonment ledger for
+    // age-gated GC, rather than being mistaken for a revision in the chain.
+    let unpublished = client
+        .query_one(
+            "SELECT count(*), \
+                    count(*) FILTER ( \
+                        WHERE intent.manifest_hash IS NOT NULL \
+                          AND intent.intent_state IN (1, 3) \
+                          AND intent.staged_node_count = intent.expected_node_count) \
+               FROM atomic_tree_manifests manifest \
+               LEFT JOIN atomic_tree_publications publication \
+                 ON publication.manifest_hash = manifest.manifest_hash \
+               LEFT JOIN atomic_tree_build_intents intent \
+                 ON intent.manifest_hash = manifest.manifest_hash \
+              WHERE manifest.database_id = $1 \
+                AND publication.manifest_hash IS NULL",
+            &[&database_id],
+        )
+        .unwrap();
+    let unpublished_manifests: i64 = unpublished.get(0);
+    let collectible_manifests: i64 = unpublished.get(1);
+    assert_eq!(unpublished_manifests, collectible_manifests);
+    assert_eq!(manifest_count, publication_count + unpublished_manifests);
     drop(client);
+
+    let inspection = PostgresOperator::connect(&connection)
+        .unwrap()
+        .inspect_database(&database_id, true)
+        .unwrap();
+    assert!(inspection.healthy(), "{:?}", inspection.problems);
+    assert_eq!(
+        inspection.metrics.tree_publications,
+        u64::try_from(publication_count).unwrap()
+    );
 
     if let (Ok(pg_ctl), Ok(data_dir)) = (
         std::env::var("ATOMIC_POSTGRES_CTL"),
@@ -1477,6 +1621,24 @@ fn avet_transition_waits_for_a_covering_native_publication() {
         unready.datoms_with_prefix(false, &prefix).unwrap_err().code,
         "peer/avet-not-ready"
     );
+    let found = Variable::new("found").unwrap();
+    let value_bound = Query::new(
+        FindSpec::Scalar(FindElement::Variable(found.clone())),
+        vec![Clause::Pattern(Box::new(DataPattern::new(
+            Term::Variable(found),
+            Term::Constant(Value::Keyword(Keyword::new("item", "count"))),
+            Term::Constant(Value::Long(7)),
+        )))],
+    );
+    let unready_query = unready
+        .database_value()
+        .query(&value_bound, &[], &QueryControl::default())
+        .unwrap();
+    assert_eq!(
+        unready_query.result,
+        QueryResult::Scalar(Some(QueryValue::Scalar(Value::Ref(entity))))
+    );
+    assert_eq!(unready_query.plan[0].access, "AEVT seek");
 
     PostgresIndexer::connect(&connection, &database_id)
         .unwrap()
@@ -1487,6 +1649,13 @@ fn avet_transition_waits_for_a_covering_native_publication() {
     assert_eq!(ready.datoms.len(), 1);
     assert_eq!(ready.datoms[0].entity, entity);
     assert_eq!(ready.datoms[0].value, Value::Long(7));
+    let ready_query = peer
+        .snapshot()
+        .database_value()
+        .query(&value_bound, &[], &QueryControl::default())
+        .unwrap();
+    assert_eq!(ready_query.result, unready_query.result);
+    assert_eq!(ready_query.plan[0].access, "AVET seek");
     service.shutdown();
 }
 
@@ -1530,55 +1699,52 @@ fn failed_multi_row_tail_does_not_tear_peer_state_and_can_retry() {
 
     let mut client = Client::connect(&connection, NoTls).unwrap();
     let basis_sql = i64::try_from(second.basis_t).unwrap();
+    let generation: i64 = client
+        .query_one(
+            "SELECT log_generation FROM atomic_heads WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    assert!(generation > 0, "new databases use a native log generation");
     let original_state: Vec<u8> = client
         .query_one(
-            "SELECT state_hash FROM atomic_transactions \
-             WHERE database_id = $1 AND basis_t = $2",
-            &[&database_id, &basis_sql],
+            "SELECT state_hash FROM atomic_generation_transactions \
+             WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
+            &[&database_id, &generation, &basis_sql],
         )
         .unwrap()
         .get(0);
     let mut corrupt_state = original_state.clone();
     corrupt_state[0] ^= 1;
-    client
-        .batch_execute("ALTER TABLE atomic_transactions DISABLE TRIGGER USER")
-        .unwrap();
-    client
-        .execute(
-            "UPDATE atomic_transactions SET state_hash = $1 \
-             WHERE database_id = $2 AND basis_t = $3",
-            &[&corrupt_state, &database_id, &basis_sql],
+    let corrupted = common::with_replica_triggers_disabled(&mut client, |client| {
+        client.execute(
+            "UPDATE atomic_generation_transactions SET state_hash = $1 \
+             WHERE database_id = $2 AND generation = $3 AND basis_t = $4",
+            &[&corrupt_state, &database_id, &generation, &basis_sql],
         )
-        .unwrap();
-    client
-        .batch_execute("ALTER TABLE atomic_transactions ENABLE TRIGGER USER")
-        .unwrap();
+    })
+    .unwrap();
+    assert_eq!(corrupted, 1);
 
     let rejected = peer
         .sync_to(second.basis_t, Duration::from_secs(1))
         .unwrap_err();
     assert_eq!(rejected.category, atomic_core::ErrorCategory::Fault);
-    assert!(matches!(
-        rejected.code,
-        "peer/tail-state-commitment-mismatch" | "recovery/state-commitment-mismatch"
-    ));
+    assert_eq!(rejected.code, "recovery/generation-membership-mismatch");
     assert_eq!(peer.basis_t(), initial_hash_basis);
     assert_current_eq(&peer.db(), &initial);
     assert!(peer.take_tx_reports().is_empty());
 
-    client
-        .batch_execute("ALTER TABLE atomic_transactions DISABLE TRIGGER USER")
-        .unwrap();
-    client
-        .execute(
-            "UPDATE atomic_transactions SET state_hash = $1 \
-             WHERE database_id = $2 AND basis_t = $3",
-            &[&original_state, &database_id, &basis_sql],
+    let restored = common::with_replica_triggers_disabled(&mut client, |client| {
+        client.execute(
+            "UPDATE atomic_generation_transactions SET state_hash = $1 \
+             WHERE database_id = $2 AND generation = $3 AND basis_t = $4",
+            &[&original_state, &database_id, &generation, &basis_sql],
         )
-        .unwrap();
-    client
-        .batch_execute("ALTER TABLE atomic_transactions ENABLE TRIGGER USER")
-        .unwrap();
+    })
+    .unwrap();
+    assert_eq!(restored, 1);
 
     let retried = peer
         .sync_to(second.basis_t, Duration::from_secs(1))

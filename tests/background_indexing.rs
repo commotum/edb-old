@@ -56,7 +56,7 @@ fn setup_empty(connection: &str, database_id: &str) {
     );
 }
 
-fn corrupt_latest_v4_manifest_payload(
+fn corrupt_latest_v5_manifest_payload(
     client: &mut impl GenericClient,
     database_id: &str,
 ) -> Vec<u8> {
@@ -77,7 +77,7 @@ fn corrupt_latest_v4_manifest_payload(
     assert_eq!(payload.get(..4), Some(b"ATIM".as_slice()));
     assert_eq!(
         u16::from_be_bytes(payload[4..6].try_into().unwrap()),
-        4,
+        5,
         "poison fixture must track the current canonical manifest version"
     );
     let checksum_byte = payload.len() - 1;
@@ -139,7 +139,7 @@ fn finish_zero_delta_publication_work(client: &mut impl GenericClient, manifest_
     );
 }
 
-fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, u64, [u8; 32]) {
+fn publish_corrupt_v5_manifest(client: &mut Client, database_id: &str) -> (u64, u64, [u8; 32]) {
     let mut transaction = client.transaction().unwrap();
     let authoritative = transaction
         .query_one(
@@ -167,7 +167,7 @@ fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, 
     let source_manifest_hash: Vec<u8> = authoritative.get(6);
     let log_generation: i64 = authoritative.get(7);
     let lineage_id: Option<String> = authoritative.get(8);
-    let poison_payload = corrupt_latest_v4_manifest_payload(&mut transaction, database_id);
+    let poison_payload = corrupt_latest_v5_manifest_payload(&mut transaction, database_id);
     let poison_hash = sha256(&poison_payload);
     transaction
         .execute(
@@ -175,7 +175,7 @@ fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, 
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
                 excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                 log_generation, lineage_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 5, $8, $9, $10, $11)",
             &[
                 &database_id,
                 &poison_revision,
@@ -394,11 +394,14 @@ fn basis_zero_is_published_at_creation_and_first_novelty_advances_it() {
         .unwrap();
     let indexed = wait_for_stats(&service, |stats| {
         stats.published_basis_t == first.basis_t
-            && stats.jobs_completed == 1
+            && stats.published_revision == stats.newest_observed_revision
+            && stats.pending_avet_projections == 0
+            && stats.jobs_completed >= 1
+            && !stats.job_in_flight
             && stats.total_bytes == 0
     });
     assert_eq!(first.basis_t, 1);
-    assert_eq!(indexed.jobs_started, 1);
+    assert_eq!(indexed.jobs_started, indexed.jobs_completed);
     assert_eq!(indexed.jobs_failed, 0);
     service.shutdown();
 }
@@ -514,7 +517,7 @@ fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
 
     let mut sql = Client::connect(&connection, NoTls).unwrap();
     let (poison_basis, poison_revision, poison_hash) =
-        publish_corrupt_v4_manifest(&mut sql, &database_id);
+        publish_corrupt_v5_manifest(&mut sql, &database_id);
     assert_eq!(poison_basis, initial_basis);
     assert_eq!(poison_revision, first.published_revision + 1);
     let head_before: i64 = sql
@@ -554,13 +557,15 @@ fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
         stats.published_basis_t == initial_basis
             && stats.published_revision > poison_revision
             && stats.published_revision == stats.newest_observed_revision
-            && stats.jobs_completed == 1
+            && stats.pending_avet_projections == 0
+            && stats.jobs_completed >= 1
+            && !stats.job_in_flight
             && stats.total_transactions == 0
             && stats.total_bytes == 0
     });
     assert_eq!(repaired.published_revision, poison_revision + 1);
     assert_eq!(repaired.target_basis_t, initial_basis);
-    assert_eq!(repaired.jobs_started, 1);
+    assert_eq!(repaired.jobs_started, repaired.jobs_completed);
     assert_eq!(repaired.jobs_failed, 0);
     assert!(repaired.last_failure.is_none());
     assert!(service.client().is_available());
@@ -910,10 +915,10 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
         u64::try_from(current_revision).unwrap(),
         initial.published_revision
     );
-    // Preserve the current v4 envelope header and corrupt its checksum. This
+    // Preserve the current v5 envelope header and corrupt its checksum. This
     // remains a hash-named immutable value at SQL level while the canonical
     // decoder correctly rejects it.
-    let poison_payload = corrupt_latest_v4_manifest_payload(&mut poison, &database_id);
+    let poison_payload = corrupt_latest_v5_manifest_payload(&mut poison, &database_id);
     let poison_hash = sha256(&poison_payload);
     let generation: i64 = poison
         .query_one(
@@ -929,7 +934,7 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
                 excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                 log_generation, lineage_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 5, $8, $9, $10, $11)",
             &[
                 &database_id,
                 &poison_revision,

@@ -18,7 +18,9 @@ pub type Digest = [u8; 32];
 const MAGIC: &[u8; 4] = b"ATMC";
 // Version 3 makes genesis/schema ordinary immutable information and removes
 // typed SchemaChange side channels from durable transactions and manifests.
-// Older mixed-authority payloads fail closed rather than being reinterpreted.
+// The corrected runtime/tree comparator is versioned independently by ATIX
+// v4; these authoritative ATMC v3 bytes retain their original stored-first
+// ordering and remain replayable during an administrative tree rebuild.
 const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
@@ -384,7 +386,16 @@ pub(crate) fn validate_persistent_index_datoms(
     order: IndexOrder,
     datoms: &[Datom],
 ) -> Result<(), SemanticError> {
-    validate_index_datoms(order, datoms)
+    if datoms
+        .windows(2)
+        .any(|pair| pair[0].cmp_in(&pair[1], order).is_gt())
+    {
+        return Err(fault(
+            "encoding/unsorted-index-segment",
+            "persistent index datoms must use the current tree ordering",
+        ));
+    }
+    validate_index_datom_contents(datoms)
 }
 
 /// Encode the authoritative t=0 information set. Genesis has its own checked
@@ -517,19 +528,26 @@ fn validate_index_segment(segment: &IndexSegment) -> Result<(), SemanticError> {
             "index segments cannot be empty",
         ));
     }
-    validate_index_datoms(segment.order, &segment.datoms)
+    validate_format_v3_index_datoms(segment.order, &segment.datoms)
 }
 
-fn validate_index_datoms(order: IndexOrder, datoms: &[Datom]) -> Result<(), SemanticError> {
+fn validate_format_v3_index_datoms(
+    order: IndexOrder,
+    datoms: &[Datom],
+) -> Result<(), SemanticError> {
     if datoms
         .windows(2)
-        .any(|pair| pair[0].cmp_in(&pair[1], order).is_gt())
+        .any(|pair| format_v3_datom_cmp(&pair[0], &pair[1], order).is_gt())
     {
         return Err(fault(
             "encoding/unsorted-index-segment",
             "index segment datoms must be ordered",
         ));
     }
+    validate_index_datom_contents(datoms)
+}
+
+fn validate_index_datom_contents(datoms: &[Datom]) -> Result<(), SemanticError> {
     for datom in datoms {
         let datom_t = tx_to_t(datom.tx).map_err(|error| {
             fault(
@@ -556,6 +574,57 @@ fn validate_index_datoms(order: IndexOrder, datoms: &[Datom]) -> Result<(), Sema
         }
     }
     Ok(())
+}
+
+/// Comparator frozen into authoritative ATMC v3 genesis, transaction, and
+/// flat-segment values. The native ATIX v4 tree comparator intentionally
+/// differs: it places descending T/op before the stored representation tie.
+fn format_v3_datom_cmp(left: &Datom, right: &Datom, order: IndexOrder) -> std::cmp::Ordering {
+    let ordering = match order {
+        IndexOrder::Eavt => left
+            .entity
+            .cmp(&right.entity)
+            .then(left.attribute.cmp(&right.attribute))
+            .then_with(|| format_v3_value_cmp(&left.value, &right.value)),
+        IndexOrder::Aevt => left
+            .attribute
+            .cmp(&right.attribute)
+            .then(left.entity.cmp(&right.entity))
+            .then_with(|| format_v3_value_cmp(&left.value, &right.value)),
+        IndexOrder::Avet => left
+            .attribute
+            .cmp(&right.attribute)
+            .then_with(|| format_v3_value_cmp(&left.value, &right.value))
+            .then(left.entity.cmp(&right.entity)),
+        IndexOrder::Vaet => format_v3_value_cmp(&left.value, &right.value)
+            .then(left.attribute.cmp(&right.attribute))
+            .then(left.entity.cmp(&right.entity)),
+    };
+    ordering
+        .then_with(|| right.tx.cmp(&left.tx))
+        .then_with(|| right.added.cmp(&left.added))
+}
+
+fn format_v3_value_cmp(left: &Value, right: &Value) -> std::cmp::Ordering {
+    left.index_cmp(right).then_with(|| match (left, right) {
+        (Value::BigDec(left), Value::BigDec(right)) => left
+            .fractional_digit_count()
+            .cmp(&right.fractional_digit_count()),
+        (Value::Tuple(left), Value::Tuple(right)) => left
+            .iter()
+            .zip(right)
+            .find_map(|(left, right)| {
+                let ordering = match (left, right) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(left), Some(right)) => format_v3_value_cmp(left, right),
+                };
+                ordering.is_ne().then_some(ordering)
+            })
+            .unwrap_or_else(|| left.len().cmp(&right.len())),
+        _ => std::cmp::Ordering::Equal,
+    })
 }
 
 fn validate_index_manifest(manifest: &IndexManifest) -> Result<(), SemanticError> {
@@ -745,7 +814,7 @@ fn transaction_body(transaction: &DurableTransaction) -> Result<Vec<u8>, Semanti
         })
         .collect::<Result<Vec<_>, SemanticError>>()?;
     datoms.sort_by(|(left, left_bytes), (right, right_bytes)| {
-        left.cmp_in(right, crate::IndexOrder::Eavt)
+        format_v3_datom_cmp(left, right, crate::IndexOrder::Eavt)
             .then_with(|| left_bytes.cmp(right_bytes))
     });
     let mut body = Vec::new();
@@ -863,7 +932,7 @@ fn validate_genesis(datoms: &[Datom]) -> Result<(), SemanticError> {
     }
     if datoms
         .windows(2)
-        .any(|pair| !pair[0].cmp_in(&pair[1], IndexOrder::Eavt).is_lt())
+        .any(|pair| !format_v3_datom_cmp(&pair[0], &pair[1], IndexOrder::Eavt).is_lt())
     {
         return Err(fault(
             "encoding/noncanonical-genesis",
@@ -2383,8 +2452,58 @@ mod tests {
             tx_data: vec![datom("1.0"), datom("1.00")],
         };
         let forward = encode_transaction(&transaction).unwrap();
+        assert_eq!(u16::from_be_bytes([forward[5], forward[6]]), 3);
+        let decoded = decode_transaction(&forward).unwrap();
+        assert!(matches!(
+            &decoded.tx_data[0].value,
+            Value::BigDec(value) if value.fractional_digit_count() == 1
+        ));
         transaction.tx_data.reverse();
         assert_eq!(encode_transaction(&transaction).unwrap(), forward);
+    }
+
+    #[test]
+    fn format_v3_flat_segments_keep_stored_value_before_transaction_order() {
+        let datom = |value: &str, t| Datom {
+            entity: 1,
+            attribute: 10,
+            value: Value::BigDec(BigDecimal::from_str(value).unwrap()),
+            tx: t_to_tx(t).unwrap(),
+            added: true,
+        };
+        let older_short_scale = datom("1.0", 1);
+        let newer_long_scale = datom("1.00", 2);
+        assert!(
+            format_v3_datom_cmp(&older_short_scale, &newer_long_scale, IndexOrder::Eavt).is_lt()
+        );
+        assert!(
+            newer_long_scale
+                .cmp_in(&older_short_scale, IndexOrder::Eavt)
+                .is_lt(),
+            "ATIX v4 must instead put descending T before stored scale"
+        );
+
+        let legacy = IndexSegment {
+            order: IndexOrder::Eavt,
+            history: true,
+            datoms: vec![older_short_scale.clone(), newer_long_scale.clone()],
+        };
+        let bytes = encode_index_segment(&legacy).unwrap();
+        assert_eq!(u16::from_be_bytes([bytes[5], bytes[6]]), 3);
+        assert_eq!(decode_index_segment(&bytes).unwrap(), legacy);
+
+        let current_tree_order = vec![newer_long_scale, older_short_scale];
+        validate_persistent_index_datoms(IndexOrder::Eavt, &current_tree_order).unwrap();
+        assert_eq!(
+            encode_index_segment(&IndexSegment {
+                order: IndexOrder::Eavt,
+                history: true,
+                datoms: current_tree_order,
+            })
+            .unwrap_err()
+            .code,
+            "encoding/unsorted-index-segment"
+        );
     }
 
     #[test]

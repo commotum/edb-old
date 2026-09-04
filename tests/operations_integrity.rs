@@ -367,8 +367,7 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
     let deep = operator.inspect_database(&database_id, true).unwrap();
     assert!(!deep.healthy());
     assert!(deep.problems.iter().any(|problem| {
-        problem.code == "integrity/tree-derived-index-mismatch"
-            && problem.message.contains("Aevt")
+        problem.code == "integrity/tree-derived-index-mismatch" && problem.message.contains("Aevt")
     }));
 }
 

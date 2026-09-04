@@ -22,6 +22,7 @@ use crate::{
     Value, decode_genesis, decode_program, decode_transaction, encode_genesis, encode_program,
     encode_transaction, request_digest, sha256, transaction_hash,
 };
+use postgres::fallible_iterator::FallibleIterator;
 use postgres::{Client, GenericClient, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -228,12 +229,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         21,
         include_str!("../migrations/0021_resumable_avet_projection.sql"),
     ),
+    (
+        22,
+        include_str!("../migrations/0022_tree_retirement_intent_dependency.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 21;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 22;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -287,6 +292,10 @@ const WRITER_RUNTIME_TABLES: &[&str] = &[
     // The invoker tree-manifest validation trigger authenticates a positive
     // generation's endpoint against its immutable completion checkpoint.
     "atomic_log_generation_checkpoints",
+    // The invoker semantic-root validation trigger distinguishes ordinary
+    // publication from the two fixed-path generation-GC mutations.
+    "atomic_log_generation_collection_progress",
+    "atomic_log_generation_abandonment_progress",
     "atomic_tree_build_intents",
     "atomic_tree_build_intent_nodes",
     "atomic_tree_delta_headers",
@@ -2184,6 +2193,13 @@ pub struct WriterResidencyStats {
     pub recent_accounted_bytes: u64,
     pub tree_cache_entries: usize,
     pub tree_cache_bytes: usize,
+    /// Child references retained by the eight decoded native roots. Roots
+    /// live in `TreeBase`, outside the discardable node cache.
+    pub resident_tree_root_children: usize,
+    /// Estimated decoded root allocations, including child vectors and
+    /// recursively owned routing-key data. Canonical payload bytes are not
+    /// retained here and are not included in this figure.
+    pub resident_tree_root_estimated_bytes: u64,
     /// Resident authenticated schema/ident projections. These are expected to
     /// scale with metadata cardinality, so their size is explicit rather than
     /// hidden inside the database-size-independent writer claim.
@@ -2386,6 +2402,7 @@ impl PostgresStore {
         };
         let recent = state.database.recent_stats();
         let cache = state.database.tree_cache_stats();
+        let roots = state.database.resident_tree_root_stats();
         let load = state.database.load_stats();
         let metadata = state.database.resident_metadata_stats();
         WriterResidencyStats {
@@ -2396,6 +2413,8 @@ impl PostgresStore {
             recent_accounted_bytes: recent.accounted_bytes,
             tree_cache_entries: cache.current_entries,
             tree_cache_bytes: cache.current_bytes,
+            resident_tree_root_children: roots.children,
+            resident_tree_root_estimated_bytes: roots.estimated_bytes,
             resident_schema_attributes: metadata.schema_attributes,
             resident_schema_information_datoms: metadata.schema_information_datoms,
             resident_schema_estimated_bytes: metadata.schema_estimated_bytes,
@@ -2563,6 +2582,7 @@ impl PostgresStore {
             base_t: target_t.saturating_sub(opened.tail_transactions),
             target_t,
             tail_transactions: opened.tail_transactions,
+            tail_range_reads: opened.tail_range_reads,
             rejected_manifests: opened.rejected_candidates,
         })
     }
@@ -3149,11 +3169,7 @@ impl PostgresStore {
             shared_snapshot.as_ref(),
         )?;
         let live_head_state = if basis == head_basis && hash == head_hash {
-            Some(select_freshest_head_writer_state(
-                cached,
-                replay_state,
-                &head_commitment,
-            )?)
+            select_freshest_head_writer_state(cached, replay_state, &head_commitment)?
         } else {
             None
         };
@@ -3475,11 +3491,7 @@ impl PostgresStore {
                 cached.as_ref().map(|state| &state.database),
             )?;
             let live_head_state = if basis == head_basis && hash == head_hash {
-                Some(select_freshest_head_writer_state(
-                    cached,
-                    replay_state,
-                    &head_commitment,
-                )?)
+                select_freshest_head_writer_state(cached, replay_state, &head_commitment)?
             } else {
                 None
             };
@@ -3542,7 +3554,7 @@ impl PostgresStore {
             {
                 state
             }
-            _ => open_writer_state(
+            _ => open_exact_state(
                 &connection,
                 database_id,
                 head_commitment.clone(),
@@ -3551,6 +3563,7 @@ impl PostgresStore {
                 self.capacity_limits.writer_tree_cache_bytes,
                 self.writer_recent_limits,
                 shared_snapshot.as_ref(),
+                true,
             )?,
         };
         let db_before_snapshot = writer_before.database.clone();
@@ -3958,6 +3971,39 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
     through_basis: u64,
     predecessor_hash: Digest,
 ) -> Result<Vec<AuthenticatedLogTransaction>, SemanticError> {
+    let mut output = Vec::new();
+    visit_authenticated_log_range(
+        client,
+        database_id,
+        generation,
+        after_basis,
+        through_basis,
+        predecessor_hash,
+        |transaction| {
+            output.push(transaction);
+            Ok(())
+        },
+    )?;
+    Ok(output)
+}
+
+/// Stream one authenticated range through a caller-owned bounded consumer.
+/// This keeps writer activation to one PostgreSQL range stream and permits a
+/// hard-capacity rejection after one decoded transaction, without first
+/// retaining or rereading the complete tail.
+pub(crate) fn visit_authenticated_log_range<C, F>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    after_basis: u64,
+    through_basis: u64,
+    predecessor_hash: Digest,
+    mut visit: F,
+) -> Result<u64, SemanticError>
+where
+    C: GenericClient,
+    F: FnMut(AuthenticatedLogTransaction) -> Result<(), SemanticError>,
+{
     if through_basis < after_basis {
         return Err(fault(
             "recovery/range-order",
@@ -3975,9 +4021,9 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
     let after = sql_basis(after_basis)?;
     let through = sql_basis(through_basis)?;
     let generation_sql = sql_basis(generation)?;
-    let rows = if generation == 0 {
+    let mut rows = if generation == 0 {
         client
-            .query(
+            .query_raw(
                 "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.payload, \
                         t.state_hash, NULL::bytea, NULL::bigint, NULL::text, \
                         1::smallint, r.request_key, NULL::bytea, r.request_digest \
@@ -3987,12 +4033,16 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
                     AND r.tx_hash = t.tx_hash \
                   WHERE t.database_id = $1 AND t.basis_t > $2 AND t.basis_t <= $3 \
                   ORDER BY t.basis_t",
-                &[&database_id, &after, &through],
+                [
+                    &database_id as &(dyn postgres::types::ToSql + Sync),
+                    &after,
+                    &through,
+                ],
             )
             .map_err(|error| postgres_error("postgres/log-range-legacy", error))?
     } else {
         client
-            .query(
+            .query_raw(
                 "SELECT t.basis_t, t.previous_hash, t.tx_hash, c.payload, \
                         t.state_hash, t.content_hash, t.eidx_frontier, c.lineage_id, \
                         r.request_kind, NULL::text, r.request_key_hash, r.request_digest \
@@ -4003,20 +4053,22 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
                     AND r.basis_t = t.basis_t AND r.tx_hash = t.tx_hash \
                   WHERE t.database_id = $1 AND t.generation = $2 \
                     AND t.basis_t > $3 AND t.basis_t <= $4 ORDER BY t.basis_t",
-                &[&database_id, &generation_sql, &after, &through],
+                [
+                    &database_id as &(dyn postgres::types::ToSql + Sync),
+                    &generation_sql,
+                    &after,
+                    &through,
+                ],
             )
             .map_err(|error| postgres_error("postgres/log-range-generation", error))?
     };
-    if rows.len() != usize::try_from(through_basis - after_basis).unwrap_or(usize::MAX) {
-        return Err(fault(
-            "recovery/missing-transaction",
-            "transaction range is incomplete or lacks its exact request record",
-        ));
-    }
     let mut expected_basis = after_basis;
     let mut expected_previous = predecessor_hash;
-    let mut output = Vec::with_capacity(rows.len());
-    for row in rows {
+    let mut visited = 0_u64;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| postgres_error("postgres/log-range-stream", error))?
+    {
         expected_basis = expected_basis
             .checked_add(1)
             .ok_or_else(|| fault("recovery/basis-overflow", "transaction basis overflow"))?;
@@ -4119,7 +4171,7 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
                 "transaction request record has invalid generation identity metadata",
             ));
         }
-        output.push(AuthenticatedLogTransaction {
+        visit(AuthenticatedLogTransaction {
             transaction,
             tx_hash,
             state_hash,
@@ -4131,10 +4183,22 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
                 .transpose()?,
             request_digest,
             excision_replay: request_kind == 0,
-        });
+        })?;
+        visited = visited.checked_add(1).ok_or_else(|| {
+            fault(
+                "recovery/basis-overflow",
+                "transaction range row count overflow",
+            )
+        })?;
         expected_previous = tx_hash;
     }
-    Ok(output)
+    if visited != through_basis - after_basis {
+        return Err(fault(
+            "recovery/missing-transaction",
+            "transaction range is incomplete or lacks its exact request record",
+        ));
+    }
+    Ok(visited)
 }
 
 pub(crate) fn recover_to<C: GenericClient>(
@@ -4389,7 +4453,7 @@ fn select_freshest_head_writer_state(
     cached: Option<WriterState>,
     reconstructed: WriterState,
     head: &PersistentCommitmentCoordinate,
-) -> Result<WriterState, SemanticError> {
+) -> Result<Option<WriterState>, SemanticError> {
     let endpoint = exact_endpoint(head);
     if reconstructed.commitment != *head || reconstructed.database.endpoint() != endpoint {
         return Err(fault(
@@ -4397,13 +4461,15 @@ fn select_freshest_head_writer_state(
             "the reconstructed idempotent outcome does not name the locked logical head",
         ));
     }
-    Ok(cached
-        .filter(|state| state.commitment == *head && state.database.endpoint() == endpoint)
-        .unwrap_or(reconstructed))
+    // The reconstructed state exists to serve an immutable receipt. It may
+    // legitimately exceed a writer limit lowered after commit, so never turn
+    // it into mutable writer state without a writer-purpose admission pass.
+    // An already-installed exact head has crossed that boundary already.
+    Ok(cached.filter(|state| state.commitment == *head && state.database.endpoint() == endpoint))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn open_writer_state(
+fn open_exact_state(
     connection: &PostgresConnectionConfig,
     database_id: &str,
     commitment: PersistentCommitmentCoordinate,
@@ -4412,12 +4478,19 @@ fn open_writer_state(
     cache_bytes: usize,
     recent_limits: RecentLimits,
     shared_snapshot: Option<&TieredSnapshot>,
+    writer_admission: bool,
 ) -> Result<WriterState, SemanticError> {
     let endpoint = exact_endpoint(&commitment);
-    let (database, opened) = if let Some(shared_snapshot) = shared_snapshot {
-        shared_snapshot.open_exact_sharing_core(database_id, endpoint, required_manifest)?
-    } else {
-        TieredSnapshot::open_exact_configured(
+    let (database, opened) = match (shared_snapshot, writer_admission) {
+        (Some(shared_snapshot), true) => shared_snapshot.open_writer_exact_sharing_core(
+            database_id,
+            endpoint,
+            required_manifest,
+        )?,
+        (Some(shared_snapshot), false) => {
+            shared_snapshot.open_exact_sharing_core(database_id, endpoint, required_manifest)?
+        }
+        (None, true) => TieredSnapshot::open_writer_exact_configured(
             connection,
             database_id.to_owned(),
             endpoint,
@@ -4425,7 +4498,16 @@ fn open_writer_state(
             cache_entries,
             cache_bytes,
             recent_limits,
-        )?
+        )?,
+        (None, false) => TieredSnapshot::open_exact_configured(
+            connection,
+            database_id.to_owned(),
+            endpoint,
+            required_manifest,
+            cache_entries,
+            cache_bytes,
+            recent_limits,
+        )?,
     };
     if database.endpoint() != endpoint {
         return Err(fault(
@@ -4517,7 +4599,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
     } else {
         None
     };
-    let before_state = open_writer_state(
+    let before_state = open_exact_state(
         connection,
         database_id,
         before,
@@ -4526,6 +4608,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
         cache_bytes,
         recent_limits,
         shared_snapshot,
+        false,
     )?;
     let mut transactions = read_authenticated_log_range(
         client,

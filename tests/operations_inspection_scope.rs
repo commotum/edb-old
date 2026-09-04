@@ -246,8 +246,7 @@ fn corrupt_tree_in_a_is_scoped_and_makes_shared_reclamation_conservative() {
     common::with_replica_triggers_disabled(&mut raw, |client| {
         client.execute(
             "UPDATE atomic_tree_manifests \
-             SET payload = set_byte(payload, octet_length(payload) - 1, \
-                                    get_byte(payload, octet_length(payload) - 1) # 1) \
+             SET payload = set_byte(payload, 0, get_byte(payload, 0) # 1) \
              WHERE manifest_hash = $1",
             &[&manifest_hash],
         )?;
@@ -306,7 +305,9 @@ fn corrupt_tree_in_a_is_scoped_and_makes_shared_reclamation_conservative() {
         report_a
             .problems
             .iter()
-            .any(|problem| problem.code.contains("manifest") || problem.code.contains("checksum"))
+            .any(|problem| problem.code == "tree/manifest-magic"),
+        "target inspection did not report its unreadable manifest header: {:?}",
+        report_a.problems
     );
     let garbage = garbage.unwrap();
     assert!(

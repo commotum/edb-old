@@ -973,15 +973,46 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
             &[&before_commit],
         )
         .unwrap();
-    let activation_without_root = client
+    let candidate_generation: i64 = candidate.get(0);
+    let candidate_basis: i64 = candidate.get(1);
+    let candidate_head: Vec<u8> = candidate.get(2);
+    let candidate_state: Vec<u8> = candidate.get(3);
+    // BeforeCommit now deliberately leaves every semantic coordinate staged.
+    // Remove only the exact endpoint inside a rolled-back fault transaction so
+    // this remains a direct witness for the SQL activation fence.
+    let mut rootless = client.transaction().unwrap();
+    rootless
+        .batch_execute(
+            "ALTER TABLE atomic_semantic_commitment_roots \
+             DISABLE TRIGGER atomic_semantic_commitment_roots_immutable",
+        )
+        .unwrap();
+    assert_eq!(
+        rootless
+            .execute(
+                "DELETE FROM atomic_semantic_commitment_roots \
+                  WHERE database_id = $1 AND generation = $2 AND basis_t = $3 \
+                    AND tx_hash = $4 AND state_hash = $5",
+                &[
+                    &before_commit,
+                    &candidate_generation,
+                    &candidate_basis,
+                    &candidate_head,
+                    &candidate_state,
+                ],
+            )
+            .unwrap(),
+        1
+    );
+    let activation_without_root = rootless
         .query_one(
             "SELECT atomic_activate_initial_log_generation($1, $2, $3, $4, $5)",
             &[
                 &before_commit,
-                &candidate.get::<_, i64>(0),
-                &candidate.get::<_, i64>(1),
-                &candidate.get::<_, Vec<u8>>(2),
-                &candidate.get::<_, Vec<u8>>(3),
+                &candidate_generation,
+                &candidate_basis,
+                &candidate_head,
+                &candidate_state,
             ],
         )
         .unwrap_err();
@@ -990,6 +1021,7 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
         "23503",
         "the SQL publication boundary must reject a coordinate-less generation"
     );
+    rootless.rollback().unwrap();
     assert!(
         client
             .query_opt(
@@ -1060,11 +1092,27 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
     let abandoned_generation: i64 = abandoned_identity.get(1);
     let mut abandoned_operator = PostgresOperator::connect(&abandoned_connection).unwrap();
     let first_collection = abandoned_operator.collect_garbage(Duration::ZERO).unwrap();
-    assert!(first_collection.log_generations.iter().any(|candidate| {
-        candidate.database_id == abandoned_target
-            && candidate.generation == abandoned_generation as u64
-            && candidate.abandoned
-    }));
+    assert!(
+        first_collection
+            .request_base_archives
+            .iter()
+            .any(|candidate| {
+                candidate.database_id == abandoned_target
+                    && candidate.generation == abandoned_generation as u64
+            })
+    );
+    let abandonment_claimed: bool = abandoned_catalog
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_log_generation_abandonment_progress \
+                              WHERE database_id = $1 AND generation = $2)",
+            &[&abandoned_target, &abandoned_generation],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        abandonment_claimed,
+        "request-base archive collection did not permanently claim the headless restore"
+    );
     let busy = abandoned_restore
         .restore_backup(&directory, committed.basis_t, &abandoned_target)
         .unwrap_err();

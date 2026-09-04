@@ -8,7 +8,7 @@ use crate::persistent_tree::{
 };
 use crate::postgres::{
     is_postgres_connection_error, postgres_error, read_authenticated_log_range, recover_to,
-    verify_schema_compatibility,
+    verify_schema_compatibility, visit_authenticated_log_range,
 };
 use crate::recent::{
     EndpointProjection, RecentCursor, RecentCursorStats, RecentLimits, RecentRange, RecentTier,
@@ -106,6 +106,10 @@ pub struct RecoveryStats {
     pub base_t: u64,
     pub target_t: u64,
     pub tail_transactions: u64,
+    /// PostgreSQL transaction-range streams used to authenticate the writer
+    /// tail. This is zero for a covered endpoint and one for any non-empty
+    /// tail, independent of transaction count.
+    pub tail_range_reads: u64,
     pub rejected_manifests: u64,
 }
 
@@ -151,6 +155,12 @@ pub(crate) struct ResidentMetadataStats {
     pub(crate) ident_estimated_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResidentTreeRootStats {
+    pub(crate) children: usize,
+    pub(crate) estimated_bytes: u64,
+}
+
 /// Complete logical coordinate of one immutable value in one authoritative
 /// log generation. Unlike a live head, this can name a historical source
 /// value while an administrative rewrite or idempotent retry is in progress.
@@ -188,6 +198,7 @@ pub(crate) struct ExactOpenStats {
     pub(crate) selected_publication_revision: u64,
     pub(crate) selected_manifest_hash: Digest,
     pub(crate) tail_transactions: u64,
+    pub(crate) tail_range_reads: u64,
 }
 
 #[derive(Debug, Default)]
@@ -416,7 +427,35 @@ struct TreeBase {
     manifest: PersistentTreeManifest,
     manifest_hash: Digest,
     roots: BTreeMap<(bool, u8), Arc<RootNode>>,
+    root_residency: ResidentTreeRootStats,
     metadata: Arc<MetadataProjection>,
+}
+
+impl TreeBase {
+    fn new(
+        manifest: PersistentTreeManifest,
+        manifest_hash: Digest,
+        roots: BTreeMap<(bool, u8), Arc<RootNode>>,
+        metadata: Arc<MetadataProjection>,
+    ) -> Self {
+        let root_residency =
+            roots
+                .values()
+                .fold(ResidentTreeRootStats::default(), |mut total, root| {
+                    total.children = total.children.saturating_add(root.directories.len());
+                    total.estimated_bytes = total
+                        .estimated_bytes
+                        .saturating_add(root.estimated_retained_bytes());
+                    total
+                });
+        Self {
+            manifest,
+            manifest_hash,
+            roots,
+            root_residency,
+            metadata,
+        }
+    }
 }
 
 /// Small discardable projection needed to classify recent AVET/VAET datoms.
@@ -607,6 +646,38 @@ fn manifest_avet_unready(manifest: &PersistentTreeManifest) -> BTreeSet<u32> {
         .filter(|work| work.adding)
         .map(|work| work.attribute)
         .collect()
+}
+
+/// Bind authenticated physical AVET work to the schema reconstructed from the
+/// same immutable tree value. Shape-valid manifest bytes alone cannot prove
+/// the direction: additions require endpoint AVET membership, while removals
+/// require its absence. All work must name a real installed attribute.
+pub(crate) fn validate_avet_work_directions(
+    pending_avet: &[AvetProjectionWork],
+    schema: &crate::Schema,
+) -> Result<(), SemanticError> {
+    for work in pending_avet {
+        let attribute = schema.attribute(work.attribute).map_err(|_| {
+            fault(
+                "tree/pending-avet-schema-mismatch",
+                format!(
+                    "pending AVET work names missing attribute {}",
+                    work.attribute
+                ),
+            )
+        })?;
+        let endpoint_has_avet = attribute.indexed || attribute.unique.is_some();
+        if endpoint_has_avet != work.adding {
+            return Err(fault(
+                "tree/pending-avet-schema-mismatch",
+                format!(
+                    "pending AVET direction for attribute {} disagrees with endpoint schema",
+                    work.attribute
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Keep only the current install/alter hooks and facts belonging to the
@@ -874,11 +945,15 @@ impl PostgresIndexer {
             basis_t,
             excision_generation,
         )?;
-        if selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
-            previous.publication_revision == selection.newest_observed_revision
-                && selection.newest_live_complete
-                && previous.pending_avet.is_empty()
-        }) {
+        if selection
+            .usable
+            .as_ref()
+            .is_some_and(|(previous, _, _, _)| {
+                previous.publication_revision == selection.newest_observed_revision
+                    && selection.newest_live_complete
+                    && previous.pending_avet.is_empty()
+            })
+        {
             self.tree_store.discard_completed_avet_sort();
         }
         if scope == IndexBuildScope::Background && !selection.newest_live_complete {
@@ -940,17 +1015,23 @@ impl PostgresIndexer {
                     )
                 })?;
 
-        let advancing_pending = selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
-            selection.newest_live_complete
-                && previous.publication_revision == selection.newest_observed_revision
-                && !previous.pending_avet.is_empty()
-        });
-        let can_increment = selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
-            selection.newest_live_complete
-                && previous.pending_avet.is_empty()
-                && (scope == IndexBuildScope::Background
-                    || previous.publication_revision == selection.newest_observed_revision)
-        });
+        let advancing_pending = selection
+            .usable
+            .as_ref()
+            .is_some_and(|(previous, _, _, _)| {
+                selection.newest_live_complete
+                    && previous.publication_revision == selection.newest_observed_revision
+                    && !previous.pending_avet.is_empty()
+            });
+        let can_increment = selection
+            .usable
+            .as_ref()
+            .is_some_and(|(previous, _, _, _)| {
+                selection.newest_live_complete
+                    && previous.pending_avet.is_empty()
+                    && (scope == IndexBuildScope::Background
+                        || previous.publication_revision == selection.newest_observed_revision)
+            });
         // Selection may decode/cache source nodes before a potentially long
         // external AVET sort. Acquire the same shared manifest coordinate
         // used by immutable peers, then revalidate after the lock closes the
@@ -980,9 +1061,12 @@ impl PostgresIndexer {
         };
         let fallback_predecessor = if can_increment
             && scope == IndexBuildScope::Background
-            && selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
-                previous.publication_revision != selection.newest_observed_revision
-            }) {
+            && selection
+                .usable
+                .as_ref()
+                .is_some_and(|(previous, _, _, _)| {
+                    previous.publication_revision != selection.newest_observed_revision
+                }) {
             if selection.newest_observed_generation != Some(excision_generation) {
                 return Err(background_rebuild_required(
                     "the newest native publication belongs to a different log generation",
@@ -1490,7 +1574,12 @@ struct NativeManifestSelection {
     manifest_candidates_examined: u64,
     manifest_candidates_rejected: u64,
     manifest_probe_limit_reached: bool,
-    usable: Option<(PersistentTreeManifest, Digest, MetadataProjection, TreeNodeSet)>,
+    usable: Option<(
+        PersistentTreeManifest,
+        Digest,
+        MetadataProjection,
+        TreeNodeSet,
+    )>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1753,7 +1842,15 @@ fn load_indexer_tree_manifest_candidate<C: GenericClient>(
     excision_generation: u64,
     publication_revision: u64,
     manifest_hash: Digest,
-) -> Result<(PersistentTreeManifest, Digest, MetadataProjection, TreeNodeSet), SemanticError> {
+) -> Result<
+    (
+        PersistentTreeManifest,
+        Digest,
+        MetadataProjection,
+        TreeNodeSet,
+    ),
+    SemanticError,
+> {
     let row = client
         .query_opt(
             "SELECT m.basis_t, m.tx_hash, m.state_hash, m.eidx_frontier, \
@@ -1882,6 +1979,7 @@ fn load_indexer_tree_manifest_candidate<C: GenericClient>(
         }
     }
     let (metadata, cache) = derive_metadata_from_store(tree_store, &manifest)?;
+    validate_avet_work_directions(&manifest.pending_avet, &metadata.schema)?;
     Ok((manifest, manifest_hash, metadata, cache))
 }
 
@@ -2031,12 +2129,8 @@ fn build_incremental_native(
         if changes.contains_key(&key) {
             continue;
         }
-        let found = postgres_tree_exact_stored_eav(
-            store,
-            &current_eavt.descriptor,
-            datom,
-            &mut old_cache,
-        )?;
+        let found =
+            postgres_tree_exact_stored_eav(store, &current_eavt.descriptor, datom, &mut old_cache)?;
         changes.insert(
             key,
             CurrentTreeChange {
@@ -2082,35 +2176,26 @@ fn build_incremental_native(
         })
         .collect::<Vec<_>>();
 
-    let (_, endpoint_avet_unready) = apply_metadata_and_avet_readiness(
-        base_projection,
-        &BTreeSet::new(),
-        tail,
-        |attribute| {
+    let (_, endpoint_avet_unready) =
+        apply_metadata_and_avet_readiness(base_projection, &BTreeSet::new(), tail, |attribute| {
             let (lower, upper) = attribute_bounds(attribute)?;
-            Ok(postgres_tree_seek(
-                store,
-                &history_aevt.descriptor,
-                &lower,
-                &mut old_cache,
-            )?
-            .is_some_and(|datom| {
-                datom.attribute == attribute
-                    && datom.cmp_in(&upper, IndexOrder::Aevt).is_lt()
-            }))
-        },
-    )?;
-    let mut projection_changes = changed_avet_attributes(
-        &base_projection.schema,
-        &endpoint_projection.schema,
-    )
-    .into_iter()
-    // Recovered `can-immediately-toggle-storage-has-avet?` makes an empty
-    // attribute ready in the same indexing pass.  Only removals and additions
-    // for which the storageHasAVET fold found prior values need broad work.
-    .filter(|(attribute, _, after)| !*after || endpoint_avet_unready.contains(attribute))
-    .map(|change @ (attribute, _, _)| (attribute, change))
-    .collect::<BTreeMap<_, _>>();
+            Ok(
+                postgres_tree_seek(store, &history_aevt.descriptor, &lower, &mut old_cache)?
+                    .is_some_and(|datom| {
+                        datom.attribute == attribute
+                            && datom.cmp_in(&upper, IndexOrder::Aevt).is_lt()
+                    }),
+            )
+        })?;
+    let mut projection_changes =
+        changed_avet_attributes(&base_projection.schema, &endpoint_projection.schema)
+            .into_iter()
+            // Recovered `can-immediately-toggle-storage-has-avet?` makes an empty
+            // attribute ready in the same indexing pass.  Only removals and additions
+            // for which the storageHasAVET fold found prior values need broad work.
+            .filter(|(attribute, _, after)| !*after || endpoint_avet_unready.contains(attribute))
+            .map(|change @ (attribute, _, _)| (attribute, change))
+            .collect::<BTreeMap<_, _>>();
     // A false->true transition can be hidden by a disable/re-enable cycle
     // inside one uncovered tail. The recovered storageHasAVET fold retains
     // that fact even when base and endpoint schemas compare equal.
@@ -2160,11 +2245,8 @@ fn build_incremental_native(
         &eavt_history_edits,
         &mut old_cache,
     )?;
-    let coordinated_no_history_pairs = discover_merge_no_history_pairs(
-        &history_eavt.descriptor,
-        &old_cache,
-        &eavt_history_edits,
-    )?;
+    let coordinated_no_history_pairs =
+        discover_merge_no_history_pairs(&history_eavt.descriptor, &old_cache, &eavt_history_edits)?;
 
     let mut candidate_nodes = TreeNodeSet::default();
     let mut trees = Vec::with_capacity(8);
@@ -2177,18 +2259,13 @@ fn build_incremental_native(
                 fault("index/missing-tree", "prior manifest omitted an index tree")
             })?;
             let mut edits = if history {
-                let mut edits = history_edits(
-                    order,
-                    &recent,
-                    &changed_avet,
-                    &avet_backfills,
-                    &avet_drops,
-                )?;
+                let mut edits =
+                    history_edits(order, &recent, &changed_avet, &avet_backfills, &avet_drops)?;
                 for pair in &coordinated_no_history_pairs {
                     let avet_projection_changed = order == IndexOrder::Avet
-                        && changed_avet.iter().any(|(attribute, _, _)| {
-                            *attribute == pair.retraction.attribute
-                        });
+                        && changed_avet
+                            .iter()
+                            .any(|(attribute, _, _)| *attribute == pair.retraction.attribute);
                     if !avet_projection_changed
                         && schema_index_member(
                             &endpoint_projection.schema,
@@ -2292,10 +2369,18 @@ fn build_avet_projection_step(
     let target_index = previous
         .trees
         .iter()
-        .position(|tree| tree.descriptor.order == IndexOrder::Avet && tree.descriptor.history == work.history)
-        .ok_or_else(|| fault("index/missing-projection-target", "manifest omitted AVET projection target"))?;
+        .position(|tree| {
+            tree.descriptor.order == IndexOrder::Avet && tree.descriptor.history == work.history
+        })
+        .ok_or_else(|| {
+            fault(
+                "index/missing-projection-target",
+                "manifest omitted AVET projection target",
+            )
+        })?;
     let target = &previous.trees[target_index];
     let mut edits = TreeMergeEdits::default();
+    let mut projection_source_root = None;
     let (chunk_datoms, chunk_complete, sort_key) = if work.clearing {
         // Clearing always removes the shrinking AVET prefix. This is required
         // not only for a drop, but for disable/data/re-enable tails whose old
@@ -2318,7 +2403,13 @@ fn build_avet_projection_step(
         debug_assert!(work.adding, "only AVET additions have a copy phase");
         let source = previous
             .tree(IndexOrder::Aevt, work.history)
-            .ok_or_else(|| fault("index/missing-projection-source", "manifest omitted AEVT projection source"))?;
+            .ok_or_else(|| {
+                fault(
+                    "index/missing-projection-source",
+                    "manifest omitted AEVT projection source",
+                )
+            })?;
+        projection_source_root = Some(source.descriptor.root_hash);
         let (sort_key, final_level, row_count) = prepare_avet_projection_sort(
             store,
             &previous.database_id,
@@ -2333,7 +2424,36 @@ fn build_avet_projection_step(
                 "authenticated AVET projection offset exceeds its regenerated source",
             ));
         }
-        let datoms = read_avet_projection_output(
+        if !store.avet_projection_prefix_is_validated(
+            source.descriptor.root_hash,
+            target.descriptor.root_hash,
+            work.attribute,
+            work.history,
+            work.offset,
+        ) {
+            if let Err(error) = validate_avet_projection_prefix(
+                store,
+                &target.descriptor,
+                work.attribute,
+                sort_key,
+                final_level,
+                work.offset,
+                row_count,
+                config.max_leaf_bytes as u64,
+                &mut old_cache,
+            ) {
+                store.discard_avet_sort(sort_key)?;
+                return Err(error);
+            }
+            store.remember_validated_avet_projection_prefix(
+                source.descriptor.root_hash,
+                target.descriptor.root_hash,
+                work.attribute,
+                work.history,
+                work.offset,
+            );
+        }
+        let datoms = match read_avet_projection_output(
             store,
             sort_key,
             final_level,
@@ -2341,7 +2461,17 @@ fn build_avet_projection_step(
             row_count,
             AVET_PROJECTION_CHUNK_DATOMS,
             config.max_leaf_bytes as u64,
-        )?;
+        ) {
+            Ok(datoms) => datoms,
+            Err(error) => {
+                // A finalized spill is disposable derived work. Keeping a
+                // corrupt ready marker would make this long-lived indexer
+                // retry the same bad run forever; discard it so the next
+                // bounded attempt regenerates from immutable AEVT.
+                store.discard_avet_sort(sort_key)?;
+                return Err(error);
+            }
+        };
         let complete = work
             .offset
             .checked_add(datoms.len() as u64)
@@ -2424,9 +2554,28 @@ fn build_avet_projection_step(
             offset: work
                 .offset
                 .checked_add(chunk_datoms.len() as u64)
-                .ok_or_else(|| fault("index/avet-projection-offset", "AVET projection offset overflow"))?,
+                .ok_or_else(|| {
+                    fault(
+                        "index/avet-projection-offset",
+                        "AVET projection offset overflow",
+                    )
+                })?,
             ..work
         };
+    }
+
+    if let (Some(source_root), Some(next)) = (projection_source_root, pending_avet.first())
+        && next.attribute == work.attribute
+        && next.history == work.history
+        && !next.clearing
+    {
+        store.remember_validated_avet_projection_prefix(
+            source_root,
+            trees[target_index].descriptor.root_hash,
+            next.attribute,
+            next.history,
+            next.offset,
+        );
     }
 
     let added_nodes = nodes.iter().map(|(hash, _)| *hash).collect();
@@ -2485,7 +2634,11 @@ fn prepare_avet_projection_sort(
             config.max_leaf_bytes as u64,
             cache,
         )?;
-        if chunk.datoms.iter().any(|datom| datom.attribute != attribute) {
+        if chunk
+            .datoms
+            .iter()
+            .any(|datom| datom.attribute != attribute)
+        {
             return Err(fault(
                 "index/avet-sort-range",
                 "AEVT external-sort run escaped its attribute range",
@@ -2539,9 +2692,7 @@ fn prepare_avet_projection_sort(
             let first_input = output_run
                 .checked_mul(AVET_SORT_FAN_IN)
                 .ok_or_else(|| fault("index/avet-sort-size", "AVET sort run overflow"))?;
-            let last_input = first_input
-                .saturating_add(AVET_SORT_FAN_IN)
-                .min(run_count);
+            let last_input = first_input.saturating_add(AVET_SORT_FAN_IN).min(run_count);
             merge_avet_sort_runs(
                 store,
                 work_key,
@@ -2713,13 +2864,7 @@ fn merge_avet_sort_runs(
         previous = Some(datom);
     }
     if !output.is_empty() {
-        store.insert_avet_sort_rows(
-            work_key,
-            output_level,
-            output_run,
-            output_ordinal,
-            &output,
-        )?;
+        store.insert_avet_sort_rows(work_key, output_level, output_run, output_ordinal, &output)?;
     }
     Ok(())
 }
@@ -2780,6 +2925,93 @@ fn read_avet_projection_output(
         }
     }
     Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_avet_projection_prefix(
+    store: &mut PostgresTreeStore,
+    target: &crate::persistent_tree::TreeDescriptor,
+    attribute: u32,
+    sort_key: Digest,
+    final_level: u32,
+    offset: u64,
+    row_count: u64,
+    maximum_bytes: u64,
+    cache: &mut TreeNodeSet,
+) -> Result<(), SemanticError> {
+    let mut directory = 0_u32;
+    let mut leaf = 0_u32;
+    let mut slot = 0_u32;
+    let mut compared = 0_u64;
+    loop {
+        let chunk = postgres_tree_attribute_chunk(
+            store,
+            target,
+            attribute,
+            directory,
+            leaf,
+            slot,
+            AVET_PROJECTION_CHUNK_DATOMS,
+            maximum_bytes,
+            cache,
+        )?;
+        let chunk_count = chunk.datoms.len() as u64;
+        if compared.saturating_add(chunk_count) > offset {
+            return Err(fault(
+                "index/avet-projection-prefix-mismatch",
+                "pending AVET target contains rows beyond its authenticated source offset",
+            ));
+        }
+        if !chunk.datoms.is_empty() {
+            for (index, actual) in chunk.datoms.iter().enumerate() {
+                let ordinal = compared.checked_add(index as u64).ok_or_else(|| {
+                    fault(
+                        "index/avet-projection-prefix-mismatch",
+                        "pending AVET prefix ordinal overflow",
+                    )
+                })?;
+                let expected = read_avet_projection_output(
+                    store,
+                    sort_key,
+                    final_level,
+                    ordinal,
+                    row_count,
+                    1,
+                    maximum_bytes,
+                )?;
+                if expected.len() != 1 || !same_stored_datom(actual, &expected[0]) {
+                    return Err(fault(
+                        "index/avet-projection-prefix-mismatch",
+                        "pending AVET target is not the exact sorted AEVT source prefix",
+                    ));
+                }
+            }
+        }
+        compared = compared.checked_add(chunk_count).ok_or_else(|| {
+            fault(
+                "index/avet-projection-prefix-mismatch",
+                "pending AVET prefix count overflow",
+            )
+        })?;
+        if chunk.complete {
+            if compared == offset {
+                return Ok(());
+            }
+            return Err(fault(
+                "index/avet-projection-prefix-mismatch",
+                "pending AVET target ends before its authenticated source offset",
+            ));
+        }
+        if chunk.datoms.is_empty() || compared == offset {
+            return Err(fault(
+                "index/avet-projection-prefix-mismatch",
+                "pending AVET target range is not one exact source prefix",
+            ));
+        }
+        directory = chunk.directory;
+        leaf = chunk.leaf;
+        slot = chunk.slot;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3240,7 +3472,9 @@ fn postgres_tree_attribute_chunk(
             descriptor.order,
             descriptor.history,
         )?;
-        let mut leaf_index = if fresh && directory_index == floor_tree_child(&root.directories, &start, descriptor.order) {
+        let mut leaf_index = if fresh
+            && directory_index == floor_tree_child(&root.directories, &start, descriptor.order)
+        {
             floor_tree_child(&directory.leaves, &start, descriptor.order)
         } else {
             usize::try_from(resume_leaf).map_err(|_| {
@@ -4232,6 +4466,7 @@ impl Peer {
                     eidx_frontier: base.manifest.eidx_frontier,
                 },
                 head_basis,
+                None,
             )?;
             if tail.end_hash != head_hash {
                 return Err(fault(
@@ -4261,6 +4496,7 @@ impl Peer {
                 end_hash,
                 end_state_hash,
                 eidx_frontier,
+                range_reads: _,
             } = tail;
             let recent = Arc::new(RecentTier::new_authenticated_existing(
                 &database_id,
@@ -4747,6 +4983,7 @@ impl Peer {
                 eidx_frontier: tree_base.manifest.eidx_frontier,
             },
             through,
+            None,
         )?;
         if tail.end_hash != state.current_hash
             || tail.end_state_hash != state.current_state_hash
@@ -4833,16 +5070,15 @@ impl Peer {
                 eidx_frontier: state.eidx_frontier,
             },
             target,
+            None,
         )?;
-        let before = TieredSnapshot {
-            core: Arc::clone(&self.core.read),
-            state: Arc::clone(&state.tiered),
-        };
         let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
             &state.metadata,
             &state.avet_unready,
             &tail.transactions,
-            |attribute| before.has_attribute_history(attribute, None, None),
+            |attribute| {
+                peer_state_has_attribute_history_with_io(&self.core.read, io, &state, attribute)
+            },
         )?;
         let metadata = Arc::new(metadata);
         let recent = state.recent.extend_authenticated_existing(
@@ -4952,6 +5188,7 @@ impl Peer {
                     eidx_frontier: base.manifest.eidx_frontier,
                 },
                 basis,
+                None,
             )?;
             if tail.end_hash != hash {
                 return Err(fault(
@@ -5418,10 +5655,9 @@ impl Drop for PeerIndexCursor {
 }
 
 impl TieredSnapshot {
-    /// Open one generation-qualified immutable value strictly from an
-    /// authenticated native publication plus its authenticated log tail.
-    /// There is intentionally no legacy segment, eager `Database`, or
-    /// `recover_to` branch in this writer-facing constructor.
+    /// Open an already-committed immutable value without applying writer
+    /// admission limits. Exact reports remain readable if an operator later
+    /// lowers the live writer's recent-tier ceiling.
     pub(crate) fn open_exact_configured(
         connection: &PostgresConnectionConfig,
         database_id: impl Into<String>,
@@ -5505,22 +5741,7 @@ impl TieredSnapshot {
         let root_pin = root_pins
             .acquire(Some(&base))
             .map_err(|error| exact_pin_error(error, required_manifest))?;
-        if configuration.purpose == ExactOpenPurpose::WriterActivation {
-            preflight_writer_tail_capacity(
-                &mut client,
-                &database_id,
-                endpoint.generation,
-                TailBase {
-                    basis_t: base.manifest.basis_t,
-                    tx_hash: base.manifest.tx_hash,
-                    state_hash: base.manifest.state_hash,
-                    eidx_frontier: base.manifest.eidx_frontier,
-                },
-                endpoint,
-                configuration.recent_limits,
-            )?;
-        }
-        let (state, tail_transactions) = build_exact_tiered_state(
+        let (state, tail_transactions, tail_range_reads) = build_exact_tiered_state(
             &mut client,
             ExactTieredBuild {
                 database_id: &database_id,
@@ -5529,12 +5750,13 @@ impl TieredSnapshot {
                 generation_pin,
                 root_pin,
                 recent_limits: configuration.recent_limits,
+                purpose: configuration.purpose,
                 local_generation: 0,
                 counters: &counters,
             },
             &mut tree_cache,
         )?;
-        let stats = exact_open_stats(&state, scan_stats, tail_transactions)?;
+        let stats = exact_open_stats(&state, scan_stats, tail_transactions, tail_range_reads)?;
         let core = Arc::new(TieredReadCore {
             database_id,
             connection: connection.clone(),
@@ -5576,6 +5798,38 @@ impl TieredSnapshot {
         endpoint: ExactEndpoint,
         required_manifest: Option<Digest>,
     ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        self.open_exact_sharing_core_for(
+            database_id,
+            endpoint,
+            required_manifest,
+            ExactOpenPurpose::ImmutableRead,
+        )
+    }
+
+    /// Writer-purpose variant of shared-core exact open. Receipt replay can
+    /// reuse the live writer's PostgreSQL session and tree cache, but it must
+    /// retain the same streamed hard-capacity gate as cold activation.
+    pub(crate) fn open_writer_exact_sharing_core(
+        &self,
+        database_id: &str,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        self.open_exact_sharing_core_for(
+            database_id,
+            endpoint,
+            required_manifest,
+            ExactOpenPurpose::WriterActivation,
+        )
+    }
+
+    fn open_exact_sharing_core_for(
+        &self,
+        database_id: &str,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+        purpose: ExactOpenPurpose,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
         if self.core.database_id != database_id {
             return Err(fault(
                 "peer/shared-core-database-mismatch",
@@ -5608,7 +5862,7 @@ impl TieredSnapshot {
             .acquire(Some(&base))
             .map_err(|error| exact_pin_error(error, required_manifest))?;
         let local_generation = self.state.generation.saturating_add(1);
-        let (state, tail_transactions) = {
+        let (state, tail_transactions, tail_range_reads) = {
             let PeerIo {
                 client, tree_cache, ..
             } = &mut *io;
@@ -5621,13 +5875,14 @@ impl TieredSnapshot {
                     generation_pin,
                     root_pin,
                     recent_limits: self.core.recent_limits,
+                    purpose,
                     local_generation,
                     counters: &self.core.load_counters,
                 },
                 tree_cache,
             )?
         };
-        let stats = exact_open_stats(&state, scan_stats, tail_transactions)?;
+        let stats = exact_open_stats(&state, scan_stats, tail_transactions, tail_range_reads)?;
         Ok((
             Self {
                 core: Arc::clone(&self.core),
@@ -5878,6 +6133,13 @@ impl TieredSnapshot {
 
     pub(crate) fn resident_metadata_stats(&self) -> ResidentMetadataStats {
         self.state.metadata.resident_stats()
+    }
+
+    pub(crate) fn resident_tree_root_stats(&self) -> ResidentTreeRootStats {
+        self.state
+            .tree_base
+            .as_ref()
+            .map_or_else(ResidentTreeRootStats::default, |base| base.root_residency)
     }
 
     pub(crate) fn durable_manifest_hash(&self) -> Option<Digest> {
@@ -6901,6 +7163,45 @@ fn tree_base_has_attribute_history<C: GenericClient>(
     Ok(false)
 }
 
+/// Test recovered `has-values?` while a live peer already owns its I/O guard.
+/// History existence is a union across the immutable recent tier and durable
+/// base, so this can probe each directly without opening a public cursor (and
+/// recursively locking the same non-reentrant `PeerIo` mutex).
+fn peer_state_has_attribute_history_with_io(
+    core: &TieredReadCore,
+    io: &mut PeerIo,
+    state: &PeerState,
+    attribute: u32,
+) -> Result<bool, SemanticError> {
+    let prefix = IndexPrefix::Aevt {
+        attribute,
+        entity: None,
+        value: None,
+    };
+    if state.recent.prefix_cursor(true, &prefix)?.next().is_some() {
+        return Ok(true);
+    }
+    if let Some(base) = state.tree_base.as_deref() {
+        let PeerIo {
+            client, tree_cache, ..
+        } = io;
+        return tree_base_has_attribute_history(
+            client,
+            base,
+            attribute,
+            &core.load_counters,
+            tree_cache,
+        );
+    }
+    let database = state.compatibility.value.get().ok_or_else(|| {
+        fault(
+            "peer/avet-readiness-source-missing",
+            "log-only peer state has no compatibility value for AVET readiness",
+        )
+    })?;
+    Ok(!database.history_with_prefix(&prefix)?.is_empty())
+}
+
 fn derive_metadata_from_client<C: GenericClient>(
     client: &mut C,
     roots: &BTreeMap<(bool, u8), Arc<RootNode>>,
@@ -7333,12 +7634,8 @@ fn load_peer_tree_manifest_candidate<C: GenericClient>(
     let metadata = Arc::new(derive_metadata_from_client(
         client, &roots, counters, cache,
     )?);
-    Ok(TreeBase {
-        manifest,
-        manifest_hash,
-        roots,
-        metadata,
-    })
+    validate_avet_work_directions(&manifest.pending_avet, &metadata.schema)?;
+    Ok(TreeBase::new(manifest, manifest_hash, roots, metadata))
 }
 
 /// Load an exact retry-only archive. Archives never enter the ordinary
@@ -7542,12 +7839,8 @@ fn load_required_request_base_archive<C: GenericClient>(
     let metadata = Arc::new(derive_metadata_from_client(
         client, &roots, counters, cache,
     )?);
-    Ok(TreeBase {
-        manifest,
-        manifest_hash,
-        roots,
-        metadata,
-    })
+    validate_avet_work_directions(&manifest.pending_avet, &metadata.schema)?;
+    Ok(TreeBase::new(manifest, manifest_hash, roots, metadata))
 }
 
 fn load_latest_tree_base<C: GenericClient>(
@@ -7660,6 +7953,7 @@ struct ExactTieredBuild<'a> {
     generation_pin: Arc<GenerationPin>,
     root_pin: Option<Arc<RootPin>>,
     recent_limits: RecentLimits,
+    purpose: ExactOpenPurpose,
     local_generation: u64,
     counters: &'a PeerLoadCounters,
 }
@@ -7682,7 +7976,7 @@ fn build_exact_tiered_state<C: GenericClient>(
     client: &mut C,
     build: ExactTieredBuild<'_>,
     tree_cache: &mut TreeNodeCache,
-) -> Result<(TieredState, u64), SemanticError> {
+) -> Result<(TieredState, u64, u64), SemanticError> {
     let ExactTieredBuild {
         database_id,
         endpoint,
@@ -7690,6 +7984,7 @@ fn build_exact_tiered_state<C: GenericClient>(
         generation_pin,
         root_pin,
         recent_limits,
+        purpose,
         local_generation,
         counters,
     } = build;
@@ -7705,6 +8000,7 @@ fn build_exact_tiered_state<C: GenericClient>(
             eidx_frontier: base.manifest.eidx_frontier,
         },
         endpoint.basis_t,
+        (purpose == ExactOpenPurpose::WriterActivation).then_some(recent_limits),
     )?;
     if tail.end_hash != endpoint.tx_hash
         || tail.end_state_hash != endpoint.state_hash
@@ -7716,6 +8012,7 @@ fn build_exact_tiered_state<C: GenericClient>(
         ));
     }
     let tail_transactions = tail.transactions.len() as u64;
+    let tail_range_reads = tail.range_reads;
     let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
         &base_metadata,
         &manifest_avet_unready(&base.manifest),
@@ -7750,6 +8047,7 @@ fn build_exact_tiered_state<C: GenericClient>(
             generation: local_generation,
         },
         tail_transactions,
+        tail_range_reads,
     ))
 }
 
@@ -7757,6 +8055,7 @@ fn exact_open_stats(
     state: &TieredState,
     scan: TreeBaseScanStats,
     tail_transactions: u64,
+    tail_range_reads: u64,
 ) -> Result<ExactOpenStats, SemanticError> {
     let base = state.tree_base.as_ref().ok_or_else(|| {
         fault(
@@ -7770,6 +8069,7 @@ fn exact_open_stats(
         selected_publication_revision: base.manifest.publication_revision,
         selected_manifest_hash: base.manifest_hash,
         tail_transactions,
+        tail_range_reads,
     })
 }
 
@@ -7779,6 +8079,7 @@ struct AuthenticatedTail {
     end_hash: Digest,
     end_state_hash: Digest,
     eidx_frontier: u64,
+    range_reads: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -7787,93 +8088,6 @@ struct TailBase {
     tx_hash: Digest,
     state_hash: Digest,
     eidx_frontier: u64,
-}
-
-/// Bound the rejecting writer-startup path independently of the total tail.
-/// A one-transaction page is intentional: startup is already above its hard
-/// admission limit, so throughput no longer matters and fetching a larger
-/// page would let a rejected database consume memory proportional to that
-/// page before backpressure is reported.
-fn preflight_writer_tail_capacity<C: GenericClient>(
-    client: &mut C,
-    database_id: &str,
-    log_generation: u64,
-    base: TailBase,
-    endpoint: ExactEndpoint,
-    limits: RecentLimits,
-) -> Result<(), SemanticError> {
-    let tail_transactions = endpoint.basis_t.checked_sub(base.basis_t).ok_or_else(|| {
-        fault(
-            "peer/tail-target-before-base",
-            "requested writer tail endpoint precedes its native base",
-        )
-    })?;
-    let mut through_basis = base.basis_t;
-    let mut predecessor_hash = base.tx_hash;
-    let mut scanned_transactions = 0_u64;
-    let mut datoms = 0_u64;
-    let mut accounted_bytes = 0_u64;
-
-    while through_basis < endpoint.basis_t {
-        let after_basis = through_basis;
-        through_basis = through_basis
-            .checked_add(1)
-            .ok_or_else(|| fault("peer/tail-basis-overflow", "writer tail basis overflow"))?;
-        let row = read_authenticated_log_range(
-            client,
-            database_id,
-            log_generation,
-            after_basis,
-            through_basis,
-            predecessor_hash,
-        )?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            fault(
-                "peer/writer-preflight-empty-page",
-                "authenticated writer-tail preflight returned an empty exact page",
-            )
-        })?;
-        let retained = retained_entry_stats(&row.transaction)?;
-        scanned_transactions = scanned_transactions.checked_add(1).ok_or_else(|| {
-            fault(
-                "peer/writer-preflight-count-overflow",
-                "writer-tail preflight transaction count overflow",
-            )
-        })?;
-        datoms = datoms.checked_add(retained.datoms).ok_or_else(|| {
-            fault(
-                "peer/writer-preflight-count-overflow",
-                "writer-tail preflight datom count overflow",
-            )
-        })?;
-        accounted_bytes = accounted_bytes
-            .checked_add(retained.accounted_bytes)
-            .ok_or_else(|| {
-                fault(
-                    "peer/writer-preflight-count-overflow",
-                    "writer-tail preflight resident-byte count overflow",
-                )
-            })?;
-        if datoms > limits.hard_datoms || accounted_bytes > limits.hard_bytes {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "recent/hard-capacity",
-                format!(
-                    "writer startup recent tail crosses hard capacity after {scanned_transactions} of {tail_transactions} transactions ({datoms} datoms/{accounted_bytes} accounted resident bytes, limits {}/{})",
-                    limits.hard_datoms, limits.hard_bytes
-                ),
-            )
-            .detail("preflight_transactions", scanned_transactions.to_string())
-            .detail("preflight_datoms", datoms.to_string())
-            .detail("preflight_accounted_bytes", accounted_bytes.to_string())
-            .detail("tail_transactions", tail_transactions.to_string())
-            .detail("preflight_stopped_basis_t", through_basis.to_string()));
-        }
-        predecessor_hash = row.tx_hash;
-    }
-    Ok(())
 }
 
 /// Authenticate the canonical transaction chain without constructing the
@@ -7889,6 +8103,7 @@ fn read_authenticated_tail<C: GenericClient>(
     log_generation: u64,
     base: TailBase,
     target_t: u64,
+    writer_limits: Option<RecentLimits>,
 ) -> Result<AuthenticatedTail, SemanticError> {
     if target_t < base.basis_t {
         return Err(fault(
@@ -7896,46 +8111,101 @@ fn read_authenticated_tail<C: GenericClient>(
             "requested tail endpoint precedes its native base",
         ));
     }
+    if target_t == base.basis_t {
+        return Ok(AuthenticatedTail {
+            transactions: Vec::new(),
+            transaction_hashes: Vec::new(),
+            end_hash: base.tx_hash,
+            end_state_hash: base.state_hash,
+            eidx_frontier: base.eidx_frontier,
+            range_reads: 0,
+        });
+    }
+    let tail_transactions = target_t - base.basis_t;
     let mut end_hash = base.tx_hash;
     let mut end_state_hash = base.state_hash;
     let mut eidx_frontier = base.eidx_frontier;
-    let rows = read_authenticated_log_range(
+    let mut transactions = Vec::new();
+    let mut transaction_hashes = Vec::new();
+    let mut scanned_transactions = 0_u64;
+    let mut datoms = 0_u64;
+    let mut accounted_bytes = 0_u64;
+    visit_authenticated_log_range(
         client,
         database_id,
         log_generation,
         base.basis_t,
         target_t,
         base.tx_hash,
+        |row| {
+            let state_hash = row.state_hash;
+            if state_hash == [0; 32] {
+                return Err(fault(
+                    "peer/missing-state-commitment",
+                    "native peer tail row has no semantic state commitment",
+                ));
+            }
+            let transaction = row.transaction;
+            if transaction.eidx_frontier < eidx_frontier {
+                return Err(fault(
+                    "peer/tail-frontier-regressed",
+                    "native transaction entity frontier moved backwards",
+                ));
+            }
+            if let Some(limits) = writer_limits {
+                let retained = retained_entry_stats(&transaction)?;
+                scanned_transactions = scanned_transactions.checked_add(1).ok_or_else(|| {
+                    fault(
+                        "peer/writer-preflight-count-overflow",
+                        "writer-tail preflight transaction count overflow",
+                    )
+                })?;
+                datoms = datoms.checked_add(retained.datoms).ok_or_else(|| {
+                    fault(
+                        "peer/writer-preflight-count-overflow",
+                        "writer-tail preflight datom count overflow",
+                    )
+                })?;
+                accounted_bytes = accounted_bytes
+                    .checked_add(retained.accounted_bytes)
+                    .ok_or_else(|| {
+                        fault(
+                            "peer/writer-preflight-count-overflow",
+                            "writer-tail preflight resident-byte count overflow",
+                        )
+                    })?;
+                if datoms > limits.hard_datoms || accounted_bytes > limits.hard_bytes {
+                    return Err(SemanticError::new(
+                    ErrorCategory::Busy,
+                    "recent/hard-capacity",
+                    format!(
+                        "writer startup recent tail crosses hard capacity after {scanned_transactions} of {tail_transactions} transactions ({datoms} datoms/{accounted_bytes} accounted resident bytes, limits {}/{})",
+                        limits.hard_datoms, limits.hard_bytes
+                    ),
+                )
+                .detail("preflight_transactions", scanned_transactions.to_string())
+                .detail("preflight_datoms", datoms.to_string())
+                .detail("preflight_accounted_bytes", accounted_bytes.to_string())
+                .detail("tail_transactions", tail_transactions.to_string())
+                .detail("preflight_stopped_basis_t", transaction.basis_t.to_string())
+                .detail("preflight_range_reads", "1"));
+                }
+            }
+            eidx_frontier = transaction.eidx_frontier;
+            end_hash = row.tx_hash;
+            end_state_hash = state_hash;
+            transaction_hashes.push(row.tx_hash);
+            transactions.push(transaction);
+            Ok(())
+        },
     )?;
-    let mut transactions = Vec::with_capacity(rows.len());
-    let mut transaction_hashes = Vec::with_capacity(rows.len());
-    for row in rows {
-        let state_hash = row.state_hash;
-        if state_hash == [0; 32] {
-            return Err(fault(
-                "peer/missing-state-commitment",
-                "native peer tail row has no semantic state commitment",
-            ));
-        }
-        let transaction = row.transaction;
-        if transaction.eidx_frontier < eidx_frontier {
-            return Err(fault(
-                "peer/tail-frontier-regressed",
-                "native transaction entity frontier moved backwards",
-            ));
-        }
-        eidx_frontier = transaction.eidx_frontier;
-        end_hash = row.tx_hash;
-        end_state_hash = state_hash;
-        transaction_hashes.push(row.tx_hash);
-        transactions.push(transaction);
-    }
     Ok(AuthenticatedTail {
         transactions,
         transaction_hashes,
         end_hash,
         end_state_hash,
         eidx_frontier,
+        range_reads: 1,
     })
 }
 
@@ -8379,6 +8649,42 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         )
+    }
+
+    #[test]
+    fn pending_avet_direction_is_bound_to_reconstructed_schema() {
+        let mut schema = Schema::new();
+        let mut indexed = Attribute::new(
+            1_000,
+            Keyword::new("item", "indexed"),
+            ValueType::Long,
+            Cardinality::One,
+        );
+        indexed.indexed = true;
+        schema.install(indexed).unwrap();
+        schema
+            .install(Attribute::new(
+                1_001,
+                Keyword::new("item", "plain"),
+                ValueType::Long,
+                Cardinality::One,
+            ))
+            .unwrap();
+
+        validate_avet_work_directions(&[AvetProjectionWork::new(1_000, true)], &schema).unwrap();
+        validate_avet_work_directions(&[AvetProjectionWork::new(1_001, false)], &schema).unwrap();
+        for invalid in [
+            AvetProjectionWork::new(1_001, true),
+            AvetProjectionWork::new(1_000, false),
+            AvetProjectionWork::new(1_002, true),
+        ] {
+            assert_eq!(
+                validate_avet_work_directions(&[invalid], &schema)
+                    .unwrap_err()
+                    .code,
+                "tree/pending-avet-schema-mismatch"
+            );
+        }
     }
 
     #[test]

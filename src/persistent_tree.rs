@@ -75,6 +75,24 @@ impl Default for TreeConfig {
 }
 
 impl TreeConfig {
+    /// Conservative ceiling for the decoded allocation retained by one root.
+    ///
+    /// Root construction independently bounds the child-vector length and
+    /// canonical payload bytes. Every recursively allocated routing/value
+    /// slot consumes at least one canonical byte, so scaling the payload
+    /// budget by the largest decoded collection slot covers compact tuple
+    /// encodings without conflating encoded bytes with resident bytes.
+    pub fn max_decoded_root_estimated_bytes(&self) -> u64 {
+        let decoded_slot_bytes = size_of::<Option<RoutingValue>>()
+            .max(size_of::<Option<Value>>())
+            .max(size_of::<u16>()) as u64;
+        (size_of::<RootNode>() as u64)
+            .saturating_add(
+                (self.max_directories_per_root as u64).saturating_mul(size_of::<ChildRef>() as u64),
+            )
+            .saturating_add((self.max_root_bytes as u64).saturating_mul(decoded_slot_bytes))
+    }
+
     fn validate(&self) -> Result<(), SemanticError> {
         let count_limits = [
             ("max_leaf_datoms", self.max_leaf_datoms),
@@ -632,20 +650,20 @@ impl RoutingKey {
         };
         ordering
             .then_with(|| {
-            if self.has(ROUTING_TX_PRESENT) {
-                other
-                    .tx
-                    .cmp(&self.tx)
-                    .then_with(|| other.added.cmp(&self.added))
-            } else {
-                // Sparse routing keys are lower-bound prefixes. Treat an
-                // omitted descending-T component as below every concrete T,
-                // rather than comparing its encoded zero placeholder. This
-                // is the explicit counterpart of recovered `make-sparse-lt`,
-                // and matters when a preceding omitted component ties a real
-                // native zero (notably entity 0 in VAET).
-                Ordering::Less
-            }
+                if self.has(ROUTING_TX_PRESENT) {
+                    other
+                        .tx
+                        .cmp(&self.tx)
+                        .then_with(|| other.added.cmp(&self.added))
+                } else {
+                    // Sparse routing keys are lower-bound prefixes. Treat an
+                    // omitted descending-T component as below every concrete T,
+                    // rather than comparing its encoded zero placeholder. This
+                    // is the explicit counterpart of recovered `make-sparse-lt`,
+                    // and matters when a preceding omitted component ties a real
+                    // native zero (notably entity 0 in VAET).
+                    Ordering::Less
+                }
             })
             .then_with(|| {
                 if self.has(ROUTING_TX_PRESENT) {
@@ -1501,6 +1519,17 @@ pub struct RootNode {
     pub directories: Vec<ChildRef>,
 }
 
+impl RootNode {
+    /// Deterministic decoded bytes retained by this root and its routing keys.
+    /// This is deliberately not its canonical encoded length.
+    pub(crate) fn estimated_retained_bytes(&self) -> u64 {
+        (size_of::<Self>() as u64).saturating_add(child_refs_retained_heap_bytes(
+            &self.directories,
+            self.directories.capacity(),
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TreeNode {
     Leaf(LeafSegment),
@@ -1533,16 +1562,13 @@ impl TreeNode {
     /// compactly encoded tuples and sparse keys cannot evade the resident
     /// cache ceiling.
     pub(crate) fn retained_bytes(&self) -> u64 {
-        let child_refs = |children: &Vec<ChildRef>| {
-            (children.capacity() as u64)
-                .saturating_mul(size_of::<ChildRef>() as u64)
-                .saturating_add(children.iter().fold(0_u64, |total, child| {
-                    total.saturating_add(child.key.retained_heap_bytes())
-                }))
-        };
         let heap = match self {
-            Self::Root(root) => child_refs(&root.directories),
-            Self::Directory(directory) => child_refs(&directory.leaves),
+            Self::Root(root) => {
+                child_refs_retained_heap_bytes(&root.directories, root.directories.capacity())
+            }
+            Self::Directory(directory) => {
+                child_refs_retained_heap_bytes(&directory.leaves, directory.leaves.capacity())
+            }
             Self::Leaf(leaf) => (leaf.entities.capacity() as u64)
                 .saturating_mul(size_of::<u64>() as u64)
                 .saturating_add(
@@ -1563,6 +1589,14 @@ impl TreeNode {
         };
         (size_of::<Self>() as u64).saturating_add(heap)
     }
+}
+
+fn child_refs_retained_heap_bytes(children: &[ChildRef], capacity: usize) -> u64 {
+    (capacity as u64)
+        .saturating_mul(size_of::<ChildRef>() as u64)
+        .saturating_add(children.iter().fold(0_u64, |total, child| {
+            total.saturating_add(child.key.retained_heap_bytes())
+        }))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1750,17 +1784,10 @@ pub fn merge_tree(
     let mut no_history_pairs = edits.no_history_pairs.clone();
     if descriptor.history && !edits.no_history_attributes.is_empty() {
         no_history_pairs.extend(discover_segment_no_history_pairs(
-            descriptor,
-            &old_root,
-            old_nodes,
-            edits,
-            &removals,
-            &points,
+            descriptor, &old_root, old_nodes, edits, &removals, &points,
         )?);
-        no_history_pairs.sort_by(|left, right| {
-            left.retraction
-                .cmp_in(&right.retraction, descriptor.order)
-        });
+        no_history_pairs
+            .sort_by(|left, right| left.retraction.cmp_in(&right.retraction, descriptor.order));
         no_history_pairs.dedup_by(|right, left| {
             same_datom(&left.retraction, &right.retraction)
                 && same_datom(&left.assertion, &right.assertion)
@@ -2643,9 +2670,7 @@ fn validate_merge_edits(
             "retained history accepts additions and exact noHistory pairs, not arbitrary removals",
         ));
     }
-    if !history
-        && (!edits.no_history_pairs.is_empty() || !edits.no_history_attributes.is_empty())
-    {
+    if !history && (!edits.no_history_pairs.is_empty() || !edits.no_history_attributes.is_empty()) {
         return Err(SemanticError::incorrect(
             "tree/current-no-history-filter",
             "noHistory pair filtering applies only to retained history",
@@ -2806,10 +2831,7 @@ fn combined_removals(
     Ok(removals)
 }
 
-fn pair_removals(
-    pairs: &[NoHistoryPair],
-    order: IndexOrder,
-) -> Result<Vec<Datom>, SemanticError> {
+fn pair_removals(pairs: &[NoHistoryPair], order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
     let mut removals = pairs
         .iter()
         .flat_map(|pair| [pair.retraction.clone(), pair.assertion.clone()])
@@ -2920,12 +2942,8 @@ fn discover_segment_no_history_pairs(
             )?;
             let leaf_removals =
                 datoms_in_interval(removals, leaf_lower, leaf_upper, descriptor.order);
-            let leaf_insertions = datoms_in_interval(
-                &edits.insertions,
-                leaf_lower,
-                leaf_upper,
-                descriptor.order,
-            );
+            let leaf_insertions =
+                datoms_in_interval(&edits.insertions, leaf_lower, leaf_upper, descriptor.order);
             let mut ignored = AppliedEdits::default();
             let merged = apply_leaf_edits(
                 leaf.datoms(),
@@ -2974,18 +2992,17 @@ fn discover_no_history_in_stream(
     pairs: &mut Vec<NoHistoryPair>,
 ) {
     for datom in datoms {
-        if let Some(previous) = pending.take() {
-            if !previous.added
-                && datom.added
-                && no_history_attributes.contains(&previous.attribute)
-                && same_logical_eav(&previous, &datom)
-            {
-                pairs.push(NoHistoryPair {
-                    retraction: previous,
-                    assertion: datom,
-                });
-                continue;
-            }
+        if let Some(previous) = pending.take()
+            && !previous.added
+            && datom.added
+            && no_history_attributes.contains(&previous.attribute)
+            && same_logical_eav(&previous, &datom)
+        {
+            pairs.push(NoHistoryPair {
+                retraction: previous,
+                assertion: datom,
+            });
+            continue;
         }
         *pending = Some(datom);
     }
@@ -5032,20 +5049,19 @@ mod tests {
         let Some(RoutingValue::Tuple { prefix, .. }) = separator.value.as_ref() else {
             panic!("tuple boundary should retain a sparse tuple prefix")
         };
-        assert_eq!(prefix.len(), 2, "logical-equal first member was not skipped");
+        assert_eq!(
+            prefix.len(),
+            2,
+            "logical-equal first member was not skipped"
+        );
         assert!(separator.cmp_datom(&prior, IndexOrder::Eavt).is_gt());
         assert!(separator.cmp_datom(&current, IndexOrder::Eavt).is_le());
 
         let mut config = tiny_config();
         config.max_leaf_datoms = 1;
         for order in [IndexOrder::Eavt, IndexOrder::Aevt, IndexOrder::Avet] {
-            let built = build_tree(
-                order,
-                true,
-                vec![prior.clone(), current.clone()],
-                &config,
-            )
-            .unwrap();
+            let built =
+                build_tree(order, true, vec![prior.clone(), current.clone()], &config).unwrap();
             validate_tree(&built.descriptor, &built.nodes).unwrap();
             assert_eq!(
                 range_tree(&built.descriptor, &built.nodes, None, None)
@@ -5127,6 +5143,10 @@ mod tests {
                 TreeNode::Root(root) => {
                     assert!(root.directories.len() <= tiny_config().max_directories_per_root);
                     assert!(bytes.len() <= tiny_config().max_root_bytes);
+                    assert!(
+                        root.estimated_retained_bytes()
+                            <= tiny_config().max_decoded_root_estimated_bytes()
+                    );
                 }
             }
         }
@@ -5422,8 +5442,14 @@ mod tests {
         let error = decode_tree_node(&build.descriptor.root_hash, &corrupt).unwrap_err();
         assert_eq!(error.code, "tree/content-hash-mismatch");
 
+        // A fully self-consistent predecessor-format value is still not
+        // adoptable: comparator semantics changed, so v3 bytes require an
+        // explicit rebuild from the authoritative log.
         let mut unsupported = root_bytes.to_vec();
-        unsupported[4..6].copy_from_slice(&99_u16.to_be_bytes());
+        unsupported[4..6].copy_from_slice(&3_u16.to_be_bytes());
+        let checksum_at = unsupported.len() - CHECKSUM_LEN;
+        let checksum = sha256(&unsupported[..checksum_at]);
+        unsupported[checksum_at..].copy_from_slice(&checksum);
         let unsupported_hash = sha256(&unsupported);
         let error = decode_tree_node(&unsupported_hash, &unsupported).unwrap_err();
         assert_eq!(error.code, "tree/unsupported-version");

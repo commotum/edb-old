@@ -2,10 +2,18 @@
 
 Goal 16 replaced the production transactor's eager database cache with an
 immutable native root-plus-tail value. `Database` remains the pure semantic
-oracle and the explicit administrative reconstruction type; an ordinary
-service activation, transaction, retry, report, or failover neither retains
-nor reconstructs it. This document keeps the original dependency audit below
-because it explains why the replacement boundary is as broad as it is.
+oracle and the explicit administrative reconstruction type. For established
+history, an ordinary service activation, transaction, retry, report, or
+failover neither retains nor reconstructs it. The bounded new-database
+exception is basis 0/1: service startup may run
+`consolidate_fresh_database`, reconstructing only fixed bootstrap/application
+schema input to publish the first native root, then immediately opens and
+retains the native value. Public `Peer` compatibility is not covered by this
+writer claim: a database with no native publication can still use `recover_to`,
+and `Peer::db` explicitly materializes an eager value. Removing that Goal
+17-owned compatibility surface is separate from Goal 16 writer residency.
+This document keeps the original dependency audit below because it explains
+why the replacement boundary is as broad as it is.
 
 ## Implemented production shape
 
@@ -30,14 +38,36 @@ are reported distinctly; cache effectiveness never changes semantics.
 Physical AVET readiness is separate from logical schema. A new
 `:db/index`/`:db/unique` fact does not make old values magically present in an
 older AVET root. The writer uses a correct AEVT fallback while the affected
-root is not ready, and publication records when AVET becomes usable. This
-matches the recovered forced-indexing boundary (`db.clj:3382-3642`) without
-making a transient physical state part of database semantics.
+root is not ready, and publication records when AVET becomes usable. Raw index
+access deliberately preserves the recovered physical distinction: an
+unqualified AVET scan contains only physically ready attributes, while an
+attribute-qualified AVET seek fails explicitly until that attribute is ready.
+Logical query planning tests readiness and falls back to the complete AEVT
+attribute range, so backfill timing cannot change query answers. This matches
+the docs' `sync-schema` availability boundary
+(`datomic_pro_docs/03_schema/01_changing_schema.md:75-79`) and recovered
+`Attribute.hasAVET`, qualified `seek-datoms`, and `add-avet` paths
+(`db.clj:1019-1038,1880-1915,3382-3642`).
 
-Full reconstruction remains deliberately confined to explicit broad work:
-initial root creation, migration/backfill, deep verification, excision, and
-backup/restore. In particular, if every derived request-base tree is corrupt,
-backup rebuilds the exact portable tree from the authenticated immutable log.
+The source-corrected tree comparator is versioned as **ATIX v4**: logical
+E/A/V, descending T, assertion before retraction, then a native
+stored-representation tie-break (`1.0.7705/peer/src-clj/datomic/common.clj:123-172`,
+`db.clj:885-930`, `index.clj:2522-2547`). Authoritative **ATMC v3**
+datom-bearing values keep their already-published stored-first canonical order.
+Administrative rebuilds decode that frozen format and write new ATIX v4 nodes;
+neither format silently changes meaning.
+
+Within the production writer/service path, full reconstruction is deliberately
+confined to explicit broad work: the bounded basis-0/1 first-root build,
+migration/backfill, deep verification, excision, and backup/restore. The
+Goal-17-owned public peer compatibility exceptions described above are not a
+writer fallback. In particular, if every derived request-base tree is corrupt,
+backup may rebuild a source-admissible portable projection from the
+authenticated immutable log at the exact semantic coordinate. Its retained
+history need not be byte-for-byte identical when `:db/noHistory` applies,
+because removal and indexing-job timing are expressly nonsemantic
+(`datomic_pro_docs/03_schema/00_schema_data_reference.md:201-213`,
+`03_schema/01_changing_schema.md:62-73`).
 That is not a writer fallback: the docs explicitly say backup memory is
 proportional to database size, while the introduction makes the log
 authoritative and index trees replaceable
@@ -231,12 +261,15 @@ or ambiguous result cannot mutate the installed writer value.
    existing versioned digest exactly. Because state hash participates in
    generation transaction hashes, changing it requires an explicit generation
    migration boundary; history cannot be silently rewritten.
-4. **AVET readiness differs today.** Recovered Datomic detects a schema datom
+4. **AVET readiness is a physical publication boundary.** Recovered Datomic detects a schema datom
    requiring AVET and forces an index job (`db.clj:3457-3606`). Native peers
-   mark such attributes `avet_unready` and reject AVET reads until a covering
-   root (`peer.rs:362-375,3909-3939`). The writer must force/await publication
-   or correctly scan AEVT for the affected attribute; an availability error
-   cannot become the permanent semantics of new writes.
+   mark such attributes `avet_unready`: qualified raw AVET seeks reject the
+   affected attribute, unqualified raw AVET scans omit it, and logical queries
+   use AEVT until a covering root is adopted (`peer.rs:362-375,3909-3939`). The
+   writer forces/schedules that bounded attribute job and correctly scans AEVT
+   until the covering root is adopted. Tests prove the query planner changes
+   from AEVT to AVET without changing the answer; an availability error is
+   confined to qualified raw AVET access while the physical index is pending.
 5. **Administrative full scans are explicit exceptions.** Initial native-root
    construction, deep verification, export/import, and privacy excision may
    stream the full history. They must be isolated, measured, and never hidden
@@ -253,6 +286,11 @@ or ambiguous result cannot mutate the installed writer value.
 8. **Initial root absence is not normal failover.** A one-time administrative
    build is acceptable. Thereafter activation must use a covering root+tail or
    fail/repair explicitly; silently replaying genesis is a regression.
+9. **Retained history is a projection, not a second authority.** Ordinary
+   incremental jobs filter only ranges they rebuild and only under endpoint
+   `noHistory`; explicit reconstruction may choose another admissible subset
+   from the immutable log. Goal 20 owns semantic deep checks for backup and
+   request-base archives, plus disclosure of every retained-content anchor.
 
 ## Completed proof obligations
 
@@ -284,6 +322,10 @@ or ambiguous result cannot mutate the installed writer value.
     values/current/history/index/semantic nodes, active and frozen recent
     datoms/bytes, cache entries/bytes, cursor node reads/bytes, commitment
     proof nodes, and pinned roots/generations.
+11. Made sealed tree-build intents exact liveness owners for retirement. The
+    Rust candidate selector and migration-22 privileged collector take both
+    fences and refuse to retire a matching publication; the upgrade also
+    drains the state-2 orphan form that an older collector could strand.
 
 `tests/transactor_residency.rs` is now the permanent inverse of the historical
 baseline. After 128 commits it requires zero eager writer values/facts/history,
@@ -293,7 +335,14 @@ the total history size. `tests/transactor_differential.rs` drives the real
 service through generated accepted and rejected transitions and compares the
 complete outcome against `Database::with`; restart, failover, ambiguity,
 backpressure, physical AVET readiness, corruption, and repeated schema-event
-witnesses cover the remaining risky boundaries. These tests count as evidence
-only when the PostgreSQL environment is explicitly present and the work
-actually executes; Goal 20 owns a non-skipping harness for the integrated
-suite.
+witnesses cover the remaining risky boundaries. Deep inspection now compares
+every usable retained native publication with its named authoritative log
+value and proves its sibling indexes derive from current EAVT plus an
+admissible `noHistory` history projection. A live tree witness checks identical
+retained fact sets across EAVT/AEVT/AVET/VAET despite different leaf layouts.
+These tests count as evidence only when the PostgreSQL environment is
+explicitly present and the work actually executes; Goal 20 owns a non-skipping
+harness for the integrated suite. That gate must extend semantic equivalence
+to portable backup and request-base archive trees and report
+backup/archive/retired-root/snapshot/WAL retention anchors. Those remaining
+obligations are assigned, not claimed complete here.

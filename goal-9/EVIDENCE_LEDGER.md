@@ -298,6 +298,11 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   one-million-transaction ceiling. Temp-file rename, directory fsync, and
   opaque proof types are Atomic-specific safety. Deep verification is an
   explicit backup operation; it is not an excision authorization token.
+  Reachability/hash checks alone do not prove tree semantics. Goal 20 owns the
+  non-skipping semantic comparison of backup and request-base-archive roots to
+  their authoritative log coordinate, using admissibility rather than one
+  invented exact retained-history set for `noHistory`, and must disclose all
+  backup/archive/retired-root/snapshot/WAL retention anchors.
 
 ### C21 — Make database functions temporal information, not mutable deployment state
 
@@ -374,17 +379,20 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   leaves would require a new shared accumulator or authenticated cross-tree
   proof format. A duplicate checksum cannot provide that proof.
 - **Explicit verification boundary:** `PostgresOperator::inspect_database(...,
-  true)` is the broad administrative check. It authenticates the complete
-  native tree, reconstructs the named authoritative log value, and compares
-  its exact current and retained-history EAVT information. Ordinary peer and
+  true)` is the broad administrative check. Its required contract is to
+  authenticate the complete native tree, reconstruct the named authoritative
+  log value, prove exact current EAVT, and prove that retained-history EAVT plus
+  all siblings are a source-admissible `noHistory` projection. Ordinary peer and
   writer opens deliberately trust roots published by the restricted native
   indexer role, matching Datomic's conditionally-published-root model. A
   PostgreSQL superuser or intentionally Byzantine indexer that can publish a
   new self-consistent false tree is outside ordinary corruption detection;
-  deep inspection detects the false tree, while role separation, immutable
-  rows, conditional publication, and triggers prevent untrusted runtime roles
-  from creating one. This narrower claim replaces the impossible assertion
-  that endpoint metadata alone proves global semantic equivalence.
+  deep inspection is intended to detect the false tree, while role separation,
+  immutable rows, conditional publication, and triggers prevent untrusted
+  runtime roles from creating one. This narrower claim replaces the impossible
+  assertion that endpoint metadata alone proves global semantic equivalence.
+  Goal 20 must establish the same check for backup and request-base-archive
+  trees; this ledger assigns that evidence and does not claim it already passes.
 
 ### C25 — Keep the production transactor tiered as well as the peer
 
@@ -400,9 +408,9 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   the memory tier (`:5599-5610`). `datomic.indexer.IndexerImpl` separately
   accounts `:memidx` and `:indexing` bytes and applies the hard limit
   (`transactor/src-clj/datomic/indexer.clj:262-329`).
-- **Observed native gap:** `PostgresStore.current` retains a complete eager
-  `Database` per served database (`src/postgres.rs`), and that oracle owns full
-  current/history collections. Native background publication can bound its
+- **Observed native gap (closed by Goal 16):** `PostgresStore.current` retained
+  a complete eager `Database` per served database, and that oracle owned full
+  current/history collections. Native background publication could bound its
   separate novelty counter without bounding this retained state.
 - **Repair:** after Goal 14 establishes one exact lazy `IndexAccess` seam for
   query/pull, use the same semantic access boundary for transaction expansion,
@@ -411,6 +419,17 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   must retain durable roots plus bounded memory/indexing tiers and load only
   the ranges actually needed. This is Goal 16; it is not waived by Goal 13's
   peer-cache evidence.
+- **Implemented evidence:** the authoritative writer now owns one immutable
+  `TieredSnapshot`, persistent commitment coordinate, physical publication
+  revision, bounded recent tree, resident information-derived metadata, and
+  bounded node cache. Established-history activation authenticates one native
+  root and streams its exact tail once. A 128-transaction live witness reaches
+  zero retained recent datoms after publication, retains no eager database,
+  and performs bounded native path and commitment work on the next localized
+  write. Generated eager/native transaction differentials, failover, and two
+  actual PostgreSQL restart witnesses pass. The bounded basis-0/1 creation
+  bootstrap and explicitly broad operator/oracle methods remain named
+  exceptions; the ordinary writer path has no materialization escape.
 
 ### C26 — Keep schema and ident projections out of physical root manifests
 
@@ -441,10 +460,13 @@ requirements are labeled rather than misrepresented as Datomic behavior.
 
 ### C27 — Apply `:db/noHistory` to affected merged segments without a base cutoff
 
-- **Docs:** setting `:db/noHistory` affects future indexing jobs and does not
-  immediately change current historical values
-  (`03_schema/01_changing_schema.md:85-99`). It does not promise that already
-  durable adjacent pairs remain forever once a later job rebuilds their range.
+- **Docs:** `:db/noHistory` exists to conserve storage and makes no semantic or
+  precise-removal promise (`03_schema/00_schema_data_reference.md:201-213`). A
+  change affects future indexing jobs and does nothing to current historical
+  values (`03_schema/01_changing_schema.md:62-73`). It therefore does not
+  promise that already durable adjacent pairs remain forever once a later job
+  rebuilds their range, or that a full reconstruction reproduces one unique
+  prior subset.
 - **1.0.7705:** `filter-nohist-pairs` checks endpoint `noHistory`, adjacent
   retract/assert operations, equal E/A, and `common/compare`-equal V; it has no
   transaction/base predicate (`peer/src-clj/datomic/index.clj:2522-2547`). The
@@ -455,8 +477,17 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   the base and used stored equality, missing a pair across the base boundary
   and logically equal numeric values with different physical representation.
 - **Repair:** use logical index comparison for E/A/V and no base cutoff on the
-  supplied affected segment. Ordinary history reads remain exact; only explicit
-  consolidation omits eligible pairs.
+  supplied affected segment. An ordinary incremental job filters only its
+  rebuilt range under the endpoint schema; changing the flag alone does not
+  sweep all history. The immutable log remains authority, so explicit admin
+  rebuild/excision/backup reconstruction may produce a different admissible
+  retained-history subset. Every captured database value remains immutable,
+  but there is no invented cross-rebuild exactness guarantee.
+- **Format boundary:** source-corrected index ordering (logical E/A/V,
+  descending T and assertion first) plus a final native stored-representation
+  tie is **ATIX tree v4**. Authoritative ATMC v3
+  transaction/genesis/flat-segment bytes retain their frozen stored-first
+  comparator and are decoded as rebuild input, never reinterpreted in place.
 
 ### C28 — Preserve sparse parent routing without inventing value-size ceilings
 
@@ -688,22 +719,32 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   7451-7473`); the transactor owns bounded prefetch workers and immutable
   segment cache warming (`transactor/src-clj/datomic/update.clj:163-223,
   346-546`).
-- **Observed native gap:** Goal 16's assessor can issue and charge the identical
-  prefix read repeatedly within one transaction. Its shared node cache reduces
-  decoding but does not remove repeated cursor traversal or SQL/cache probes.
+- **Observed native gap (closed for exact transaction reads):** the early Goal
+  16 assessor could issue and charge the identical prefix read repeatedly
+  within one transaction. Its shared node cache reduced decoding but did not
+  remove repeated cursor traversal or SQL/cache probes.
 - **Repair:** at minimum memoize exact transaction-local prefixes and report
   hit/miss work accurately. Defer a concurrent client-hint protocol only as an
   explicit performance extension; do not claim recovered prefetch parity from
   the cache alone.
+- **Implemented evidence:** exact transaction prefixes now share one bounded
+  admission-controlled memo across normalizer, assessor, successor overlay,
+  persisted programs/predicates, and commitment predecessor reads. Only a
+  completely consumed result is admitted; oversized/failed prefixes cannot
+  evade read limits or consume unbounded retained memory. Logical reuse is
+  recharged separately from source I/O and exposed in writer work metrics.
+  Datomic's optional client hint/prefetch protocol remains a documented
+  performance omission rather than being falsely claimed from cache hits.
 
 ## Internal correctness/evidence requirements
 
 These do not pretend to be Datomic API semantics, but follow from Goal 0's own
 production claims: atomic peer state swap on tail failure; coherent PostgreSQL
 inspection snapshots; forward migration-version rejection; immutable program
-catalog constraints; crash-safe filesystem publication; exact restore
-postconditions; and an integration harness that cannot report PostgreSQL tests
-as passed without executing them. Derived-state corruption must also be isolated
+catalog constraints; crash-safe filesystem publication; exact-coordinate
+restore with an admissible `noHistory` projection; and an integration harness
+that cannot report PostgreSQL tests as passed without executing them.
+Derived-state corruption must also be isolated
 by database: the log remains authoritative and derived roots are independently
 discardable (`00_start_here/00_introduction.md:79-109`), backup identity is
 explicitly per database
@@ -721,6 +762,16 @@ database ids failed at global `delete_unreferenced_segments` with
 `encoding/bad-magic`, despite every authoritative transaction payload for those
 databases retaining the canonical `41544d43` header. Goal 15 owns the repair and
 a cross-database regression fixture.
+
+The Goal 16 serial GC gate exposed another PostgreSQL-specific liveness rule:
+a sealed content-first tree-build intent owns its staged immutable nodes until
+its bounded ledger drains, even after publication. Retirement selection and
+the privileged collector now both exclude that dependency under the manifest
+and build advisory fences. Migration 22 both prevents the race and lets
+version-21 catalogs converge if an older collector already stranded a sealed
+activated intent. This is a native operational safety repair consistent with
+the recovered content-first/root-last discipline; it is not presented as a
+new Datomic information-model semantic.
 
 ## Corrected or rejected audit claims
 

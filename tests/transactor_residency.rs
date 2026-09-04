@@ -1,3 +1,4 @@
+use atomic_core::persistent_tree::TreeConfig;
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, CapacityLimits, Cardinality, EntityRef, Keyword,
     PostgresStore, Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxOp,
@@ -139,6 +140,14 @@ fn production_writer_residency_is_bounded_by_recent_and_cache_tiers() {
     assert_eq!(bounded.recent_datoms, 0);
     assert!(bounded.tree_cache_entries <= 64);
     assert!(bounded.tree_cache_bytes <= 1024 * 1024);
+    let tree_config = TreeConfig::default();
+    assert!(bounded.resident_tree_root_children <= 8 * tree_config.max_directories_per_root);
+    assert!(
+        bounded.resident_tree_root_estimated_bytes
+            <= 8 * tree_config.max_decoded_root_estimated_bytes()
+    );
+    assert!(bounded.resident_tree_root_children > 0);
+    assert!(bounded.resident_tree_root_estimated_bytes > 0);
     assert!(bounded.resident_schema_attributes > 0);
     assert!(bounded.resident_schema_information_datoms > 0);
     assert!(bounded.resident_schema_estimated_bytes > 0);
@@ -218,5 +227,12 @@ fn production_writer_residency_is_bounded_by_recent_and_cache_tiers() {
     assert!(after.resident_ident_estimated_bytes > 0);
     assert_eq!(after.tree_cache_entries, 0);
     assert_eq!(after.tree_cache_bytes, 0);
+    assert!(after.resident_tree_root_children <= 8 * tree_config.max_directories_per_root);
+    assert!(
+        after.resident_tree_root_estimated_bytes
+            <= 8 * tree_config.max_decoded_root_estimated_bytes()
+    );
+    assert!(after.resident_tree_root_children > 0);
+    assert!(after.resident_tree_root_estimated_bytes > 0);
     restarted.shutdown();
 }

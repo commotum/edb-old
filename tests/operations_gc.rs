@@ -1,17 +1,17 @@
-use atomic_core::persistent_tree::TreeConfig;
+use atomic_core::persistent_tree::{TreeConfig, TreeDescriptor};
 use atomic_core::{
-    Attribute, Cardinality, DB_EXCISE, DB_FN, DB_IDENT, Digest, EntityRef, ExcisionFault,
-    GarbageInventory, IndexBuildFault, IndexOrder, IndexSegment, Instruction, Keyword,
-    MAX_LOG_GENERATION_ROWS_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
-    MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_RETIREMENT_NODES_PER_GC, Peer,
+    Attribute, Cardinality, DB_EXCISE, DB_FN, DB_IDENT, Digest, DurableTransaction, EntityRef,
+    ExcisionFault, GarbageInventory, IndexBuildFault, IndexOrder, IndexSegment, Instruction,
+    Keyword, MAX_LOG_GENERATION_ROWS_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
+    MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_RETIREMENT_NODES_PER_GC, ManifestTree, Peer,
     PersistentTreeManifest, PortableBackup, PostgresIndexer, PostgresOperator, PostgresStore,
     PostgresTreeStore, Program, ProgramKind, RECOMMENDED_GARBAGE_COLLECTION_AGE, RestoreFault,
     Schema, TreeManifestRecord, TreePublicationDelta, TreePublishOutcome, TreeRootBinding, TxOp,
-    TxValue, USER_PARTITION, Value, ValueType, encode_index_segment, encode_program, make_eid,
-    sha256,
+    TxValue, USER_PARTITION, Value, ValueType, View, encode_index_segment, encode_program,
+    encode_transaction, make_eid, sha256, t_to_tx,
 };
 use postgres::{Client, NoTls};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -97,26 +97,184 @@ fn provision_generation_zero_database(
     connection: &str,
     store: &mut PostgresStore,
     database_id: &str,
-) {
+) -> u64 {
     // New catalogs correctly start in the native positive-generation format.
-    // This owner-level fixture recreates the supported upgrade shape: an
-    // existing v13 catalog row and basis-zero head that migration 14 leaves as
-    // generation zero until its first COW activation.
+    // Recreate a canonical, positive-basis generation-zero value without
+    // weakening the production rule that legacy trees cannot exist at
+    // genesis. A native donor supplies the exact semantic commitment nodes;
+    // the legacy row itself remains alias-bound ATMC v3.
     let donor = unique("generation_zero_donor");
-    store.create_database(&donor, Schema::new()).unwrap();
+    let donor_database = store.create_database(&donor, schema()).unwrap();
+    let mut donor_transactions = vec![(
+        donor_database
+            .datoms(View::History, IndexOrder::Eavt)
+            .into_iter()
+            .filter(|datom| datom.tx == t_to_tx(1).unwrap())
+            .collect::<Vec<_>>(),
+        BTreeMap::new(),
+    )];
+    let donor_service = common::start_service(connection, &donor);
+    let seeded = common::transact(
+        &donor_service,
+        "generation-zero-donor-seed",
+        donor_database.basis_t(),
+        &[add(unique_long())],
+        1_000,
+    );
+    donor_transactions.push((seeded.tx_data.clone(), seeded.tempids.clone()));
+    let requested = common::transact(
+        &donor_service,
+        "generation-zero-donor-excision",
+        seeded.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("generation-zero-donor-request".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(42))),
+        }],
+        2_000,
+    );
+    donor_transactions.push((requested.tx_data.clone(), requested.tempids.clone()));
+    drop(seeded);
+    drop(requested);
+    donor_service.shutdown();
+
     let mut raw = Client::connect(connection, NoTls).unwrap();
-    raw.execute(
-        "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) \
+    let genesis_hash: Vec<u8> = raw
+        .query_one(
+            "SELECT genesis_hash FROM atomic_databases WHERE database_id = $1",
+            &[&donor],
+        )
+        .unwrap()
+        .get(0);
+
+    let mut fixture = raw.transaction().unwrap();
+    fixture
+        .execute(
+            "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) \
          SELECT $1, genesis, genesis_hash FROM atomic_databases WHERE database_id = $2",
-        &[&database_id, &donor],
-    )
-    .unwrap();
-    raw.execute(
-        "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) \
+            &[&database_id, &donor],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .execute(
+                "INSERT INTO atomic_semantic_commitment_roots \
+                (database_id, generation, basis_t, tx_hash, state_hash, eidx_frontier, \
+                 commitment_version, current_root, current_count) \
+         SELECT $1, 0, basis_t, tx_hash, state_hash, eidx_frontier, \
+                commitment_version, current_root, current_count \
+           FROM atomic_semantic_commitment_roots \
+          WHERE database_id = $2 AND generation = 1 AND basis_t = 0",
+                &[&database_id, &donor],
+            )
+            .unwrap(),
+        1
+    );
+    fixture
+        .execute(
+            "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) \
          SELECT $1, 0, genesis_hash, 0 FROM atomic_databases WHERE database_id = $1",
-        &[&database_id],
-    )
-    .unwrap();
+            &[&database_id],
+        )
+        .unwrap();
+    fixture.commit().unwrap();
+
+    let mut previous_hash: [u8; 32] = genesis_hash.try_into().unwrap();
+    for (offset, (tx_data, tempids)) in donor_transactions.into_iter().enumerate() {
+        let basis_t = u64::try_from(offset).unwrap() + 1;
+        let basis_sql = i64::try_from(basis_t).unwrap();
+        let donor_endpoint = raw
+            .query_one(
+                "SELECT t.eidx_frontier, t.state_hash \
+                   FROM atomic_generation_transactions t \
+                  WHERE t.database_id = $1 AND t.generation = 1 AND t.basis_t = $2",
+                &[&donor, &basis_sql],
+            )
+            .unwrap();
+        let eidx_frontier = u64::try_from(donor_endpoint.get::<_, i64>(0)).unwrap();
+        let state_hash: Vec<u8> = donor_endpoint.get(1);
+        let envelope = DurableTransaction {
+            database_id: database_id.to_owned(),
+            basis_t,
+            previous_hash,
+            eidx_frontier,
+            tempids,
+            tx_data,
+        };
+        let payload = encode_transaction(&envelope).unwrap();
+        let transaction_hash = sha256(&payload);
+        let request_digest = sha256(&payload);
+        let request_key = format!("generation-zero-canonical-{basis_t}");
+
+        let mut publication = raw.transaction().unwrap();
+        publication
+            .execute(
+                "INSERT INTO atomic_transactions \
+                        (database_id, basis_t, previous_hash, tx_hash, payload, state_hash) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &database_id,
+                    &basis_sql,
+                    &&previous_hash[..],
+                    &&transaction_hash[..],
+                    &payload,
+                    &state_hash,
+                ],
+            )
+            .unwrap();
+        publication
+            .execute(
+                "INSERT INTO atomic_requests \
+                        (database_id, request_key, request_digest, basis_t, tx_hash) \
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &database_id,
+                    &request_key,
+                    &&request_digest[..],
+                    &basis_sql,
+                    &&transaction_hash[..],
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            publication
+                .execute(
+                    "INSERT INTO atomic_semantic_commitment_roots \
+                            (database_id, generation, basis_t, tx_hash, state_hash, \
+                             eidx_frontier, commitment_version, current_root, current_count) \
+                     SELECT $1, 0, basis_t, $2, state_hash, eidx_frontier, \
+                            commitment_version, current_root, current_count \
+                       FROM atomic_semantic_commitment_roots \
+                      WHERE database_id = $3 AND generation = 1 AND basis_t = $4",
+                    &[&database_id, &&transaction_hash[..], &donor, &basis_sql],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            publication
+                .execute(
+                    "UPDATE atomic_heads SET basis_t = $1, tx_hash = $2 \
+                      WHERE database_id = $3 AND basis_t = $4 AND log_generation = 0",
+                    &[
+                        &basis_sql,
+                        &&transaction_hash[..],
+                        &database_id,
+                        &(basis_sql - 1),
+                    ],
+                )
+                .unwrap(),
+            1
+        );
+        publication.commit().unwrap();
+        previous_hash = transaction_hash;
+    }
+
+    PostgresIndexer::connect(connection, database_id)
+        .unwrap()
+        .consolidate()
+        .unwrap();
+    3
 }
 
 fn add(value: i64) -> TxOp {
@@ -205,7 +363,7 @@ fn republish_with_forged_old_timestamp(connection: &str, database_id: &str) -> T
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
                 excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                 log_generation, lineage_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 5, $8, $9, $10, $11)",
             &[
                 &successor.database_id,
                 &(successor.publication_revision as i64),
@@ -696,39 +854,8 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
-    provision_generation_zero_database(&connection, &mut store, &database_id);
-    let service = common::start_service(&connection, &database_id);
-    let schema_ops = schema()
-        .attributes()
-        .cloned()
-        .map(TxOp::InstallAttribute)
-        .collect::<Vec<_>>();
-    let installed = common::transact(
-        &service,
-        "generation-gc-install-schema",
-        0,
-        &schema_ops,
-        500,
-    );
-    let seeded = common::transact(
-        &service,
-        "generation-gc-seed",
-        installed.basis_t,
-        &[add(unique_long())],
-        1_000,
-    );
-    let requested = common::transact(
-        &service,
-        "generation-gc-excision",
-        seeded.basis_t,
-        &[TxOp::Add {
-            entity: EntityRef::Temp("generation-gc-request".into()),
-            attribute: DB_EXCISE as u32,
-            value: TxValue::Entity(EntityRef::Id(user(42))),
-        }],
-        2_000,
-    );
-    service.shutdown();
+    let initial_basis = provision_generation_zero_database(&connection, &mut store, &database_id);
+    let requested_basis = initial_basis;
 
     // This immutable value has no tree root, so its generation session pin is
     // the only thing standing between a lazy reader and retired log bytes.
@@ -737,7 +864,7 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     let receipt = operator.process_excision_requests(&database_id).unwrap();
     assert_eq!(receipt.source_generation, 0);
-    assert_eq!(receipt.basis_t, requested.basis_t);
+    assert_eq!(receipt.basis_t, requested_basis);
 
     let mut raw = Client::connect(&connection, NoTls).unwrap();
     let legacy_endpoint = raw
@@ -749,7 +876,9 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
         .unwrap();
     let legacy_basis: i64 = legacy_endpoint.get(0);
     let legacy_tx_hash: Vec<u8> = legacy_endpoint.get(1);
-    let legacy_manifest_payload = vec![0x5a; 64];
+    let mut legacy_manifest_payload = b"legacy-flat-manifest:".to_vec();
+    legacy_manifest_payload.extend_from_slice(database_id.as_bytes());
+    legacy_manifest_payload.resize(legacy_manifest_payload.len().max(64), 0x5a);
     let legacy_manifest_hash = sha256(&legacy_manifest_payload);
     raw.execute(
         "INSERT INTO atomic_index_manifests \
@@ -815,6 +944,19 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
         &[&database_id, &program_hashes],
     )
     .unwrap();
+    let legacy_publication_rows = u64::try_from(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_index_publications WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+    )
+    .unwrap();
+    assert!(
+        (1..=MAX_LOG_GENERATION_ROWS_PER_GC as u64).contains(&legacy_publication_rows),
+        "fixture publications must fit in the first bounded legacy phase"
+    );
 
     assert!(
         operator
@@ -843,6 +985,23 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
             .all(|candidate| candidate.database_id != database_id)
     );
 
+    let semantic_roots = preview_next_log_generation(&mut operator, &database_id, 0);
+    let semantic_candidate = semantic_roots
+        .log_generations
+        .iter()
+        .find(|candidate| candidate.database_id == database_id && candidate.generation == 0)
+        .unwrap();
+    assert_eq!(
+        (
+            semantic_candidate.collection_phase,
+            semantic_candidate.rows_removed,
+            semantic_candidate.semantic_roots_removed,
+            semantic_candidate.is_complete,
+        ),
+        (0, initial_basis + 1, initial_basis + 1, false)
+    );
+    apply_exact_inventory(&mut operator, &semantic_roots);
+
     let first = preview_next_log_generation(&mut operator, &database_id, 0);
     let first_candidate = first
         .log_generations
@@ -855,7 +1014,7 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
             first_candidate.rows_removed,
             first_candidate.is_complete,
         ),
-        (0, 1, false)
+        (0, legacy_publication_rows, false)
     );
     let mut expected_first = first.clone();
     expected_first.applied = true;
@@ -992,10 +1151,11 @@ fn retired_generation_collection_preserves_shared_atlc_content() {
         ],
         1_000,
     );
+    let seeded_basis = seeded.basis_t;
     let first_request = common::transact(
         &service,
         "shared-atlc-first-excision",
-        seeded.basis_t,
+        seeded_basis,
         &[TxOp::Add {
             entity: EntityRef::Temp("shared-atlc-first-request".into()),
             attribute: DB_EXCISE as u32,
@@ -1003,10 +1163,13 @@ fn retired_generation_collection_preserves_shared_atlc_content() {
         }],
         2_000,
     );
+    drop(seeded);
+    let first_request_basis = first_request.basis_t;
+    drop(first_request);
     service.shutdown();
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     let first = operator.process_excision_requests(&database_id).unwrap();
-    assert_eq!(first.basis_t, first_request.basis_t);
+    assert_eq!(first.basis_t, first_request_basis);
 
     let service = common::start_service(&connection, &database_id);
     let second_request = common::transact(
@@ -1020,12 +1183,14 @@ fn retired_generation_collection_preserves_shared_atlc_content() {
         }],
         3_000,
     );
+    let second_request_basis = second_request.basis_t;
+    drop(second_request);
     service.shutdown();
     let old_peer = Peer::connect(&connection, &database_id, 0).unwrap();
     let old_snapshot = old_peer.snapshot();
     let second = operator.process_excision_requests(&database_id).unwrap();
     assert_eq!(second.source_generation, first.generation);
-    assert_eq!(second.basis_t, second_request.basis_t);
+    assert_eq!(second.basis_t, second_request_basis);
 
     let mut raw = Client::connect(&connection, NoTls).unwrap();
     let shared_hash: Vec<u8> = raw
@@ -1115,6 +1280,8 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
         &[add(unique_long())],
         1_000,
     );
+    let seeded_basis = seeded.basis_t;
+    drop(seeded);
     service.shutdown();
     let mut backup = PortableBackup::connect(&connection).unwrap();
     let point = backup
@@ -1125,7 +1292,7 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
     let request = common::transact(
         &service,
         "abandoned-generation-request",
-        seeded.basis_t,
+        seeded_basis,
         &[TxOp::Add {
             entity: EntityRef::Temp("abandoned-generation-request".into()),
             attribute: DB_EXCISE as u32,
@@ -1133,6 +1300,8 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
         }],
         2_000,
     );
+    let request_basis = request.basis_t;
+    drop(request);
     service.shutdown();
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     let interrupted = operator
@@ -1177,7 +1346,7 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
         )
         .unwrap();
     assert_eq!(restored.basis_t(), point.basis_t);
-    assert!(restored.basis_t() < request.basis_t);
+    assert!(restored.basis_t() < request_basis);
     assert!(
         operator
             .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
@@ -2530,7 +2699,32 @@ fn large_replacement_publishes_root_before_bounded_membership_fold() {
             encoded_bytes: payload.len() as u64,
         });
     }
-    let manifest_payload = format!("bounded-replacement-manifest-{database_id}").into_bytes();
+    let manifest_payload = PersistentTreeManifest {
+        database_id: database_id.clone(),
+        publication_revision: 1,
+        basis_t,
+        tx_hash,
+        state_hash,
+        excision_generation: log_generation,
+        eidx_frontier: database.eidx_frontier(),
+        trees: roots
+            .iter()
+            .map(|root| ManifestTree {
+                descriptor: TreeDescriptor {
+                    root_hash: root.root_hash,
+                    order: root.order,
+                    history: root.history,
+                    count: root.datom_count,
+                    first_hash: None,
+                    last_hash: None,
+                },
+                root_bytes: root.encoded_bytes,
+            })
+            .collect(),
+        pending_avet: Vec::new(),
+    }
+    .encode()
+    .unwrap();
     let manifest = TreeManifestRecord {
         database_id: database_id.clone(),
         publication_revision: 1,

@@ -244,7 +244,12 @@ disconnected-reader, request-tombstone, and administrative-authority limits.
 
 ### 7. Tiered production transactor (`goal-16/`)
 
-**Status:** Pending.
+**Status:** Complete 2026-09-04. See `goal-16/0-plan.md` and
+`goal-16/ARCHITECTURE.md`. The fenced writer now assesses against an immutable
+native root-plus-tail value, updates a persistent authenticated commitment by
+path copy, publishes through the existing atomic PostgreSQL decision, and
+retains bounded recent/cache/root/metadata state rather than a full eager
+database.
 
 **Outcome:** The authoritative Rust writer uses the same immutable durable
 roots and bounded memory/indexing tiers as the peer-facing database value;
@@ -261,6 +266,17 @@ writer residency follows configured recent/cache bounds rather than total
 database history; localized transactions load bounded index ranges, preserve
 all Goal 12 acknowledgement/fencing semantics, and produce exactly the eager
 oracle result across restart and failover.
+
+**Established evidence:** A 128-commit residency test, fixed-seed and
+adversarial eager/native differentials, background handoff, backlog,
+contention, failover, corruption, exact retry, and service recovery pass on
+real PostgreSQL. Fresh broad runs pass peer 18/18 and GC 15/15; separate peer
+and transactor tests each perform a real PostgreSQL 15.11 stop/start and reopen
+the exact committed native value without compatibility materialization.
+Migration 22 closes the retirement/build-intent dependency found only when the
+full GC suite ran serially and successfully heals the actual stranded v21
+fixture. The remaining eager public peer methods are not writer fallbacks and
+remain explicitly owned by Goal 17.
 
 ### 8. Native connection and immutable database API (`goal-17/`)
 

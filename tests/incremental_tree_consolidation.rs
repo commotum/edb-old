@@ -1,7 +1,7 @@
 use atomic_core::{
     Attribute, Cardinality, DB_ALTER_ATTRIBUTE, Digest, EntityRef, IndexBuildFault, IndexOrder,
-    Keyword, Peer, PersistentTreeManifest, PostgresIndexer, PostgresStore, PostgresTreeStore,
-    Schema, TxOp, TxValue, Value, ValueType, View, t_to_tx,
+    IndexPrefix, Keyword, Peer, PersistentTreeManifest, PostgresIndexer, PostgresStore,
+    PostgresTreeStore, Schema, TxOp, TxValue, Value, ValueType, View, t_to_tx,
 };
 use postgres::{Client, NoTls};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,7 +10,9 @@ mod common;
 use common::InformationSource;
 
 const ITEM_COUNT: u32 = 1_000;
-const AVET_BACKFILL_DATOMS: u32 = 1_200;
+// More than four fixed 512-datom source chunks forces five initial runs and a
+// genuine second merge level at fan-in four.
+const AVET_BACKFILL_DATOMS: u32 = 2_100;
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
@@ -31,7 +33,9 @@ fn await_background_publication(
     service: &atomic_core::TransactionService,
     basis_t: u64,
 ) -> atomic_core::BackgroundIndexingStats {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // A deliberately multi-level external AVET sort advances through several
+    // separately committed same-basis publications and live-set folds.
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let stats = service.background_indexing_stats();
         if stats.published_basis_t >= basis_t && stats.pending_avet_projections == 0 {
@@ -39,7 +43,7 @@ fn await_background_publication(
         }
         assert!(
             Instant::now() < deadline,
-            "schema-triggered physical publication did not complete"
+            "schema-triggered physical publication did not complete: {stats:?}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -357,18 +361,26 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         .map(|index| TxOp::Add {
             entity: EntityRef::Temp(format!("item-{index}")),
             attribute: ITEM_COUNT,
-            value: TxValue::Scalar(Value::Long(
-                salt + i64::from(AVET_BACKFILL_DATOMS - index),
-            )),
+            value: TxValue::Scalar(Value::Long(salt + i64::from(AVET_BACKFILL_DATOMS - index))),
         })
         .collect::<Vec<_>>();
-    let populated = common::transact(
-        &service,
-        "populate-unindexed-attribute",
-        created.basis_t(),
-        &operations,
-        1_000,
-    );
+    // Keep each writer request comfortably below the generic five-second test
+    // client deadline. The aggregate AEVT range still exceeds four 512-datom
+    // sort runs, which is the behavior this witness needs to exercise.
+    let mut basis_t = created.basis_t();
+    let mut populated = None;
+    for (batch, operations) in operations.chunks(350).enumerate() {
+        let report = common::transact(
+            &service,
+            &format!("populate-unindexed-attribute-{batch}"),
+            basis_t,
+            operations,
+            1_000 + batch as i64,
+        );
+        basis_t = report.basis_t;
+        populated = Some(report);
+    }
+    let populated = populated.expect("AVET backfill fixture has at least one batch");
     service.shutdown();
     let mut indexer = PostgresIndexer::connect(&connection, &database_id)
         .unwrap()
@@ -410,14 +422,8 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
     assert!(enabled_build.reused);
     assert!(enabled.tx_data.len() < 10);
     let enabled_physical_avet = latest_avet_counts(&connection, &database_id);
-    assert!(
-        enabled_physical_avet.0 - baseline_physical_avet.0
-            >= i64::from(AVET_BACKFILL_DATOMS)
-    );
-    assert!(
-        enabled_physical_avet.1 - baseline_physical_avet.1
-            >= i64::from(AVET_BACKFILL_DATOMS)
-    );
+    assert!(enabled_physical_avet.0 - baseline_physical_avet.0 >= i64::from(AVET_BACKFILL_DATOMS));
+    assert!(enabled_physical_avet.1 - baseline_physical_avet.1 >= i64::from(AVET_BACKFILL_DATOMS));
     assert!(
         enabled_physical_avet.0 + enabled_physical_avet.1 > enabled.tx_data.len() as i64,
         "physical AVET roots did not expose the historical attribute-range backfill"
@@ -427,18 +433,49 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         .snapshot();
     assert_eq!(refreshed.basis_t(), enabled.db_after.basis_t());
     assert_eq!(refreshed.schema(), enabled.db_after.schema());
+    let pending_avet = IndexPrefix::Avet {
+        attribute: ITEM_COUNT,
+        value: None,
+        entity: None,
+    };
     assert_eq!(
-        enabled.db_after.datoms(IndexOrder::Avet).unwrap_err().code,
+        enabled
+            .db_after
+            .datoms(IndexOrder::Avet)
+            .unwrap()
+            .into_iter()
+            .filter(|datom| datom.attribute == ITEM_COUNT)
+            .count(),
+        0,
+        "an unqualified raw AVET scan must expose only the physically ready projection"
+    );
+    assert_eq!(
+        enabled
+            .db_after
+            .datoms_with_prefix(&pending_avet)
+            .unwrap_err()
+            .code,
         "peer/avet-not-ready",
-        "the immutable db-after must not retroactively gain a physical AVET"
+        "an attribute-qualified raw AVET seek must not silently return a partial result"
+    );
+    assert_eq!(
+        enabled
+            .db_after
+            .datoms_with_prefix(&IndexPrefix::Aevt {
+                attribute: ITEM_COUNT,
+                entity: None,
+                value: None,
+            })
+            .unwrap()
+            .len(),
+        AVET_BACKFILL_DATOMS as usize,
+        "the immutable logical value must remain complete through AEVT while AVET is pending"
     );
     let enabled_avet = refreshed
-        .datoms(false, IndexOrder::Avet)
+        .datoms_with_prefix(false, &pending_avet)
         .unwrap()
         .datoms
-        .into_iter()
-        .filter(|datom| datom.attribute == ITEM_COUNT)
-        .count();
+        .len();
     assert_eq!(enabled_avet, AVET_BACKFILL_DATOMS as usize);
 
     let mut unindexed = enabled

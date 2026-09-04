@@ -25,12 +25,12 @@ below remain useful records of what was built, but every stage status is
 reopened until the matching `goal-9` repair stage and the final integrated
 acceptance gate demonstrate the original outcome without narrowing it.
 
-Goals 10 through 15 have since closed identity/successor validity,
+Goals 10 through 16 have since closed identity/successor validity,
 schema/ident authority, competing write paths, transaction time,
 acknowledgement, controlled behavior, verified durable bases, lazy peer/index
-internals, exact query-source propagation, and PostgreSQL lifecycle safety with
-real fault/restart evidence. Goal 16's tiered production transactor is now the
-first unfinished corrective child. A renewed public-boundary audit found that
+internals, exact query-source propagation, PostgreSQL lifecycle safety, and the
+tiered production writer with real fault/restart evidence. Goal 17's native
+connection/API boundary is now the first unfinished corrective child. A renewed public-boundary audit found that
 the default peer still materializes the eager oracle, peer reports are
 incomplete, reverse/time-point cursors and reference-shaped tuple transaction
 inputs are missing, and default query controls impose undocumented ceilings.
@@ -96,7 +96,8 @@ final integrated Goal 0 acceptance remains open.
 The pure kernel now validates complete successors, uses collision-free issued
 identity and structural normalization, lowers schema to ordinary history with
 material recovered hooks, and round-trips every accepted transition through
-the same recovery boundary. Goal 16 owns the production assessor; Goal 18 owns
+the same recovery boundary. Goal 16 supplies the completed native production
+assessor; Goal 18 owns
 the still-unrepresentable tuple-ref inputs and chainable native speculative
 values.
 
@@ -130,9 +131,12 @@ shared caches, atomic shared-connection advancement, immutable old snapshots,
 and independent physical root revisions. Focused real-PostgreSQL concurrency,
 corruption, same-basis repair, and actual-restart witnesses pass. The eager
 `Database` remains an oracle/compatibility path; Goal 14 moves query/pull/entity
-consumers to the lazy value and Goal 16 removes it from the production writer.
+consumers to the lazy value and Goal 16 has removed it from the production writer.
 Goal 17 still must make that native value the ordinary public `db`/`sync`
 result, complete transaction reports, and add lazy reverse/time-view traversal.
+Goal 16's 128-commit live witness additionally proves the writer retains no
+eager current/history value and cold-opens the authenticated native root with
+an exact streamed tail; this stage remains only public-API incomplete.
 
 **Outcome:** Independent Rust peers maintain immutable database snapshots and answer indexed reads locally while synchronizing monotonically through PostgreSQL.
 
@@ -179,9 +183,9 @@ requests no longer require basis/time; one database-bound fenced worker owns
 serialization, durable decisions, exact assessed reports, nonblocking lossless
 report delivery, bounded admission, process-fault handling, and standby
 takeover. Real concurrent, unknown/retry, process-death, and failover tests
-pass without an unfenced application publication API. Goal 16 still owns
-unknown-outcome observer reconciliation and tiered writer residency; Goal 17
-owns the single application connection and complete peer report boundary.
+pass without an unfenced application publication API. Goal 16 now establishes
+unknown-outcome observer reconciliation and bounded tiered writer residency;
+Goal 17 owns the single application connection and complete peer report boundary.
 
 **Outcome:** The serialized write service remains correct through concurrency, overload, timeout, process failure, and leader replacement.
 

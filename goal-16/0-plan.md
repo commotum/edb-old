@@ -115,14 +115,14 @@ passed (one subprocess helper ignored) and warning-denying all-target Clippy.
 
 ### 2. Lazy transaction assessment with eager-oracle equivalence
 
-**Status:** In progress. The exact prefix-driven assessor and bounded
-transaction overlay are implemented in `bc4bcd1`/`ed0dc5d`; focused eager
-oracle fixtures cover ordinary updates/upserts, CAS/conflict rejection,
-recursive retract-entity, schema install/alter, all four indexes, ident alias
-repurposing, stored numeric identity, and AVET enable/disable. Persisted
-program execution now accepts the same exact value (`5239920`). Production
-wiring and a generated native-PostgreSQL differential remain open, so this is
-not yet the completion signal.
+**Status:** Complete 2026-09-04. The production writer now runs the exact
+prefix-driven assessor, persisted programs and predicates, complete successor
+overlay, and schema/ident projection against one immutable native db-before.
+Generated and adversarial PostgreSQL differentials cover ordinary
+updates/upserts, CAS/conflict rejection, recursive retract-entity, schema
+install/alter, all four indexes, ident alias repurposing, stored numeric
+identity, AVET enable/disable, and restart. No production assessment path
+materializes or retains the eager oracle.
 
 **Outcome:** Transaction expansion and complete successor validation operate
 over exact lazy ranges plus a bounded overlay representing db-after.
@@ -138,14 +138,23 @@ datoms, tempids, errors, schema/idents, reports, and state digest as
 `Database::with` across eager and native bases, including schema changes and
 persisted behavior, without whole-index reads.
 
+**Established evidence:** `tests/transactor_differential.rs` passes both the
+curated restart sequence and the fixed-seed generated sequence against real
+PostgreSQL. The unit differential/scaling corpus exercises early cursor
+termination, grouped identity and uniqueness work, localized schema and tuple
+validation, predicate roles, persisted reads, and exact rejection codes.
+`tests/transactor_residency.rs` proves a localized transaction after 128
+commits reads fewer than 128 source datoms and tree/commitment nodes rather
+than scanning the database.
+
 ### 3. Durable incremental semantic commitment and publication
 
-**Status:** In progress. Migration 15 and a PostgreSQL-resident version-2
-semantic treap are under focused verification. Integration must remove the
-old asserted datom named by each retraction (the commitment key includes the
-original transaction coordinate), publish its successor coordinate in the
-same SQL transaction as the log/head CAS, and prove rollback, corruption, and
-bounded path work before this stage can close.
+**Status:** Complete 2026-09-04. The PostgreSQL-resident version-2 semantic
+treap verifies immutable content-addressed paths, removes the original asserted
+coordinate named by a retraction, writes only successor paths, and publishes
+the new coordinate in the same fenced SQL transaction as log content,
+idempotency outcome, and head CAS. Missing/corrupt proofs fail closed, failed
+publication remains invisible, and exact retry reuses the durable decision.
 
 **Outcome:** The writer derives the authoritative successor commitment and
 durable transaction from changed facts/ranges without retaining the eager
@@ -162,15 +171,22 @@ changed semantic paths, reproduce the eager commitment exactly, remain
 invisible on failed publication, survive restart, and reject coherent-forgery
 or missing-node cases.
 
+**Established evidence:** persistent-commitment unit/PostgreSQL witnesses
+match the eager version-2 root, exercise child-first writes and bounded path
+visits, and reject corruption. The private publication/process-death tests
+prove rollback and ambiguity behavior. Deep integrity additionally rejects a
+structurally valid, internally coherent native tree whose facts were not
+derived from the named authoritative log value.
+
 ### 4. Bounded tiered writer state and handoff
 
-**Status:** Pending. A concrete restart defect is now reproduced against the
-unchanged Goal 15 baseline: `PostgresIndexer` publishes native
-`atomic_tree_manifests`, while `recover_transactor_state` considers only
-legacy `atomic_index_manifests`. Consequently failover after native
-consolidation falls back to genesis replay (`RecoveryStats.base_t == 0`). The
-repair must activate the same authenticated native root-plus-tail value used
-by peers and must not route through the eager compatibility cell.
+**Status:** Complete 2026-09-04. `WriterState` owns a `TieredSnapshot`, exact
+commitment coordinate, and physical publication revision. Activation selects
+an authenticated native root, streams/authenticates the log tail once, and
+installs bounded recent/schema/ident/cache state. Consolidation can replace a
+same-basis physical root and release the covered recent prefix. The old
+native-tree-blind genesis replay reproduced by this stage no longer occurs on
+an established writer path.
 
 **Outcome:** One writer database value owns resident schema/idents, a bounded
 recent tier, indexing handoff state, lazy durable roots/cache, log endpoint,
@@ -187,9 +203,24 @@ and cache limits leaves measured writer residency bounded; local transactions
 read bounded ranges; consolidation advances the durable basis and releases old
 recent state; cold restart reconstructs root plus tail rather than genesis.
 
+**Established evidence:** The 128-commit residency witness reaches an empty
+recent tier after consolidation, retains zero eager database/current/history
+values, stays within the configured 64-entry/1-MiB cache and fixed eight-root
+decoded bound, then cold-opens exactly at the durable basis with zero tail
+transactions. With the cache disabled, the next localized write records
+bounded nonzero SQL path reads and commitment path-copy work. A separate
+32-transaction over-cap recovery witness performs one streamed tail range read
+and rejects before installing an oversized live writer state; immutable older
+receipts remain readable after limits are lowered.
+
 ### 5. Fencing, failover, differential, and fault closure
 
-**Status:** Pending.
+**Status:** Complete 2026-09-04. The tiered value remains behind the same
+database-bound epoch fence, durable request identity, unknown-outcome
+reconciliation, response/report ordering, and index-first backpressure as Goal
+12. Root repair, contention, standby takeover, corrupt tail/root rejection,
+same-basis physical replacement, server restart, and old immutable values all
+preserve a single exact history.
 
 **Outcome:** The tiered transactor preserves every Goal 12 durability and
 service guarantee under contention, retry, process failure, root replacement,
@@ -205,9 +236,26 @@ failover witnesses show no forks, gaps, duplicate commits, eager writer value,
 or residency growth with total history, while reports and peer values agree
 exactly with the eager oracle.
 
+**Established evidence:** Fresh PostgreSQL runs pass the service failover,
+recovery, backlog-liveness, differential, and residency suites. The complete
+peer suite passes 18/18 and the complete GC suite passes 15/15 on pristine
+databases. An explicitly restart-enabled peer witness and a separate
+restart-enabled transactor recovery witness both stop and restart PostgreSQL
+15.11, reopen the exact committed basis, and observe zero compatibility
+materializations before the explicit oracle comparison. Migration 22 closes a
+real retirement/build-intent race found by the serial GC suite and heals an
+already stranded version-21 catalog.
+
 ### 6. Goal closure and parent fold-back
 
-**Status:** Pending.
+**Status:** Complete 2026-09-04. The implemented/source/deviation map is in
+`ARCHITECTURE.md`; Goal 9's ledger records the corrected comparator, physical
+AVET readiness, admissible `noHistory` projection, writer tiering, and the
+remaining public/API work owned by Goals 17--20. Ordinary established-history
+service activation, transaction, retry, failover, report, and background-index
+paths contain no eager `Database`, `recover_to`, compatibility materializer, or
+whole-index fallback. The fixed basis-0/1 creation bootstrap and explicitly
+broad administrative recovery/inspection paths remain documented exceptions.
 
 **Outcome:** Goal 16's bounded-writer claim is reproducible and narrowly
 documented, with no eager fallback disguised behind compatibility APIs.
@@ -219,6 +267,14 @@ Goal 9/Goal 0 status updates.
 **Completion signal:** Every earlier stage has executable evidence, an
 independent search/audit finds no production path retaining or rebuilding an
 eager full database, and the parent loop can proceed to Goal 17.
+
+**Established evidence:** Format, all-target check, warning-denying Clippy,
+the 219-test library binary (218 passed, one explicit subprocess helper
+ignored), and focused non-skipping PostgreSQL suites pass. `git diff --check`
+is clean. The independent architecture audit accepted the tiered-writer shape
+and kept deep portable-backup equivalence, public peer materialization, native
+reverse/time views, tuple-ref input, and query-surface truth explicitly open in
+Goals 17--20 rather than hiding them in this completion claim.
 
 ## Exit condition
 

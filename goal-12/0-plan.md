@@ -42,8 +42,11 @@ without a competing write API.
 ## Known context
 
 - Goals 10 and 11 establish collision-free identity, exact valid successors,
-  schema/idents as ordinary information, canonical format v3, and exact
-  PostgreSQL recovery.
+  schema/idents as ordinary information, canonical **ATMC v3** durable values,
+  and exact PostgreSQL recovery. ATMC v3 datom-bearing payloads keep their
+  frozen stored-value-before-T ordering; Goal 16's source-corrected
+  logical-E/A/V then descending-T/op order
+  is a separate **ATIX tree v4** format, not a reinterpretation of v3 bytes.
 - `PostgresStore::transact` and `Peer::transact` currently expose mandatory
   expected basis and caller-supplied transaction time. `PostgresStore` is also
   a public unfenced writer beside `TransactionService`.
@@ -226,10 +229,15 @@ frontier, while the separately bound transaction hash authenticates complete
 chronology, so a self-consistent forged manifest cannot substitute different
 current facts. Startup selects the newest verified base, rejects corrupt or
 unpublished candidates, and replays the contiguous authoritative tail.
-`:db/noHistory` remains an indexing-job storage policy: a true-to-false
-transition before any job retains the unconsolidated interval, while turning
-it off cannot resurrect facts already omitted by a published base. Real
-PostgreSQL tests prove coherent-forgery rejection,
+`:db/noHistory` remains an indexing-job storage policy, not a semantic erasure
+contract. Ordinary root-plus-tail recovery preserves its selected base and
+does not resurrect omissions while incrementally indexing it. An explicit
+administrative rebuild from the authoritative log may produce a different
+admissible retained-history subset: the docs say the flag controls future
+indexing jobs, not current values or precise removal
+(`03_schema/00_schema_data_reference.md:201-213`,
+`03_schema/01_changing_schema.md:62-73`). Real PostgreSQL tests prove
+coherent-forgery rejection,
 corrupt-base fallback, exact base-plus-tail equality, standby recovery, and two
 actual server restarts. The strengthened server-restart witness compares every
 current/history index of the recovered db-before with the exact pre-restart

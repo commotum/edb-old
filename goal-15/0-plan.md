@@ -230,17 +230,20 @@ GC fixture database intentionally contains a retained corrupt root from prior
 fault tests, and now fails closed as designed; Stage 4 owns isolated complete
 root-retirement/GC evidence rather than weakening this boundary.
 
-### 3. Differential root-last backup and exact restore
+### 3. Differential root-last backup and exact-point restore
 
-**Status:** Complete on PostgreSQL 15.11. Backup unit tests pass 10/10 and the
-normal-parallel live backup/restore suite passes 9/9, including deterministic
-zero-age GC handoff, injected publication/restore faults, ambiguous retry,
+**Status:** Operationally complete on PostgreSQL 15.11. Backup unit tests pass
+10/10 and the normal-parallel live backup/restore suite passes 9/9, including
+deterministic zero-age GC handoff, injected publication/restore faults,
+ambiguous retry,
 same-basis generations, corrupt/missing content, temporal programs, and
-derived-tree fallback.
+derived-tree fallback. This does not claim the still-unproved semantic
+cross-check of every restored/request-archive tree described below.
 
-**Outcome:** Backups capture a stable database identity and point, reuse
-already-copied immutable content, publish roots last and crash-safely, and
-restore the exact requested database value.
+**Outcome:** Backups capture a stable database identity and authoritative point,
+reuse already-copied immutable content, publish roots last and crash-safely,
+and restore either the copied physical projection or a source-admissible
+rebuild at that exact log/current coordinate.
 
 **Focus:** Coherent capture; database identity/lineage; differential object
 reuse; temporary-file/rename/directory durability; shallow/deep verification;
@@ -249,8 +252,10 @@ point selection; restore postconditions and retry/fault behavior.
 **Completion signal:** Live incremental backups reuse content; interruption at
 each publication boundary leaves no visible partial backup; retry converges;
 deep verification detects missing/corrupt reachability; restored log, schema,
-idents, functions, current/history indexes, basis, and commitments are exactly
-equal to the source point.
+idents, functions, basis, and commitments are exactly equal to the source
+point. Copied roots remain byte-identical; rebuilt `noHistory` projections need
+only be admissible because retained-history removal and timing are explicitly
+nonsemantic (`03_schema/00_schema_data_reference.md:201-213`).
 
 **Evidence and decisions:** `PortableBackup` captures one Repeatable Read point
 while holding an exact active-generation pin. Its canonical constant-size v4
@@ -261,8 +266,11 @@ repository serializes writers, reuses immutable objects, publishes a
 no-clobber/fsynced root last, and removes only exact regular temporary files
 without following symlinks. Exact `(generation, basis)` APIs distinguish the
 pre/post-excision points that a basis-only API cannot. Shallow verification
-proves complete reachability; deep verification also hashes, decodes, and
-semantically reconstructs the selected value.
+proves complete reachability; the implemented deep mode also hashes and
+decodes its portable authoritative rows and tree topology. It does **not yet**
+establish semantic equality of every current/history sibling or every
+request-base archive against the log. Goal 20 owns that non-skipping proof,
+including the admissible (not uniquely exact) `noHistory` history rule.
 
 Restore deep-verifies before mutation, stages an invisible database-local
 generation, owns ATLC content and program references atomically with its
@@ -282,7 +290,12 @@ publication in `fsbackup.clj:105-179`. ATBK/ATLC, fsync details, and
 database-local generation rebinding are deliberate native formats. Deliberate
 limits are a local filesystem repository, no same-catalog lineage clone,
 writer-quiesced restore, memory-proportional deep verification, and optional
-replaceable tree accelerators rather than tree authority.
+replaceable tree accelerators rather than tree authority. Backups,
+request-base archives, retired roots, live snapshot pins, WAL/replicas, and
+exports can remain retention anchors after the active projection changes;
+Goal 20 must make those anchors visible in the final operator disclosure and
+verify request-archive semantics rather than treating reachability as semantic
+proof.
 
 ### 4. Safe retirement of superseded physical roots
 
@@ -412,15 +425,16 @@ The final explicitly enabled library run passed 135/135 nonignored tests with
 one intentional subprocess helper ignored. Focused fresh-catalog evidence is
 backup/restore 9/9, GC 13/13, inspection scope 2/2, integrity 2/2, excision
 1/1, and runtime ACL/search-path 1/1, in addition to migration, TLS, restart,
-and fault witnesses recorded above. Goal 17 still owns one reproducible
-cross-goal deployment gate and Goal 16 still owns removal of the eager writer;
-neither is misreported as Goal 15 lifecycle work.
+and fault witnesses recorded above. Goal 16 owns removal of the eager writer,
+while Goal 20 owns the reproducible cross-goal deployment gate plus the
+semantic backup/request-archive and retention-anchor checks; none is
+misreported as Goal 15 lifecycle work.
 
 ## Exit condition
 
 Goal 15 completes only when PostgreSQL can be provisioned and operated with
 separate authority, secure/version-checked runtime access, coherent and scoped
-diagnostics, crash-safe differential backup/exact restore, safe bounded
+diagnostics, crash-safe differential backup/exact-point restore, safe bounded
 physical reclamation, and source-faithful auditable excision, all demonstrated
 by non-skipping real-PostgreSQL evidence.
 

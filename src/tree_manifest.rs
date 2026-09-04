@@ -374,7 +374,8 @@ impl PersistentTreeManifest {
         }
         let mut previous = None;
         for work in &self.pending_avet {
-            if work.attribute == 0 || previous.is_some_and(|attribute| attribute >= work.attribute) {
+            if work.attribute == 0 || previous.is_some_and(|attribute| attribute >= work.attribute)
+            {
                 return Err(SemanticError::incorrect(
                     "tree/manifest-pending-avet-order",
                     "pending AVET work must name positive, strictly ordered attributes",
@@ -707,7 +708,7 @@ mod tests {
     fn manifest_size_is_independent_of_database_values_and_metadata() {
         // ATIM v2 copied first and last values into all eight descriptors;
         // the first Goal 13 draft also copied every schema and ident datom.
-        // V4 contains fixed-size commitments only, so neither legal values nor
+        // V5 contains fixed-size commitments only, so neither legal values nor
         // cumulative metadata history can turn its defensive envelope limit
         // into a database semantic limit.
         // A moderately large value is sufficient to prove that only its

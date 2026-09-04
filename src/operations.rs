@@ -11,7 +11,6 @@ use crate::postgres::{
     AuthenticatedLogTransaction, insert_program_generation_refs, read_authenticated_log_range,
     recover_generation_to, verify_schema_compatibility,
 };
-use crate::state_commitment::checkpoint_information;
 use crate::{
     Datom, Digest, IndexOrder, PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore,
     SemanticError, decode_genesis, decode_index_manifest, decode_index_segment, decode_transaction,
@@ -2382,7 +2381,6 @@ fn inspect_native_trees<C: postgres::GenericClient>(
     let mut all_nodes = BTreeMap::<Digest, Vec<u8>>::new();
     let mut newest_manifest_hash = None;
     let mut newest_authenticated_nodes = None;
-    let mut newest_active_projection = None;
 
     for publication in publications {
         let revision = positive_or_zero(publication.get(0), "tree publication revision")?;
@@ -2555,48 +2553,17 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             metrics.index_basis_t = metrics.index_basis_t.max(basis);
             metrics.pending_avet_projections = manifest.pending_avet.len() as u64;
             if deep {
-                let mut indexes = Vec::with_capacity(8);
-                let mut projection_error = None;
-                for history in [false, true] {
-                    for order in [
-                        IndexOrder::Eavt,
-                        IndexOrder::Aevt,
-                        IndexOrder::Avet,
-                        IndexOrder::Vaet,
-                    ] {
-                        match native_tree_datoms(&manifest_nodes, order, history) {
-                            Ok(datoms) => indexes.push(NativeIndexProjection {
-                                order,
-                                history,
-                                datoms,
-                            }),
-                            Err(error) => {
-                                projection_error = Some(error);
-                                break;
-                            }
-                        }
-                    }
-                }
-                if let Some(error) = projection_error {
-                    problem(
-                        problems,
-                        error.code,
-                        format!("tree revision {revision}: {}", error.message),
-                    );
-                } else {
-                    newest_active_projection = Some(NativeSemanticProjection {
-                        revision,
-                        generation: stored_generation,
-                        basis_t: basis,
-                        tx_hash: stored_tx,
-                        indexes,
-                        pending_avet: manifest
-                            .pending_avet
-                            .iter()
-                            .map(|work| work.attribute)
-                            .collect(),
-                    });
-                }
+                inspect_native_semantic_projection(
+                    client,
+                    database_id,
+                    revision,
+                    stored_generation,
+                    basis,
+                    stored_tx,
+                    &manifest.pending_avet,
+                    &manifest_nodes,
+                    problems,
+                );
             }
         }
         all_nodes.extend(manifest_nodes);
@@ -2613,135 +2580,202 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             "current native live membership is absent, incomplete, or disagrees with authenticated reachability",
         );
     }
-    // Content hashes authenticate one conditionally published physical value,
-    // but cannot prove that a differently shaped semantic commitment contains
-    // the same set. This explicit administrative boundary already pays for a
-    // complete tree walk, so replay the named immutable log value and compare
-    // current EAVT plus every sibling projection here. History EAVT is the
-    // physical authority for historical siblings: `:db/noHistory` is applied
-    // by indexing jobs, and a later false setting resumes retention without
-    // resurrecting facts already omitted from a published base. Replaying only
-    // the endpoint database cannot reproduce that schedule-dependent physical
-    // history. Ordinary peer/writer adoption deliberately trusts the restricted
-    // index publisher, as Datomic trusts its adopted storage root; copying
-    // `state_hash` into another manifest is not a proof.
-    if deep && let Some(projection) = newest_active_projection {
-        match recover_generation_to(
-            client,
-            database_id,
-            projection.generation,
-            projection.basis_t,
-            projection.tx_hash,
-        ) {
-            Ok(recovered) => match checkpoint_information(&recovered.database) {
-                Ok((expected_current, _replayed_history)) => {
-                    let physical_history_eavt = projection
-                        .indexes
-                        .iter()
-                        .find(|index| index.history && index.order == IndexOrder::Eavt)
-                        .map(|index| index.datoms.clone());
-                    for actual in projection.indexes {
-                        // Authenticated history EAVT cannot be compared to an
-                        // endpoint-only replay for the noHistory reason above.
-                        // Its derived siblings can and must agree with it.
-                        if actual.history && actual.order == IndexOrder::Eavt {
-                            continue;
-                        }
-                        let Some(source) = (if actual.history {
-                            physical_history_eavt.as_deref()
-                        } else {
-                            Some(expected_current.as_slice())
-                        }) else {
-                            problem(
-                                problems,
-                                "integrity/tree-derived-index-mismatch",
-                                format!(
-                                    "tree revision {} lacks the physical EAVT history authority",
-                                    projection.revision
-                                ),
-                            );
-                            continue;
-                        };
-                        match derive_index_projection(&recovered.database, source, actual.order) {
-                            Ok(mut expected) => {
-                                let mut observed = actual.datoms;
-                                if actual.order == IndexOrder::Avet {
-                                    observed.retain(|datom| {
-                                        !projection.pending_avet.contains(&datom.attribute)
-                                    });
-                                    expected.retain(|datom| {
-                                        !projection.pending_avet.contains(&datom.attribute)
-                                    });
-                                }
-                                if !same_stored_datoms(&observed, &expected) {
-                                    problem(
-                                        problems,
-                                        "integrity/tree-derived-index-mismatch",
-                                        format!(
-                                            "tree revision {} {:?} history={} disagrees with authoritative generation {} at basis {} ({} vs {} datoms; {} pending AVET attribute(s) excluded)",
-                                            projection.revision,
-                                            actual.order,
-                                            actual.history,
-                                            projection.generation,
-                                            projection.basis_t,
-                                            observed.len(),
-                                            expected.len(),
-                                            projection.pending_avet.len(),
-                                        ),
-                                    );
-                                }
-                            }
-                            Err(error) => problem(
-                                problems,
-                                error.code,
-                                format!(
-                                    "tree revision {} {:?} history={} projection: {}",
-                                    projection.revision,
-                                    actual.order,
-                                    actual.history,
-                                    error.message
-                                ),
-                            ),
-                        }
-                    }
-                }
-                Err(error) => problem(
-                    problems,
-                    error.code,
-                    format!(
-                        "tree revision {} semantic projection: {}",
-                        projection.revision, error.message
-                    ),
-                ),
-            },
-            Err(error) => problem(
-                problems,
-                error.code,
-                format!(
-                    "tree revision {} authoritative replay: {}",
-                    projection.revision, error.message
-                ),
-            ),
-        }
-    }
     metrics.tree_nodes = all_nodes.len() as u64;
     metrics.tree_node_bytes = all_nodes.values().map(|bytes| bytes.len() as u64).sum();
     Ok(())
 }
 
-struct NativeSemanticProjection {
+#[allow(clippy::too_many_arguments)]
+fn inspect_native_semantic_projection<C: postgres::GenericClient>(
+    client: &mut C,
+    database_id: &str,
     revision: u64,
     generation: u64,
     basis_t: u64,
     tx_hash: Digest,
-    indexes: Vec<NativeIndexProjection>,
-    pending_avet: BTreeSet<u32>,
+    pending_avet: &[crate::AvetProjectionWork],
+    nodes: &BTreeMap<Digest, Vec<u8>>,
+    problems: &mut Vec<IntegrityProblem>,
+) {
+    // A peer may fall back to any retained, structurally valid publication in
+    // the active generation when a newer one is corrupt. Therefore deep
+    // inspection must compare every such candidate with its named log value,
+    // not just the newest root. Project one order at a time to avoid retaining
+    // eight duplicate datom vectors during this already-broad operation.
+    let recovered = match recover_generation_to(client, database_id, generation, basis_t, tx_hash) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            problem(
+                problems,
+                error.code,
+                format!(
+                    "tree revision {revision} authoritative replay: {}",
+                    error.message
+                ),
+            );
+            return;
+        }
+    };
+    if let Err(error) =
+        crate::peer::validate_avet_work_directions(pending_avet, recovered.database.schema())
+    {
+        problem(
+            problems,
+            error.code,
+            format!(
+                "tree revision {revision} pending AVET work: {}",
+                error.message
+            ),
+        );
+    }
+
+    let expected_current = recovered
+        .database
+        .datoms(crate::View::Current, IndexOrder::Eavt);
+    let replayed_history = recovered
+        .database
+        .datoms(crate::View::History, IndexOrder::Eavt);
+    let physical_history = match native_tree_datoms(nodes, IndexOrder::Eavt, true) {
+        Ok(datoms) => datoms,
+        Err(error) => {
+            problem(
+                problems,
+                error.code,
+                format!("tree revision {revision} history EAVT: {}", error.message),
+            );
+            return;
+        }
+    };
+    if let Err(error) = validate_physical_history_projection(
+        &replayed_history,
+        &physical_history,
+        recovered.database.basis_t(),
+    ) {
+        problem(
+            problems,
+            error.code,
+            format!("tree revision {revision} history EAVT: {}", error.message),
+        );
+    }
+
+    for work in pending_avet.iter().filter(|work| !work.clearing) {
+        let source = native_tree_datoms(nodes, IndexOrder::Aevt, work.history);
+        let target = native_tree_datoms(nodes, IndexOrder::Avet, work.history);
+        match (source, target) {
+            (Ok(source), Ok(target)) => {
+                let mut source = source
+                    .into_iter()
+                    .filter(|datom| datom.attribute == work.attribute)
+                    .collect::<Vec<_>>();
+                source.sort_by(|left, right| left.cmp_in(right, IndexOrder::Avet));
+                let target = target
+                    .into_iter()
+                    .filter(|datom| datom.attribute == work.attribute)
+                    .collect::<Vec<_>>();
+                let offset = usize::try_from(work.offset).ok();
+                let exact_prefix = offset
+                    .and_then(|offset| source.get(..offset))
+                    .is_some_and(|prefix| same_stored_datoms(&target, prefix));
+                if !exact_prefix {
+                    problem(
+                        problems,
+                        "integrity/tree-pending-avet-prefix-mismatch",
+                        format!(
+                            "tree revision {revision} pending AVET attribute {} is not the exact AEVT prefix at offset {}",
+                            work.attribute, work.offset
+                        ),
+                    );
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => problem(
+                problems,
+                error.code,
+                format!(
+                    "tree revision {revision} pending AVET attribute {}: {}",
+                    work.attribute, error.message
+                ),
+            ),
+        }
+    }
+
+    for history in [false, true] {
+        for order in [
+            IndexOrder::Eavt,
+            IndexOrder::Aevt,
+            IndexOrder::Avet,
+            IndexOrder::Vaet,
+        ] {
+            if history && order == IndexOrder::Eavt {
+                continue;
+            }
+            let source = if history {
+                physical_history.as_slice()
+            } else {
+                expected_current.as_slice()
+            };
+            let mut expected = match derive_index_projection(&recovered.database, source, order) {
+                Ok(expected) => expected,
+                Err(error) => {
+                    problem(
+                        problems,
+                        error.code,
+                        format!(
+                            "tree revision {revision} {order:?} history={history} projection: {}",
+                            error.message
+                        ),
+                    );
+                    continue;
+                }
+            };
+            let mut observed = match native_tree_datoms(nodes, order, history) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    problem(
+                        problems,
+                        error.code,
+                        format!(
+                            "tree revision {revision} {order:?} history={history}: {}",
+                            error.message
+                        ),
+                    );
+                    continue;
+                }
+            };
+            if order == IndexOrder::Avet {
+                observed.retain(|datom| {
+                    !avet_projection_is_pending(pending_avet, datom.attribute, history)
+                });
+                expected.retain(|datom| {
+                    !avet_projection_is_pending(pending_avet, datom.attribute, history)
+                });
+            }
+            if !same_stored_datoms(&observed, &expected) {
+                problem(
+                    problems,
+                    "integrity/tree-derived-index-mismatch",
+                    format!(
+                        "tree revision {revision} {order:?} history={history} disagrees with authoritative generation {generation} at basis {basis_t} ({} vs {} datoms; {} pending AVET attribute(s) excluded)",
+                        observed.len(),
+                        expected.len(),
+                        pending_avet
+                            .iter()
+                            .filter(|work| !work.history || history)
+                            .count(),
+                    ),
+                );
+            }
+        }
+    }
 }
 
-struct NativeIndexProjection {
-    order: IndexOrder,
+fn avet_projection_is_pending(
+    pending_avet: &[crate::AvetProjectionWork],
+    attribute: u32,
     history: bool,
-    datoms: Vec<Datom>,
+) -> bool {
+    pending_avet
+        .iter()
+        .any(|work| work.attribute == attribute && (!work.history || history))
 }
 
 fn native_tree_datoms(
@@ -2778,9 +2812,10 @@ fn derive_index_projection(
         .filter_map(|datom| {
             let included = match order {
                 IndexOrder::Eavt | IndexOrder::Aevt => Ok(true),
-                IndexOrder::Avet => database.schema().attribute(datom.attribute).map(|attribute| {
-                    attribute.indexed || attribute.unique.is_some()
-                }),
+                IndexOrder::Avet => database
+                    .schema()
+                    .attribute(datom.attribute)
+                    .map(|attribute| attribute.indexed || attribute.unique.is_some()),
                 IndexOrder::Vaet => database
                     .schema()
                     .attribute(datom.attribute)
@@ -2799,13 +2834,234 @@ fn derive_index_projection(
 
 fn same_stored_datoms(left: &[Datom], right: &[Datom]) -> bool {
     left.len() == right.len()
-        && left.iter().zip(right).all(|(left, right)| {
-            left.entity == right.entity
-                && left.attribute == right.attribute
-                && left.value.stored_eq(&right.value)
-                && left.tx == right.tx
-                && left.added == right.added
-        })
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| same_stored_datom(left, right))
+}
+
+fn same_stored_datom(left: &Datom, right: &Datom) -> bool {
+    left.entity == right.entity
+        && left.attribute == right.attribute
+        && left.value.stored_eq(&right.value)
+        && left.tx == right.tx
+        && left.added == right.added
+}
+
+/// Prove that physical EAVT history is an authenticated-log projection, not
+/// merely a self-consistent alternative tree. Within one logical E/A/V group,
+/// each contiguous omitted run must reduce to empty by repeatedly deleting a
+/// retraction followed by an assertion. This admits the nested omissions that
+/// successive consolidation jobs can expose (`R R A A`), while rejecting a
+/// fabricated fact, a one-sided omission, or an omission across a retained
+/// fact. Every matched retraction must also have a noHistory=true opportunity
+/// at a transaction boundary on or after it. This proves permission, not the
+/// exact scheduler instant: Datomic documents no precise time at which an
+/// eligible pair is physically forgotten.
+fn validate_physical_history_projection(
+    replayed: &[Datom],
+    physical: &[Datom],
+    through_t: u64,
+) -> Result<(), SemanticError> {
+    let opportunities = no_history_opportunities(replayed, through_t)?;
+    let mut replay_offset = 0_usize;
+    let mut physical_offset = 0_usize;
+
+    while replay_offset < replayed.len() {
+        let group_start = replay_offset;
+        replay_offset += 1;
+        while replay_offset < replayed.len()
+            && same_logical_eav(&replayed[group_start], &replayed[replay_offset])
+        {
+            replay_offset += 1;
+        }
+        let group = &replayed[group_start..replay_offset];
+
+        if let Some(actual) = physical.get(physical_offset)
+            && logical_eav_cmp(actual, &group[0]).is_lt()
+        {
+            return Err(integrity_fault(
+                "physical EAVT history contains a fact absent from authoritative replay",
+            ));
+        }
+
+        let mut expected_in_group = 0_usize;
+        let mut missing_start = 0_usize;
+        while let Some(actual) = physical.get(physical_offset) {
+            match logical_eav_cmp(actual, &group[0]) {
+                std::cmp::Ordering::Less => {
+                    return Err(integrity_fault(
+                        "physical EAVT history contains a fact absent from authoritative replay",
+                    ));
+                }
+                std::cmp::Ordering::Greater => break,
+                std::cmp::Ordering::Equal => {}
+            }
+
+            while expected_in_group < group.len()
+                && !same_stored_datom(&group[expected_in_group], actual)
+            {
+                expected_in_group += 1;
+            }
+            if expected_in_group == group.len() {
+                return Err(integrity_fault(
+                    "physical EAVT history contains a fact absent from authoritative replay",
+                ));
+            }
+            validate_history_omission(
+                &group[missing_start..expected_in_group],
+                &opportunities,
+                through_t,
+            )?;
+            expected_in_group += 1;
+            missing_start = expected_in_group;
+            physical_offset += 1;
+        }
+        validate_history_omission(&group[missing_start..], &opportunities, through_t)?;
+    }
+
+    if physical_offset != physical.len() {
+        return Err(integrity_fault(
+            "physical EAVT history has trailing facts absent from authoritative replay",
+        ));
+    }
+    Ok(())
+}
+
+fn same_logical_eav(left: &Datom, right: &Datom) -> bool {
+    logical_eav_cmp(left, right).is_eq()
+}
+
+fn logical_eav_cmp(left: &Datom, right: &Datom) -> std::cmp::Ordering {
+    left.entity
+        .cmp(&right.entity)
+        .then(left.attribute.cmp(&right.attribute))
+        .then_with(|| left.value.index_cmp(&right.value))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NoHistoryTransactionFold {
+    asserted: Option<bool>,
+    saw_retraction: bool,
+}
+
+/// Precompute inclusive transaction intervals in which each attribute had
+/// `:db/noHistory` enabled. Schema facts in one transaction are folded as one
+/// declarative change: an asserted boolean is the resulting value, while a
+/// retraction-only transaction falls back to false. In particular, retracting
+/// `false` never means `true`.
+fn no_history_opportunities(
+    replayed: &[Datom],
+    through_t: u64,
+) -> Result<BTreeMap<u32, Vec<(u64, u64)>>, SemanticError> {
+    let mut transaction_folds = BTreeMap::<(u32, u64), NoHistoryTransactionFold>::new();
+    for datom in replayed {
+        if datom.attribute != crate::DB_NO_HISTORY as u32 {
+            continue;
+        }
+        let attribute = crate::schema_eid_to_attr_id(datom.entity).map_err(|_| {
+            integrity_fault("authoritative noHistory schema fact has an invalid schema entity")
+        })?;
+        let value = match datom.value {
+            crate::Value::Bool(value) => value,
+            _ => {
+                return Err(integrity_fault(
+                    "authoritative noHistory schema history has a non-boolean value",
+                ));
+            }
+        };
+        let at = crate::tx_to_t(datom.tx)?;
+        let fold = transaction_folds.entry((attribute, at)).or_default();
+        if datom.added {
+            if fold.asserted.is_some_and(|asserted| asserted != value) {
+                return Err(integrity_fault(
+                    "authoritative noHistory schema transaction asserts conflicting values",
+                ));
+            }
+            fold.asserted = Some(value);
+        } else {
+            fold.saw_retraction = true;
+        }
+    }
+
+    let mut changes = BTreeMap::<u32, Vec<(u64, bool)>>::new();
+    for ((attribute, at), fold) in transaction_folds {
+        let enabled = fold.asserted.unwrap_or(false);
+        debug_assert!(fold.asserted.is_some() || fold.saw_retraction);
+        changes.entry(attribute).or_default().push((at, enabled));
+    }
+
+    let mut intervals = BTreeMap::<u32, Vec<(u64, u64)>>::new();
+    for (attribute, changes) in changes {
+        let mut enabled_from = None::<u64>;
+        let mut attribute_intervals = Vec::new();
+        for (at, enabled) in changes {
+            if at > through_t {
+                break;
+            }
+            if !enabled {
+                if let Some(start) = enabled_from.take() {
+                    attribute_intervals.push((start, at.saturating_sub(1)));
+                }
+            } else if enabled_from.is_none() {
+                enabled_from = Some(at);
+            }
+        }
+        if let Some(start) = enabled_from {
+            attribute_intervals.push((start, through_t));
+        }
+        if !attribute_intervals.is_empty() {
+            intervals.insert(attribute, attribute_intervals);
+        }
+    }
+    Ok(intervals)
+}
+
+fn validate_history_omission(
+    omitted: &[Datom],
+    opportunities: &BTreeMap<u32, Vec<(u64, u64)>>,
+    through_t: u64,
+) -> Result<(), SemanticError> {
+    let mut retractions = Vec::<&Datom>::new();
+    for datom in omitted {
+        if !datom.added {
+            retractions.push(datom);
+            continue;
+        }
+        let Some(retraction) = retractions.pop() else {
+            return Err(integrity_fault(
+                "physical EAVT history omission is not reducible noHistory history",
+            ));
+        };
+        let retraction_t = crate::tx_to_t(retraction.tx)?;
+        let permitted = opportunities
+            .get(&retraction.attribute)
+            .is_some_and(|intervals| {
+                let candidate = intervals.partition_point(|(_, end)| *end < retraction_t);
+                intervals
+                    .get(candidate)
+                    .is_some_and(|(start, _)| *start <= through_t)
+            });
+        if !permitted {
+            return Err(integrity_fault(
+                "physical EAVT history omission had no noHistory=true opportunity",
+            ));
+        }
+    }
+    if !retractions.is_empty() {
+        return Err(integrity_fault(
+            "physical EAVT history omits an unpaired authoritative retraction",
+        ));
+    }
+    Ok(())
+}
+
+fn integrity_fault(message: impl Into<String>) -> SemanticError {
+    SemanticError::new(
+        crate::ErrorCategory::Fault,
+        "integrity/tree-history-projection-mismatch",
+        message,
+    )
 }
 
 fn native_live_membership_matches<C: postgres::GenericClient>(
@@ -3113,12 +3369,20 @@ fn global_derived_reachability<C: postgres::GenericClient>(
         let stored_frontier = positive_or_zero(stored_frontier, "stored tree frontier")?;
         let stored_hash = digest(stored_hash, "stored tree manifest hash")?;
         let authoritative_state = digest(authoritative_state, "authoritative tree state hash")?;
+        let Ok(encoded_version) = PersistentTreeManifest::encoded_version(&payload) else {
+            // Global reachability feeds only conservative orphan accounting
+            // and reclamation eligibility. Corruption in an unrelated
+            // database makes that global answer unknowable; it must not abort
+            // this database's scoped inspection. The target database's own
+            // publication walk above still reports the precise corruption.
+            return Ok(None);
+        };
         if stored_database != published_database
             || stored_revision != published_revision
             || stored_basis != published_basis
             || stored_tx != published_tx
             || stored_state != authoritative_state
-            || stored_version != PersistentTreeManifest::encoded_version(&payload)?
+            || stored_version != encoded_version
             || stored_hash != published_hash
             || sha256(&payload) != published_hash
         {
@@ -3277,6 +3541,8 @@ fn garbage_candidates<C: postgres::GenericClient>(
                        AND head.log_generation = p.log_generation \
                      WHERE base.base_manifest_hash = r.manifest_hash \
                 ) \
+                AND NOT EXISTS (SELECT 1 FROM atomic_tree_build_intents intent \
+                                 WHERE intent.manifest_hash = r.manifest_hash) \
               ORDER BY r.retired_at, r.database_id, r.publication_revision \
               LIMIT 64 OFFSET $2",
                 &[&older_than_millis, &retirement_offset],
@@ -3297,6 +3563,15 @@ fn garbage_candidates<C: postgres::GenericClient>(
             // shared lock. Probe past pinned roots from other databases while
             // preserving the oldest-publication prefix within each database.
             if !try_lock_tree_manifest_for_gc(client, publication.manifest_hash)? {
+                continue;
+            }
+            // The upload ledger is a liveness owner independent of the
+            // publication. Acquire its fence even though the selection query
+            // found no row: a builder takes the shared form before inserting
+            // an intent, so this closes the read/lock race. It also prevents
+            // bounded candidate caps from retiring a publication whose
+            // matching intent was not admitted to this GC batch.
+            if !try_lock_tree_build_for_gc(client, publication.manifest_hash)? {
                 continue;
             }
             let retired_node_count = positive_or_zero(row.get(4), "retired tree node count")?;
@@ -4749,4 +5024,144 @@ fn hex(bytes: &Digest) -> String {
 
 fn operation_error(code: &'static str, error: postgres::Error) -> SemanticError {
     crate::postgres::postgres_error(code, error)
+}
+
+#[cfg(test)]
+mod history_projection_tests {
+    use super::*;
+    use crate::Value;
+    use bigdecimal::BigDecimal;
+    use std::str::FromStr;
+
+    const USER_ATTRIBUTE: u32 = 100;
+
+    fn datom(entity: u64, attribute: u32, value: Value, t: u64, added: bool) -> Datom {
+        Datom {
+            entity,
+            attribute,
+            value,
+            tx: crate::t_to_tx(t).unwrap(),
+            added,
+        }
+    }
+
+    fn no_history(value: bool, t: u64, added: bool) -> Datom {
+        datom(
+            u64::from(USER_ATTRIBUTE),
+            crate::DB_NO_HISTORY as u32,
+            Value::Bool(value),
+            t,
+            added,
+        )
+    }
+
+    fn canonical(mut datoms: Vec<Datom>) -> Vec<Datom> {
+        datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+        datoms
+    }
+
+    #[test]
+    fn nested_no_history_omission_is_reducible_across_repeated_jobs() {
+        let decimal = |spelling: &str| Value::BigDec(BigDecimal::from_str(spelling).unwrap());
+        let replayed = canonical(vec![
+            // Newest-to-oldest within one logical E/A/V group is R R A A.
+            // Removing the inner pair exposes the outer pair to a later job.
+            datom(1_000, USER_ATTRIBUTE, decimal("1.0"), 4, false),
+            datom(1_000, USER_ATTRIBUTE, decimal("1.00"), 3, false),
+            datom(1_000, USER_ATTRIBUTE, decimal("1.00"), 2, true),
+            datom(1_000, USER_ATTRIBUTE, decimal("1.0"), 1, true),
+            no_history(true, 3, true),
+        ]);
+        let physical = replayed
+            .iter()
+            .filter(|datom| datom.attribute == crate::DB_NO_HISTORY as u32)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        validate_physical_history_projection(&replayed, &physical, 5).unwrap();
+    }
+
+    #[test]
+    fn physical_history_must_be_an_exact_replay_subsequence() {
+        let replayed = canonical(vec![
+            datom(1_000, USER_ATTRIBUTE, Value::Long(7), 2, false),
+            datom(1_000, USER_ATTRIBUTE, Value::Long(7), 1, true),
+            no_history(true, 2, true),
+        ]);
+        validate_physical_history_projection(&replayed, &replayed, 3).unwrap();
+
+        let mut fabricated = replayed.clone();
+        fabricated.push(datom(2_000, USER_ATTRIBUTE, Value::Long(9), 1, true));
+        fabricated.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+        assert_eq!(
+            validate_physical_history_projection(&replayed, &fabricated, 3)
+                .unwrap_err()
+                .code,
+            "integrity/tree-history-projection-mismatch"
+        );
+
+        let one_sided = replayed
+            .iter()
+            .filter(|datom| !(datom.attribute == USER_ATTRIBUTE && datom.added))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_physical_history_projection(&replayed, &one_sided, 3)
+                .unwrap_err()
+                .code,
+            "integrity/tree-history-projection-mismatch"
+        );
+    }
+
+    #[test]
+    fn retraction_only_no_history_change_never_enables_omission() {
+        let replayed = canonical(vec![
+            datom(1_000, USER_ATTRIBUTE, Value::Long(7), 2, false),
+            datom(1_000, USER_ATTRIBUTE, Value::Long(7), 1, true),
+            // A standalone retraction of false yields the cardinality-one
+            // default, false. It is not an assertion of true.
+            no_history(false, 2, false),
+        ]);
+        let physical = replayed
+            .iter()
+            .filter(|datom| datom.attribute == crate::DB_NO_HISTORY as u32)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_physical_history_projection(&replayed, &physical, 3)
+                .unwrap_err()
+                .code,
+            "integrity/tree-history-projection-mismatch"
+        );
+    }
+
+    #[test]
+    fn current_avet_becomes_checkable_before_history_projection_finishes() {
+        let current_phase = crate::AvetProjectionWork::new(USER_ATTRIBUTE, true);
+        assert!(avet_projection_is_pending(
+            &[current_phase],
+            USER_ATTRIBUTE,
+            false
+        ));
+        assert!(avet_projection_is_pending(
+            &[current_phase],
+            USER_ATTRIBUTE,
+            true
+        ));
+
+        let history_phase = crate::AvetProjectionWork {
+            history: true,
+            ..current_phase
+        };
+        assert!(!avet_projection_is_pending(
+            &[history_phase],
+            USER_ATTRIBUTE,
+            false
+        ));
+        assert!(avet_projection_is_pending(
+            &[history_phase],
+            USER_ATTRIBUTE,
+            true
+        ));
+    }
 }

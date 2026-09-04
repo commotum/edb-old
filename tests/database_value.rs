@@ -503,9 +503,7 @@ fn representation_distinct_decimals_do_not_cross_cancel_in_windows() {
         ),
         vec![1]
     );
-    assert!(
-        tuple_decimal_scales(current.values(entity, AMOUNT_TUPLE).unwrap()).is_empty()
-    );
+    assert!(tuple_decimal_scales(current.values(entity, AMOUNT_TUPLE).unwrap()).is_empty());
     assert_eq!(
         tuple_decimal_scales(
             current

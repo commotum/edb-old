@@ -792,6 +792,25 @@ impl PortableBackup {
         let mut current_state_hash = checkpoint_state_hash(&database)?;
         let log = load_backup_log(directory, &manifest)?;
         let mut objects_read = 1 + log.objects_read;
+        let mut pending_avet_by_basis = BTreeMap::<u64, Vec<Vec<crate::AvetProjectionWork>>>::new();
+        if deep {
+            let mut trees = request_base_trees(&log);
+            if let Some(tree) = &manifest.tree {
+                trees.push(tree.clone());
+            }
+            for tree in trees {
+                let decoded = decode_bound_tree_manifest(directory, &manifest, &log, &tree, None)?;
+                pending_avet_by_basis
+                    .entry(decoded.basis_t)
+                    .or_default()
+                    .push(decoded.pending_avet);
+            }
+        }
+        if let Some(work_sets) = pending_avet_by_basis.remove(&0) {
+            for pending in work_sets {
+                crate::peer::validate_avet_work_directions(&pending, database.schema())?;
+            }
+        }
         let tree_basis = if deep {
             manifest
                 .tree
@@ -831,6 +850,11 @@ impl PortableBackup {
                 database.apply_committed(&entry.transaction)?
             };
             current_state_hash = checkpoint_state_hash(&database)?;
+            if let Some(work_sets) = pending_avet_by_basis.remove(&entry.transaction.basis_t) {
+                for pending in work_sets {
+                    crate::peer::validate_avet_work_directions(&pending, database.schema())?;
+                }
+            }
             if tree_basis == Some(entry.transaction.basis_t) {
                 tree_state_hash = Some(current_state_hash);
             }
@@ -854,6 +878,12 @@ impl PortableBackup {
             return Err(fault(
                 "backup/basis-mismatch",
                 "backup reconstruction disagrees with its endpoint root",
+            ));
+        }
+        if !pending_avet_by_basis.is_empty() {
+            return Err(fault(
+                "backup/tree-basis",
+                "backed-up tree metadata is outside the reconstructed log range",
             ));
         }
         let completed_excisions = load_completed_excisions(directory, &manifest)?;
@@ -3073,6 +3103,26 @@ fn restore_tree_backup(
         trees: source.trees,
         pending_avet: source.pending_avet,
     };
+    let recovered_target = recover_generation_to(
+        &mut client,
+        target_database_id,
+        target_generation,
+        target.basis_t,
+        target.tx_hash,
+    )?;
+    if recovered_target.final_hash != target.tx_hash
+        || recovered_target.database.eidx_frontier() != target.eidx_frontier
+        || checkpoint_state_hash(&recovered_target.database)? != target.state_hash
+    {
+        return Err(fault(
+            "backup/restore-tree-reconstruction",
+            "target generation log does not reproduce the restored tree coordinate",
+        ));
+    }
+    crate::peer::validate_avet_work_directions(
+        &target.pending_avet,
+        recovered_target.database.schema(),
+    )?;
     let payload = target.encode()?;
     let manifest_hash = sha256(&payload);
     let roots: Vec<TreeRootBinding> = target
@@ -3147,13 +3197,20 @@ fn restore_tree_backup(
             && existing.excision_generation == target.excision_generation
             && existing.eidx_frontier == target.eidx_frontier
         {
-            // The published accelerator is already bound to the exact
-            // restored immutable database value. Its roots and pending AVET
-            // coordinate may have advanced at this same basis after an
-            // ambiguous first restore. Reinstalling the portable physical
-            // snapshot would regress readiness; any authenticated same-value
-            // publication is sufficient and remains disposable acceleration.
-            return Ok(());
+            validate_stored_tree_graph(&mut store, &existing)?;
+            crate::peer::validate_avet_work_directions(
+                &existing.pending_avet,
+                recovered_target.database.schema(),
+            )?;
+            // Readiness is monotone at one immutable database coordinate.
+            // A complete existing accelerator always dominates. Two partial
+            // accelerators have no useful total order (clearing has no
+            // ordinal), so preserve the valid existing value and resume it.
+            // Only a complete backup source may replace a partial existing
+            // value at the next physical revision.
+            if existing.pending_avet.is_empty() || !target.pending_avet.is_empty() {
+                return Ok(());
+            }
         }
     }
     let mut reachable = BTreeSet::new();
@@ -3204,6 +3261,32 @@ fn restore_tree_backup(
         (Ok(()), Err(error)) => Err(error),
         (Ok(()), Ok(())) => Ok(()),
     }
+}
+
+fn validate_stored_tree_graph(
+    store: &mut PostgresTreeStore,
+    manifest: &PersistentTreeManifest,
+) -> Result<(), SemanticError> {
+    for tree in &manifest.trees {
+        let root_hash = tree.descriptor.root_hash;
+        let expected_root_bytes = tree.root_bytes;
+        persistent_tree::validate_tree_streaming(&tree.descriptor, |hash| {
+            let payload = store.load_node(*hash)?.ok_or_else(|| {
+                fault(
+                    "backup/restore-tree-existing-node",
+                    format!("existing tree node {} is missing", hex(hash)),
+                )
+            })?;
+            if *hash == root_hash && payload.len() as u64 != expected_root_bytes {
+                return Err(fault(
+                    "backup/restore-tree-existing-root-bytes",
+                    "existing tree root size disagrees with its manifest",
+                ));
+            }
+            Ok(payload)
+        })?;
+    }
+    Ok(())
 }
 
 fn restore_request_base_trees(
@@ -4701,8 +4784,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
             || digest(row.get(4), "restored archive transaction")? != target.tx_hash
             || digest(row.get(5), "restored archive state")? != target.state_hash
             || unsigned(row.get(6), "restored archive frontier")? != target.eidx_frontier
-            || row.get::<_, i16>(7)
-                != PersistentTreeManifest::encoded_version(&expected_payload)?
+            || row.get::<_, i16>(7) != PersistentTreeManifest::encoded_version(&expected_payload)?
             || row.get::<_, Vec<u8>>(8) != expected_payload
             || client
                 .query_one(

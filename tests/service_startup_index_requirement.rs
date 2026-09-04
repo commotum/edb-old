@@ -239,6 +239,10 @@ fn over_hard_startup_tail_requires_explicit_admin_consolidation() {
         "writer startup must stop at the first prefix above the hard limit, including its configured one-transaction overshoot allowance"
     );
     assert_eq!(error.details["cause_tail_transactions"], "32");
+    assert_eq!(
+        error.details["cause_preflight_range_reads"], "1",
+        "writer activation must stream the long tail once, not issue one SQL range read per scanned transaction and then reread it"
+    );
     assert!(
         error.details["cause_preflight_accounted_bytes"]
             .parse::<u64>()

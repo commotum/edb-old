@@ -5,8 +5,8 @@ use crate::postgres::{
     read_authenticated_log_range, shared_program_cache_stats,
 };
 use crate::{
-    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, PostgresConnectionConfig,
-    PersistentTreeManifest, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
+    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, PersistentTreeManifest,
+    PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
     SemanticError, TxForm, TxOp,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1840,14 +1840,12 @@ fn run_index_worker(
                         || shared.accepting.load(Ordering::Acquire),
                     ) {
                         Ok(Some(receipt)) => {
-                            shared
-                                .indexing
-                                .complete_job(
-                                    receipt.publication_revision,
-                                    receipt.basis_t,
-                                    receipt.pending_avet_projections,
-                                    receipt.index_work_remaining,
-                                );
+                            shared.indexing.complete_job(
+                                receipt.publication_revision,
+                                receipt.basis_t,
+                                receipt.pending_avet_projections,
+                                receipt.index_work_remaining,
+                            );
                             break;
                         }
                         Ok(None) => {
@@ -2526,7 +2524,10 @@ mod tests {
         indexing.complete_job(2, 2, 1, true);
         let partial = indexing.stats();
         assert_eq!(partial.published_basis_t, 2);
-        assert_eq!(partial.total_bytes, 0, "durable EAVT progress releases recent novelty");
+        assert_eq!(
+            partial.total_bytes, 0,
+            "durable EAVT progress releases recent novelty"
+        );
         assert_eq!(partial.pending_avet_projections, 1);
         assert!(indexing.should_continue());
 

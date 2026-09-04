@@ -72,8 +72,16 @@ shape rather than introducing a general recursive B-tree abstraction:
 3. `LeafSegment`: loaded by hash; stores datoms in E/A/V/T/op columns and
    reconstructs owned `Datom` values at the API boundary.
 
-Nodes use an independent, explicitly versioned canonical envelope and a
-domain-separated SHA-256 content identity. Child references carry a sparse
+Nodes use the independent **ATIX tree v4** canonical envelope and a
+domain-separated SHA-256 content identity. Its datom order follows recovered
+`common/compare`: logical E/A/V first, then descending T and assertion before
+retraction. A native physical stored-value tie-break comes only after those
+source coordinates
+(`1.0.7705/peer/src-clj/datomic/common.clj:123-172`,
+`db.clj:885-930`, `index.clj:2522-2547`). This is intentionally distinct from
+the frozen stored-first ordering of authoritative ATMC v3 transactions,
+genesis, and legacy flat segments; old ATMC bytes remain replayable and are
+never silently reinterpreted as ATIX nodes. Child references carry a sparse
 separator key, immutable child hash, and logical count; the next separator (or
 tree end) is the implicit exclusive upper route, as in the recovered shape.
 Separators must satisfy `previous child last < separator <= child first` and
@@ -116,15 +124,22 @@ counts, and its endpoint hash. Schema and ident projections are derived views,
 not additional durable/recent authorities. Reads capture one snapshot and
 lazily merge the relevant durable and recent cursors. Current reads collapse
 add/retract pairs; the authoritative log and recent tier retain every event.
-`:db/noHistory` is not a retroactive semantic
-erase: an indexing job may omit eligible retract/assert pairs only when the
-attribute is `noHistory` in that job's endpoint database. Recovered
-`filter-nohist-pairs` runs over each affected segment after merging old and new
-data; it has no base-transaction cutoff. A pair may therefore straddle the
-durable/recent boundary, and an older adjacent pair may be forgotten when its
-segment is rebuilt, but no global retroactive sweep occurs merely because the
-flag changed. Already-published omissions cannot be resurrected, so physical
-retained history depends on indexing schedule. Tail data is never evicted.
+`:db/noHistory` is not a retroactive semantic erase. An ordinary incremental
+job may omit eligible retract/assert pairs only when the attribute is
+`noHistory` in that job's endpoint database. Recovered `filter-nohist-pairs`
+runs over each affected old-plus-new segment and has no base-transaction cutoff
+(`1.0.7705/peer/src-clj/datomic/index.clj:2522-2547,2646-2664,3893-3914`). A
+pair may therefore straddle the durable/recent boundary, and an older adjacent
+pair may be forgotten when its segment is rebuilt, but changing the flag alone
+does not launch a global sweep. Atomic's authoritative log retains the
+information; an explicit administrative rebuild, excision rewrite, or backup
+reconstruction may therefore produce a different admissible retained-history
+subset. That is source-faithful: the docs define `noHistory` as storage
+conservation, deny precise removal guarantees, and scope changes to future
+indexing jobs
+(`datomic_pro_docs/03_schema/00_schema_data_reference.md:201-213`,
+`03_schema/01_changing_schema.md:62-73`). Tail data is never evicted by ordinary
+consolidation.
 Crossing the soft bound requests consolidation; crossing the hard
 bound prevents further peer advancement (and ultimately applies write
 backpressure) until a covering root can be adopted.

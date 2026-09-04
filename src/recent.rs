@@ -1996,9 +1996,7 @@ mod tests {
         )
         .unwrap();
 
-        let pairs = tier
-            .no_history_pairs(IndexOrder::Eavt, &durable)
-            .unwrap();
+        let pairs = tier.no_history_pairs(IndexOrder::Eavt, &durable).unwrap();
         assert_eq!(pairs.len(), 2);
         assert!(pairs.iter().any(|pair| {
             same_stored_datom(&pair.retraction, &new_retraction)
@@ -2009,13 +2007,9 @@ mod tests {
                 && same_stored_datom(&pair.assertion, &old_assertion)
         }));
         assert!(
-            tier.consolidate_history_range(
-                IndexOrder::Eavt,
-                &durable,
-                &RecentRange::unbounded(),
-            )
-            .unwrap()
-            .is_empty()
+            tier.consolidate_history_range(IndexOrder::Eavt, &durable, &RecentRange::unbounded(),)
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -2079,9 +2073,21 @@ mod tests {
         assert!(tier.touches_current(&datoms[1]));
         let current = tier.current_datoms(IndexOrder::Eavt);
         assert_eq!(current.len(), 2);
-        assert!(current.iter().any(|datom| datom.value.stored_eq(&datoms[1].value)));
-        assert!(current.iter().any(|datom| datom.value.stored_eq(&datoms[3].value)));
-        assert!(!current.iter().any(|datom| datom.value.stored_eq(&datoms[0].value)));
+        assert!(
+            current
+                .iter()
+                .any(|datom| datom.value.stored_eq(&datoms[1].value))
+        );
+        assert!(
+            current
+                .iter()
+                .any(|datom| datom.value.stored_eq(&datoms[3].value))
+        );
+        assert!(
+            !current
+                .iter()
+                .any(|datom| datom.value.stored_eq(&datoms[0].value))
+        );
     }
 
     #[test]

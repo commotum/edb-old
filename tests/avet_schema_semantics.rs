@@ -285,9 +285,7 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let stats = service.background_indexing_stats();
-        if stats.published_basis_t >= index_enabled.basis_t
-            && stats.pending_avet_projections == 0
-        {
+        if stats.published_basis_t >= index_enabled.basis_t && stats.pending_avet_projections == 0 {
             break;
         }
         assert!(

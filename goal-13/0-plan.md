@@ -90,7 +90,7 @@ witnesses fail because of observed eager work rather than missing scaffolding.
 ### 2. Canonical shallow immutable tree values
 
 **Status:** Complete 2026-09-03. `src/persistent_tree.rs` implements the fixed
-root/directory/columnar-leaf shape, canonical format-v3 encoding, compact
+root/directory/columnar-leaf shape, then-canonical format-v3 encoding, compact
 minimum-difference separators, hash-addressed children, exact count/range
 validation, and logarithmic seek/range traversal in all four orders. Component
 presence is encoded separately from numeric payloads: omitted sparse
@@ -98,6 +98,8 @@ components compare as lower sentinels, while native entity `0` remains a real
 value. Eighteen adversarial unit witnesses cover corruption, missing children,
 overlap, count and capacity faults, large values, tuples, one-datom leaves,
 copy-on-write splits, and the VAET entity-zero/T-order regression.
+Goal 16 subsequently superseded the tree codec with format v4 because its
+source-corrected logical-V/T/op/stored comparator cannot share the v3 tag.
 
 **Outcome:** Versioned content-addressed leaf, directory, and root values
 represent each index order with explicit key bounds, fanout, level, counts,

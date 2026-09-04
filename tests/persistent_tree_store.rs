@@ -1,11 +1,11 @@
 mod common;
 
+use atomic_core::persistent_tree::TreeDescriptor;
 use atomic_core::{
     Attribute, Cardinality, IndexOrder, Keyword, ManifestTree, PersistentTreeManifest,
     PostgresStore, PostgresTreeStore, Schema, TreeManifestRecord, TreePublishOutcome,
     TreeRootBinding, ValueType, sha256,
 };
-use atomic_core::persistent_tree::TreeDescriptor;
 use postgres::{Client, NoTls};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,6 +26,38 @@ fn unique(prefix: &str) -> String {
 
 fn digest(bytes: Vec<u8>) -> [u8; 32] {
     bytes.try_into().unwrap()
+}
+
+fn stage_unknown_delta(
+    client: &mut Client,
+    manifest_hash: [u8; 32],
+    predecessor_manifest_hash: Option<[u8; 32]>,
+) {
+    let mut empty_set = b"atomic/tree-build-node-set/v1\0".to_vec();
+    empty_set.extend_from_slice(&0_u64.to_be_bytes());
+    let empty_set_hash = sha256(&empty_set);
+    let mut delta_set = b"atomic/tree-publication-delta/v1\0".to_vec();
+    delta_set.extend_from_slice(&0_i16.to_be_bytes());
+    delta_set.extend_from_slice(&0_u64.to_be_bytes());
+    let delta_set_hash = sha256(&delta_set);
+    let predecessor = predecessor_manifest_hash
+        .as_ref()
+        .map(|hash| hash.as_slice());
+    client
+        .execute(
+            "INSERT INTO atomic_tree_delta_headers \
+               (manifest_hash, predecessor_manifest_hash, delta_mode, \
+                expected_node_count, staged_node_count, delta_set_hash, \
+                added_node_count, added_set_hash, delta_state) \
+             VALUES ($1, $2, 0, 0, 0, $3, 0, $4, 1)",
+            &[
+                &&manifest_hash[..],
+                &predecessor,
+                &&delta_set_hash[..],
+                &&empty_set_hash[..],
+            ],
+        )
+        .unwrap();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -106,12 +138,11 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
     let mut metadata = Client::connect(&connection, NoTls).unwrap();
     let row = metadata
         .query_one(
-            "SELECT h.basis_t, h.tx_hash, t.state_hash, g.excision_generation \
+            "SELECT h.basis_t, h.tx_hash, t.state_hash, h.log_generation \
                FROM atomic_heads h \
-               JOIN atomic_transactions t \
-                 ON t.database_id = h.database_id AND t.basis_t = h.basis_t \
-                AND t.tx_hash = h.tx_hash \
-               JOIN atomic_database_generations g ON g.database_id = h.database_id \
+               JOIN atomic_generation_transactions t \
+                 ON t.database_id = h.database_id AND t.generation = h.log_generation \
+                AND t.basis_t = h.basis_t AND t.tx_hash = h.tx_hash \
               WHERE h.database_id = $1",
             &[&database_id],
         )
@@ -258,9 +289,9 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
     let mut old = Client::connect(&connection, NoTls).unwrap();
     let old_row = old
         .query_one(
-            "SELECT tx_hash, state_hash FROM atomic_transactions \
-             WHERE database_id = $1 AND basis_t = 1",
-            &[&database_id],
+            "SELECT tx_hash, state_hash FROM atomic_generation_transactions \
+             WHERE database_id = $1 AND generation = $2 AND basis_t = 1",
+            &[&database_id, &i64::try_from(generation).unwrap()],
         )
         .unwrap();
     let old_tx_hash = digest(old_row.get(0));
@@ -362,12 +393,12 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
     let mut client = Client::connect(&connection, NoTls).unwrap();
     let row = client
         .query_one(
-            "SELECT h.basis_t, h.tx_hash, t.state_hash, g.excision_generation \
+            "SELECT h.basis_t, h.tx_hash, t.state_hash, h.log_generation, d.lineage_id \
                FROM atomic_heads h \
-               JOIN atomic_transactions t \
-                 ON t.database_id = h.database_id AND t.basis_t = h.basis_t \
-                AND t.tx_hash = h.tx_hash \
-               JOIN atomic_database_generations g ON g.database_id = h.database_id \
+               JOIN atomic_databases d USING (database_id) \
+               JOIN atomic_generation_transactions t \
+                 ON t.database_id = h.database_id AND t.generation = h.log_generation \
+                AND t.basis_t = h.basis_t AND t.tx_hash = h.tx_hash \
               WHERE h.database_id = $1",
             &[&database_id],
         )
@@ -376,6 +407,7 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
     let tx_hash: Vec<u8> = row.get(1);
     let state_hash: Vec<u8> = row.get(2);
     let generation: i64 = row.get(3);
+    let lineage_id: String = row.get(4);
     let frontier = i64::try_from(database.eidx_frontier()).unwrap();
     let node_payload = format!("ATIX-adversarial-root-{database_id}").into_bytes();
     let node_hash = sha256(&node_payload);
@@ -391,8 +423,9 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
     let legacy = client.execute(
         "INSERT INTO atomic_tree_manifests \
            (database_id, publication_revision, basis_t, tx_hash, state_hash, \
-            excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
-         VALUES ($1, 1, $2, $3, $4, $5, $6, 3, $7, $8)",
+            excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
+            log_generation, lineage_id) \
+         VALUES ($1, 1, $2, $3, $4, $5, $6, 3, $7, $8, $5, $9)",
         &[
             &database_id,
             &basis,
@@ -402,6 +435,7 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
             &frontier,
             &&legacy_hash[..],
             &&legacy_payload[..],
+            &lineage_id,
         ],
     );
     assert!(legacy.is_err());
@@ -411,8 +445,9 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
     let stale = client.execute(
         "INSERT INTO atomic_tree_manifests \
            (database_id, publication_revision, basis_t, tx_hash, state_hash, \
-            excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
-         VALUES ($1, 1, $2, $3, $4, $5, $6, 4, $7, $8)",
+            excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
+            log_generation, lineage_id) \
+         VALUES ($1, 1, $2, $3, $4, $5, $6, 5, $7, $8, $5, $9)",
         &[
             &database_id,
             &basis,
@@ -422,6 +457,7 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
             &frontier,
             &&stale_hash[..],
             &&stale_payload[..],
+            &lineage_id,
         ],
     );
     assert!(stale.is_err());
@@ -432,8 +468,9 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
         .execute(
             "INSERT INTO atomic_tree_manifests \
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
-                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
-             VALUES ($1, 1, $2, $3, $4, $5, $6, 4, $7, $8)",
+                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
+                log_generation, lineage_id) \
+             VALUES ($1, 1, $2, $3, $4, $5, $6, 5, $7, $8, $5, $9)",
             &[
                 &database_id,
                 &basis,
@@ -443,6 +480,7 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
                 &frontier,
                 &&manifest_hash[..],
                 &&payload[..],
+                &lineage_id,
             ],
         )
         .unwrap();
@@ -464,11 +502,18 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
             )
             .unwrap();
     }
+    stage_unknown_delta(&mut client, manifest_hash, None);
     let publication = client.execute(
         "INSERT INTO atomic_tree_publications \
-           (database_id, publication_revision, basis_t, tx_hash, manifest_hash) \
-         VALUES ($1, 1, $2, $3, $4)",
-        &[&database_id, &basis, &tx_hash, &&manifest_hash[..]],
+           (database_id, publication_revision, basis_t, tx_hash, manifest_hash, log_generation) \
+         VALUES ($1, 1, $2, $3, $4, $5)",
+        &[
+            &database_id,
+            &basis,
+            &tx_hash,
+            &&manifest_hash[..],
+            &generation,
+        ],
     );
     assert!(publication.is_err());
     let visible: i64 = client
@@ -495,9 +540,15 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
     client
         .execute(
             "INSERT INTO atomic_tree_publications \
-               (database_id, publication_revision, basis_t, tx_hash, manifest_hash) \
-             VALUES ($1, 1, $2, $3, $4)",
-            &[&database_id, &basis, &tx_hash, &&manifest_hash[..]],
+               (database_id, publication_revision, basis_t, tx_hash, manifest_hash, log_generation) \
+             VALUES ($1, 1, $2, $3, $4, $5)",
+            &[
+                &database_id,
+                &basis,
+                &tx_hash,
+                &&manifest_hash[..],
+                &generation,
+            ],
         )
         .unwrap();
 
@@ -509,8 +560,9 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
         .execute(
             "INSERT INTO atomic_tree_manifests \
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
-                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
-             VALUES ($1, 3, $2, $3, $4, $5, $6, 4, $7, $8)",
+                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
+                log_generation, lineage_id) \
+             VALUES ($1, 3, $2, $3, $4, $5, $6, 5, $7, $8, $5, $9)",
             &[
                 &database_id,
                 &basis,
@@ -520,6 +572,7 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
                 &frontier,
                 &&gap_hash[..],
                 &&gap_payload[..],
+                &lineage_id,
             ],
         )
         .unwrap();
@@ -532,11 +585,12 @@ fn sql_rejects_stale_generation_and_incomplete_root_publication() {
             &[&&gap_hash[..], &&manifest_hash[..]],
         )
         .unwrap();
+    stage_unknown_delta(&mut client, gap_hash, Some(manifest_hash));
     let gap_publication = client.execute(
         "INSERT INTO atomic_tree_publications \
-           (database_id, publication_revision, basis_t, tx_hash, manifest_hash) \
-         VALUES ($1, 3, $2, $3, $4)",
-        &[&database_id, &basis, &tx_hash, &&gap_hash[..]],
+           (database_id, publication_revision, basis_t, tx_hash, manifest_hash, log_generation) \
+         VALUES ($1, 3, $2, $3, $4, $5)",
+        &[&database_id, &basis, &tx_hash, &&gap_hash[..], &generation],
     );
     assert!(gap_publication.is_err());
     let visible: i64 = client
