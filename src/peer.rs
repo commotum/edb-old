@@ -548,44 +548,18 @@ impl PostgresIndexer {
             .transaction()
             .map_err(|error| postgres_error("index/build-begin", error))?;
         let (basis_t, tx_hash) = read_head(&mut transaction, &self.database_id)?;
-        if basis_t == 0 {
+        let excision_generation = read_excision_generation(&mut transaction, &self.database_id)?;
+        if basis_t == 0 && excision_generation == 0 {
             return Err(SemanticError::incorrect(
                 "index/empty-database",
-                "there is no positive basis to consolidate",
+                "legacy generation zero has no authenticated genesis tree coordinate",
             ));
         }
-        let basis_sql = sql_basis(basis_t)?;
-        let excision_generation = read_excision_generation(&mut transaction, &self.database_id)?;
-        let generation_sql = sql_basis(excision_generation)?;
-        let stored_state = digest(
-            (if excision_generation == 0 {
-                transaction.query_opt(
-                    "SELECT state_hash FROM atomic_transactions \
-                     WHERE database_id = $1 AND basis_t = $2 AND tx_hash = $3",
-                    &[&self.database_id, &basis_sql, &&tx_hash[..]],
-                )
-            } else {
-                transaction.query_opt(
-                    "SELECT state_hash FROM atomic_generation_transactions \
-                     WHERE database_id = $1 AND generation = $2 \
-                       AND basis_t = $3 AND tx_hash = $4",
-                    &[
-                        &self.database_id,
-                        &generation_sql,
-                        &basis_sql,
-                        &&tx_hash[..],
-                    ],
-                )
-            })
-            .map_err(|error| postgres_error("tree/authoritative-state", error))?
-            .ok_or_else(|| {
-                fault(
-                    "tree/missing-authoritative-state",
-                    "head has no transaction state commitment in its active generation",
-                )
-            })?
-            .get(0),
-            "authoritative tree state commitment",
+        let stored_state = read_state_hash(
+            &mut transaction,
+            &self.database_id,
+            excision_generation,
+            basis_t,
         )?;
         let selection = load_latest_native_manifest(
             &mut transaction,
@@ -959,6 +933,7 @@ fn load_latest_native_manifest<C: GenericClient>(
                 AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
                 AND m.manifest_hash = p.manifest_hash \
                 AND m.log_generation = p.log_generation \
+               JOIN atomic_databases catalog ON catalog.database_id = m.database_id \
                LEFT JOIN atomic_transactions legacy \
                  ON m.log_generation = 0 AND legacy.database_id = m.database_id \
                 AND legacy.basis_t = m.basis_t AND legacy.tx_hash = m.tx_hash \
@@ -967,10 +942,21 @@ fn load_latest_native_manifest<C: GenericClient>(
                  ON m.log_generation > 0 AND native.database_id = m.database_id \
                 AND native.generation = m.log_generation AND native.basis_t = m.basis_t \
                 AND native.tx_hash = m.tx_hash AND native.state_hash = m.state_hash \
+               LEFT JOIN atomic_semantic_commitment_roots bootstrap \
+                 ON m.log_generation > 0 AND m.basis_t = 0 \
+                AND bootstrap.database_id = m.database_id \
+                AND bootstrap.generation = m.log_generation AND bootstrap.basis_t = 0 \
+                AND bootstrap.tx_hash = m.tx_hash AND bootstrap.state_hash = m.state_hash \
+                AND bootstrap.eidx_frontier = m.eidx_frontier \
+                AND bootstrap.commitment_version = 2 \
+                AND bootstrap.tx_hash = catalog.genesis_hash \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.log_generation = $3 \
                 AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
-                  OR (m.log_generation > 0 AND native.tx_hash IS NOT NULL)) \
+                  OR (m.log_generation > 0 AND m.basis_t = 0 \
+                      AND bootstrap.tx_hash IS NOT NULL) \
+                  OR (m.log_generation > 0 AND m.basis_t > 0 \
+                      AND native.tx_hash IS NOT NULL)) \
               ORDER BY p.publication_revision DESC",
             &[
                 &database_id,
@@ -2106,8 +2092,12 @@ fn merge_tree_stats(total: &mut TreeBuildStats, one: TreeBuildStats) {
     total.root_bytes = total.root_bytes.saturating_add(one.root_bytes);
 }
 
+/// One immutable native database endpoint. This is the Rust counterpart of
+/// the recovered `Db` fields that describe index roots, memidx, resident
+/// elements/idents, and basis coordinates. It deliberately contains neither
+/// live-peer coordination nor an eager compatibility value.
 #[derive(Clone)]
-struct PeerState {
+struct TieredState {
     basis_t: u64,
     eidx_frontier: u64,
     current_hash: Digest,
@@ -2125,18 +2115,36 @@ struct PeerState {
     /// durable base. Their pre-base values cannot appear until a covering
     /// indexing publication backfills them.
     avet_unready: Arc<BTreeSet<u32>>,
-    /// Full kernel value retained solely for API compatibility. A valid
-    /// native open leaves this cell empty until `db`/`try_db` or a
-    /// compatibility-returning sync method explicitly asks for it. Native
-    /// query, pull, and entity navigation do not use this cell.
-    compatibility: Arc<OnceLock<Arc<Database>>>,
     generation: u64,
+}
+
+/// Live peers pair an immutable native endpoint with an optional eager oracle.
+/// Keeping the cell outside `TieredState` prevents native values and eventual
+/// writer state from accidentally retaining a complete `Database`.
+#[derive(Clone)]
+struct PeerState {
+    tiered: Arc<TieredState>,
+    compatibility: Arc<PeerCompatibility>,
+}
+
+impl Deref for PeerState {
+    type Target = TieredState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tiered
+    }
 }
 
 struct PeerIo {
     client: Client,
-    cache: SegmentCache,
     tree_cache: TreeNodeCache,
+}
+
+/// Everything needed only by the explicit eager-oracle path. Native database
+/// values never retain this attachment or its legacy segment cache.
+struct PeerCompatibility {
+    value: OnceLock<Arc<Database>>,
+    segments: Arc<Mutex<SegmentCache>>,
 }
 
 struct RootPinState {
@@ -2465,23 +2473,30 @@ impl Drop for RootPin {
     }
 }
 
-struct PeerCore {
+/// Process-local resources required by immutable native reads. Caches and the
+/// PostgreSQL I/O lane are shared across values, while root/generation pins in
+/// each `TieredState` keep their exact durable content alive.
+struct TieredReadCore {
     database_id: String,
     connection: PostgresConnectionConfig,
-    recent_limits: RecentLimits,
     load_counters: PeerLoadCounters,
     root_pins: Arc<RootPinManager>,
+    io: Mutex<PeerIo>,
+}
+
+struct PeerCore {
+    read: Arc<TieredReadCore>,
+    recent_limits: RecentLimits,
     /// Serializes catch-up/adoption work. Readers never take this lock.
     update: Mutex<()>,
     /// Explicit transaction-report observation channel. `None` is the normal
     /// state; reports are retained only after the caller opts in.
     reports: Mutex<Option<VecDeque<DurableTransaction>>>,
-    io: Mutex<PeerIo>,
     /// One publication cell for all peer-observable connection state.
     state: RwLock<Arc<PeerState>>,
 }
 
-fn reconnect_peer_io(core: &PeerCore, io: &mut PeerIo) -> Result<(), SemanticError> {
+fn reconnect_peer_io(core: &TieredReadCore, io: &mut PeerIo) -> Result<(), SemanticError> {
     let mut client = core.connection.connect_for("peer/reconnect")?;
     verify_schema_compatibility(&mut client)?;
     io.client = client;
@@ -2489,7 +2504,7 @@ fn reconnect_peer_io(core: &PeerCore, io: &mut PeerIo) -> Result<(), SemanticErr
 }
 
 fn reconnect_peer_io_with_timeout(
-    core: &PeerCore,
+    core: &TieredReadCore,
     io: &mut PeerIo,
     timeout: Duration,
 ) -> Result<(), SemanticError> {
@@ -2662,7 +2677,7 @@ impl Peer {
                 recent,
                 metadata,
                 avet_unready,
-                Arc::new(OnceLock::new()),
+                OnceLock::new(),
             )
         } else {
             // Pre-native databases remain readable, but the fallback is
@@ -2722,41 +2737,46 @@ impl Peer {
                 recent,
                 metadata,
                 Arc::new(BTreeSet::new()),
-                Arc::new(cell),
+                cell,
             )
         };
         let root_pins = RootPinManager::connect(connection, &database_id)?;
         let generation_pin = root_pins.acquire_generation(excision_generation)?;
         let root_pin = root_pins.acquire(tree_base.as_deref())?;
+        let compatibility = Arc::new(PeerCompatibility {
+            value: compatibility,
+            segments: Arc::new(Mutex::new(cache)),
+        });
+        let read = Arc::new(TieredReadCore {
+            database_id,
+            connection: connection.clone(),
+            load_counters,
+            root_pins,
+            io: Mutex::new(PeerIo { client, tree_cache }),
+        });
         Ok(Self {
             core: Arc::new(PeerCore {
-                database_id,
-                connection: connection.clone(),
+                read,
                 recent_limits,
-                load_counters,
-                root_pins,
                 update: Mutex::new(()),
                 reports: Mutex::new(None),
-                io: Mutex::new(PeerIo {
-                    client,
-                    cache,
-                    tree_cache,
-                }),
                 state: RwLock::new(Arc::new(PeerState {
-                    basis_t,
-                    eidx_frontier,
-                    current_hash,
-                    current_state_hash,
-                    excision_generation,
-                    durable_base_t,
-                    tree_base,
-                    _root_pin: root_pin,
-                    _generation_pin: generation_pin,
-                    recent,
-                    metadata,
-                    avet_unready,
+                    tiered: Arc::new(TieredState {
+                        basis_t,
+                        eidx_frontier,
+                        current_hash,
+                        current_state_hash,
+                        excision_generation,
+                        durable_base_t,
+                        tree_base,
+                        _root_pin: root_pin,
+                        _generation_pin: generation_pin,
+                        recent,
+                        metadata,
+                        avet_unready,
+                        generation: 0,
+                    }),
                     compatibility,
-                    generation: 0,
                 })),
             }),
         })
@@ -2799,37 +2819,54 @@ impl Peer {
     }
 
     pub fn load_stats(&self) -> PeerLoadStats {
-        self.core.load_counters.snapshot()
+        self.core.read.load_counters.snapshot()
     }
 
     /// Process-local native manifests that must remain reachable for the live
     /// connection or an older immutable snapshot. Goal 15's SQL GC can use
     /// this seam when it adds leases; Goal 13 deliberately owns no SQL policy.
     pub fn pinned_manifest_hashes(&self) -> Vec<Digest> {
-        self.core.root_pins.hashes()
+        self.core.read.root_pins.hashes()
     }
     pub fn cache_stats(&self) -> CacheStats {
-        let io = lock(&self.core.io);
+        let io = lock(&self.core.read.io);
+        let state = self.state();
+        let segments = lock(&state.compatibility.segments);
         let mut stats = io.tree_cache.stats;
-        stats.hits = stats.hits.saturating_add(io.cache.stats.hits);
-        stats.misses = stats.misses.saturating_add(io.cache.stats.misses);
-        stats.evictions = stats.evictions.saturating_add(io.cache.stats.evictions);
-        stats.current_entries = stats.current_entries.saturating_add(io.cache.entries.len());
+        stats.hits = stats.hits.saturating_add(segments.stats.hits);
+        stats.misses = stats.misses.saturating_add(segments.stats.misses);
+        stats.evictions = stats.evictions.saturating_add(segments.stats.evictions);
+        stats.current_entries = stats.current_entries.saturating_add(segments.entries.len());
         stats.peak_entries = stats.peak_entries.max(stats.current_entries);
         stats
     }
 
     pub fn snapshot(&self) -> PeerSnapshot {
+        self.snapshot_for_state(self.state())
+    }
+
+    pub(crate) fn tiered_snapshot(&self) -> TieredSnapshot {
+        let state = self.state();
+        TieredSnapshot {
+            core: Arc::clone(&self.core.read),
+            state: Arc::clone(&state.tiered),
+        }
+    }
+
+    fn snapshot_for_state(&self, state: Arc<PeerState>) -> PeerSnapshot {
         PeerSnapshot {
-            core: Arc::clone(&self.core),
-            state: self.state(),
+            native: TieredSnapshot {
+                core: Arc::clone(&self.core.read),
+                state: Arc::clone(&state.tiered),
+            },
+            compatibility: Arc::clone(&state.compatibility),
         }
     }
 
     /// Capture one immutable native database value without constructing the
     /// eager compatibility oracle.
     pub fn database_value(&self) -> DatabaseValue {
-        self.snapshot().database_value()
+        self.tiered_snapshot().database_value()
     }
 
     pub fn recent_stats(&self) -> crate::recent::RecentStats {
@@ -2883,11 +2920,11 @@ impl Peer {
     }
 
     fn sync_once(&self, require_compatibility: bool) -> Result<Arc<PeerState>, SemanticError> {
-        self.core.root_pins.ensure()?;
+        self.core.read.root_pins.ensure()?;
         let _update = lock(&self.core.update);
-        let mut io = lock(&self.core.io);
+        let mut io = lock(&self.core.read.io);
         self.refresh_after_excision_locked(&mut io)?;
-        let (target, _) = read_head(&mut io.client, &self.core.database_id)?;
+        let (target, _) = read_head(&mut io.client, &self.core.read.database_id)?;
         self.advance_to_locked(&mut io, target, require_compatibility)
     }
 
@@ -2906,10 +2943,7 @@ impl Peer {
             }
             result => result?,
         };
-        Ok(PeerSnapshot {
-            core: Arc::clone(&self.core),
-            state,
-        })
+        Ok(self.snapshot_for_state(state))
     }
 
     pub fn sync_to_snapshot(
@@ -2918,10 +2952,7 @@ impl Peer {
         timeout: Duration,
     ) -> Result<PeerSnapshot, SemanticError> {
         let state = self.wait_for_basis(target, timeout, false)?;
-        Ok(PeerSnapshot {
-            core: Arc::clone(&self.core),
-            state,
-        })
+        Ok(self.snapshot_for_state(state))
     }
 
     fn wait_for_basis(
@@ -2932,13 +2963,13 @@ impl Peer {
     ) -> Result<Arc<PeerState>, SemanticError> {
         let deadline = Instant::now() + timeout;
         loop {
-            self.core.root_pins.ensure()?;
+            self.core.read.root_pins.ensure()?;
             // Never retain the updater or I/O/cache mutex across sleep. Lazy
             // readers can continue loading nodes while a waiter observes an
             // unchanged authoritative head.
             let observed_head = {
-                let mut io = lock(&self.core.io);
-                read_head(&mut io.client, &self.core.database_id).map(|head| head.0)
+                let mut io = lock(&self.core.read.io);
+                read_head(&mut io.client, &self.core.read.database_id).map(|head| head.0)
             };
             let head = match observed_head {
                 Ok(head) => head,
@@ -2953,9 +2984,10 @@ impl Peer {
             if head >= target {
                 let attempt = {
                     let _update = lock(&self.core.update);
-                    let mut io = lock(&self.core.io);
+                    let mut io = lock(&self.core.read.io);
                     self.refresh_after_excision_locked(&mut io).and_then(|_| {
-                        let (rechecked, _) = read_head(&mut io.client, &self.core.database_id)?;
+                        let (rechecked, _) =
+                            read_head(&mut io.client, &self.core.read.database_id)?;
                         if rechecked >= target {
                             self.advance_to_locked(&mut io, target, require_compatibility)
                                 .map(Some)
@@ -2986,9 +3018,9 @@ impl Peer {
     /// Reborrow a checked PostgreSQL connection while retaining immutable
     /// peer values, pinned roots, observation state, and bounded caches.
     pub fn reconnect(&self) -> Result<(), SemanticError> {
-        self.core.root_pins.ensure()?;
-        let mut io = lock(&self.core.io);
-        reconnect_peer_io(&self.core, &mut io)
+        self.core.read.root_pins.ensure()?;
+        let mut io = lock(&self.core.read.io);
+        reconnect_peer_io(&self.core.read, &mut io)
     }
 
     fn reconnect_before(&self, deadline: Instant) -> Result<bool, SemanticError> {
@@ -2998,8 +3030,8 @@ impl Peer {
                 return Ok(false);
             }
             let result = {
-                let mut io = lock(&self.core.io);
-                reconnect_peer_io_with_timeout(&self.core, &mut io, remaining)
+                let mut io = lock(&self.core.read.io);
+                reconnect_peer_io_with_timeout(&self.core.read, &mut io, remaining)
             };
             match result {
                 Ok(()) => return Ok(true),
@@ -3061,14 +3093,14 @@ impl Peer {
     }
 
     fn refresh_index_once(&self) -> Result<bool, SemanticError> {
-        self.core.root_pins.ensure()?;
+        self.core.read.root_pins.ensure()?;
         let _update = lock(&self.core.update);
-        let mut io = lock(&self.core.io);
+        let mut io = lock(&self.core.read.io);
         self.refresh_after_excision_locked(&mut io)?;
         let state = self.state();
         let through = state.basis_t;
         let observed_revision =
-            current_tree_publication_revision(&mut io.client, &self.core.database_id)?;
+            current_tree_publication_revision(&mut io.client, &self.core.read.database_id)?;
         let adopted_revision = state
             .tree_base
             .as_ref()
@@ -3082,10 +3114,10 @@ impl Peer {
             } = &mut *io;
             load_latest_tree_base(
                 client,
-                &self.core.database_id,
+                &self.core.read.database_id,
                 through,
                 state.excision_generation,
-                &self.core.load_counters,
+                &self.core.read.load_counters,
                 tree_cache,
             )?
         };
@@ -3103,7 +3135,7 @@ impl Peer {
         }
         let tail = read_authenticated_tail(
             &mut io.client,
-            &self.core.database_id,
+            &self.core.read.database_id,
             state.excision_generation,
             TailBase {
                 basis_t: tree_base.manifest.basis_t,
@@ -3126,22 +3158,25 @@ impl Peer {
         let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
         let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
         let recent = Arc::new(RecentTier::new_authenticated(
-            &self.core.database_id,
+            &self.core.read.database_id,
             tree_base.manifest.basis_t,
             tree_base.manifest.tx_hash,
             tail.transaction_hashes.into_iter().zip(tail.transactions),
             metadata.endpoint(),
             self.core.recent_limits,
         )?);
-        let mut successor = (*state).clone();
+        let mut successor = (*state.tiered).clone();
         successor.durable_base_t = tree_base.manifest.basis_t;
-        successor._root_pin = self.core.root_pins.acquire(Some(&tree_base))?;
+        successor._root_pin = self.core.read.root_pins.acquire(Some(&tree_base))?;
         successor.tree_base = Some(tree_base);
         successor.recent = recent;
         successor.metadata = metadata;
         successor.avet_unready = avet_unready;
         successor.generation = successor.generation.saturating_add(1);
-        self.publish(successor);
+        self.publish(PeerState {
+            tiered: Arc::new(successor),
+            compatibility: Arc::clone(&state.compatibility),
+        });
         Ok(true)
     }
 
@@ -3153,15 +3188,21 @@ impl Peer {
     ) -> Result<Arc<PeerState>, SemanticError> {
         let state = self.state();
         if target <= state.basis_t {
-            if require_compatibility && state.compatibility.get().is_none() {
-                let database = self.counted_materialization_with_io(io, &state)?;
-                let _ = state.compatibility.set(database);
+            if require_compatibility && state.compatibility.value.get().is_none() {
+                let mut segments = lock(&state.compatibility.segments);
+                let database = counted_compatibility_materialization_with_io(
+                    &self.core.read,
+                    io,
+                    &mut segments,
+                    &state.tiered,
+                )?;
+                let _ = state.compatibility.value.set(database);
             }
             return Ok(state);
         }
         let tail = read_authenticated_tail(
             &mut io.client,
-            &self.core.database_id,
+            &self.core.read.database_id,
             state.excision_generation,
             TailBase {
                 basis_t: state.basis_t,
@@ -3181,7 +3222,7 @@ impl Peer {
                 .zip(tail.transactions.iter().cloned()),
             metadata.endpoint(),
         )?;
-        let mut successor = (*state).clone();
+        let mut successor = (*state.tiered).clone();
         successor.basis_t = target;
         successor.eidx_frontier = tail.eidx_frontier;
         successor.current_hash = tail.end_hash;
@@ -3189,21 +3230,33 @@ impl Peer {
         successor.recent = Arc::new(recent);
         successor.metadata = metadata;
         successor.avet_unready = Arc::new(avet_unready);
-        successor.compatibility = Arc::new(OnceLock::new());
         successor.generation = successor.generation.saturating_add(1);
-        if let Some(cached) = state.compatibility.get() {
+        let compatibility = Arc::new(PeerCompatibility {
+            value: OnceLock::new(),
+            segments: Arc::clone(&state.compatibility.segments),
+        });
+        if let Some(cached) = state.compatibility.value.get() {
             let cached = Arc::clone(cached);
             let mut database = (*cached).clone();
             for transaction in &tail.transactions {
                 database = database.apply_committed(transaction)?;
             }
             verify_materialized_endpoint(&database, &successor)?;
-            let _ = successor.compatibility.set(Arc::new(database));
+            let _ = compatibility.value.set(Arc::new(database));
         } else if require_compatibility {
-            let database = self.counted_materialization_with_io(io, &successor)?;
-            let _ = successor.compatibility.set(database);
+            let mut segments = lock(&state.compatibility.segments);
+            let database = counted_compatibility_materialization_with_io(
+                &self.core.read,
+                io,
+                &mut segments,
+                &successor,
+            )?;
+            let _ = compatibility.value.set(database);
         }
-        let published = Arc::new(successor);
+        let published = Arc::new(PeerState {
+            tiered: Arc::new(successor),
+            compatibility,
+        });
         self.publish_arc(Arc::clone(&published));
         if let Some(reports) = lock(&self.core.reports).as_mut() {
             reports.extend(tail.transactions);
@@ -3212,115 +3265,18 @@ impl Peer {
     }
 
     fn database_for_state(&self, state: &Arc<PeerState>) -> Result<Arc<Database>, SemanticError> {
-        if let Some(database) = state.compatibility.get() {
-            self.core
-                .load_counters
-                .compatibility_hits
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(Arc::clone(database));
-        }
-        self.core.root_pins.ensure()?;
-        let mut io = lock(&self.core.io);
-        // Recheck after acquiring the single I/O lane so concurrent callers
-        // coalesce into one materialization.
-        if let Some(database) = state.compatibility.get() {
-            self.core
-                .load_counters
-                .compatibility_hits
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(Arc::clone(database));
-        }
-        let materialized = match self.counted_materialization_with_io(&mut io, state) {
-            Err(error) if is_postgres_connection_error(&error) => {
-                reconnect_peer_io(&self.core, &mut io)?;
-                self.counted_materialization_with_io(&mut io, state)
-            }
-            result => result,
-        };
-        match materialized {
-            Ok(database) => {
-                let _ = state.compatibility.set(Arc::clone(&database));
-                Ok(state
-                    .compatibility
-                    .get()
-                    .map(Arc::clone)
-                    .unwrap_or(database))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn counted_materialization_with_io(
-        &self,
-        io: &mut PeerIo,
-        state: &PeerState,
-    ) -> Result<Arc<Database>, SemanticError> {
-        self.core
-            .load_counters
-            .compatibility_materializations
-            .fetch_add(1, Ordering::Relaxed);
-        match self.materialize_state_with_io(io, state) {
-            Ok(database) => Ok(database),
-            Err(error) => {
-                self.core
-                    .load_counters
-                    .compatibility_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                Err(error)
-            }
-        }
-    }
-
-    fn materialize_state_with_io(
-        &self,
-        io: &mut PeerIo,
-        state: &PeerState,
-    ) -> Result<Arc<Database>, SemanticError> {
-        let legacy_base = if state.excision_generation == 0 {
-            load_latest_base(
-                &mut io.client,
-                &self.core.database_id,
-                state.basis_t,
-                &mut io.cache,
-            )?
-        } else {
-            None
-        };
-        let (mut database, mut hash, _) = match legacy_base {
-            Some(base) => base,
-            None => {
-                let recovered = recover_to(
-                    &mut io.client,
-                    &self.core.database_id,
-                    state.basis_t,
-                    state.current_hash,
-                )?;
-                (recovered.database, recovered.final_hash, 0)
-            }
-        };
-        if database.basis_t() < state.basis_t {
-            apply_tail(
-                &mut io.client,
-                &self.core.database_id,
-                state.excision_generation,
-                &mut database,
-                &mut hash,
-                state.basis_t,
-            )?;
-        }
-        if hash != state.current_hash {
-            return Err(fault(
-                "peer/compatibility-hash",
-                "materialized database does not reach the snapshot transaction hash",
-            ));
-        }
-        verify_materialized_endpoint(&database, state)?;
-        Ok(Arc::new(database))
+        database_for_compatibility(
+            &TieredSnapshot {
+                core: Arc::clone(&self.core.read),
+                state: Arc::clone(&state.tiered),
+            },
+            &state.compatibility,
+        )
     }
 
     fn refresh_after_excision_locked(&self, io: &mut PeerIo) -> Result<bool, SemanticError> {
         let state = self.state();
-        let generation = read_excision_generation(&mut io.client, &self.core.database_id)?;
+        let generation = read_excision_generation(&mut io.client, &self.core.read.database_id)?;
         if generation == state.excision_generation {
             return Ok(false);
         }
@@ -3330,9 +3286,12 @@ impl Peer {
                 "database excision generation moved backwards",
             ));
         }
-        let (basis, hash) = read_head(&mut io.client, &self.core.database_id)?;
-        let capacity = io.cache.capacity;
-        io.cache = SegmentCache::new(capacity);
+        let (basis, hash) = read_head(&mut io.client, &self.core.read.database_id)?;
+        {
+            let mut segments = lock(&state.compatibility.segments);
+            let capacity = segments.capacity;
+            *segments = SegmentCache::new(capacity);
+        }
         let tree_entries = io.tree_cache.max_entries;
         let tree_bytes = io.tree_cache.max_bytes;
         io.tree_cache = TreeNodeCache::new(tree_entries, tree_bytes);
@@ -3342,10 +3301,10 @@ impl Peer {
             } = &mut *io;
             load_latest_tree_base(
                 client,
-                &self.core.database_id,
+                &self.core.read.database_id,
                 basis,
                 generation,
-                &self.core.load_counters,
+                &self.core.read.load_counters,
                 tree_cache,
             )?
         }
@@ -3354,7 +3313,7 @@ impl Peer {
             let base_metadata = Arc::clone(&base.metadata);
             let tail = read_authenticated_tail(
                 &mut io.client,
-                &self.core.database_id,
+                &self.core.read.database_id,
                 generation,
                 TailBase {
                     basis_t: base.manifest.basis_t,
@@ -3373,41 +3332,47 @@ impl Peer {
             let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
             let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
             let recent = Arc::new(RecentTier::new_authenticated(
-                &self.core.database_id,
+                &self.core.read.database_id,
                 base.manifest.basis_t,
                 base.manifest.tx_hash,
                 tail.transaction_hashes.into_iter().zip(tail.transactions),
                 metadata.endpoint(),
                 self.core.recent_limits,
             )?);
-            let root_pin = self.core.root_pins.acquire(Some(base))?;
-            let generation_pin = self.core.root_pins.acquire_generation(generation)?;
+            let root_pin = self.core.read.root_pins.acquire(Some(base))?;
+            let generation_pin = self.core.read.root_pins.acquire_generation(generation)?;
             PeerState {
-                basis_t: basis,
-                eidx_frontier: tail.eidx_frontier,
-                current_hash: hash,
-                current_state_hash: tail.end_state_hash,
-                excision_generation: generation,
-                durable_base_t: base.manifest.basis_t,
-                tree_base,
-                _root_pin: root_pin,
-                _generation_pin: generation_pin,
-                recent,
-                metadata,
-                avet_unready,
-                compatibility: Arc::new(OnceLock::new()),
-                generation: state.generation.saturating_add(1),
+                tiered: Arc::new(TieredState {
+                    basis_t: basis,
+                    eidx_frontier: tail.eidx_frontier,
+                    current_hash: hash,
+                    current_state_hash: tail.end_state_hash,
+                    excision_generation: generation,
+                    durable_base_t: base.manifest.basis_t,
+                    tree_base,
+                    _root_pin: root_pin,
+                    _generation_pin: generation_pin,
+                    recent,
+                    metadata,
+                    avet_unready,
+                    generation: state.generation.saturating_add(1),
+                }),
+                compatibility: Arc::new(PeerCompatibility {
+                    value: OnceLock::new(),
+                    segments: Arc::clone(&state.compatibility.segments),
+                }),
             }
         } else {
             self.core
+                .read
                 .load_counters
                 .compatibility_materializations
                 .fetch_add(1, Ordering::Relaxed);
             let recovered =
-                recover_to(&mut io.client, &self.core.database_id, basis, hash)?.database;
+                recover_to(&mut io.client, &self.core.read.database_id, basis, hash)?.database;
             let metadata = Arc::new(MetadataProjection::from_database(&recovered)?);
             let recent = Arc::new(RecentTier::new(
-                &self.core.database_id,
+                &self.core.read.database_id,
                 basis,
                 hash,
                 Vec::new(),
@@ -3417,27 +3382,32 @@ impl Peer {
             let compatibility = OnceLock::new();
             let recovered = Arc::new(recovered);
             let _ = compatibility.set(Arc::clone(&recovered));
-            let generation_pin = self.core.root_pins.acquire_generation(generation)?;
+            let generation_pin = self.core.read.root_pins.acquire_generation(generation)?;
             PeerState {
-                basis_t: basis,
-                eidx_frontier: recovered.eidx_frontier(),
-                current_hash: hash,
-                current_state_hash: read_state_hash(
-                    &mut io.client,
-                    &self.core.database_id,
-                    generation,
-                    basis,
-                )?,
-                excision_generation: generation,
-                durable_base_t: 0,
-                tree_base: None,
-                _root_pin: None,
-                _generation_pin: generation_pin,
-                recent,
-                metadata,
-                avet_unready: Arc::new(BTreeSet::new()),
-                compatibility: Arc::new(compatibility),
-                generation: state.generation.saturating_add(1),
+                tiered: Arc::new(TieredState {
+                    basis_t: basis,
+                    eidx_frontier: recovered.eidx_frontier(),
+                    current_hash: hash,
+                    current_state_hash: read_state_hash(
+                        &mut io.client,
+                        &self.core.read.database_id,
+                        generation,
+                        basis,
+                    )?,
+                    excision_generation: generation,
+                    durable_base_t: 0,
+                    tree_base: None,
+                    _root_pin: None,
+                    _generation_pin: generation_pin,
+                    recent,
+                    metadata,
+                    avet_unready: Arc::new(BTreeSet::new()),
+                    generation: state.generation.saturating_add(1),
+                }),
+                compatibility: Arc::new(PeerCompatibility {
+                    value: compatibility,
+                    segments: Arc::clone(&state.compatibility.segments),
+                }),
             }
         };
         self.publish(successor);
@@ -3465,14 +3435,21 @@ impl Peer {
     }
 }
 
-/// One immutable database value backed by a published shallow tree. Capturing
-/// this value is cheap; directory and leaf content is fetched only by seeks.
-/// Full kernel materialization is an explicit compatibility operation and is
-/// cached independently on each immutable snapshot.
+/// Concrete immutable native value shared by peers, exact read APIs, and the
+/// bounded writer. It retains only read I/O/cache resources and one tiered
+/// endpoint; it cannot coordinate a live peer or materialize an eager value.
+#[derive(Clone)]
+pub(crate) struct TieredSnapshot {
+    core: Arc<TieredReadCore>,
+    state: Arc<TieredState>,
+}
+
+/// Public peer snapshot. Native information is held by `TieredSnapshot`, while
+/// the eager oracle cache remains an explicit compatibility-only attachment.
 #[derive(Clone)]
 pub struct PeerSnapshot {
-    core: Arc<PeerCore>,
-    state: Arc<PeerState>,
+    native: TieredSnapshot,
+    compatibility: Arc<PeerCompatibility>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3495,7 +3472,7 @@ pub struct PeerIndexCursor {
 }
 
 struct DurableTreeCursor {
-    snapshot: PeerSnapshot,
+    snapshot: TieredSnapshot,
     root: Arc<RootNode>,
     history: bool,
     order: IndexOrder,
@@ -3513,7 +3490,7 @@ struct DurableTreeCursor {
 
 impl DurableTreeCursor {
     fn new(
-        snapshot: PeerSnapshot,
+        snapshot: TieredSnapshot,
         root: Arc<RootNode>,
         history: bool,
         order: IndexOrder,
@@ -3543,7 +3520,7 @@ impl DurableTreeCursor {
     }
 
     fn new_prefix(
-        snapshot: PeerSnapshot,
+        snapshot: TieredSnapshot,
         root: Arc<RootNode>,
         history: bool,
         prefix: IndexPrefix,
@@ -3755,7 +3732,7 @@ impl Iterator for PeerIndexCursor {
     }
 }
 
-impl PeerSnapshot {
+impl TieredSnapshot {
     pub fn basis_t(&self) -> u64 {
         self.state.basis_t
     }
@@ -3804,8 +3781,66 @@ impl PeerSnapshot {
         &self.state.metadata.schema
     }
 
-    pub fn database_value(&self) -> crate::DatabaseValue {
-        crate::DatabaseValue::from(self)
+    /// Path-copy one authenticated committed transaction into a successor
+    /// native value. This is the recovered `Db.acceptDataCheck` boundary: the
+    /// caller prepares it before publication, then installs the returned value
+    /// after head CAS without recovery, SQL reads, or eager materialization.
+    pub(crate) fn authenticated_successor(
+        &self,
+        tx_hash: Digest,
+        state_hash: Digest,
+        transaction: DurableTransaction,
+        successor_schema: &crate::Schema,
+    ) -> Result<Self, SemanticError> {
+        let metadata = Arc::new(
+            self.state
+                .metadata
+                .apply(std::slice::from_ref(&transaction))?,
+        );
+        if metadata.schema.as_ref() != successor_schema {
+            return Err(fault(
+                "peer/successor-schema-mismatch",
+                "committed transaction metadata does not derive the assessed successor schema",
+            ));
+        }
+        let mut avet_unready = (*self.state.avet_unready).clone();
+        avet_unready.extend(self.state.metadata.avet_unready_after(&metadata));
+        let basis_t = transaction.basis_t;
+        let eidx_frontier = transaction.eidx_frontier;
+        let recent = self
+            .state
+            .recent
+            .extend_authenticated(std::iter::once((tx_hash, transaction)), metadata.endpoint())?;
+
+        let mut state = (*self.state).clone();
+        state.basis_t = basis_t;
+        state.eidx_frontier = eidx_frontier;
+        state.current_hash = tx_hash;
+        state.current_state_hash = state_hash;
+        state.recent = Arc::new(recent);
+        state.metadata = metadata;
+        state.avet_unready = Arc::new(avet_unready);
+        state.generation = state.generation.saturating_add(1);
+        Ok(Self {
+            core: Arc::clone(&self.core),
+            state: Arc::new(state),
+        })
+    }
+
+    pub(crate) fn state_hash(&self) -> Digest {
+        self.state.current_state_hash
+    }
+
+    pub(crate) fn excision_generation(&self) -> u64 {
+        self.state.excision_generation
+    }
+
+    pub(crate) fn recent_stats(&self) -> crate::recent::RecentStats {
+        self.state.recent.stats()
+    }
+
+    pub(crate) fn database_value(&self) -> crate::DatabaseValue {
+        crate::DatabaseValue::tiered(self.clone())
     }
 
     /// Execute against this captured immutable native snapshot. Advancing the
@@ -3873,18 +3908,6 @@ impl PeerSnapshot {
     /// accepted by [`PeerSnapshot::entid`] unless subsequently repurposed.
     pub fn ident(&self, entity: u64) -> Option<&crate::Keyword> {
         self.state.metadata.idents.ident(entity)
-    }
-
-    pub fn try_eager_oracle(&self) -> Result<Arc<Database>, SemanticError> {
-        Peer {
-            core: Arc::clone(&self.core),
-        }
-        .database_for_state(&self.state)
-    }
-
-    pub fn eager_oracle(&self) -> Arc<Database> {
-        self.try_eager_oracle()
-            .unwrap_or_else(|error| panic!("peer snapshot materialization failed: {error}"))
     }
 
     pub fn seek(
@@ -4253,13 +4276,281 @@ impl PeerSnapshot {
     }
 }
 
+impl PeerSnapshot {
+    pub(crate) fn tiered_snapshot(&self) -> TieredSnapshot {
+        self.native.clone()
+    }
+
+    pub fn basis_t(&self) -> u64 {
+        self.native.basis_t()
+    }
+
+    pub fn eidx_frontier(&self) -> u64 {
+        self.native.eidx_frontier()
+    }
+
+    pub fn last_tx_instant(&self) -> Result<Option<i64>, SemanticError> {
+        self.native.last_tx_instant()
+    }
+
+    pub fn schema(&self) -> &crate::Schema {
+        self.native.schema()
+    }
+
+    /// Extract only the immutable native value. The returned database value
+    /// retains neither this peer wrapper nor its eager compatibility cell.
+    pub fn database_value(&self) -> crate::DatabaseValue {
+        self.native.database_value()
+    }
+
+    pub fn query(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.native.query(query, inputs, control)
+    }
+
+    pub fn query_with_extensions(
+        &self,
+        query: &Query,
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: &QueryExtensions,
+    ) -> Result<QueryOutcome, SemanticError> {
+        self.native
+            .query_with_extensions(query, inputs, control, extensions)
+    }
+
+    pub fn entity(
+        &self,
+        identifier: impl Into<EntityIdentifier>,
+    ) -> Result<Option<Entity>, SemanticError> {
+        self.native.entity(identifier)
+    }
+
+    pub fn pull(
+        &self,
+        pattern: &PullPattern,
+        entity: impl Into<EntityIdentifier>,
+    ) -> Result<QueryValue, SemanticError> {
+        self.native.pull(pattern, entity)
+    }
+
+    pub fn durable_base_t(&self) -> Option<u64> {
+        self.native.durable_base_t()
+    }
+
+    pub fn durable_base_revision(&self) -> Option<u64> {
+        self.native.durable_base_revision()
+    }
+
+    pub fn transaction_hash(&self) -> Digest {
+        self.native.transaction_hash()
+    }
+
+    pub fn entid(&self, ident: &crate::Keyword) -> Option<u64> {
+        self.native.entid(ident)
+    }
+
+    pub fn ident(&self, entity: u64) -> Option<&crate::Keyword> {
+        self.native.ident(entity)
+    }
+
+    pub fn try_eager_oracle(&self) -> Result<Arc<Database>, SemanticError> {
+        database_for_compatibility(&self.native, &self.compatibility)
+    }
+
+    pub fn eager_oracle(&self) -> Arc<Database> {
+        self.try_eager_oracle()
+            .unwrap_or_else(|error| panic!("peer snapshot materialization failed: {error}"))
+    }
+
+    pub fn seek(
+        &self,
+        history: bool,
+        order: IndexOrder,
+        key: &Datom,
+    ) -> Result<TreeSeekResult, SemanticError> {
+        self.native.seek(history, order, key)
+    }
+
+    pub fn range_cursor(
+        &self,
+        history: bool,
+        order: IndexOrder,
+        start: Option<&Datom>,
+        end: Option<&Datom>,
+    ) -> Result<PeerIndexCursor, SemanticError> {
+        self.native.range_cursor(history, order, start, end)
+    }
+
+    pub fn prefix_cursor(
+        &self,
+        history: bool,
+        prefix: &IndexPrefix,
+    ) -> Result<PeerIndexCursor, SemanticError> {
+        self.native.prefix_cursor(history, prefix)
+    }
+
+    pub fn range(
+        &self,
+        history: bool,
+        order: IndexOrder,
+        start: Option<&Datom>,
+        end: Option<&Datom>,
+    ) -> Result<TreeRangeResult, SemanticError> {
+        self.native.range(history, order, start, end)
+    }
+
+    pub fn datoms(
+        &self,
+        history: bool,
+        order: IndexOrder,
+    ) -> Result<TreeRangeResult, SemanticError> {
+        self.native.datoms(history, order)
+    }
+
+    pub fn datoms_with_prefix(
+        &self,
+        history: bool,
+        prefix: &IndexPrefix,
+    ) -> Result<TreeRangeResult, SemanticError> {
+        self.native.datoms_with_prefix(history, prefix)
+    }
+}
+
+fn database_for_compatibility(
+    native: &TieredSnapshot,
+    compatibility: &PeerCompatibility,
+) -> Result<Arc<Database>, SemanticError> {
+    if let Some(database) = compatibility.value.get() {
+        native
+            .core
+            .load_counters
+            .compatibility_hits
+            .fetch_add(1, Ordering::Relaxed);
+        return Ok(Arc::clone(database));
+    }
+    native.core.root_pins.ensure()?;
+    let mut io = lock(&native.core.io);
+    let mut segments = lock(&compatibility.segments);
+    // Recheck after acquiring the one shared native I/O lane so concurrent
+    // compatibility callers coalesce into a single explicit materialization.
+    if let Some(database) = compatibility.value.get() {
+        native
+            .core
+            .load_counters
+            .compatibility_hits
+            .fetch_add(1, Ordering::Relaxed);
+        return Ok(Arc::clone(database));
+    }
+    let materialized = match counted_compatibility_materialization_with_io(
+        &native.core,
+        &mut io,
+        &mut segments,
+        &native.state,
+    ) {
+        Err(error) if is_postgres_connection_error(&error) => {
+            reconnect_peer_io(&native.core, &mut io)?;
+            counted_compatibility_materialization_with_io(
+                &native.core,
+                &mut io,
+                &mut segments,
+                &native.state,
+            )
+        }
+        result => result,
+    };
+    match materialized {
+        Ok(database) => {
+            let _ = compatibility.value.set(Arc::clone(&database));
+            Ok(compatibility
+                .value
+                .get()
+                .map(Arc::clone)
+                .unwrap_or(database))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn counted_compatibility_materialization_with_io(
+    core: &TieredReadCore,
+    io: &mut PeerIo,
+    segments: &mut SegmentCache,
+    state: &TieredState,
+) -> Result<Arc<Database>, SemanticError> {
+    core.load_counters
+        .compatibility_materializations
+        .fetch_add(1, Ordering::Relaxed);
+    match materialize_compatibility_with_io(core, io, segments, state) {
+        Ok(database) => Ok(database),
+        Err(error) => {
+            core.load_counters
+                .compatibility_failures
+                .fetch_add(1, Ordering::Relaxed);
+            Err(error)
+        }
+    }
+}
+
+fn materialize_compatibility_with_io(
+    core: &TieredReadCore,
+    io: &mut PeerIo,
+    segments: &mut SegmentCache,
+    state: &TieredState,
+) -> Result<Arc<Database>, SemanticError> {
+    let legacy_base = if state.excision_generation == 0 {
+        load_latest_base(&mut io.client, &core.database_id, state.basis_t, segments)?
+    } else {
+        None
+    };
+    let (mut database, mut hash, _) = match legacy_base {
+        Some(base) => base,
+        None => {
+            let recovered = recover_to(
+                &mut io.client,
+                &core.database_id,
+                state.basis_t,
+                state.current_hash,
+            )?;
+            (recovered.database, recovered.final_hash, 0)
+        }
+    };
+    if database.basis_t() < state.basis_t {
+        apply_tail(
+            &mut io.client,
+            &core.database_id,
+            state.excision_generation,
+            &mut database,
+            &mut hash,
+            state.basis_t,
+        )?;
+    }
+    if hash != state.current_hash {
+        return Err(fault(
+            "peer/compatibility-hash",
+            "materialized database does not reach the snapshot transaction hash",
+        ));
+    }
+    verify_materialized_endpoint(&database, state)?;
+    Ok(Arc::new(database))
+}
+
 fn compatibility_value(state: &PeerState) -> Result<Arc<Database>, SemanticError> {
-    state.compatibility.get().map(Arc::clone).ok_or_else(|| {
-        fault(
-            "peer/missing-compatibility-value",
-            "compatibility sync did not materialize its requested database value",
-        )
-    })
+    state
+        .compatibility
+        .value
+        .get()
+        .map(Arc::clone)
+        .ok_or_else(|| {
+            fault(
+                "peer/missing-compatibility-value",
+                "compatibility sync did not materialize its requested database value",
+            )
+        })
 }
 
 fn sync_timeout(target: u64) -> SemanticError {
@@ -4272,7 +4563,7 @@ fn sync_timeout(target: u64) -> SemanticError {
 
 fn verify_materialized_endpoint(
     database: &Database,
-    state: &PeerState,
+    state: &TieredState,
 ) -> Result<(), SemanticError> {
     if database.basis_t() != state.basis_t || database.eidx_frontier() != state.eidx_frontier {
         return Err(fault(
@@ -4495,6 +4786,7 @@ fn load_latest_tree_base<C: GenericClient>(
                 AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
                 AND m.manifest_hash = p.manifest_hash \
                 AND m.log_generation = p.log_generation \
+               JOIN atomic_databases catalog ON catalog.database_id = m.database_id \
                LEFT JOIN atomic_transactions legacy \
                  ON m.log_generation = 0 AND legacy.database_id = m.database_id \
                 AND legacy.basis_t = m.basis_t AND legacy.tx_hash = m.tx_hash \
@@ -4503,10 +4795,21 @@ fn load_latest_tree_base<C: GenericClient>(
                  ON m.log_generation > 0 AND native.database_id = m.database_id \
                 AND native.generation = m.log_generation AND native.basis_t = m.basis_t \
                 AND native.tx_hash = m.tx_hash AND native.state_hash = m.state_hash \
+               LEFT JOIN atomic_semantic_commitment_roots bootstrap \
+                 ON m.log_generation > 0 AND m.basis_t = 0 \
+                AND bootstrap.database_id = m.database_id \
+                AND bootstrap.generation = m.log_generation AND bootstrap.basis_t = 0 \
+                AND bootstrap.tx_hash = m.tx_hash AND bootstrap.state_hash = m.state_hash \
+                AND bootstrap.eidx_frontier = m.eidx_frontier \
+                AND bootstrap.commitment_version = 2 \
+                AND bootstrap.tx_hash = catalog.genesis_hash \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.log_generation = $3 \
                 AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
-                  OR (m.log_generation > 0 AND native.tx_hash IS NOT NULL)) \
+                  OR (m.log_generation > 0 AND m.basis_t = 0 \
+                      AND bootstrap.tx_hash IS NOT NULL) \
+                  OR (m.log_generation > 0 AND m.basis_t > 0 \
+                      AND native.tx_hash IS NOT NULL)) \
               ORDER BY p.publication_revision DESC",
             &[&database_id, &through_sql, &generation_sql],
         )
@@ -4726,10 +5029,16 @@ fn read_state_hash<C: GenericClient>(
     log_generation: u64,
     basis_t: u64,
 ) -> Result<Digest, SemanticError> {
-    if basis_t == 0 {
+    if basis_t == 0 && log_generation == 0 {
         return Ok([0; 32]);
     }
-    let row = if log_generation == 0 {
+    let row = if basis_t == 0 {
+        client.query_opt(
+            "SELECT state_hash FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2 AND basis_t = 0",
+            &[&database_id, &sql_basis(log_generation)?],
+        )
+    } else if log_generation == 0 {
         client.query_opt(
             "SELECT state_hash FROM atomic_transactions \
               WHERE database_id = $1 AND basis_t = $2",

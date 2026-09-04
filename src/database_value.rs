@@ -1,5 +1,6 @@
 use crate::identity::validate_frontier;
 use crate::index::compare_prefix;
+use crate::peer::TieredSnapshot;
 use crate::{
     AttributeName, DB_IDENT, Database, Datom, EntityIdentifier, ErrorCategory, IndexOrder,
     IndexPrefix, Keyword, PeerIndexCursor, PeerSnapshot, Schema, SemanticError, Value, eid_to_eidx,
@@ -32,7 +33,7 @@ pub struct DatabaseValue {
 #[derive(Clone)]
 enum ReadBasis {
     Eager(Arc<Database>),
-    Native(PeerSnapshot),
+    Native(TieredSnapshot),
     TransactionOverlay(Arc<TransactionOverlay>),
 }
 
@@ -114,6 +115,10 @@ impl DatabaseValue {
     }
 
     pub fn native(snapshot: PeerSnapshot) -> Self {
+        Self::tiered(snapshot.tiered_snapshot())
+    }
+
+    pub(crate) fn tiered(snapshot: TieredSnapshot) -> Self {
         Self {
             basis: ReadBasis::Native(snapshot),
             as_of_t: None,
@@ -582,18 +587,7 @@ impl DatabaseValue {
 
 impl TransactionOverlay {
     fn prefix(&self, history: bool, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
-        let source_prefix = match prefix {
-            // AVET membership can change when :db/index or :db/unique changes
-            // in this transaction. AEVT is the complete attribute source on
-            // both eager and native bases, so it can populate or suppress the
-            // successor AVET exactly without scanning the whole database.
-            IndexPrefix::Avet { attribute, .. } => IndexPrefix::Aevt {
-                attribute: *attribute,
-                entity: None,
-                value: None,
-            },
-            _ => prefix.clone(),
-        };
+        let source_prefix = self.source_prefix(prefix);
         let mut datoms = self.base.basis_prefix(history, &source_prefix)?;
         datoms.retain(|datom| {
             overlay_index_member(&self.schema, datom, prefix.order())
@@ -624,6 +618,25 @@ impl TransactionOverlay {
         datoms.sort_by(|left, right| left.cmp_in(right, prefix.order()));
         Ok(datoms)
     }
+
+    fn source_prefix(&self, prefix: &IndexPrefix) -> IndexPrefix {
+        match prefix {
+            // Only AVET enablement needs the documented linear attribute
+            // backfill. Steady indexed reads retain the caller's selective
+            // AVET seek, while disabling can filter the old AVET range away.
+            IndexPrefix::Avet { attribute, .. }
+                if !schema_has_avet(self.base.schema(), *attribute)
+                    && schema_has_avet(&self.schema, *attribute) =>
+            {
+                IndexPrefix::Aevt {
+                    attribute: *attribute,
+                    entity: None,
+                    value: None,
+                }
+            }
+            _ => prefix.clone(),
+        }
+    }
 }
 
 fn overlay_index_member(schema: &Schema, datom: &Datom, order: IndexOrder) -> bool {
@@ -636,6 +649,12 @@ fn overlay_index_member(schema: &Schema, datom: &Datom, order: IndexOrder) -> bo
             .attribute(datom.attribute)
             .is_ok_and(|attribute| attribute.value_type == crate::ValueType::Ref),
     }
+}
+
+fn schema_has_avet(schema: &Schema, attribute: u32) -> bool {
+    schema
+        .attribute(attribute)
+        .is_ok_and(|attribute| attribute.indexed || attribute.unique.is_some())
 }
 
 fn same_stored_eav(left: &Datom, right: &Datom) -> bool {
@@ -809,6 +828,13 @@ mod tests {
             .unwrap();
         let eager_history = eager.clone().history().datoms_with_prefix(prefix).unwrap();
         assert_same_stored_datoms(&overlay_history, &eager_history);
+    }
+
+    fn overlay_source_prefix(overlay: &DatabaseValue, prefix: &IndexPrefix) -> IndexPrefix {
+        match &overlay.basis {
+            ReadBasis::TransactionOverlay(overlay) => overlay.source_prefix(prefix),
+            _ => panic!("expected a transaction overlay"),
+        }
     }
 
     fn overlay_fixture() -> (TxReport, DatabaseValue, u64, u64, Keyword, Keyword, Keyword) {
@@ -1036,6 +1062,52 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn transaction_overlay_only_backfills_aevt_when_avet_is_enabled() {
+        let (enabled_report, enabled, first, ..) = overlay_fixture();
+        let prefix = IndexPrefix::Avet {
+            attribute: AMOUNT,
+            value: Some(decimal("1.0")),
+            entity: None,
+        };
+        assert_eq!(
+            overlay_source_prefix(&enabled, &prefix),
+            IndexPrefix::Aevt {
+                attribute: AMOUNT,
+                entity: None,
+                value: None,
+            }
+        );
+
+        let steady_report = enabled_report
+            .db_after
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(first),
+                    attribute: AMOUNT,
+                    value: decimal("2.0").into(),
+                }],
+                4_500,
+            )
+            .unwrap();
+        let steady = overlay_for(&steady_report, 4_500);
+        assert_eq!(overlay_source_prefix(&steady, &prefix), prefix);
+
+        let mut unindexed = enabled_report
+            .db_after
+            .schema()
+            .attribute(AMOUNT)
+            .unwrap()
+            .clone();
+        unindexed.indexed = false;
+        let disabled_report = enabled_report
+            .db_after
+            .with(&[TxOp::AlterAttribute(unindexed)], 5_000)
+            .unwrap();
+        let disabled = overlay_for(&disabled_report, 5_000);
+        assert_eq!(overlay_source_prefix(&disabled, &prefix), prefix);
     }
 
     #[test]
