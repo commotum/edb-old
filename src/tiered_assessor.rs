@@ -25,6 +25,22 @@ use std::sync::Arc;
 pub(crate) struct AssessmentReadWork {
     pub(crate) prefixes: u64,
     pub(crate) datoms: u64,
+    pub(crate) retained_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AssessmentLimits {
+    pub(crate) max_read_datoms: u64,
+    pub(crate) max_read_bytes: u64,
+}
+
+impl AssessmentLimits {
+    fn unbounded() -> Self {
+        Self {
+            max_read_datoms: u64::MAX,
+            max_read_bytes: u64::MAX,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,27 +208,57 @@ struct LogicalDatom {
 
 struct Reader<'a> {
     base: &'a DatabaseValue,
+    limits: AssessmentLimits,
     work: AssessmentReadWork,
 }
 
 impl<'a> Reader<'a> {
-    fn new(base: &'a DatabaseValue) -> Self {
+    fn new(base: &'a DatabaseValue, limits: AssessmentLimits) -> Self {
         Self {
             base,
+            limits,
             work: AssessmentReadWork::default(),
         }
     }
 
     fn prefix(&mut self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
         self.work.prefixes = self.work.prefixes.saturating_add(1);
-        let datoms = self
-            .base
-            .current_prefix_cursor(prefix)?
-            .collect::<Result<Vec<_>, _>>()?;
-        self.work.datoms = self
-            .work
-            .datoms
-            .saturating_add(u64::try_from(datoms.len()).unwrap_or(u64::MAX));
+        let mut datoms = Vec::new();
+        for datom in self.base.current_prefix_cursor(prefix)? {
+            let datom = datom?;
+            let next_datoms = self.work.datoms.checked_add(1).ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::Busy,
+                    "transaction/read-capacity",
+                    "transaction assessment read count overflowed",
+                )
+            })?;
+            let next_bytes = self
+                .work
+                .retained_bytes
+                .checked_add(datom.retained_bytes())
+                .ok_or_else(|| {
+                    SemanticError::new(
+                        ErrorCategory::Busy,
+                        "transaction/read-capacity",
+                        "transaction assessment read-byte count overflowed",
+                    )
+                })?;
+            if next_datoms > self.limits.max_read_datoms || next_bytes > self.limits.max_read_bytes
+            {
+                return Err(SemanticError::new(
+                    ErrorCategory::Busy,
+                    "transaction/read-capacity",
+                    format!(
+                        "transaction assessment exceeds {} datoms or {} retained bytes",
+                        self.limits.max_read_datoms, self.limits.max_read_bytes
+                    ),
+                ));
+            }
+            self.work.datoms = next_datoms;
+            self.work.retained_bytes = next_bytes;
+            datoms.push(datom);
+        }
         Ok(datoms)
     }
 
@@ -274,6 +320,21 @@ pub(crate) fn assess_tiered(
     ops: &[TxOp],
     tx_instant: i64,
 ) -> Result<TieredAssessment, SemanticError> {
+    assess_tiered_with_limits(base, ops, tx_instant, AssessmentLimits::unbounded())
+}
+
+pub(crate) fn assess_tiered_with_limits(
+    base: &DatabaseValue,
+    ops: &[TxOp],
+    tx_instant: i64,
+    limits: AssessmentLimits,
+) -> Result<TieredAssessment, SemanticError> {
+    if limits.max_read_datoms == 0 || limits.max_read_bytes == 0 {
+        return Err(SemanticError::incorrect(
+            "transaction/invalid-read-capacity",
+            "transaction assessment read limits must be positive",
+        ));
+    }
     if base
         .last_tx_instant()?
         .is_some_and(|prior| tx_instant < prior)
@@ -303,7 +364,7 @@ pub(crate) fn assess_tiered(
     let mut ordered = ops.to_vec();
     ordered.sort_by(crate::transaction::compare_tx_op);
     validate_tx_instant_forms(&ordered, tx_instant)?;
-    let mut reader = Reader::new(base);
+    let mut reader = Reader::new(base, limits);
     let (mut logical, allocation_start) =
         prepare_schema_information(&mut reader, &ordered, tx, initial_allocation_start)?;
     let (tempids, eidx_frontier) = resolve_tempids(&mut reader, &ordered, allocation_start)?;
@@ -599,6 +660,20 @@ fn derive_successor_schema(
     logical: &[LogicalDatom],
     tx: u64,
 ) -> Result<Schema, SemanticError> {
+    // Schema and ident projections are resident authenticated metadata. Most
+    // transactions do not touch either; preserve the immutable projection
+    // directly instead of issuing one durable EAVT seek per attribute merely
+    // to rediscover an unchanged schema.
+    if !logical.iter().any(|datom| {
+        schema_information_attribute(datom.attribute)
+            || matches!(
+                u64::from(datom.attribute),
+                DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
+            )
+    }) {
+        return Ok(reader.base.schema().clone());
+    }
+
     let mut current = reader
         .prefix(&IndexPrefix::Eavt {
             entity: DB_PART_DB,
@@ -2154,5 +2229,39 @@ mod tests {
             assert_eq!(tiered.category, eager.category, "ops: {ops:?}");
             assert_eq!(tiered.code, eager.code, "ops: {ops:?}");
         }
+    }
+
+    #[test]
+    fn read_capacity_stops_broad_assessment_at_the_cursor_boundary() {
+        let initial = Database::new(schema()).unwrap();
+        let seeded = initial.with(&add("one", 1), 10).unwrap().db_after;
+        let entity = seeded
+            .lookup(NAME, &Value::String("one".into()))
+            .unwrap()
+            .unwrap();
+        let error = assess_tiered_with_limits(
+            &DatabaseValue::eager(Arc::new(seeded)),
+            &[TxOp::RetractEntity(EntityRef::Id(entity))],
+            11,
+            AssessmentLimits {
+                max_read_datoms: 1,
+                max_read_bytes: u64::MAX,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Busy);
+        assert_eq!(error.code, "transaction/read-capacity");
+
+        let invalid = assess_tiered_with_limits(
+            &DatabaseValue::eager(Arc::new(Database::new(schema()).unwrap())),
+            &[],
+            10,
+            AssessmentLimits {
+                max_read_datoms: 0,
+                max_read_bytes: 1,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid.code, "transaction/invalid-read-capacity");
     }
 }
