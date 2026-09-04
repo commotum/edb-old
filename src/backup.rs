@@ -2209,6 +2209,27 @@ fn activate_restore_candidate(
         if let Some(probe) = activation_probe {
             probe();
         }
+        // Restore staging has already paid to authenticate a complete log.
+        // Reconstruct its terminal value once at this broad administrative
+        // boundary, persist the exact semantic treap, and publish both root
+        // and head atomically below. Ordinary commits never take this eager
+        // path.
+        let endpoint = crate::postgres::recover_generation_to(
+            &mut transaction,
+            target_database_id,
+            candidate.generation,
+            manifest.basis,
+            restored.head_hash,
+        )?
+        .database;
+        crate::persistent_commitment::record_eager_endpoint(
+            &mut transaction,
+            target_database_id,
+            candidate.generation,
+            restored.head_hash,
+            restored.state_hash,
+            &endpoint,
+        )?;
         let generation_sql = sql_u64(candidate.generation, "restore activation generation")?;
         let basis_sql = sql_u64(manifest.basis, "restore activation basis")?;
         if candidate.initial {

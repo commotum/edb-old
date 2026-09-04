@@ -1756,12 +1756,11 @@ fn load_root_rows(
 fn validate_manifest(manifest: &TreeManifestRecord) -> Result<(), SemanticError> {
     if manifest.database_id.is_empty()
         || manifest.publication_revision == 0
-        || manifest.basis_t == 0
         || manifest.eidx_frontier == 0
     {
         return Err(SemanticError::incorrect(
             "tree/invalid-manifest-metadata",
-            "tree manifest needs a database, positive publication revision, basis, and entity frontier",
+            "tree manifest needs a database, positive publication revision and entity frontier",
         ));
     }
     validate_content_hash(

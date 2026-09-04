@@ -816,12 +816,82 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
             .unwrap()
             .is_none()
     );
+    let unpublished_coordinates: i64 = client
+        .query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1",
+            &[&before_commit],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        unpublished_coordinates, 0,
+        "a staged restore has no endpoint coordinate before activation"
+    );
+    let candidate = client
+        .query_one(
+            "SELECT generation, through_basis_t, head_hash, state_hash \
+               FROM atomic_log_generation_checkpoints \
+              WHERE database_id = $1",
+            &[&before_commit],
+        )
+        .unwrap();
+    let activation_without_root = client
+        .query_one(
+            "SELECT atomic_activate_initial_log_generation($1, $2, $3, $4, $5)",
+            &[
+                &before_commit,
+                &candidate.get::<_, i64>(0),
+                &candidate.get::<_, i64>(1),
+                &candidate.get::<_, Vec<u8>>(2),
+                &candidate.get::<_, Vec<u8>>(3),
+            ],
+        )
+        .unwrap_err();
+    assert_eq!(
+        activation_without_root.as_db_error().unwrap().code().code(),
+        "23503",
+        "the SQL publication boundary must reject a coordinate-less generation"
+    );
+    assert!(
+        client
+            .query_opt(
+                "SELECT 1 FROM atomic_heads WHERE database_id = $1",
+                &[&before_commit],
+            )
+            .unwrap()
+            .is_none(),
+        "a rejected activation must roll its tentative head insert back"
+    );
     let mut unpublished = PostgresStore::connect(&before_connection).unwrap();
     assert!(unpublished.recover(&before_commit).is_err());
     let restored = before_restore
         .restore_backup(&directory, committed.basis_t, &before_commit)
         .unwrap();
     assert_same_information(&committed.db_after, &restored);
+    let restored_coordinate: i64 = client
+        .query_one(
+            "SELECT count(*) FROM atomic_heads h \
+               JOIN atomic_log_generation_activations a \
+                 ON a.database_id = h.database_id \
+                AND a.generation = h.log_generation \
+                AND a.basis_t = h.basis_t AND a.head_hash = h.tx_hash \
+               JOIN atomic_semantic_commitment_roots r \
+                 ON r.database_id = h.database_id \
+                AND r.generation = h.log_generation \
+                AND r.basis_t = h.basis_t AND r.tx_hash = h.tx_hash \
+                AND r.state_hash = a.state_hash \
+              WHERE h.database_id = $1",
+            &[&before_commit],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_coordinate, 1);
+    let restarted_restore = PostgresStore::connect(&before_connection)
+        .unwrap()
+        .recover(&before_commit)
+        .unwrap();
+    assert_same_information(&committed.db_after, &restarted_restore);
 
     // A second faulted first-time restore is deliberately abandoned instead
     // of resumed. The first GC pass installs the permanent claim; restore
@@ -917,6 +987,20 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
         )
         .unwrap_err();
     assert_eq!(error.category, ErrorCategory::Interrupted);
+    let mut after_catalog = Client::connect(&after_connection, NoTls).unwrap();
+    let acknowledged_coordinate: i64 = after_catalog
+        .query_one(
+            "SELECT count(*) FROM atomic_heads h \
+               JOIN atomic_semantic_commitment_roots r \
+                 ON r.database_id = h.database_id \
+                AND r.generation = h.log_generation \
+                AND r.basis_t = h.basis_t AND r.tx_hash = h.tx_hash \
+              WHERE h.database_id = $1",
+            &[&after_commit],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(acknowledged_coordinate, 1);
     let replay = after_restore
         .restore_backup(&directory, committed.basis_t, &after_commit)
         .unwrap();

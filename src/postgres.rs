@@ -198,12 +198,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         15,
         include_str!("../migrations/0015_persistent_semantic_commitments.sql"),
     ),
+    (
+        16,
+        include_str!("../migrations/0016_activation_semantic_roots.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 15;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 16;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -402,7 +406,7 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
         if *version == 9 {
             backfill_state_commitments(&mut transaction).map_err(upgrade_rebuild_required)?;
         }
-        if *version == 15 {
+        if matches!(*version, 15 | 16) {
             crate::persistent_commitment::backfill_terminal_persistent_commitments(
                 &mut transaction,
             )?;
@@ -2516,6 +2520,17 @@ impl PostgresStore {
             )
             .map_err(|error| postgres_error("postgres/create-generation", error))?;
         let generation = 1;
+        // Creation already materializes the complete bootstrap value. Seed
+        // its PostgreSQL-owned semantic treap in this same transaction before
+        // any generation/head row can become visible.
+        crate::persistent_commitment::record_eager_endpoint(
+            &mut transaction,
+            database_id,
+            generation,
+            genesis_hash,
+            bootstrap_state_hash,
+            &bootstrap,
+        )?;
         transaction
             .execute(
                 "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) \
@@ -2617,6 +2632,14 @@ impl PostgresStore {
                     ],
                 )
                 .map_err(|error| postgres_error("postgres/create-schema-request", error))?;
+            crate::persistent_commitment::record_eager_endpoint(
+                &mut transaction,
+                database_id,
+                generation,
+                tx_hash,
+                *state_hash,
+                &database,
+            )?;
             let updated = transaction
                 .execute(
                     "UPDATE atomic_heads SET basis_t = 1, tx_hash = $1 \

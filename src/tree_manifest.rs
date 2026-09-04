@@ -194,14 +194,11 @@ impl PersistentTreeManifest {
     }
 
     fn validate(&self) -> Result<(), SemanticError> {
-        if self.database_id.is_empty()
-            || self.publication_revision == 0
-            || self.basis_t == 0
-            || self.eidx_frontier == 0
+        if self.database_id.is_empty() || self.publication_revision == 0 || self.eidx_frontier == 0
         {
             return Err(SemanticError::incorrect(
                 "tree/manifest-metadata",
-                "tree manifest requires a database id, positive publication revision, basis, and entity frontier",
+                "tree manifest requires a database id, positive publication revision and entity frontier",
             ));
         }
         if self.state_hash == [0; 32] {
@@ -448,6 +445,11 @@ mod tests {
         let bytes = manifest.encode().unwrap();
         assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
         assert_eq!(manifest.hash().unwrap(), sha256(&bytes));
+
+        let mut genesis = manifest.clone();
+        genesis.basis_t = 0;
+        let bytes = genesis.encode().unwrap();
+        assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), genesis);
     }
 
     #[test]

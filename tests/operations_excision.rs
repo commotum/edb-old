@@ -196,6 +196,24 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
             .values(user(42), SECRET)
             .is_empty()
     );
+    let mut evidence = postgres::Client::connect(&connection, NoTls).unwrap();
+    let unpublished_coordinates: i64 = evidence
+        .query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots r \
+               JOIN atomic_log_generation_builds b \
+                 ON b.database_id = r.database_id AND b.generation = r.generation \
+              WHERE r.database_id = $1 \
+                AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                                 WHERE a.database_id = r.database_id \
+                                   AND a.generation = r.generation)",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        unpublished_coordinates, 0,
+        "a staged but unpublished excision must not leak a semantic endpoint"
+    );
 
     let interrupted = operator
         .process_excision_requests_with_fault(&database_id, ExcisionFault::AfterActivation)
@@ -204,7 +222,6 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         (interrupted.category, interrupted.code),
         (ErrorCategory::Interrupted, "excision/injected-fault")
     );
-    let mut evidence = postgres::Client::connect(&connection, NoTls).unwrap();
     let generation_count: i64 = evidence
         .query_one(
             "SELECT count(*) FROM atomic_log_generations WHERE database_id=$1",
@@ -219,6 +236,24 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
     // Head activation is authoritative, but sync-excise remains false until
     // the separate root-last completion marker is durable.
     let switched = store.recover(&database_id).unwrap();
+    let active_coordinate_count: i64 = evidence
+        .query_one(
+            "SELECT count(*) FROM atomic_heads h \
+               JOIN atomic_log_generation_activations a \
+                 ON a.database_id = h.database_id \
+                AND a.generation = h.log_generation \
+                AND a.basis_t = h.basis_t AND a.head_hash = h.tx_hash \
+               JOIN atomic_semantic_commitment_roots r \
+                 ON r.database_id = h.database_id \
+                AND r.generation = h.log_generation \
+                AND r.basis_t = h.basis_t AND r.tx_hash = h.tx_hash \
+                AND r.state_hash = a.state_hash \
+              WHERE h.database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(active_coordinate_count, 1);
     assert!(switched.values(user(42), SECRET).is_empty());
     assert!(
         !operator

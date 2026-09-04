@@ -1352,25 +1352,47 @@ fn build_and_activate_excision(
         let manifest_parameter = staged_tree
             .as_ref()
             .map(|(manifest_hash, _)| manifest_hash.as_slice());
-        match client.query_one(
-            "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, $6)",
-            &[
-                &database_id,
-                &sql_u64(generation, "generation")?,
-                &sql_u64(active_basis, "activation basis")?,
-                &&rewriter.current_head_hash()[..],
-                &&candidate_state_hash[..],
-                &manifest_parameter,
-            ],
-        ) {
-            Ok(_) => {
+        // Excision already owns a complete materialized candidate. Convert
+        // that endpoint into the PostgreSQL-resident semantic treap and
+        // activate it in one transaction: neither a coordinate-less head nor
+        // a root for a failed CAS can become visible.
+        let activation = (|| {
+            let mut transaction = client
+                .transaction()
+                .map_err(|error| operation_error("excision/activation-begin", error))?;
+            crate::persistent_commitment::record_eager_endpoint(
+                &mut transaction,
+                database_id,
+                generation,
+                rewriter.current_head_hash(),
+                candidate_state_hash,
+                rewriter.current_database(),
+            )?;
+            transaction
+                .query_one(
+                    "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, $6)",
+                    &[
+                        &database_id,
+                        &sql_u64(generation, "generation")?,
+                        &sql_u64(active_basis, "activation basis")?,
+                        &&rewriter.current_head_hash()[..],
+                        &&candidate_state_hash[..],
+                        &manifest_parameter,
+                    ],
+                )
+                .map_err(|error| operation_error("excision/activate", error))?;
+            transaction
+                .commit()
+                .map_err(|error| operation_error("excision/activation-commit", error))
+        })();
+        match activation {
+            Ok(()) => {
                 let (manifest_hash, tree_store) = staged_tree
                     .take()
                     .map_or((None, None), |(hash, store)| (Some(hash), Some(store)));
                 break (active_basis, active_hash, manifest_hash, tree_store);
             }
-            Err(error) => {
-                let semantic = operation_error("excision/activate", error);
+            Err(semantic) => {
                 if let Some((_, store)) = staged_tree.as_mut() {
                     store.release_build_intent()?;
                 }

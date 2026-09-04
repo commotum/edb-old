@@ -639,6 +639,41 @@ pub(crate) fn record_persistent_coordinate<C: GenericClient>(
     Ok(())
 }
 
+/// Seed one endpoint already materialized by a broad administrative workflow.
+/// Creation, excision, and restore inherently reconstruct the complete target
+/// value; paying the one-time O(current information) conversion here keeps
+/// ordinary transaction publication on the incremental touched-path API.
+pub(crate) fn record_eager_endpoint<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    tx_hash: Digest,
+    expected_state_hash: Digest,
+    database: &Database,
+) -> Result<PersistentSemanticRoot, SemanticError> {
+    let root = persist_eager_snapshot(client, database)?;
+    let state_hash = root.state_hash(database.basis_t(), database.eidx_frontier());
+    if state_hash != expected_state_hash {
+        return Err(corrupt(
+            "persistent-commitment/endpoint-state",
+            "administrative endpoint does not reproduce its authoritative state digest",
+        ));
+    }
+    record_persistent_coordinate(
+        client,
+        &PersistentCommitmentCoordinate {
+            database_id: database_id.to_owned(),
+            generation,
+            basis_t: database.basis_t(),
+            tx_hash,
+            state_hash,
+            eidx_frontier: database.eidx_frontier(),
+            root,
+        },
+    )?;
+    Ok(root)
+}
+
 pub(crate) fn load_persistent_coordinate<C: GenericClient>(
     client: &mut C,
     database_id: &str,
@@ -865,7 +900,7 @@ fn pg_error(code: &'static str, error: postgres::Error) -> SemanticError {
 #[cfg(test)]
 mod codec_tests {
     use super::*;
-    use crate::postgres::{MIGRATIONS, PostgresStore};
+    use crate::postgres::PostgresStore;
     use crate::state_commitment::{checkpoint_root_metadata, checkpoint_state_hash};
     use crate::{
         Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, Unique, Value, ValueType,
@@ -1106,22 +1141,31 @@ mod codec_tests {
             return;
         };
         let schema_name = isolated_schema(&connection, "persistent_commitment_upgrade");
-        let mut client = client_in_schema(&connection, &schema_name);
-        for (version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version <= 14) {
-            client.batch_execute(sql).unwrap();
-            let checksum = crate::sha256(sql.as_bytes());
-            client
-                .execute(
-                    "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
-                    &[version, &&checksum[..]],
-                )
-                .unwrap();
-        }
+        let client = client_in_schema(&connection, &schema_name);
+        crate::PostgresMigrator::from_client(client)
+            .migrate()
+            .unwrap();
         let database_id = unique("persistent_commitment_database");
+        let client = client_in_schema(&connection, &schema_name);
         let mut store = PostgresStore::from_client(client);
         let expected = store.create_database(&database_id, test_schema()).unwrap();
         drop(store);
 
+        // Recreate the only materially relevant interim-v14 state: an active
+        // authenticated database with neither persistent semantic table nor
+        // migration record. The log/catalog bytes remain untouched and the
+        // v15 Rust hook must derive their terminal coordinate from replay.
+        let mut client = client_in_schema(&connection, &schema_name);
+        client
+            .batch_execute(
+                "DROP TRIGGER atomic_log_generation_activations_semantic_root \
+                    ON atomic_log_generation_activations; \
+                 DROP TABLE atomic_semantic_commitment_roots; \
+                 DROP TABLE atomic_semantic_commitment_nodes; \
+                 DELETE FROM atomic_schema_migrations WHERE version >= 15",
+            )
+            .unwrap();
+        drop(client);
         let client = client_in_schema(&connection, &schema_name);
         crate::PostgresMigrator::from_client(client)
             .migrate()
@@ -1149,6 +1193,68 @@ mod codec_tests {
             coordinate.state_hash,
             checkpoint_state_hash(&expected).unwrap()
         );
+
+        drop(client);
+        drop_schema(&connection, &schema_name);
+    }
+
+    #[test]
+    fn database_creation_publishes_restartable_genesis_and_schema_coordinates() {
+        let Some(connection) = connection() else {
+            return;
+        };
+        let schema_name = isolated_schema(&connection, "persistent_commitment_create");
+        let client = client_in_schema(&connection, &schema_name);
+        crate::PostgresMigrator::from_client(client)
+            .migrate()
+            .unwrap();
+        let empty_id = unique("persistent_empty_database");
+        let schema_id = unique("persistent_schema_database");
+        let mut store = PostgresStore::from_client(client_in_schema(&connection, &schema_name));
+        let empty = store.create_database(&empty_id, Schema::new()).unwrap();
+        let installed = store.create_database(&schema_id, test_schema()).unwrap();
+        drop(store);
+
+        let mut client = client_in_schema(&connection, &schema_name);
+        for (database_id, expected, expected_coordinate_count) in
+            [(&empty_id, &empty, 1_i64), (&schema_id, &installed, 2_i64)]
+        {
+            let head = client
+                .query_one(
+                    "SELECT log_generation, basis_t, tx_hash FROM atomic_heads \
+                      WHERE database_id = $1",
+                    &[database_id],
+                )
+                .unwrap();
+            let generation = u64::try_from(head.get::<_, i64>(0)).unwrap();
+            let basis = u64::try_from(head.get::<_, i64>(1)).unwrap();
+            let coordinate =
+                load_persistent_coordinate(&mut client, database_id, generation, basis)
+                    .unwrap()
+                    .expect("created head requires its semantic coordinate");
+            assert_eq!(
+                coordinate.root.metadata(),
+                checkpoint_root_metadata(expected)
+            );
+            assert_eq!(
+                coordinate.state_hash,
+                checkpoint_state_hash(expected).unwrap()
+            );
+            let count: i64 = client
+                .query_one(
+                    "SELECT count(*) FROM atomic_semantic_commitment_roots \
+                      WHERE database_id = $1 AND generation = $2",
+                    &[database_id, &i64::try_from(generation).unwrap()],
+                )
+                .unwrap()
+                .get(0);
+            assert_eq!(count, expected_coordinate_count);
+
+            let restarted = PostgresStore::from_client(client_in_schema(&connection, &schema_name))
+                .recover(database_id)
+                .unwrap();
+            assert!(restarted.same_information_as(expected));
+        }
 
         drop(client);
         drop_schema(&connection, &schema_name);
