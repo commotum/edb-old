@@ -1166,29 +1166,37 @@ impl TransactionService {
                     return Err(error);
                 }
             };
-        // Probe with the strict native opener before deciding that a root must
-        // be built. Only genuine absence or a valid root with an over-hard
-        // tail authorizes this synchronous bootstrap/catch-up. A present but
-        // corrupt native authority fails closed for explicit repair.
+        // Probe with the strict native opener before deciding whether this is
+        // the one bounded startup exception: a just-created database may build
+        // its fixed bootstrap/application-schema value at basis 0/1. Once user
+        // history exists, ordinary activation never hides an eager `recover_to`
+        // behind service startup. Operators must publish a native root with
+        // `PostgresIndexer::consolidate` before retrying. A present but corrupt
+        // native authority continues to fail closed for explicit repair.
         let recovery_stats = match store.activate_transactor_state(&lease, lease_millis) {
             Ok(stats) => stats,
-            Err(error)
-                if matches!(
-                    error.code,
-                    "peer/exact-no-native-publication" | "recent/hard-capacity"
-                ) =>
-            {
-                if let Err(index_error) = indexer.consolidate() {
-                    let _ = store.release_lease(&lease);
-                    return Err(index_error);
-                }
-                match store.activate_transactor_state(&lease, lease_millis) {
-                    Ok(stats) => stats,
-                    Err(error) => {
+            Err(error) if error.code == "peer/exact-no-native-publication" => {
+                match indexer.consolidate_fresh_database() {
+                    Ok(Some(_)) => match store.activate_transactor_state(&lease, lease_millis) {
+                        Ok(stats) => stats,
+                        Err(error) => {
+                            let _ = store.release_lease(&lease);
+                            return Err(error);
+                        }
+                    },
+                    Ok(None) => {
                         let _ = store.release_lease(&lease);
-                        return Err(error);
+                        return Err(native_index_required(&error));
+                    }
+                    Err(index_error) => {
+                        let _ = store.release_lease(&lease);
+                        return Err(index_error);
                     }
                 }
+            }
+            Err(error) if error.code == "recent/hard-capacity" => {
+                let _ = store.release_lease(&lease);
+                return Err(native_index_required(&error));
             }
             Err(error) => {
                 let _ = store.release_lease(&lease);
@@ -1322,6 +1330,16 @@ impl TransactionService {
             let _ = worker.join();
         }
     }
+}
+
+fn native_index_required(cause: &SemanticError) -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Unavailable,
+        "service/native-index-required",
+        "ordinary transactor startup cannot rebuild or overrun the native index; run \
+         PostgresIndexer::consolidate in an explicit offline/admin step, then retry startup",
+    )
+    .detail("cause", cause.code)
 }
 
 impl Drop for TransactionService {

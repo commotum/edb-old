@@ -617,6 +617,25 @@ impl PostgresIndexer {
         }
     }
 
+    /// Create the first native publication only while the authoritative value
+    /// is still the fixed database bootstrap/application-schema value.
+    ///
+    /// Ordinary transactor startup uses this narrow exception so a newly
+    /// created database is immediately usable without a separate operator
+    /// step. Once user history exists, a missing native publication is an
+    /// administrative condition: silently calling [`Self::consolidate`] there
+    /// would make activation perform an unbounded `recover_to` over the entire
+    /// log and defeat the native root-plus-tail recovery contract.
+    pub(crate) fn consolidate_fresh_database(
+        &mut self,
+    ) -> Result<Option<IndexBuildReceipt>, SemanticError> {
+        let (basis_t, _) = read_head(&mut self.client, &self.database_id)?;
+        if basis_t > 1 {
+            return Ok(None);
+        }
+        self.consolidate().map(Some)
+    }
+
     pub fn reconnect(&mut self) -> Result<(), SemanticError> {
         let mut client = self.connection.connect_for("index/reconnect")?;
         verify_schema_compatibility(&mut client)?;
