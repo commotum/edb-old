@@ -73,6 +73,10 @@ pub struct SegmentRef {
 #[derive(Clone, Debug)]
 pub struct IndexManifest {
     pub database_id: String,
+    /// This legacy flat-manifest coordinate is already the basis represented
+    /// by its stored index segments. It is not the logical head basis and
+    /// therefore needs no second `index_basis_t` field; ATIM V6 needs that
+    /// distinction because one tree publication also binds pending AVET work.
     pub basis_t: u64,
     pub tx_hash: Digest,
     /// Exclusive low-42-bit entity-index issuance frontier.

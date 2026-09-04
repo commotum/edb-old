@@ -7,6 +7,7 @@
 //! backpressure if consolidation has not caught up.
 
 use crate::encoding::validate_persistent_index_datoms;
+use crate::index::{IndexComponents, NormalizedIndexBoundary};
 use crate::recent_btset::{BtCursor, BtWork, RecentBtSet, RecentDatomRef};
 use crate::{
     Datom, Digest, DurableTransaction, ErrorCategory, IndexOrder, IndexPrefix, Schema,
@@ -775,6 +776,38 @@ impl RecentTier {
         ))
     }
 
+    /// Open a forward cursor at the lowest datom admitted by a typed virtual
+    /// boundary. Current traversal begins at the complete logical group when
+    /// T is present, then applies the exact boundary to the selected winner.
+    pub(crate) fn boundary_cursor(
+        &self,
+        history: bool,
+        boundary: &NormalizedIndexBoundary,
+    ) -> RecentCursor {
+        RecentCursor::new_boundary(
+            self.indexes.get(boundary.order()),
+            Arc::clone(&self.projection),
+            history,
+            boundary.clone(),
+        )
+    }
+
+    /// Open a reverse cursor immediately after the highest datom matching the
+    /// typed virtual boundary. The memory tree descends by upper bound; no
+    /// forward collection or reversal is involved.
+    pub(crate) fn reverse_boundary_cursor(
+        &self,
+        history: bool,
+        boundary: &NormalizedIndexBoundary,
+    ) -> RecentCursor {
+        RecentCursor::new_reverse(
+            self.indexes.get(boundary.order()),
+            Arc::clone(&self.projection),
+            history,
+            boundary.clone(),
+        )
+    }
+
     pub fn stats(&self) -> RecentStats {
         self.stats
     }
@@ -970,6 +1003,9 @@ pub struct RecentCursorStats {
     pub node_visits: u64,
     pub datoms_examined: u64,
     pub datoms_yielded: u64,
+    /// Largest logical E/A/V history group buffered to collapse a current
+    /// value. History cursors leave this at zero.
+    pub max_group_datoms: u64,
 }
 
 /// Lazy ordered view over one raw memory-index tree. Current cursors collapse
@@ -983,11 +1019,14 @@ pub struct RecentCursor {
     order: IndexOrder,
     range: RecentRange,
     prefix: Option<IndexPrefix>,
+    forward_boundary: Option<NormalizedIndexBoundary>,
+    reverse_boundary: Option<NormalizedIndexBoundary>,
     pending: Option<RecentDatomRef>,
     current_output: VecDeque<RecentDatomRef>,
     exhausted: bool,
     examined: u64,
     yielded: u64,
+    max_group_datoms: u64,
 }
 
 impl RecentCursor {
@@ -1012,11 +1051,14 @@ impl RecentCursor {
             order,
             range,
             prefix: None,
+            forward_boundary: None,
+            reverse_boundary: None,
             pending: None,
             current_output: VecDeque::new(),
             exhausted: false,
             examined: 0,
             yielded: 0,
+            max_group_datoms: 0,
         }
     }
 
@@ -1037,11 +1079,77 @@ impl RecentCursor {
             order,
             range: RecentRange::unbounded(),
             prefix: Some(prefix),
+            forward_boundary: None,
+            reverse_boundary: None,
             pending: None,
             current_output: VecDeque::new(),
             exhausted: false,
             examined: 0,
             yielded: 0,
+            max_group_datoms: 0,
+        }
+    }
+
+    fn new_boundary(
+        tree: &RecentBtSet,
+        projection: Arc<EndpointProjection>,
+        history: bool,
+        boundary: NormalizedIndexBoundary,
+    ) -> Self {
+        let order = boundary.order();
+        let seek_boundary = boundary.clone();
+        let inner = if history {
+            tree.seek_by(move |candidate| seek_boundary.compare_datom(candidate))
+        } else {
+            tree.seek_by(move |candidate| seek_boundary.compare_current_group_start(candidate))
+        };
+        Self {
+            inner,
+            projection,
+            history,
+            order,
+            range: RecentRange::unbounded(),
+            prefix: None,
+            forward_boundary: Some(boundary),
+            reverse_boundary: None,
+            pending: None,
+            current_output: VecDeque::new(),
+            exhausted: false,
+            examined: 0,
+            yielded: 0,
+            max_group_datoms: 0,
+        }
+    }
+
+    fn new_reverse(
+        tree: &RecentBtSet,
+        projection: Arc<EndpointProjection>,
+        history: bool,
+        boundary: NormalizedIndexBoundary,
+    ) -> Self {
+        let order = boundary.order();
+        let inner = match &boundary {
+            NormalizedIndexBoundary::Eavt(IndexComponents::Empty)
+            | NormalizedIndexBoundary::Aevt(IndexComponents::Empty)
+            | NormalizedIndexBoundary::Avet(IndexComponents::Empty)
+            | NormalizedIndexBoundary::Vaet(IndexComponents::Empty) => tree.reverse_cursor(),
+            _ => tree.reverse_seek_by(|candidate| boundary.compare_datom(candidate)),
+        };
+        Self {
+            inner,
+            projection,
+            history,
+            order,
+            range: RecentRange::unbounded(),
+            prefix: None,
+            forward_boundary: None,
+            reverse_boundary: Some(boundary),
+            pending: None,
+            current_output: VecDeque::new(),
+            exhausted: false,
+            examined: 0,
+            yielded: 0,
+            max_group_datoms: 0,
         }
     }
 
@@ -1065,7 +1173,11 @@ impl RecentCursor {
             return Some(candidate);
         }
         loop {
-            let candidate = self.inner.next()?;
+            let candidate = if self.reverse_boundary.is_some() {
+                self.inner.prev()?
+            } else {
+                self.inner.next()?
+            };
             self.examined = self.examined.saturating_add(1);
             if index_member(self.projection.schema(), candidate.datom(), self.order)
                 .expect("authenticated recent datom has an endpoint schema attribute")
@@ -1082,6 +1194,69 @@ impl RecentCursor {
             node_visits: work.node_visits,
             datoms_examined: self.examined,
             datoms_yielded: self.yielded,
+            max_group_datoms: self.max_group_datoms,
+        }
+    }
+
+    fn next_reverse(&mut self) -> Option<Datom> {
+        if self.history {
+            loop {
+                let candidate = self.next_member()?;
+                let datom = candidate.datom();
+                if self
+                    .reverse_boundary
+                    .as_ref()
+                    .is_some_and(|boundary| boundary.compare_datom(datom).is_gt())
+                {
+                    continue;
+                }
+                self.yielded = self.yielded.saturating_add(1);
+                return Some(datom.clone());
+            }
+        }
+
+        loop {
+            if self.current_output.is_empty() {
+                let first = self.next_member()?;
+                let mut group = vec![first];
+                while let Some(candidate) = self.next_member() {
+                    if same_logical_eav(group[0].datom(), candidate.datom()) {
+                        group.push(candidate);
+                    } else {
+                        self.pending = Some(candidate);
+                        break;
+                    }
+                }
+                self.max_group_datoms = self.max_group_datoms.max(group.len() as u64);
+
+                // Reversed history visits one logical group oldest-first.
+                // Recovered `distinct-last-by [e a v]` therefore retains its
+                // newest event. Atomic deliberately retains one newest event
+                // per strict stored V representation: documented rseek is the
+                // reverse complement of forward access, and the native kernel
+                // treats scale-distinct BigDecimals as distinct stored facts.
+                // This buffers only the current logical group, never an index.
+                let mut winners = Vec::<RecentDatomRef>::new();
+                for candidate in group {
+                    let value = &candidate.datom().value;
+                    match winners.binary_search_by(|prior| prior.datom().value.stored_cmp(value)) {
+                        Ok(position) => winners[position] = candidate,
+                        Err(position) => winners.insert(position, candidate),
+                    }
+                }
+                winners.retain(|candidate| candidate.datom().added);
+                winners.sort_by(|left, right| right.datom().cmp_in(left.datom(), self.order));
+                self.current_output.extend(winners);
+                if self.current_output.is_empty() {
+                    continue;
+                }
+            }
+            let winner = self
+                .current_output
+                .pop_front()
+                .expect("a non-empty reverse current group retained an assertion");
+            self.yielded = self.yielded.saturating_add(1);
+            return Some(winner.datom().clone());
         }
     }
 }
@@ -1092,6 +1267,9 @@ impl Iterator for RecentCursor {
     fn next(&mut self) -> Option<Self::Item> {
         if self.exhausted {
             return None;
+        }
+        if self.reverse_boundary.is_some() {
+            return self.next_reverse();
         }
         if self.history {
             loop {
@@ -1113,6 +1291,13 @@ impl Iterator for RecentCursor {
                     return None;
                 }
                 if self.range.contains(datom, self.order) {
+                    if self
+                        .forward_boundary
+                        .as_ref()
+                        .is_some_and(|boundary| boundary.compare_datom(datom).is_lt())
+                    {
+                        continue;
+                    }
                     self.yielded = self.yielded.saturating_add(1);
                     return Some(datom.clone());
                 }
@@ -1131,6 +1316,7 @@ impl Iterator for RecentCursor {
                         break;
                     }
                 }
+                self.max_group_datoms = self.max_group_datoms.max(group.len() as u64);
                 // The recovered comparator makes this group newest-first.
                 // Select only the first operation for each exact stored value;
                 // a newer retraction shadows that representation without
@@ -1173,6 +1359,13 @@ impl Iterator for RecentCursor {
                 return None;
             }
             if datom.added && self.range.contains(datom, self.order) {
+                if self
+                    .forward_boundary
+                    .as_ref()
+                    .is_some_and(|boundary| boundary.compare_datom(datom).is_lt())
+                {
+                    continue;
+                }
                 self.yielded = self.yielded.saturating_add(1);
                 return Some(datom.clone());
             }
@@ -2014,7 +2207,7 @@ mod tests {
     }
 
     #[test]
-    fn current_cursor_tracks_scale_distinct_values_across_logical_interleaving() {
+    fn forward_and_reverse_current_track_scale_distinct_values_across_retractions() {
         use bigdecimal::BigDecimal;
         use std::str::FromStr;
 
@@ -2087,6 +2280,105 @@ mod tests {
             !current
                 .iter()
                 .any(|datom| datom.value.stored_eq(&datoms[0].value))
+        );
+
+        let boundary = crate::IndexBoundary::Eavt(crate::IndexComponents::Empty)
+            .normalized()
+            .unwrap();
+        let mut reverse_current = tier.reverse_boundary_cursor(false, &boundary);
+        let reversed = reverse_current.by_ref().collect::<Vec<_>>();
+        assert_eq!(reversed.len(), current.len());
+        assert!(
+            reversed
+                .iter()
+                .zip(current.iter().rev())
+                .all(|(left, right)| same_stored_datom(left, right))
+        );
+        assert_eq!(reverse_current.stats().max_group_datoms, 4);
+
+        let history = tier.datoms(IndexOrder::Eavt);
+        let mut reverse_history = tier.reverse_boundary_cursor(true, &boundary);
+        let reversed_history = reverse_history.by_ref().collect::<Vec<_>>();
+        assert_eq!(reversed_history.len(), history.len());
+        assert!(
+            reversed_history
+                .iter()
+                .zip(history.iter().rev())
+                .all(|(left, right)| same_stored_datom(left, right))
+        );
+        assert_eq!(reverse_history.stats().max_group_datoms, 0);
+
+        let mut forward_current = tier.boundary_cursor(false, &boundary);
+        let forwarded = forward_current.by_ref().collect::<Vec<_>>();
+        assert!(
+            forwarded
+                .iter()
+                .zip(current.iter())
+                .all(|(left, right)| same_stored_datom(left, right))
+        );
+        assert_eq!(forward_current.stats().max_group_datoms, 4);
+    }
+
+    #[test]
+    fn forward_t_boundary_collapses_the_complete_recent_group_before_positioning() {
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("item", "count"),
+                ValueType::Long,
+                Cardinality::Many,
+            ))
+            .unwrap();
+        let entity = make_eid(USER_PARTITION, 1).unwrap();
+        let base_hash = [0x59; 32];
+        let mut previous_hash = base_hash;
+        let mut transactions = Vec::new();
+        for basis_t in 1..=3 {
+            let transaction = DurableTransaction {
+                database_id: DATABASE_ID.into(),
+                basis_t,
+                previous_hash,
+                eidx_frontier: INITIAL_EIDX_FRONTIER,
+                tempids: BTreeMap::new(),
+                tx_data: vec![Datom {
+                    entity,
+                    attribute: 1_000,
+                    value: Value::Long(7),
+                    tx: t_to_tx(basis_t).unwrap(),
+                    added: true,
+                }],
+            };
+            previous_hash = transaction_hash(&encode_transaction(&transaction).unwrap());
+            transactions.push(transaction);
+        }
+        let tier = RecentTier::new(
+            DATABASE_ID,
+            0,
+            base_hash,
+            transactions,
+            EndpointProjection::new(schema),
+            RecentLimits::default(),
+        )
+        .unwrap();
+        let boundary = crate::IndexBoundary::Eavt(crate::IndexComponents::Four(
+            entity,
+            1_000,
+            Value::Long(7),
+            crate::IndexTransaction::T(2),
+        ))
+        .normalized()
+        .unwrap();
+
+        assert!(
+            tier.boundary_cursor(false, &boundary).next().is_none(),
+            "the endpoint winner at T=3 sorts before T=2; starting raw history at T=2 would resurrect its stale T=2 assertion"
+        );
+        assert_eq!(
+            tier.boundary_cursor(true, &boundary)
+                .map(|datom| crate::tx_to_t(datom.tx).unwrap())
+                .collect::<Vec<_>>(),
+            vec![2, 1]
         );
     }
 

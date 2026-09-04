@@ -56,10 +56,7 @@ fn setup_empty(connection: &str, database_id: &str) {
     );
 }
 
-fn corrupt_latest_v5_manifest_payload(
-    client: &mut impl GenericClient,
-    database_id: &str,
-) -> Vec<u8> {
+fn corrupt_latest_manifest_payload(client: &mut impl GenericClient, database_id: &str) -> Vec<u8> {
     let mut payload: Vec<u8> = client
         .query_one(
             "SELECT m.payload FROM atomic_tree_publications p \
@@ -77,7 +74,7 @@ fn corrupt_latest_v5_manifest_payload(
     assert_eq!(payload.get(..4), Some(b"ATIM".as_slice()));
     assert_eq!(
         u16::from_be_bytes(payload[4..6].try_into().unwrap()),
-        5,
+        6,
         "poison fixture must track the current canonical manifest version"
     );
     let checksum_byte = payload.len() - 1;
@@ -139,11 +136,11 @@ fn finish_zero_delta_publication_work(client: &mut impl GenericClient, manifest_
     );
 }
 
-fn publish_corrupt_v5_manifest(client: &mut Client, database_id: &str) -> (u64, u64, [u8; 32]) {
+fn publish_corrupt_manifest(client: &mut Client, database_id: &str) -> (u64, u64, [u8; 32]) {
     let mut transaction = client.transaction().unwrap();
     let authoritative = transaction
         .query_one(
-            "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
+            "SELECT p.publication_revision, m.basis_t, m.index_basis_t, m.tx_hash, m.state_hash, \
                     m.excision_generation, m.eidx_frontier, m.manifest_hash, \
                     m.log_generation, m.lineage_id \
                FROM atomic_tree_publications p \
@@ -160,26 +157,28 @@ fn publish_corrupt_v5_manifest(client: &mut Client, database_id: &str) -> (u64, 
     let current_revision: i64 = authoritative.get(0);
     let poison_revision = current_revision.checked_add(1).unwrap();
     let basis_t: i64 = authoritative.get(1);
-    let tx_hash: Vec<u8> = authoritative.get(2);
-    let state_hash: Vec<u8> = authoritative.get(3);
-    let generation: i64 = authoritative.get(4);
-    let eidx_frontier: i64 = authoritative.get(5);
-    let source_manifest_hash: Vec<u8> = authoritative.get(6);
-    let log_generation: i64 = authoritative.get(7);
-    let lineage_id: Option<String> = authoritative.get(8);
-    let poison_payload = corrupt_latest_v5_manifest_payload(&mut transaction, database_id);
+    let index_basis_t: i64 = authoritative.get(2);
+    let tx_hash: Vec<u8> = authoritative.get(3);
+    let state_hash: Vec<u8> = authoritative.get(4);
+    let generation: i64 = authoritative.get(5);
+    let eidx_frontier: i64 = authoritative.get(6);
+    let source_manifest_hash: Vec<u8> = authoritative.get(7);
+    let log_generation: i64 = authoritative.get(8);
+    let lineage_id: Option<String> = authoritative.get(9);
+    let poison_payload = corrupt_latest_manifest_payload(&mut transaction, database_id);
     let poison_hash = sha256(&poison_payload);
     transaction
         .execute(
             "INSERT INTO atomic_tree_manifests \
-               (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+               (database_id, publication_revision, basis_t, index_basis_t, tx_hash, state_hash, \
                 excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                 log_generation, lineage_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 5, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 6, $9, $10, $11, $12)",
             &[
                 &database_id,
                 &poison_revision,
                 &basis_t,
+                &index_basis_t,
                 &tx_hash,
                 &state_hash,
                 &generation,
@@ -517,7 +516,7 @@ fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
 
     let mut sql = Client::connect(&connection, NoTls).unwrap();
     let (poison_basis, poison_revision, poison_hash) =
-        publish_corrupt_v5_manifest(&mut sql, &database_id);
+        publish_corrupt_manifest(&mut sql, &database_id);
     assert_eq!(poison_basis, initial_basis);
     assert_eq!(poison_revision, first.published_revision + 1);
     let head_before: i64 = sql
@@ -894,7 +893,7 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     let source = poison
         .query_one(
             "SELECT p.publication_revision, p.manifest_hash, \
-                    m.log_generation, m.lineage_id \
+                    m.log_generation, m.lineage_id, m.index_basis_t \
                FROM atomic_tree_publications p \
                JOIN atomic_tree_manifests m \
                  ON m.database_id = p.database_id \
@@ -911,14 +910,15 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     let source_manifest_hash: Vec<u8> = source.get(1);
     let log_generation: i64 = source.get(2);
     let lineage_id: Option<String> = source.get(3);
+    let source_index_basis_t: i64 = source.get(4);
     assert_eq!(
         u64::try_from(current_revision).unwrap(),
         initial.published_revision
     );
-    // Preserve the current v5 envelope header and corrupt its checksum. This
+    // Preserve the current v6 envelope header and corrupt its checksum. This
     // remains a hash-named immutable value at SQL level while the canonical
     // decoder correctly rejects it.
-    let poison_payload = corrupt_latest_v5_manifest_payload(&mut poison, &database_id);
+    let poison_payload = corrupt_latest_manifest_payload(&mut poison, &database_id);
     let poison_hash = sha256(&poison_payload);
     let generation: i64 = poison
         .query_one(
@@ -931,14 +931,15 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     poison
         .execute(
             "INSERT INTO atomic_tree_manifests \
-               (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+               (database_id, publication_revision, basis_t, index_basis_t, tx_hash, state_hash, \
                 excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                 log_generation, lineage_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 5, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 6, $9, $10, $11, $12)",
             &[
                 &database_id,
                 &poison_revision,
                 &(committed.basis_t as i64),
+                &source_index_basis_t,
                 &tx_hash,
                 &state_hash,
                 &generation,

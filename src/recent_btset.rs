@@ -172,6 +172,21 @@ impl RecentBtSet {
         BtCursor::seek(self.root.clone(), compare)
     }
 
+    /// Reverse cursor beginning at the greatest item in this immutable tree.
+    pub(crate) fn reverse_cursor(&self) -> BtCursor {
+        BtCursor::last(self.root.clone())
+    }
+
+    /// Reverse upper-bound seek against a virtual key.
+    ///
+    /// The first `prev` returns the greatest item whose comparison is less
+    /// than or equal to the key. Projected raw-index boundaries can therefore
+    /// position after their highest match without manufacturing a concrete
+    /// sentinel datom.
+    pub(crate) fn reverse_seek_by(&self, compare: impl Fn(&Datom) -> Ordering) -> BtCursor {
+        BtCursor::seek_upper(self.root.clone(), compare)
+    }
+
     #[cfg(test)]
     pub(crate) fn node_ids(&self) -> BTreeSet<usize> {
         fn collect(node: &Arc<Node>, result: &mut BTreeSet<usize>) {
@@ -356,6 +371,67 @@ impl BtCursor {
         }
     }
 
+    fn last(root: Option<Arc<Node>>) -> Self {
+        let mut cursor = Self {
+            path: Vec::new(),
+            leaf: None,
+            position: 0,
+            work: BtWork::default(),
+        };
+        if let Some(root) = root {
+            cursor.descend_right(root);
+        }
+        cursor
+    }
+
+    /// Position immediately after the greatest item `<=` a virtual key.
+    fn seek_upper(root: Option<Arc<Node>>, compare: impl Fn(&Datom) -> Ordering) -> Self {
+        let mut cursor = Self {
+            path: Vec::new(),
+            leaf: None,
+            position: 0,
+            work: BtWork::default(),
+        };
+        let Some(mut node) = root else {
+            return cursor;
+        };
+        loop {
+            cursor.work.node_visits = cursor.work.node_visits.saturating_add(1);
+            match node.as_ref() {
+                Node::Leaf { items } => {
+                    let position = items.partition_point(|item| {
+                        cursor.work.comparisons = cursor.work.comparisons.saturating_add(1);
+                        !compare(item.datom()).is_gt()
+                    });
+                    cursor.leaf = Some(Arc::clone(&node));
+                    cursor.position = position;
+                    if position == 0 {
+                        cursor.retreat_leaf();
+                    }
+                    return cursor;
+                }
+                Node::Branch {
+                    separators,
+                    children,
+                    ..
+                } => {
+                    // A separator is the first item of its right child. For
+                    // an upper bound, equality belongs on the right so a
+                    // projected prefix reaches its rightmost matching child.
+                    let child = separators.partition_point(|separator| {
+                        cursor.work.comparisons = cursor.work.comparisons.saturating_add(1);
+                        !compare(separator.datom()).is_gt()
+                    });
+                    cursor.path.push(PathFrame {
+                        branch: Arc::clone(&node),
+                        child,
+                    });
+                    node = Arc::clone(&children[child]);
+                }
+            }
+        }
+    }
+
     fn descend_left(&mut self, mut node: Arc<Node>) {
         loop {
             self.work.node_visits = self.work.node_visits.saturating_add(1);
@@ -371,6 +447,27 @@ impl BtCursor {
                         child: 0,
                     });
                     node = Arc::clone(&children[0]);
+                }
+            }
+        }
+    }
+
+    fn descend_right(&mut self, mut node: Arc<Node>) {
+        loop {
+            self.work.node_visits = self.work.node_visits.saturating_add(1);
+            match node.as_ref() {
+                Node::Leaf { items } => {
+                    self.position = items.len();
+                    self.leaf = Some(node);
+                    return;
+                }
+                Node::Branch { children, .. } => {
+                    let child = children.len() - 1;
+                    self.path.push(PathFrame {
+                        branch: Arc::clone(&node),
+                        child,
+                    });
+                    node = Arc::clone(&children[child]);
                 }
             }
         }
@@ -392,6 +489,22 @@ impl BtCursor {
         }
     }
 
+    fn retreat_leaf(&mut self) {
+        self.leaf = None;
+        while let Some(frame) = self.path.last_mut() {
+            let Node::Branch { children, .. } = frame.branch.as_ref() else {
+                unreachable!("cursor path contains only branches")
+            };
+            if frame.child > 0 {
+                frame.child -= 1;
+                let child = Arc::clone(&children[frame.child]);
+                self.descend_right(child);
+                return;
+            }
+            self.path.pop();
+        }
+    }
+
     pub(crate) fn next(&mut self) -> Option<RecentDatomRef> {
         loop {
             let leaf = self.leaf.as_ref()?;
@@ -403,6 +516,20 @@ impl BtCursor {
                 return Some(item.clone());
             }
             self.advance_leaf();
+        }
+    }
+
+    pub(crate) fn prev(&mut self) -> Option<RecentDatomRef> {
+        loop {
+            let leaf = self.leaf.as_ref()?;
+            let Node::Leaf { items } = leaf.as_ref() else {
+                unreachable!("cursor leaf points to a leaf")
+            };
+            if self.position > 0 {
+                self.position -= 1;
+                return Some(items[self.position].clone());
+            }
+            self.retreat_leaf();
         }
     }
 
@@ -476,6 +603,39 @@ mod tests {
                 .next()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn reverse_cursor_and_virtual_upper_seek_follow_predecessor_paths() {
+        let mut tree = RecentBtSet::empty(IndexOrder::Eavt);
+        for value in (0..257).rev() {
+            tree = tree.insert(item(value), &mut BtWork::default()).0;
+        }
+
+        let mut reverse = tree.reverse_cursor();
+        let mut values = Vec::new();
+        while let Some(reference) = reverse.prev() {
+            values.push(reference.datom().entity - 1);
+        }
+        assert_eq!(values, (0..257).rev().collect::<Vec<_>>());
+
+        let mut existing = tree.reverse_seek_by(|candidate| candidate.entity.cmp(&(128 + 1)));
+        assert_eq!(existing.prev().unwrap().datom().entity, 128 + 1);
+        assert!(existing.work().node_visits <= u64::from(tree.height()) + 1);
+
+        let mut before_first = tree.reverse_seek_by(|candidate| candidate.entity.cmp(&0));
+        assert!(before_first.prev().is_none());
+        assert!(before_first.work().node_visits <= u64::from(tree.height()) + 1);
+
+        // Every item has the same A prefix. Equality must descend right and
+        // begin after the highest virtual-prefix match.
+        let mut by_attribute = RecentBtSet::empty(IndexOrder::Aevt);
+        for value in 0..257 {
+            by_attribute = by_attribute.insert(item(value), &mut BtWork::default()).0;
+        }
+        let mut prefix = by_attribute.reverse_seek_by(|candidate| candidate.attribute.cmp(&1));
+        assert_eq!(prefix.prev().unwrap().datom().entity, 257);
+        assert!(prefix.work().node_visits <= u64::from(by_attribute.height()) + 1);
     }
 
     #[test]

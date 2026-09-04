@@ -87,7 +87,16 @@ contracts while retaining Goal 16's bounded root-plus-tail architecture.
 
 ### 1. Exact public contract, time points, and raw bounds
 
-**Status:** Pending.
+**Status:** In progress 2026-09-03. Explicit `TimePoint::{T, Tx, Instant}`
+now follows recovered `as-of-t`/`entid-at`, including earliest exact
+duplicate-millisecond selection, inclusive as-of, exclusive since, and the
+separate first-at-or-after instant rule for entity boundaries. Typed
+zero-through-four-component raw boundaries now fixture forward-lower and
+reverse-upper positioning in every index, checked T/Tx normalization, AVET
+qualification, and VAET reference requirements. Focused pure witnesses pass;
+the remaining Stage 1 work is exact-value ident/lookup-ref/schema
+normalization at the public raw boundary plus a non-skipping native
+PostgreSQL bounded-read witness.
 
 **Outcome:** The public types can express every documented native time point
 and zero-to-four-component raw index boundary without sentinels or eager-only

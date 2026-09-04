@@ -1,5 +1,6 @@
 use crate::database_value::{LogicalReadObserver, TransactionReadContext};
 use crate::idents::IdentIndex;
+use crate::index::{IndexComponents, NormalizedIndexBoundary};
 use crate::operations::tree_manifest_advisory_key;
 use crate::persistent_tree::{
     ChildRef, DirectoryNode, LeafSegment, RootNode, TreeBuildStats, TreeConfig, TreeMergeEdits,
@@ -16,12 +17,14 @@ use crate::recent::{
 };
 use crate::state_commitment::{checkpoint_information, verify_checkpoint_state_hash};
 use crate::{
-    AvetProjectionWork, Database, DatabaseValue, Datom, Digest, DurableTransaction, Entity,
-    EntityIdentifier, ErrorCategory, IndexManifest, IndexOrder, IndexPrefix, IndexSegment,
-    ManifestTree, PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, PullPattern,
-    Query, QueryControl, QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
-    TreeManifestRecord, TreePublicationDelta, TreePublishOutcome, TreeRootBinding, View,
-    decode_index_manifest, decode_index_segment, encode_genesis, sha256, tx_to_t,
+    AvetProjectionWork, Database, DatabaseIdentity, DatabaseValue, Datom, Digest,
+    DurableTransaction, Entity, EntityIdentifier, ErrorCategory, IndexBoundary, IndexManifest,
+    IndexOrder, IndexPrefix, IndexSegment, ManifestTree, PersistentTreeManifest,
+    PostgresConnectionConfig, PostgresTreeStore, PullPattern, Query, QueryControl,
+    QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
+    ServiceTransactionReport, TreeManifestRecord, TreePublicationDelta, TreePublishOutcome,
+    TreeRootBinding, View, decode_index_manifest, decode_index_segment, encode_genesis, sha256,
+    tx_to_t,
 };
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
@@ -29,7 +32,7 @@ use postgres::{Client, GenericClient};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 const DEFAULT_SEGMENT_DATOMS: usize = 4_096;
@@ -1092,6 +1095,10 @@ impl PostgresIndexer {
         } else {
             None
         };
+        let predecessor_index_basis_t = selection
+            .usable
+            .as_ref()
+            .map(|(previous, _, _, _)| previous.index_basis_t);
         let mut publish_basis_t = basis_t;
         let mut publish_tx_hash = tx_hash;
         let mut publish_state_hash = stored_state;
@@ -1195,10 +1202,24 @@ impl PostgresIndexer {
             *claimed_predecessor = predecessor_manifest_hash;
         }
         let completed_avet_sort = build.completed_avet_sort;
+        let index_basis_t = if build.pending_avet.is_empty() {
+            // Recovered `complete-indexing` advances indexBasisT only when
+            // the completed root is accepted. The final same-basis AVET step
+            // is therefore genuine physical progress.
+            publish_basis_t
+        } else {
+            predecessor_index_basis_t.ok_or_else(|| {
+                fault(
+                    "tree/missing-index-basis-predecessor",
+                    "pending AVET work requires an authenticated predecessor index basis",
+                )
+            })?
+        };
 
         let tree_manifest = PersistentTreeManifest {
             database_id: self.database_id.clone(),
             publication_revision,
+            index_basis_t,
             basis_t: publish_basis_t,
             tx_hash: publish_tx_hash,
             state_hash: publish_state_hash,
@@ -1225,6 +1246,7 @@ impl PostgresIndexer {
             database_id: self.database_id.clone(),
             publication_revision,
             basis_t: publish_basis_t,
+            index_basis_t,
             tx_hash: publish_tx_hash,
             state_hash: publish_state_hash,
             excision_generation,
@@ -1474,6 +1496,7 @@ pub(crate) fn build_full_native_tree(
         manifest: PersistentTreeManifest {
             database_id: database_id.to_owned(),
             publication_revision,
+            index_basis_t: database.basis_t(),
             basis_t: database.basis_t(),
             tx_hash,
             state_hash,
@@ -1520,6 +1543,7 @@ pub(crate) fn stage_full_generation_tree(
         database_id: database_id.to_owned(),
         publication_revision,
         basis_t: manifest.basis_t,
+        index_basis_t: manifest.index_basis_t,
         tx_hash,
         state_hash,
         excision_generation: log_generation,
@@ -4299,6 +4323,7 @@ impl Drop for RootPin {
 /// each `TieredState` keep their exact durable content alive.
 struct TieredReadCore {
     database_id: String,
+    lineage_id: String,
     connection: PostgresConnectionConfig,
     recent_limits: RecentLimits,
     load_counters: PeerLoadCounters,
@@ -4313,7 +4338,9 @@ struct PeerCore {
     update: Mutex<()>,
     /// Explicit transaction-report observation channel. `None` is the normal
     /// state; reports are retained only after the caller opts in.
-    reports: Mutex<Option<VecDeque<DurableTransaction>>>,
+    reports: Mutex<Option<VecDeque<ServiceTransactionReport>>>,
+    report_ready: Condvar,
+    state_advanced: Condvar,
     /// One publication cell for all peer-observable connection state.
     state: RwLock<Arc<PeerState>>,
 }
@@ -4321,6 +4348,7 @@ struct PeerCore {
 fn reconnect_peer_io(core: &TieredReadCore, io: &mut PeerIo) -> Result<(), SemanticError> {
     let mut client = core.connection.connect_for("peer/reconnect")?;
     verify_schema_compatibility(&mut client)?;
+    verify_database_lineage(&mut client, &core.database_id, &core.lineage_id)?;
     io.client = client;
     Ok(())
 }
@@ -4334,6 +4362,7 @@ fn reconnect_peer_io_with_timeout(
         .connection
         .connect_for_with_timeout("peer/reconnect", Some(timeout))?;
     verify_schema_compatibility(&mut client)?;
+    verify_database_lineage(&mut client, &core.database_id, &core.lineage_id)?;
     io.client = client;
     Ok(())
 }
@@ -4429,6 +4458,7 @@ impl Peer {
         // Fail before reading a head or any derived value when this peer does
         // not understand the installed PostgreSQL schema.
         verify_schema_compatibility(&mut client)?;
+        let lineage_id = read_database_lineage(&mut client, &database_id)?;
         let (head_basis, head_hash) = read_head(&mut client, &database_id)?;
         let excision_generation = read_excision_generation(&mut client, &database_id)?;
         let mut cache = SegmentCache::new(cache_entries);
@@ -4578,6 +4608,10 @@ impl Peer {
                 cell,
             )
         };
+        // Catalog names are addresses, not identities. Close the initial
+        // multi-statement observation window before exposing a live handle;
+        // every reconnect repeats this check.
+        verify_database_lineage(&mut client, &database_id, &lineage_id)?;
         let root_pins = RootPinManager::connect(connection, &database_id)?;
         let generation_pin = root_pins.acquire_generation(excision_generation)?;
         let root_pin = root_pins.acquire(tree_base.as_deref())?;
@@ -4587,6 +4621,7 @@ impl Peer {
         });
         let read = Arc::new(TieredReadCore {
             database_id,
+            lineage_id,
             connection: connection.clone(),
             recent_limits,
             load_counters,
@@ -4599,6 +4634,8 @@ impl Peer {
                 recent_limits,
                 update: Mutex::new(()),
                 reports: Mutex::new(None),
+                report_ready: Condvar::new(),
+                state_advanced: Condvar::new(),
                 state: RwLock::new(Arc::new(PeerState {
                     tiered: Arc::new(TieredState {
                         basis_t,
@@ -4708,6 +4745,14 @@ impl Peer {
         self.tiered_snapshot().database_value()
     }
 
+    /// Stable logical database identity retained when this peer was opened.
+    pub fn identity(&self) -> DatabaseIdentity {
+        DatabaseIdentity::new(
+            self.core.read.database_id.clone(),
+            self.core.read.lineage_id.clone(),
+        )
+    }
+
     pub fn recent_stats(&self) -> crate::recent::RecentStats {
         self.state().recent.stats()
     }
@@ -4785,6 +4830,11 @@ impl Peer {
         Ok(self.snapshot_for_state(state))
     }
 
+    /// Advance and return the ordinary immutable native database value.
+    pub fn sync_database_value(&self) -> Result<DatabaseValue, SemanticError> {
+        self.sync_snapshot().map(|snapshot| snapshot.database_value())
+    }
+
     pub fn sync_to_snapshot(
         &self,
         target: u64,
@@ -4792,6 +4842,17 @@ impl Peer {
     ) -> Result<PeerSnapshot, SemanticError> {
         let state = self.wait_for_basis(target, timeout, false)?;
         Ok(self.snapshot_for_state(state))
+    }
+
+    /// Wait for a requested logical basis and return its native value without
+    /// eager compatibility materialization.
+    pub fn sync_to_database_value(
+        &self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<DatabaseValue, SemanticError> {
+        self.sync_to_snapshot(target, timeout)
+            .map(|snapshot| snapshot.database_value())
     }
 
     fn wait_for_basis(
@@ -4898,14 +4959,16 @@ impl Peer {
     /// Remove the optional report channel and release every unconsumed report.
     pub fn remove_tx_reports(&self) -> bool {
         let _update = lock(&self.core.update);
-        lock(&self.core.reports).take().is_some()
+        let removed = lock(&self.core.reports).take().is_some();
+        self.core.report_ready.notify_all();
+        removed
     }
 
     pub fn tx_reports_enabled(&self) -> bool {
         lock(&self.core.reports).is_some()
     }
 
-    pub fn take_tx_reports(&self) -> Vec<DurableTransaction> {
+    pub fn take_tx_reports(&self) -> Vec<ServiceTransactionReport> {
         // Share the updater lock so draining cannot race successor adoption.
         // Unlike the old implementation, draining reports does not publish a
         // counterfeit new database generation.
@@ -4915,6 +4978,128 @@ impl Peer {
             return Vec::new();
         };
         reports.drain(..).collect()
+    }
+
+    pub fn try_next_tx_report(&self) -> Option<ServiceTransactionReport> {
+        lock(&self.core.reports)
+            .as_mut()
+            .and_then(VecDeque::pop_front)
+    }
+
+    pub fn next_tx_report(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<ServiceTransactionReport>, SemanticError> {
+        let deadline = Instant::now() + timeout;
+        let mut slot = lock(&self.core.reports);
+        loop {
+            let Some(queue) = slot.as_mut() else {
+                return Ok(None);
+            };
+            if let Some(report) = queue.pop_front() {
+                return Ok(Some(report));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let (next, waited) = self
+                .core
+                .report_ready
+                .wait_timeout(slot, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            slot = next;
+            if waited.timed_out() {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Install one exact committed native successor supplied by the fenced
+    /// service. This operation performs no PostgreSQL I/O: once the service
+    /// has acknowledged COMMIT, local observation cannot turn that success
+    /// into an ordinary storage error.
+    pub(crate) fn adopt_committed_report(
+        &self,
+        report: &ServiceTransactionReport,
+    ) -> Result<DatabaseValue, SemanticError> {
+        let before = report.db_before.native_tiered_snapshot().ok_or_else(|| {
+            fault(
+                "peer/report-before-not-native",
+                "transaction report db-before is not one direct native value",
+            )
+        })?;
+        let after = report.db_after.native_tiered_snapshot().ok_or_else(|| {
+            fault(
+                "peer/report-after-not-native",
+                "transaction report db-after is not one direct native value",
+            )
+        })?;
+        if before.core.database_id != self.core.read.database_id
+            || after.core.database_id != self.core.read.database_id
+            || before.core.lineage_id != self.core.read.lineage_id
+            || after.core.lineage_id != self.core.read.lineage_id
+        {
+            return Err(fault(
+                "peer/report-database-identity",
+                "transaction report belongs to a different database lineage",
+            ));
+        }
+        if report.basis_t == 0
+            || before.basis_t().checked_add(1) != Some(report.basis_t)
+            || after.basis_t() != report.basis_t
+            || after.transaction_hash() != report.tx_hash
+        {
+            return Err(fault(
+                "peer/report-coordinate",
+                "transaction report before/after values do not form its claimed successor",
+            ));
+        }
+
+        let _update = lock(&self.core.update);
+        let current = self.state();
+        if current.basis_t > report.basis_t {
+            return Ok(self.database_value());
+        }
+        if current.basis_t == report.basis_t {
+            if current.current_hash != report.tx_hash {
+                return Err(fault(
+                    "peer/report-fork",
+                    "transaction report conflicts with the already adopted basis",
+                ));
+            }
+            return Ok(self.database_value());
+        }
+        if current.basis_t != before.basis_t()
+            || current.current_hash != before.transaction_hash()
+        {
+            return Err(fault(
+                "peer/report-gap",
+                "transaction reports must be adopted in contiguous source order",
+            ));
+        }
+
+        let mut tiered = (*after.state).clone();
+        tiered.generation = current.generation.saturating_add(1);
+        let published = Arc::new(PeerState {
+            tiered: Arc::new(tiered),
+            compatibility: Arc::new(PeerCompatibility {
+                value: OnceLock::new(),
+                segments: Arc::clone(&current.compatibility.segments),
+            }),
+        });
+        self.publish_arc(Arc::clone(&published));
+        if !report.replayed
+            && let Some(queue) = lock(&self.core.reports).as_mut()
+        {
+            queue.push_back(report.clone());
+            self.core.report_ready.notify_one();
+        }
+        Ok(TieredSnapshot {
+            core: Arc::clone(&self.core.read),
+            state: Arc::clone(&published.tiered),
+        }
+        .database_value())
     }
 
     /// Adopt a newly published physical base without changing the connection's
@@ -5124,9 +5309,6 @@ impl Peer {
             compatibility,
         });
         self.publish_arc(Arc::clone(&published));
-        if let Some(reports) = lock(&self.core.reports).as_mut() {
-            reports.extend(tail.transactions);
-        }
         Ok(published)
     }
 
@@ -5318,6 +5500,7 @@ impl Peer {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+        self.core.state_advanced.notify_all();
     }
 }
 
@@ -5352,6 +5535,7 @@ pub struct PeerIndexCursor {
     recent: RecentCursor,
     history: bool,
     order: IndexOrder,
+    reverse: bool,
     durable_next: Option<Datom>,
     recent_next: Option<Datom>,
     failed: bool,
@@ -5366,6 +5550,8 @@ struct DurableTreeCursor {
     start: Option<Datom>,
     end: Option<Datom>,
     prefix: Option<IndexPrefix>,
+    forward_boundary: Option<TreeBoundary>,
+    reverse_boundary: Option<TreeBoundary>,
     directory_index: usize,
     leaf_index: usize,
     directory: Option<LoadedDirectory>,
@@ -5373,6 +5559,191 @@ struct DurableTreeCursor {
     datom_index: usize,
     stats: TreeReadStats,
     exhausted: bool,
+}
+
+/// One normalized raw seek boundary plus the prefix form needed to compare
+/// sparse persistent-tree routing keys. A full E/A/V/T boundary compares a
+/// routing key's T only after its logical three-component prefix; `added` and
+/// stored-value ties intentionally remain outside the public boundary.
+#[derive(Clone, Debug)]
+struct TreeBoundary {
+    normalized: NormalizedIndexBoundary,
+    routing_prefix: Option<IndexPrefix>,
+    tx: Option<u64>,
+}
+
+impl TreeBoundary {
+    fn new(normalized: NormalizedIndexBoundary) -> Self {
+        let (routing_prefix, tx) = match &normalized {
+            NormalizedIndexBoundary::Eavt(components) => match components {
+                IndexComponents::Empty => (None, None),
+                IndexComponents::One(e) => (
+                    Some(IndexPrefix::Eavt {
+                        entity: *e,
+                        attribute: None,
+                        value: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Two(e, a) => (
+                    Some(IndexPrefix::Eavt {
+                        entity: *e,
+                        attribute: Some(*a),
+                        value: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Three(e, a, v) => (
+                    Some(IndexPrefix::Eavt {
+                        entity: *e,
+                        attribute: Some(*a),
+                        value: Some(v.clone()),
+                    }),
+                    None,
+                ),
+                IndexComponents::Four(e, a, v, t) => (
+                    Some(IndexPrefix::Eavt {
+                        entity: *e,
+                        attribute: Some(*a),
+                        value: Some(v.clone()),
+                    }),
+                    Some(*t),
+                ),
+            },
+            NormalizedIndexBoundary::Aevt(components) => match components {
+                IndexComponents::Empty => (None, None),
+                IndexComponents::One(a) => (
+                    Some(IndexPrefix::Aevt {
+                        attribute: *a,
+                        entity: None,
+                        value: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Two(a, e) => (
+                    Some(IndexPrefix::Aevt {
+                        attribute: *a,
+                        entity: Some(*e),
+                        value: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Three(a, e, v) => (
+                    Some(IndexPrefix::Aevt {
+                        attribute: *a,
+                        entity: Some(*e),
+                        value: Some(v.clone()),
+                    }),
+                    None,
+                ),
+                IndexComponents::Four(a, e, v, t) => (
+                    Some(IndexPrefix::Aevt {
+                        attribute: *a,
+                        entity: Some(*e),
+                        value: Some(v.clone()),
+                    }),
+                    Some(*t),
+                ),
+            },
+            NormalizedIndexBoundary::Avet(components) => match components {
+                IndexComponents::Empty => (None, None),
+                IndexComponents::One(a) => (
+                    Some(IndexPrefix::Avet {
+                        attribute: *a,
+                        value: None,
+                        entity: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Two(a, v) => (
+                    Some(IndexPrefix::Avet {
+                        attribute: *a,
+                        value: Some(v.clone()),
+                        entity: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Three(a, v, e) => (
+                    Some(IndexPrefix::Avet {
+                        attribute: *a,
+                        value: Some(v.clone()),
+                        entity: Some(*e),
+                    }),
+                    None,
+                ),
+                IndexComponents::Four(a, v, e, t) => (
+                    Some(IndexPrefix::Avet {
+                        attribute: *a,
+                        value: Some(v.clone()),
+                        entity: Some(*e),
+                    }),
+                    Some(*t),
+                ),
+            },
+            NormalizedIndexBoundary::Vaet(components) => match components {
+                IndexComponents::Empty => (None, None),
+                IndexComponents::One(v) => (
+                    Some(IndexPrefix::Vaet {
+                        value: v.clone(),
+                        attribute: None,
+                        entity: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Two(v, a) => (
+                    Some(IndexPrefix::Vaet {
+                        value: v.clone(),
+                        attribute: Some(*a),
+                        entity: None,
+                    }),
+                    None,
+                ),
+                IndexComponents::Three(v, a, e) => (
+                    Some(IndexPrefix::Vaet {
+                        value: v.clone(),
+                        attribute: Some(*a),
+                        entity: Some(*e),
+                    }),
+                    None,
+                ),
+                IndexComponents::Four(v, a, e, t) => (
+                    Some(IndexPrefix::Vaet {
+                        value: v.clone(),
+                        attribute: Some(*a),
+                        entity: Some(*e),
+                    }),
+                    Some(*t),
+                ),
+            },
+        };
+        Self {
+            normalized,
+            routing_prefix,
+            tx,
+        }
+    }
+
+    fn compare_routing_key(&self, key: &crate::persistent_tree::RoutingKey) -> std::cmp::Ordering {
+        let Some(prefix) = &self.routing_prefix else {
+            return std::cmp::Ordering::Equal;
+        };
+        let primary = key.cmp_prefix(prefix);
+        if primary.is_ne() {
+            return primary;
+        }
+        let Some(tx) = self.tx else {
+            return std::cmp::Ordering::Equal;
+        };
+        if key.tx == 0 {
+            // A validated sparse routing key with omitted T is below every
+            // concrete member of the tied logical prefix.
+            std::cmp::Ordering::Less
+        } else {
+            // T sorts descending. Equality intentionally covers assertion,
+            // retraction, and every strict stored representation at this T.
+            tx.cmp(&key.tx)
+        }
+    }
 }
 
 impl DurableTreeCursor {
@@ -5396,6 +5767,8 @@ impl DurableTreeCursor {
             start,
             end,
             prefix: None,
+            forward_boundary: None,
+            reverse_boundary: None,
             directory_index,
             leaf_index: 0,
             directory: None,
@@ -5423,6 +5796,8 @@ impl DurableTreeCursor {
             start: None,
             end: None,
             prefix: Some(prefix),
+            forward_boundary: None,
+            reverse_boundary: None,
             directory_index,
             leaf_index: 0,
             directory: None,
@@ -5433,7 +5808,69 @@ impl DurableTreeCursor {
         }
     }
 
+    fn new_forward_boundary(
+        snapshot: TieredSnapshot,
+        root: Arc<RootNode>,
+        history: bool,
+        boundary: NormalizedIndexBoundary,
+    ) -> Self {
+        let order = boundary.order();
+        let boundary = TreeBoundary::new(boundary);
+        let exhausted = root.directories.is_empty();
+        let directory_index = boundary_floor_child(&root.directories, &boundary).unwrap_or(0);
+        Self {
+            snapshot,
+            root,
+            history,
+            order,
+            start: None,
+            end: None,
+            prefix: None,
+            forward_boundary: Some(boundary),
+            reverse_boundary: None,
+            directory_index,
+            leaf_index: 0,
+            directory: None,
+            leaf: None,
+            datom_index: 0,
+            stats: TreeReadStats::default(),
+            exhausted,
+        }
+    }
+
+    fn new_reverse(
+        snapshot: TieredSnapshot,
+        root: Arc<RootNode>,
+        history: bool,
+        boundary: NormalizedIndexBoundary,
+    ) -> Self {
+        let order = boundary.order();
+        let boundary = TreeBoundary::new(boundary);
+        let directory_index = boundary_floor_child(&root.directories, &boundary);
+        Self {
+            snapshot,
+            root,
+            history,
+            order,
+            start: None,
+            end: None,
+            prefix: None,
+            forward_boundary: None,
+            reverse_boundary: Some(boundary),
+            directory_index: directory_index.unwrap_or(0),
+            leaf_index: 0,
+            directory: None,
+            leaf: None,
+            datom_index: 0,
+            stats: TreeReadStats::default(),
+            exhausted: directory_index.is_none(),
+        }
+    }
+
     fn next_datom(&mut self) -> Result<Option<Datom>, SemanticError> {
+        if self.reverse_boundary.is_some() {
+            return self.next_reverse_datom();
+        }
         if self.exhausted {
             return Ok(None);
         }
@@ -5450,6 +5887,13 @@ impl DurableTreeCursor {
                                 return Ok(None);
                             }
                         }
+                    }
+                    if self
+                        .forward_boundary
+                        .as_ref()
+                        .is_some_and(|boundary| boundary.normalized.compare_datom(&datom).is_lt())
+                    {
+                        continue;
                     }
                     if self
                         .start
@@ -5496,14 +5940,15 @@ impl DurableTreeCursor {
                         self.history,
                         &mut self.stats,
                     )?;
-                    self.datom_index = self.start.as_ref().map_or_else(
-                        || {
-                            self.prefix
-                                .as_ref()
-                                .map_or(0, |prefix| leaf_prefix_lower_bound(&leaf, prefix))
-                        },
-                        |start| leaf_lower_bound(&leaf, start, self.order),
-                    );
+                    self.datom_index = if let Some(start) = &self.start {
+                        leaf_lower_bound(&leaf, start, self.order)
+                    } else if let Some(prefix) = &self.prefix {
+                        leaf_prefix_lower_bound(&leaf, prefix)
+                    } else if let Some(boundary) = &self.forward_boundary {
+                        leaf_boundary_lower_bound(&leaf, boundary)
+                    } else {
+                        0
+                    };
                     self.leaf = Some(leaf);
                     continue;
                 }
@@ -5537,14 +5982,104 @@ impl DurableTreeCursor {
                 self.history,
                 &mut self.stats,
             )?;
-            self.leaf_index = self.start.as_ref().map_or_else(
-                || {
-                    self.prefix
+            self.leaf_index = if let Some(key) = &self.start {
+                floor_tree_child(&directory.leaves, key, self.order)
+            } else if let Some(prefix) = &self.prefix {
+                prefix_start_child(&directory.leaves, prefix)
+            } else if let Some(boundary) = &self.forward_boundary {
+                boundary_floor_child(&directory.leaves, boundary).unwrap_or(0)
+            } else {
+                0
+            };
+            self.directory = Some(directory);
+        }
+    }
+
+    fn next_reverse_datom(&mut self) -> Result<Option<Datom>, SemanticError> {
+        if self.exhausted {
+            return Ok(None);
+        }
+        loop {
+            if let Some(leaf) = &self.leaf {
+                while self.datom_index > 0 {
+                    self.datom_index -= 1;
+                    let datom = leaf
+                        .datom(self.datom_index)
+                        .expect("validated parallel leaf columns");
+                    if self
+                        .reverse_boundary
                         .as_ref()
-                        .map_or(0, |prefix| prefix_start_child(&directory.leaves, prefix))
-                },
-                |key| floor_tree_child(&directory.leaves, key, self.order),
-            );
+                        .expect("reverse cursor retains its boundary")
+                        .normalized
+                        .compare_datom(&datom)
+                        .is_gt()
+                    {
+                        continue;
+                    }
+                    return Ok(Some(datom));
+                }
+                self.leaf = None;
+                if self.leaf_index > 0 {
+                    self.leaf_index -= 1;
+                } else {
+                    self.directory = None;
+                    if self.directory_index > 0 {
+                        self.directory_index -= 1;
+                    } else {
+                        self.exhausted = true;
+                        return Ok(None);
+                    }
+                }
+            }
+
+            if let Some(directory) = &self.directory {
+                let reference = directory
+                    .leaves
+                    .get(self.leaf_index)
+                    .cloned()
+                    .expect("reverse leaf index was selected from this directory");
+                let leaf = self.snapshot.load_leaf(
+                    &reference,
+                    self.order,
+                    self.history,
+                    &mut self.stats,
+                )?;
+                self.datom_index = leaf_reverse_upper_bound(
+                    &leaf,
+                    self.reverse_boundary
+                        .as_ref()
+                        .expect("reverse cursor retains its boundary"),
+                );
+                self.leaf = Some(leaf);
+                continue;
+            }
+
+            let reference = self
+                .root
+                .directories
+                .get(self.directory_index)
+                .cloned()
+                .expect("reverse directory index was selected from the root");
+            let directory = self.snapshot.load_directory(
+                &reference,
+                self.order,
+                self.history,
+                &mut self.stats,
+            )?;
+            let Some(leaf_index) = boundary_floor_child(
+                &directory.leaves,
+                self.reverse_boundary
+                    .as_ref()
+                    .expect("reverse cursor retains its boundary"),
+            ) else {
+                if self.directory_index > 0 {
+                    self.directory_index -= 1;
+                    continue;
+                }
+                self.exhausted = true;
+                return Ok(None);
+            };
+            self.leaf_index = leaf_index;
             self.directory = Some(directory);
         }
     }
@@ -5600,6 +6135,9 @@ impl PeerIndexCursor {
             self.recent_next = Some(datom);
         }
         let take_durable = match (&self.durable_next, &self.recent_next) {
+            (Some(durable), Some(recent)) if self.reverse => {
+                !durable.cmp_in(recent, self.order).is_lt()
+            }
             (Some(durable), Some(recent)) => !recent.cmp_in(durable, self.order).is_lt(),
             (Some(_), None) => true,
             (None, Some(_)) => false,
@@ -6279,6 +6817,7 @@ impl TieredSnapshot {
             recent,
             history,
             order,
+            reverse: false,
             durable_next: None,
             recent_next: None,
             failed: false,
@@ -6310,6 +6849,67 @@ impl TieredSnapshot {
             recent,
             history,
             order,
+            reverse: false,
+            durable_next: None,
+            recent_next: None,
+            failed: false,
+            work_recorded: false,
+        })
+    }
+
+    /// Open a lazy forward raw-index cursor at the typed virtual boundary.
+    /// Missing suffix components compare equal, so traversal starts before
+    /// the lowest matching datom and then continues through the index.
+    pub(crate) fn seek_boundary_cursor(
+        &self,
+        history: bool,
+        boundary: &IndexBoundary,
+    ) -> Result<PeerIndexCursor, SemanticError> {
+        let normalized = boundary.normalized()?;
+        let order = normalized.order();
+        self.core.root_pins.ensure()?;
+        self.ensure_avet_ready(order, boundary.avet_attribute())?;
+        let (_, root) = self.exact_tree(history, order)?;
+        let recent = self.state.recent.boundary_cursor(history, &normalized);
+        let durable =
+            DurableTreeCursor::new_forward_boundary(self.clone(), root, history, normalized);
+        Ok(PeerIndexCursor {
+            durable,
+            recent,
+            history,
+            order,
+            reverse: false,
+            durable_next: None,
+            recent_next: None,
+            failed: false,
+            work_recorded: false,
+        })
+    }
+
+    /// Open a lazy reverse raw-index cursor at the typed virtual boundary.
+    /// Construction retains the resident root and positions the memory tree;
+    /// durable directory and leaf reads remain deferred until first demand.
+    pub(crate) fn reverse_boundary_cursor(
+        &self,
+        history: bool,
+        boundary: &IndexBoundary,
+    ) -> Result<PeerIndexCursor, SemanticError> {
+        let normalized = boundary.normalized()?;
+        let order = normalized.order();
+        self.core.root_pins.ensure()?;
+        self.ensure_avet_ready(order, boundary.avet_attribute())?;
+        let (_, root) = self.exact_tree(history, order)?;
+        let recent = self
+            .state
+            .recent
+            .reverse_boundary_cursor(history, &normalized);
+        let durable = DurableTreeCursor::new_reverse(self.clone(), root, history, normalized);
+        Ok(PeerIndexCursor {
+            durable,
+            recent,
+            history,
+            order,
+            reverse: true,
             durable_next: None,
             recent_next: None,
             failed: false,
@@ -6964,6 +7564,12 @@ fn prefix_start_child(children: &[ChildRef], prefix: &IndexPrefix) -> usize {
         .saturating_sub(1)
 }
 
+fn boundary_floor_child(children: &[ChildRef], boundary: &TreeBoundary) -> Option<usize> {
+    children
+        .partition_point(|child| !boundary.compare_routing_key(&child.key).is_gt())
+        .checked_sub(1)
+}
+
 fn leaf_lower_bound(leaf: &LeafSegment, key: &Datom, order: IndexOrder) -> usize {
     let mut low = 0;
     let mut high = leaf.len();
@@ -6986,6 +7592,36 @@ fn leaf_prefix_lower_bound(leaf: &LeafSegment, prefix: &IndexPrefix) -> usize {
         let middle = low + (high - low) / 2;
         let datom = leaf.datom(middle).expect("validated parallel leaf columns");
         if crate::index::compare_prefix(&datom, prefix).is_lt() {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+fn leaf_boundary_lower_bound(leaf: &LeafSegment, boundary: &TreeBoundary) -> usize {
+    let mut low = 0;
+    let mut high = leaf.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let datom = leaf.datom(middle).expect("validated parallel leaf columns");
+        if boundary.normalized.compare_datom(&datom).is_lt() {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+fn leaf_reverse_upper_bound(leaf: &LeafSegment, boundary: &TreeBoundary) -> usize {
+    let mut low = 0;
+    let mut high = leaf.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let datom = leaf.datom(middle).expect("validated parallel leaf columns");
+        if !boundary.normalized.compare_datom(&datom).is_gt() {
             low = middle + 1;
         } else {
             high = middle;
@@ -8585,6 +9221,41 @@ fn read_head<C: GenericClient>(
     ))
 }
 
+fn read_database_lineage<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+) -> Result<String, SemanticError> {
+    client
+        .query_opt(
+            "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
+            &[&database_id],
+        )
+        .map_err(|error| postgres_error("peer/database-lineage", error))?
+        .map(|row| row.get(0))
+        .ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::NotFound,
+                "postgres/database-not-found",
+                format!("database {database_id} does not exist"),
+            )
+        })
+}
+
+fn verify_database_lineage<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    expected_lineage: &str,
+) -> Result<(), SemanticError> {
+    let actual = read_database_lineage(client, database_id)?;
+    if actual == expected_lineage {
+        return Ok(());
+    }
+    Err(fault(
+        "peer/database-lineage-changed",
+        "database catalog address now names a different durable lineage",
+    ))
+}
+
 fn order_tag(order: IndexOrder) -> u8 {
     match order {
         IndexOrder::Eavt => 0,
@@ -8685,6 +9356,161 @@ mod tests {
                 "tree/pending-avet-schema-mismatch"
             );
         }
+    }
+
+    #[test]
+    fn reverse_full_t_boundary_routes_after_all_operation_and_stored_value_ties() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let entity = crate::make_eid(crate::USER_PARTITION, 1).unwrap();
+        let mut datoms = (1..=40)
+            .map(|t| Datom {
+                entity,
+                attribute: 1_000,
+                value: Value::BigDec(BigDecimal::from_str("1").unwrap()),
+                tx: crate::t_to_tx(t).unwrap(),
+                added: true,
+            })
+            .collect::<Vec<_>>();
+        datoms.extend([
+            Datom {
+                value: Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+                tx: crate::t_to_tx(20).unwrap(),
+                ..datoms[0].clone()
+            },
+            Datom {
+                value: Value::BigDec(BigDecimal::from_str("1.000").unwrap()),
+                tx: crate::t_to_tx(20).unwrap(),
+                added: false,
+                ..datoms[0].clone()
+            },
+        ]);
+        datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+        let config = TreeConfig {
+            max_leaf_datoms: 2,
+            target_leaf_bytes: 512,
+            max_leaf_bytes: 2_048,
+            max_leaves_per_directory: 2,
+            max_directory_bytes: 2_048,
+            max_directories_per_root: 64,
+            max_root_bytes: 64 * 1_024,
+        };
+        let build = build_tree(IndexOrder::Eavt, true, datoms.clone(), &config).unwrap();
+        let root = match decode_tree_node(
+            &build.descriptor.root_hash,
+            build.nodes.get(&build.descriptor.root_hash).unwrap(),
+        )
+        .unwrap()
+        {
+            TreeNode::Root(root) => root,
+            _ => panic!("tree descriptor must address a root"),
+        };
+        assert!(root.directories.len() > 1);
+
+        let normalized = IndexBoundary::Eavt(IndexComponents::Four(
+            entity,
+            1_000,
+            Value::BigDec(BigDecimal::from_str("1.0").unwrap()),
+            crate::IndexTransaction::T(20),
+        ))
+        .normalized()
+        .unwrap();
+        let boundary = TreeBoundary::new(normalized);
+        let expected_lower =
+            datoms.partition_point(|datom| boundary.normalized.compare_datom(datom).is_lt());
+        let expected_upper =
+            datoms.partition_point(|datom| !boundary.normalized.compare_datom(datom).is_gt());
+        assert_eq!(
+            datoms[expected_lower..expected_upper]
+                .iter()
+                .filter(|datom| datom.tx == crate::t_to_tx(20).unwrap())
+                .count(),
+            3,
+            "the virtual T lower bound must precede operation and scale ties"
+        );
+        assert_eq!(
+            datoms[..expected_upper]
+                .iter()
+                .filter(|datom| datom.tx == crate::t_to_tx(20).unwrap())
+                .count(),
+            3,
+            "the virtual T upper bound must include assertion/retraction and scale ties"
+        );
+
+        let directory_index = boundary_floor_child(&root.directories, &boundary).unwrap();
+        let directory = match decode_tree_node(
+            &root.directories[directory_index].hash,
+            build
+                .nodes
+                .get(&root.directories[directory_index].hash)
+                .unwrap(),
+        )
+        .unwrap()
+        {
+            TreeNode::Directory(directory) => directory,
+            _ => panic!("root child must be a directory"),
+        };
+        let leaf_index = boundary_floor_child(&directory.leaves, &boundary).unwrap();
+        let leaf = match decode_tree_node(
+            &directory.leaves[leaf_index].hash,
+            build.nodes.get(&directory.leaves[leaf_index].hash).unwrap(),
+        )
+        .unwrap()
+        {
+            TreeNode::Leaf(leaf) => leaf,
+            _ => panic!("directory child must be a leaf"),
+        };
+        let local_upper = leaf_reverse_upper_bound(&leaf, &boundary);
+        let global_upper = root.directories[..directory_index]
+            .iter()
+            .map(|child| child.count as usize)
+            .sum::<usize>()
+            + directory.leaves[..leaf_index]
+                .iter()
+                .map(|child| child.count as usize)
+                .sum::<usize>()
+            + local_upper;
+        assert_eq!(global_upper, expected_upper);
+
+        let forward_directory_index =
+            boundary_floor_child(&root.directories, &boundary).unwrap_or(0);
+        let forward_directory = match decode_tree_node(
+            &root.directories[forward_directory_index].hash,
+            build
+                .nodes
+                .get(&root.directories[forward_directory_index].hash)
+                .unwrap(),
+        )
+        .unwrap()
+        {
+            TreeNode::Directory(directory) => directory,
+            _ => panic!("root child must be a directory"),
+        };
+        let forward_leaf_index =
+            boundary_floor_child(&forward_directory.leaves, &boundary).unwrap_or(0);
+        let forward_leaf = match decode_tree_node(
+            &forward_directory.leaves[forward_leaf_index].hash,
+            build
+                .nodes
+                .get(&forward_directory.leaves[forward_leaf_index].hash)
+                .unwrap(),
+        )
+        .unwrap()
+        {
+            TreeNode::Leaf(leaf) => leaf,
+            _ => panic!("directory child must be a leaf"),
+        };
+        let global_lower = root.directories[..forward_directory_index]
+            .iter()
+            .map(|child| child.count as usize)
+            .sum::<usize>()
+            + forward_directory.leaves[..forward_leaf_index]
+                .iter()
+                .map(|child| child.count as usize)
+                .sum::<usize>()
+            + leaf_boundary_lower_bound(&forward_leaf, &boundary);
+        assert_eq!(global_lower, expected_lower);
     }
 
     #[test]
@@ -9015,6 +9841,7 @@ mod tests {
             let manifest = PersistentTreeManifest {
                 database_id: database_id.clone(),
                 publication_revision,
+                index_basis_t: endpoint.basis_t,
                 basis_t: endpoint.basis_t,
                 tx_hash: endpoint.tx_hash,
                 state_hash: endpoint.state_hash,
@@ -9030,6 +9857,7 @@ mod tests {
                 database_id: database_id.clone(),
                 publication_revision,
                 basis_t: manifest.basis_t,
+                index_basis_t: manifest.index_basis_t,
                 tx_hash: manifest.tx_hash,
                 state_hash: manifest.state_hash,
                 excision_generation: manifest.excision_generation,
@@ -9186,6 +10014,7 @@ mod tests {
         let manifest = PersistentTreeManifest {
             database_id: database_id.clone(),
             publication_revision: old_publication.publication_revision + 1,
+            index_basis_t: endpoint.basis_t,
             basis_t: endpoint.basis_t,
             tx_hash: endpoint.tx_hash,
             state_hash: endpoint.state_hash,
@@ -9200,6 +10029,7 @@ mod tests {
             database_id: database_id.clone(),
             publication_revision: manifest.publication_revision,
             basis_t: manifest.basis_t,
+            index_basis_t: manifest.index_basis_t,
             tx_hash: manifest.tx_hash,
             state_hash: manifest.state_hash,
             excision_generation: manifest.excision_generation,

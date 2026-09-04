@@ -233,12 +233,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         22,
         include_str!("../migrations/0022_tree_retirement_intent_dependency.sql"),
     ),
+    (
+        23,
+        include_str!("../migrations/0023_authenticated_index_basis.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 22;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 23;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.

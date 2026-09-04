@@ -124,7 +124,7 @@ fn transactor_adopts_verified_base_and_replays_only_the_exact_tail() {
     let mut sql = Client::connect(&connection, NoTls).unwrap();
     let published = sql
         .query_one(
-            "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
+            "SELECT p.publication_revision, m.basis_t, m.index_basis_t, m.tx_hash, m.state_hash, \
                     m.excision_generation, m.eidx_frontier, m.manifest_version, \
                     m.log_generation, m.lineage_id \
                FROM atomic_tree_publications p \
@@ -139,26 +139,28 @@ fn transactor_adopts_verified_base_and_replays_only_the_exact_tail() {
         .unwrap();
     let publication_revision = published.get::<_, i64>(0) + 1;
     let basis_t: i64 = published.get(1);
-    let tx_hash: Vec<u8> = published.get(2);
-    let state_hash: Vec<u8> = published.get(3);
-    let excision_generation: i64 = published.get(4);
-    let eidx_frontier: i64 = published.get(5);
-    let manifest_version: i16 = published.get(6);
-    let log_generation: i64 = published.get(7);
-    let lineage_id: Option<String> = published.get(8);
+    let index_basis_t: i64 = published.get(2);
+    let tx_hash: Vec<u8> = published.get(3);
+    let state_hash: Vec<u8> = published.get(4);
+    let excision_generation: i64 = published.get(5);
+    let eidx_frontier: i64 = published.get(6);
+    let manifest_version: i16 = published.get(7);
+    let log_generation: i64 = published.get(8);
+    let lineage_id: Option<String> = published.get(9);
     let bogus_payload = [0x5A_u8; 48];
     let bogus_hash = sha256(&bogus_payload);
     common::with_replica_triggers_disabled(&mut sql, |sql| {
         sql.execute(
             "INSERT INTO atomic_tree_manifests \
-                 (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+                 (database_id, publication_revision, basis_t, index_basis_t, tx_hash, state_hash, \
                   excision_generation, eidx_frontier, manifest_version, manifest_hash, \
                   payload, log_generation, lineage_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             &[
                 &database_id,
                 &publication_revision,
                 &basis_t,
+                &index_basis_t,
                 &tx_hash,
                 &state_hash,
                 &excision_generation,

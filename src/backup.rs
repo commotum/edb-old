@@ -3095,6 +3095,7 @@ fn restore_tree_backup(
     let target = PersistentTreeManifest {
         database_id: target_database_id.to_owned(),
         publication_revision,
+        index_basis_t: source.index_basis_t,
         basis_t: source.basis_t,
         tx_hash: target_tx_hash,
         state_hash: target_state_hash,
@@ -3140,6 +3141,7 @@ fn restore_tree_backup(
         database_id: target_database_id.to_owned(),
         publication_revision,
         basis_t: target.basis_t,
+        index_basis_t: target.index_basis_t,
         tx_hash: target.tx_hash,
         state_hash: target.state_hash,
         excision_generation: target_generation,
@@ -3419,6 +3421,7 @@ fn restore_request_base_archive(
     let target = PersistentTreeManifest {
         database_id: target_database_id.to_owned(),
         publication_revision: archive_revision,
+        index_basis_t: source.index_basis_t,
         basis_t: source.basis_t,
         tx_hash: target_tx_hash,
         state_hash: target_state_hash,
@@ -3959,6 +3962,7 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
     let portable = PersistentTreeManifest {
         database_id: lineage_id.to_owned(),
         publication_revision: 1,
+        index_basis_t: decoded.index_basis_t,
         basis_t,
         tx_hash: portable_tx_hash,
         state_hash,
@@ -4736,6 +4740,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
         let target = PersistentTreeManifest {
             database_id: target_database_id.to_owned(),
             publication_revision: archive_revision,
+            index_basis_t: source.index_basis_t,
             basis_t: source.basis_t,
             tx_hash: target_tx_hash,
             state_hash: source.state_hash,

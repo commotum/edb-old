@@ -437,6 +437,9 @@ pub struct TreeManifestRecord {
     pub database_id: String,
     pub publication_revision: u64,
     pub basis_t: u64,
+    /// Authenticated physical indexing progress. This can lag `basis_t` only
+    /// while the manifest carries pending AVET projection work.
+    pub index_basis_t: u64,
     pub tx_hash: Digest,
     pub state_hash: Digest,
     pub excision_generation: u64,
@@ -444,6 +447,13 @@ pub struct TreeManifestRecord {
     pub manifest_hash: Digest,
     pub payload: Vec<u8>,
     pub roots: Vec<TreeRootBinding>,
+}
+
+impl TreeManifestRecord {
+    /// Greatest logical transaction basis represented by the physical roots.
+    pub fn index_basis_t(&self) -> u64 {
+        self.index_basis_t
+    }
 }
 
 /// Exact physical membership change installed with a root publication.
@@ -997,6 +1007,7 @@ impl PostgresTreeStore {
         }
         let revision = sql_u64(manifest.publication_revision, "publication revision")?;
         let basis = sql_u64(manifest.basis_t, "manifest basis")?;
+        let index_basis = sql_u64(manifest.index_basis_t, "manifest index basis")?;
         let generation = sql_u64(manifest.excision_generation, "excision generation")?;
         let frontier = sql_u64(manifest.eidx_frontier, "entity frontier")?;
         let lineage_id: String = self
@@ -1016,6 +1027,7 @@ impl PostgresTreeStore {
             })?;
         let manifest_lineage = (manifest.excision_generation > 0).then_some(lineage_id.as_str());
         let manifest_version = crate::PersistentTreeManifest::encoded_version(&manifest.payload)?;
+        let stored_index_basis = (manifest_version >= 6).then_some(index_basis);
         let mut transaction = self
             .client
             .transaction()
@@ -1024,15 +1036,16 @@ impl PostgresTreeStore {
         let manifest_inserted = transaction
             .execute(
                 "INSERT INTO atomic_tree_manifests \
-                   (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+                   (database_id, publication_revision, basis_t, index_basis_t, tx_hash, state_hash, \
                     excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                     log_generation, lineage_id) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
                  ON CONFLICT (manifest_hash) DO NOTHING",
                 &[
                     &manifest.database_id,
                     &revision,
                     &basis,
+                    &stored_index_basis,
                     &&manifest.tx_hash[..],
                     &&manifest.state_hash[..],
                     &generation,
@@ -1148,6 +1161,9 @@ impl PostgresTreeStore {
         }
         let revision = sql_u64(manifest.publication_revision, "publication revision")?;
         let basis = sql_u64(manifest.basis_t, "manifest basis")?;
+        let index_basis = sql_u64(manifest.index_basis_t, "manifest index basis")?;
+        let candidate_manifest_version =
+            crate::PersistentTreeManifest::encoded_version(&manifest.payload)?;
         let generation = sql_u64(manifest.excision_generation, "excision generation")?;
         let frontier = sql_u64(manifest.eidx_frontier, "entity frontier")?;
 
@@ -1253,22 +1269,41 @@ impl PostgresTreeStore {
 
         let current = transaction
             .query_opt(
-                "SELECT publication_revision, basis_t, log_generation, manifest_hash \
-                 FROM atomic_tree_publications WHERE database_id = $1 \
-                 ORDER BY publication_revision DESC LIMIT 1",
+                "SELECT publication.publication_revision, publication.basis_t, \
+                        publication.log_generation, publication.manifest_hash, \
+                        manifest.index_basis_t \
+                   FROM atomic_tree_publications publication \
+                   JOIN atomic_tree_manifests manifest \
+                     ON manifest.manifest_hash = publication.manifest_hash \
+                    AND manifest.database_id = publication.database_id \
+                    AND manifest.publication_revision = publication.publication_revision \
+                    AND manifest.basis_t = publication.basis_t \
+                    AND manifest.tx_hash = publication.tx_hash \
+                    AND manifest.log_generation = publication.log_generation \
+                  WHERE publication.database_id = $1 \
+                  ORDER BY publication.publication_revision DESC LIMIT 1",
                 &[&manifest.database_id],
             )
             .map_err(|error| postgres_error("tree/publication-current", error))?;
-        let (observed_revision, observed_basis, observed_generation, observed_manifest) =
+        let (
+            observed_revision,
+            observed_basis,
+            observed_generation,
+            observed_manifest,
+            observed_index_basis,
+        ) =
             if let Some(row) = current {
                 (
                     pg_u64(row.get(0), "current tree publication revision")?,
                     Some(pg_u64(row.get(1), "current tree publication basis")?),
                     Some(pg_u64(row.get(2), "current tree publication generation")?),
                     Some(digest(row.get(3), "current tree publication manifest")?),
+                    row.get::<_, Option<i64>>(4)
+                        .map(|value| pg_u64(value, "current tree publication index basis"))
+                        .transpose()?,
                 )
             } else {
-                (0, None, None, None)
+                (0, None, None, None, None)
             };
         if observed_revision != expected_revision {
             return Err(SemanticError::conflict(
@@ -1289,6 +1324,23 @@ impl PostgresTreeStore {
             .detail(
                 "current_basis",
                 observed_basis.expect("checked as present").to_string(),
+            ));
+        }
+        if observed_generation == Some(manifest.excision_generation)
+            && observed_index_basis.is_some_and(|current_index_basis| {
+                candidate_manifest_version < 6 || manifest.index_basis_t < current_index_basis
+            })
+        {
+            return Err(SemanticError::conflict(
+                "tree/publication-index-basis-regression",
+                "persistent tree publication cannot regress its authenticated index basis",
+            )
+            .detail("candidate_index_basis", manifest.index_basis_t.to_string())
+            .detail(
+                "current_index_basis",
+                observed_index_basis
+                    .expect("checked as present")
+                    .to_string(),
             ));
         }
 
@@ -1314,25 +1366,26 @@ impl PostgresTreeStore {
         if matches!(delta, TreePublicationDelta::Unknown) {
             let manifest_lineage =
                 (manifest.excision_generation > 0).then_some(lineage_id.as_str());
-            let manifest_version =
-                crate::PersistentTreeManifest::encoded_version(&manifest.payload)?;
+            let stored_index_basis =
+                (candidate_manifest_version >= 6).then_some(index_basis);
             manifest_inserted = transaction
                 .execute(
                     "INSERT INTO atomic_tree_manifests \
-                       (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+                       (database_id, publication_revision, basis_t, index_basis_t, tx_hash, state_hash, \
                         excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                         log_generation, lineage_id) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
                      ON CONFLICT (manifest_hash) DO NOTHING",
                     &[
                         &manifest.database_id,
                         &revision,
                         &basis,
+                        &stored_index_basis,
                         &&manifest.tx_hash[..],
                         &&manifest.state_hash[..],
                         &generation,
                         &frontier,
-                        &manifest_version,
+                        &candidate_manifest_version,
                         &&manifest.manifest_hash[..],
                         &&manifest.payload[..],
                         &generation,
@@ -1503,7 +1556,7 @@ impl PostgresTreeStore {
         let row = self
             .client
             .query_opt(
-                "SELECT m.basis_t, m.tx_hash, m.state_hash, m.excision_generation, \
+                "SELECT m.basis_t, m.index_basis_t, m.tx_hash, m.state_hash, m.excision_generation, \
                         m.eidx_frontier, m.manifest_version, m.manifest_hash, m.payload, \
                         m.log_generation, m.lineage_id, \
                         COALESCE(legacy.tx_hash, native.tx_hash), \
@@ -1536,21 +1589,33 @@ impl PostgresTreeStore {
         };
 
         let basis_t = pg_u64(row.get(0), "tree manifest basis")?;
-        let tx_hash = digest(row.get(1), "tree manifest transaction hash")?;
-        let state_hash = digest(row.get(2), "tree manifest state hash")?;
-        let generation = pg_u64(row.get(3), "tree manifest generation")?;
-        let frontier = pg_u64(row.get(4), "tree manifest entity frontier")?;
-        let version: i16 = row.get(5);
-        let manifest_hash = digest(row.get(6), "tree manifest hash")?;
-        let payload: Vec<u8> = row.get(7);
-        let stored_log_generation = pg_u64(row.get(8), "tree manifest log generation")?;
-        let stored_lineage: Option<String> = row.get(9);
-        let authoritative_tx: Option<Vec<u8>> = row.get(10);
-        let authoritative_state: Option<Vec<u8>> = row.get(11);
-        let current_generation = pg_u64(row.get(12), "current log generation")?;
-        let durable_lineage: String = row.get(13);
-        let publication_generation = pg_u64(row.get(14), "tree publication generation")?;
+        let stored_index_basis = row
+            .get::<_, Option<i64>>(1)
+            .map(|value| pg_u64(value, "tree manifest index basis"))
+            .transpose()?;
+        let tx_hash = digest(row.get(2), "tree manifest transaction hash")?;
+        let state_hash = digest(row.get(3), "tree manifest state hash")?;
+        let generation = pg_u64(row.get(4), "tree manifest generation")?;
+        let frontier = pg_u64(row.get(5), "tree manifest entity frontier")?;
+        let version: i16 = row.get(6);
+        let manifest_hash = digest(row.get(7), "tree manifest hash")?;
+        let payload: Vec<u8> = row.get(8);
+        let stored_log_generation = pg_u64(row.get(9), "tree manifest log generation")?;
+        let stored_lineage: Option<String> = row.get(10);
+        let authoritative_tx: Option<Vec<u8>> = row.get(11);
+        let authoritative_state: Option<Vec<u8>> = row.get(12);
+        let current_generation = pg_u64(row.get(13), "current log generation")?;
+        let durable_lineage: String = row.get(14);
+        let publication_generation = pg_u64(row.get(15), "tree publication generation")?;
+        let decoded = crate::PersistentTreeManifest::decode(&payload)?;
+        let index_basis_t = decoded.index_basis_t;
+        let index_basis_authenticated = if version >= 6 {
+            stored_index_basis == Some(index_basis_t)
+        } else {
+            stored_index_basis.is_none()
+        };
         if version != crate::PersistentTreeManifest::encoded_version(&payload)?
+            || !index_basis_authenticated
             || stored_log_generation != generation
             || publication_generation != generation
             || current_generation != generation
@@ -1580,6 +1645,7 @@ impl PostgresTreeStore {
             database_id: database_id.to_owned(),
             publication_revision,
             basis_t,
+            index_basis_t,
             tx_hash,
             state_hash,
             excision_generation: generation,
@@ -2252,7 +2318,7 @@ fn verify_manifest_row(
 ) -> Result<(), SemanticError> {
     let row = client
         .query_opt(
-            "SELECT database_id, publication_revision, basis_t, tx_hash, state_hash, \
+            "SELECT database_id, publication_revision, basis_t, index_basis_t, tx_hash, state_hash, \
                     excision_generation, eidx_frontier, manifest_version, payload, \
                     log_generation, lineage_id, \
                     (SELECT lineage_id FROM atomic_databases \
@@ -2270,18 +2336,24 @@ fn verify_manifest_row(
     let stored_database: String = row.get(0);
     let stored_revision = pg_u64(row.get(1), "stored tree publication revision")?;
     let stored_basis = pg_u64(row.get(2), "stored tree basis")?;
-    let stored_tx = digest(row.get(3), "stored tree transaction hash")?;
-    let stored_state = digest(row.get(4), "stored tree state hash")?;
-    let stored_generation = pg_u64(row.get(5), "stored tree generation")?;
-    let stored_frontier = pg_u64(row.get(6), "stored tree entity frontier")?;
-    let stored_version: i16 = row.get(7);
-    let stored_payload: Vec<u8> = row.get(8);
-    let stored_log_generation = pg_u64(row.get(9), "stored tree log generation")?;
-    let stored_lineage: Option<String> = row.get(10);
-    let durable_lineage: Option<String> = row.get(11);
+    let stored_index_basis: Option<i64> = row.get(3);
+    let stored_tx = digest(row.get(4), "stored tree transaction hash")?;
+    let stored_state = digest(row.get(5), "stored tree state hash")?;
+    let stored_generation = pg_u64(row.get(6), "stored tree generation")?;
+    let stored_frontier = pg_u64(row.get(7), "stored tree entity frontier")?;
+    let stored_version: i16 = row.get(8);
+    let stored_payload: Vec<u8> = row.get(9);
+    let stored_log_generation = pg_u64(row.get(10), "stored tree log generation")?;
+    let stored_lineage: Option<String> = row.get(11);
+    let durable_lineage: Option<String> = row.get(12);
+    let expected_index_basis = (stored_version >= 6).then_some(sql_u64(
+        expected.index_basis_t,
+        "expected tree index basis",
+    )?);
     if stored_database != expected.database_id
         || stored_revision != expected.publication_revision
         || stored_basis != expected.basis_t
+        || stored_index_basis != expected_index_basis
         || stored_tx != expected.tx_hash
         || stored_state != expected.state_hash
         || stored_generation != expected.excision_generation
@@ -2444,6 +2516,7 @@ fn validate_manifest(manifest: &TreeManifestRecord) -> Result<(), SemanticError>
     if decoded.database_id != manifest.database_id
         || decoded.publication_revision != manifest.publication_revision
         || decoded.basis_t != manifest.basis_t
+        || decoded.index_basis_t != manifest.index_basis_t
         || decoded.tx_hash != manifest.tx_hash
         || decoded.state_hash != manifest.state_hash
         || decoded.excision_generation != manifest.excision_generation
@@ -2795,6 +2868,7 @@ mod tests {
         let canonical = crate::PersistentTreeManifest {
             database_id: "database".to_owned(),
             publication_revision: 1,
+            index_basis_t: 1,
             basis_t: 1,
             tx_hash: [1; 32],
             state_hash: [2; 32],
@@ -2821,6 +2895,7 @@ mod tests {
             database_id: "database".to_owned(),
             publication_revision: 1,
             basis_t: 1,
+            index_basis_t: 1,
             tx_hash: [1; 32],
             state_hash: [2; 32],
             excision_generation: 0,
@@ -2854,6 +2929,12 @@ mod tests {
         metadata.basis_t += 1;
         let error = validate_manifest(&metadata).unwrap_err();
         assert_eq!(error.code, "tree/manifest-envelope-mismatch");
+
+        let mut index_basis = manifest();
+        index_basis.index_basis_t -= 1;
+        let error = validate_manifest(&index_basis).unwrap_err();
+        assert_eq!(error.code, "tree/manifest-envelope-mismatch");
+        assert_eq!(manifest().index_basis_t(), 1);
 
         let mut roots = manifest();
         roots.roots[0].root_hash = [9; 32];

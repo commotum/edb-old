@@ -1,3 +1,4 @@
+use crate::connection::DatabaseIdentity;
 use crate::log_generation::request_key_hash;
 use crate::postgres::{
     CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
@@ -849,6 +850,18 @@ pub struct TransactionClient {
 }
 
 impl TransactionClient {
+    /// Stable identity of the one database this client can transact against.
+    ///
+    /// Request-key hashing is lineage scoped, so exposing the same pair to
+    /// the native connection facade lets it reject a peer/client mismatch
+    /// before either side can publish observable state.
+    pub fn identity(&self) -> DatabaseIdentity {
+        DatabaseIdentity::new(
+            self.shared.database_id.clone(),
+            self.shared.lineage_id.clone(),
+        )
+    }
+
     pub fn submit(&self, request: TransactionRequest) -> Result<TransactionTicket, SemanticError> {
         if !self.shared.accepting.load(Ordering::Acquire) {
             return Err(self.shared.unavailable());
@@ -1513,6 +1526,11 @@ impl TransactionService {
 
     pub fn client(&self) -> TransactionClient {
         self.client.clone()
+    }
+
+    /// Stable catalog identity retained by this service activation.
+    pub fn identity(&self) -> DatabaseIdentity {
+        self.client.identity()
     }
 
     pub fn recovery_stats(&self) -> RecoveryStats {

@@ -1,13 +1,13 @@
-use atomic_core::persistent_tree::{TreeNode, decode_tree_node};
+use atomic_core::persistent_tree::{TreeConfig, TreeNode, decode_tree_node};
 use atomic_core::{
     Attribute, AttributeName, Binding, Cardinality, Clause, DataPattern, Datom, Digest, EntityRef,
-    EntityValue, FindElement, FindSpec, Function, IndexBuildFault, IndexOrder, IndexPrefix,
-    InputSpec, Instruction, Keyword, Peer, PeerSnapshot, PostgresIndexer, PostgresOperator,
-    PostgresStore, PostgresTreeStore, Program, ProgramKind, PullAttribute, PullPattern, Query,
-    QueryControl, QueryEngine, QueryExtensions, QueryInput, QueryOutcome, QueryResult, QuerySource,
-    QueryValue, Schema, Term, TransactionRequest, TransactionService, TransactionServiceConfig,
-    TxOp, TxValue, Unique, Value, ValueType, Variable, View, decode_index_manifest,
-    encode_index_manifest, sha256,
+    EntityValue, FindElement, FindSpec, Function, IndexBoundary, IndexBuildFault, IndexComponents,
+    IndexOrder, IndexPrefix, InputSpec, Instruction, Keyword, Peer, PeerSnapshot, PostgresIndexer,
+    PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramKind, PullAttribute,
+    PullPattern, Query, QueryControl, QueryEngine, QueryExtensions, QueryInput, QueryOutcome,
+    QueryResult, QuerySource, QueryValue, Schema, Term, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TxOp, TxValue, Unique, Value, ValueType, Variable, View,
+    decode_index_manifest, encode_index_manifest, sha256,
 };
 use postgres::{Client, NoTls};
 use std::process::Command;
@@ -319,6 +319,122 @@ fn native_database_value_prefix_cursor_matches_eager_with_bounded_tree_reads() {
         "one exact prefix read the whole {}-segment publication",
         publication.segment_count
     );
+}
+
+#[test]
+fn native_bidirectional_raw_seek_is_lazy_and_matches_every_eager_index_view() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("database_value_raw_seek");
+    let (mut store, _) = populated(&connection, &database_id, false, 24);
+    let eager = store.recover(&database_id).unwrap().database_value();
+
+    let mut config = TreeConfig::default();
+    config.max_leaf_datoms = 1;
+    config.max_leaves_per_directory = 2;
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .with_tree_config(config)
+        .unwrap();
+    let publication = indexer.consolidate().unwrap();
+    assert_eq!(publication.max_depth, 3);
+    assert!(publication.segment_count > 8);
+
+    // No decoded-child cache: every observed directory/leaf delta is a real
+    // PostgreSQL read, not a process-local cache hit.
+    let peer = Peer::connect_with_cache_limits(&connection, &database_id, 0, 0).unwrap();
+    let native = peer.database_value();
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
+    let boundaries = [
+        IndexBoundary::Eavt(IndexComponents::Empty),
+        IndexBoundary::Aevt(IndexComponents::Empty),
+        IndexBoundary::Avet(IndexComponents::Empty),
+        IndexBoundary::Vaet(IndexComponents::Empty),
+    ];
+    let as_of = eager.basis_t().saturating_sub(8);
+    let since = eager.basis_t().saturating_sub(16);
+    let views = [
+        (eager.clone(), native.clone()),
+        (eager.clone().history(), native.clone().history()),
+        (eager.clone().as_of(as_of), native.clone().as_of(as_of)),
+        (eager.clone().since(since), native.clone().since(since)),
+    ];
+    for (eager_view, native_view) in views {
+        for boundary in &boundaries {
+            assert_eq!(
+                native_view
+                    .seek_cursor(boundary)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                eager_view
+                    .seek_cursor(boundary)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            );
+            assert_eq!(
+                native_view
+                    .reverse_seek_cursor(boundary)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                eager_view
+                    .reverse_seek_cursor(boundary)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            );
+        }
+    }
+
+    let keep_even_t = |_: &atomic_core::DatabaseValue, datom: &Datom| {
+        atomic_core::tx_to_t(datom.tx).unwrap() % 2 == 0
+    };
+    let eager_filtered = eager.clone().history().filter(keep_even_t);
+    let native_filtered = native.clone().history().filter(keep_even_t);
+    for boundary in &boundaries {
+        assert_eq!(
+            native_filtered.collect_seek_datoms(boundary).unwrap(),
+            eager_filtered.collect_seek_datoms(boundary).unwrap()
+        );
+        assert_eq!(
+            native_filtered
+                .collect_reverse_seek_datoms(boundary)
+                .unwrap(),
+            eager_filtered
+                .collect_reverse_seek_datoms(boundary)
+                .unwrap()
+        );
+    }
+
+    let boundary = IndexBoundary::Eavt(IndexComponents::Empty);
+    for reverse in [false, true] {
+        let before = peer.load_stats();
+        let mut cursor = if reverse {
+            native.reverse_seek_cursor(&boundary).unwrap()
+        } else {
+            native.seek_cursor(&boundary).unwrap()
+        };
+        let constructed = peer.load_stats();
+        assert_eq!(constructed.directory_reads, before.directory_reads);
+        assert_eq!(constructed.leaf_reads, before.leaf_reads);
+        assert!(cursor.next().transpose().unwrap().is_some());
+        drop(cursor);
+        let after = peer.load_stats();
+        let child_reads = after
+            .directory_reads
+            .saturating_sub(constructed.directory_reads)
+            .saturating_add(after.leaf_reads.saturating_sub(constructed.leaf_reads));
+        assert!(child_reads > 0);
+        assert!(
+            child_reads <= 2,
+            "first yield read {child_reads} child nodes"
+        );
+        assert!(child_reads < publication.segment_count as u64);
+        assert_eq!(after.compatibility_materializations, 0);
+    }
 }
 
 #[test]

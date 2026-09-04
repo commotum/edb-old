@@ -841,7 +841,9 @@ fn transaction_instants_resolve_to_stable_time_boundaries() {
 
     assert_eq!(db.t_at_or_before_instant(999), 1);
     assert_eq!(db.t_at_or_before_instant(1_500), 2);
-    assert_eq!(db.t_at_or_before_instant(2_000), 4);
+    // Recovered `as-of-t` lower-bound seeks AVET and accepts the first exact
+    // match, so duplicate milliseconds resolve to the earliest matching T.
+    assert_eq!(db.t_at_or_before_instant(2_000), 3);
     assert_eq!(db.t_at_or_after_instant(1_500), 3);
     assert_eq!(db.t_at_or_after_instant(2_001), 5);
     assert_eq!(

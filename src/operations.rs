@@ -532,7 +532,7 @@ impl PostgresOperator {
                                   OR ( \
                                       CASE WHEN publication.manifest_hash IS NOT NULL \
                                                 AND manifest.manifest_hash IS NOT NULL \
-                                                AND manifest.manifest_version IN (4, 5) \
+                                                AND manifest.manifest_version IN (4, 5, 6) \
                                                 AND semantic.database_id IS NOT NULL \
                                                 AND publication.basis_t <= request.basis_t - 1 \
                                                 AND NOT EXISTS ( \
@@ -541,7 +541,7 @@ impl PostgresOperator {
                                                 ) \
                                            THEN 1 ELSE 0 END \
                                       + CASE WHEN archive.manifest_hash IS NOT NULL \
-                                                   AND archive.manifest_version IN (4, 5) \
+                                                   AND archive.manifest_version IN (4, 5, 6) \
                                                    AND archive_complete.manifest_hash IS NOT NULL \
                                                    AND archive_semantic.database_id IS NOT NULL \
                                                    AND archive.basis_t <= request.basis_t - 1 \

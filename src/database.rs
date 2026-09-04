@@ -571,26 +571,46 @@ impl Database {
         Ok(database)
     }
 
-    /// Greatest transaction t whose transaction instant is at or before the
-    /// supplied millisecond instant, or zero when the instant predates the DB.
+    /// Recovered `as-of-t` resolution for a millisecond instant.
+    ///
+    /// The AVET lower-bound seek returns the first transaction at or after the
+    /// instant.  An exact match is used directly; otherwise its predecessor T
+    /// is used.  Consequently, when several transactions share the exact same
+    /// millisecond, the earliest of them wins.  This is the documented
+    /// imprecision of instant time points; T/Tx remain exact.  An instant after
+    /// the database resolves to the next T, which is observationally current.
     pub fn t_at_or_before_instant(&self, instant: i64) -> u64 {
         let Some(attribute) = self.tx_instant_attribute else {
             return 0;
         };
-        self.current_indexes
-            .matching(&IndexPrefix::Aevt {
+        let candidate = self
+            .current_indexes
+            .seek(&IndexPrefix::Avet {
                 attribute,
+                value: Some(Value::Instant(instant)),
                 entity: None,
-                value: None,
             })
             .expect("internally constructed index prefix is valid")
             .iter()
-            .filter_map(|datom| match datom.value {
-                Value::Instant(value) if value <= instant => tx_to_t(datom.tx).ok(),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
+            .next()
+            .filter(|datom| datom.attribute == attribute);
+        match candidate {
+            Some(datom) => {
+                let Value::Instant(candidate_instant) = &datom.value else {
+                    unreachable!("validated :db/txInstant index contains only instants")
+                };
+                let candidate_t =
+                    tx_to_t(datom.tx).expect("validated :db/txInstant datom has a transaction id");
+                if *candidate_instant == instant {
+                    candidate_t
+                } else {
+                    candidate_t
+                        .checked_sub(1)
+                        .expect("positive transaction T has a predecessor boundary")
+                }
+            }
+            None => self.basis_t.saturating_add(1),
+        }
     }
 
     /// Least transaction t whose transaction instant is at or after the
@@ -600,18 +620,18 @@ impl Database {
             return self.basis_t + 1;
         };
         self.current_indexes
-            .matching(&IndexPrefix::Aevt {
+            .seek(&IndexPrefix::Avet {
                 attribute,
+                value: Some(Value::Instant(instant)),
                 entity: None,
-                value: None,
             })
             .expect("internally constructed index prefix is valid")
             .iter()
-            .filter_map(|datom| match datom.value {
-                Value::Instant(value) if value >= instant => tx_to_t(datom.tx).ok(),
-                _ => None,
+            .next()
+            .filter(|datom| datom.attribute == attribute)
+            .map(|datom| {
+                tx_to_t(datom.tx).expect("validated :db/txInstant datom has a transaction id")
             })
-            .min()
             .unwrap_or(self.basis_t + 1)
     }
 
@@ -654,6 +674,18 @@ impl Database {
                     .get(order)
                     .to_vec()
             }
+        }
+    }
+
+    /// Borrow one already-resident current or history index without copying
+    /// it. `DatabaseValue` uses this narrow eager-oracle seam to give its
+    /// public fallible cursor the same construction-time laziness as a native
+    /// tree cursor.
+    pub(crate) fn index_datoms(&self, history: bool, order: IndexOrder) -> &[Datom] {
+        if history {
+            self.history_indexes.get(order)
+        } else {
+            self.current_indexes.get(order)
         }
     }
 

@@ -360,14 +360,15 @@ fn republish_with_forged_old_timestamp(connection: &str, database_id: &str) -> T
     transaction
         .execute(
             "INSERT INTO atomic_tree_manifests \
-               (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+               (database_id, publication_revision, basis_t, index_basis_t, tx_hash, state_hash, \
                 excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
                 log_generation, lineage_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 5, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 6, $9, $10, $11, $12)",
             &[
                 &successor.database_id,
                 &(successor.publication_revision as i64),
                 &(successor.basis_t as i64),
+                &(successor.index_basis_t as i64),
                 &&successor.tx_hash[..],
                 &&successor.state_hash[..],
                 &(successor.excision_generation as i64),
@@ -2702,6 +2703,7 @@ fn large_replacement_publishes_root_before_bounded_membership_fold() {
     let manifest_payload = PersistentTreeManifest {
         database_id: database_id.clone(),
         publication_revision: 1,
+        index_basis_t: basis_t,
         basis_t,
         tx_hash,
         state_hash,
@@ -2729,6 +2731,7 @@ fn large_replacement_publishes_root_before_bounded_membership_fold() {
         database_id: database_id.clone(),
         publication_revision: 1,
         basis_t,
+        index_basis_t: basis_t,
         tx_hash,
         state_hash,
         excision_generation: log_generation,

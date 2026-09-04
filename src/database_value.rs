@@ -2,19 +2,46 @@ use crate::identity::validate_frontier;
 use crate::index::compare_prefix;
 use crate::peer::TieredSnapshot;
 use crate::{
-    AttributeName, DB_IDENT, Database, Datom, EntityIdentifier, ErrorCategory, IndexOrder,
-    IndexPrefix, Keyword, PeerCursorStats, PeerIndexCursor, PeerSnapshot, Schema, SemanticError,
-    Value, eid_to_eidx, schema_eid_to_attr_id, tx_to_t,
+    AttributeName, DB_IDENT, Database, Datom, EntityIdentifier, ErrorCategory, IndexBoundary,
+    IndexComponents, IndexOrder, IndexPrefix, IndexTransaction, Keyword, PeerCursorStats,
+    PeerIndexCursor, PeerSnapshot, Schema, SemanticError, TimePoint, TupleSpec, Value, ValueType,
+    eid_to_eidx, schema_eid_to_attr_id, tx_to_t,
 };
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::iter::Cloned;
+use std::iter::{Cloned, Rev};
 use std::slice::Iter;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::vec::IntoIter;
 
 type ReadFilter = dyn Fn(&DatabaseValue, &Datom) -> bool + Send + Sync;
+
+/// A value component accepted at the raw-index API boundary.
+///
+/// `Stored` keeps an ordinary value unambiguous, while `Entity` requests
+/// ident or lookup-ref resolution against this exact immutable database
+/// value. `Tuple` permits that same distinction recursively in ref-typed
+/// tuple slots; `None` slots remain tuple nils. Read boundaries deliberately
+/// have no tempid form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RawIndexValue {
+    Stored(Value),
+    Entity(EntityIdentifier),
+    Tuple(Vec<Option<RawIndexValue>>),
+}
+
+impl From<Value> for RawIndexValue {
+    fn from(value: Value) -> Self {
+        Self::Stored(value)
+    }
+}
+
+impl From<EntityIdentifier> for RawIndexValue {
+    fn from(identifier: EntityIdentifier) -> Self {
+        Self::Entity(identifier)
+    }
+}
 
 const MAX_TRANSACTION_PREFIX_MEMO_ENTRIES: usize = 4_096;
 const MAX_TRANSACTION_PREFIX_MEMO_BYTES: u64 = 64 * 1024 * 1024;
@@ -335,18 +362,6 @@ impl LogicalReadObserver {
         })
     }
 
-    fn charge_datoms(&self, datoms: &[Datom]) -> Result<(), SemanticError> {
-        let mut work = LogicalReadWork::default();
-        for datom in datoms {
-            work.datoms = work.datoms.checked_add(1).ok_or_else(read_work_overflow)?;
-            work.retained_bytes = work
-                .retained_bytes
-                .checked_add(datom.retained_bytes())
-                .ok_or_else(read_work_overflow)?;
-        }
-        self.charge(work)
-    }
-
     fn charge(&self, additional: LogicalReadWork) -> Result<(), SemanticError> {
         let mut work = self.work.lock().map_err(|_| read_observer_poisoned())?;
         let next_datoms = work
@@ -498,11 +513,14 @@ struct TransactionOverlay {
     last_tx_instant: i64,
 }
 
-/// A scan of one exact immutable basis. Native scans retain the lazy
-/// persistent-tree/recent-tier merge; an assessment overlay adds only its
-/// bounded transaction delta to that stream. This is crate-private until the
-/// complete public raw-index cursor contract (including reverse seeks) lands.
-pub(crate) struct DatabaseValueScanCursor<'a> {
+/// A fallible forward scan of one exact immutable database value.
+///
+/// Native scans retain the lazy persistent-tree/recent-tier merge; an
+/// assessment overlay adds only its bounded transaction delta; temporal and
+/// custom windows consume and collapse history incrementally. Every yielded
+/// datom is owned, so advancing the connection or evicting a tree node cannot
+/// mutate an already observed result.
+pub struct DatabaseValueScanCursor<'a> {
     inner: DatabaseValueScanCursorInner<'a>,
     observer: Option<Arc<LogicalReadObserver>>,
     physical_context: Option<Arc<TransactionReadContext>>,
@@ -513,7 +531,9 @@ pub(crate) struct DatabaseValueScanCursor<'a> {
 enum DatabaseValueScanCursorInner<'a> {
     Native(Box<PeerIndexCursor>),
     Overlay(Box<TransactionOverlayScanCursor<'a>>),
-    Owned(IntoIter<Datom>),
+    Eager(Cloned<Iter<'a, Datom>>),
+    EagerReverse(Cloned<Rev<Iter<'a, Datom>>>),
+    Window(Box<DatabaseValueWindowCursor<'a>>),
 }
 
 impl DatabaseValueScanCursor<'_> {
@@ -541,7 +561,9 @@ impl Iterator for DatabaseValueScanCursor<'_> {
         let item = match &mut self.inner {
             DatabaseValueScanCursorInner::Native(cursor) => cursor.next(),
             DatabaseValueScanCursorInner::Overlay(cursor) => cursor.next(),
-            DatabaseValueScanCursorInner::Owned(cursor) => cursor.next().map(Ok),
+            DatabaseValueScanCursorInner::Eager(cursor) => cursor.next().map(Ok),
+            DatabaseValueScanCursorInner::EagerReverse(cursor) => cursor.next().map(Ok),
+            DatabaseValueScanCursorInner::Window(cursor) => cursor.next(),
         };
         let Some(item) = item else {
             if let Err(error) = self.record_physical_work() {
@@ -636,7 +658,7 @@ enum DatabaseValuePrefixCursorInner<'a> {
     Eager(Cloned<Iter<'a, Datom>>),
     Native(Box<PeerIndexCursor>),
     Overlay(Box<TransactionOverlayScanCursor<'a>>),
-    Owned(IntoIter<Datom>),
+    Window(Box<DatabaseValueWindowCursor<'a>>),
     Memoized { datoms: Arc<[Datom]>, next: usize },
 }
 
@@ -679,7 +701,7 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
             DatabaseValuePrefixCursorInner::Eager(cursor) => cursor.next().map(Ok),
             DatabaseValuePrefixCursorInner::Native(cursor) => cursor.next(),
             DatabaseValuePrefixCursorInner::Overlay(cursor) => cursor.next(),
-            DatabaseValuePrefixCursorInner::Owned(cursor) => cursor.next().map(Ok),
+            DatabaseValuePrefixCursorInner::Window(cursor) => cursor.next(),
             DatabaseValuePrefixCursorInner::Memoized { datoms, next } => {
                 let datom = datoms.get(*next).cloned();
                 *next = next.saturating_add(1);
@@ -785,6 +807,232 @@ impl Drop for DatabaseValuePrefixCursor<'_> {
     }
 }
 
+/// Recovered `windowed` as an incremental state machine.
+///
+/// The source is retained behind one box to break the recursive cursor shape:
+/// a window wraps a raw-history scan/prefix cursor, while the public cursor in
+/// turn owns the window. No source datoms are retained beyond the current
+/// logical E/A/V group.
+struct DatabaseValueWindowCursor<'a> {
+    source: DatabaseValueWindowSource<'a>,
+    filter_database: DatabaseValue,
+    filters: Arc<[Arc<ReadFilter>]>,
+    as_of_t: Option<u64>,
+    since_t: Option<u64>,
+    history: bool,
+    order: IndexOrder,
+    reverse: bool,
+    forward_boundary: Option<crate::index::NormalizedIndexBoundary>,
+    group: Option<WindowGroup>,
+    retracted_representations: Vec<Value>,
+    reverse_pending: Option<Datom>,
+    reverse_output: VecDeque<Datom>,
+    failed: bool,
+}
+
+enum DatabaseValueWindowSource<'a> {
+    Scan(Box<DatabaseValueScanCursor<'a>>),
+    Prefix(Box<DatabaseValuePrefixCursor<'a>>),
+}
+
+impl Iterator for DatabaseValueWindowSource<'_> {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Scan(cursor) => cursor.next(),
+            Self::Prefix(cursor) => cursor.next(),
+        }
+    }
+}
+
+struct WindowGroup {
+    entity: u64,
+    attribute: u32,
+    value: Value,
+}
+
+impl WindowGroup {
+    fn from_datom(datom: &Datom) -> Self {
+        Self {
+            entity: datom.entity,
+            attribute: datom.attribute,
+            value: datom.value.clone(),
+        }
+    }
+
+    fn matches(&self, datom: &Datom) -> bool {
+        self.entity == datom.entity
+            && self.attribute == datom.attribute
+            && self.value.index_cmp(&datom.value).is_eq()
+    }
+}
+
+impl<'a> DatabaseValueWindowCursor<'a> {
+    fn new(
+        database: &DatabaseValue,
+        source: DatabaseValueWindowSource<'a>,
+        order: IndexOrder,
+        reverse: bool,
+    ) -> Self {
+        Self {
+            source,
+            filter_database: database.without_filters(),
+            filters: Arc::clone(&database.filters),
+            as_of_t: database.as_of_t,
+            since_t: database.since_t,
+            history: database.history,
+            order,
+            reverse,
+            forward_boundary: None,
+            group: None,
+            retracted_representations: Vec::new(),
+            reverse_pending: None,
+            reverse_output: VecDeque::new(),
+            failed: false,
+        }
+    }
+
+    fn next_filtered(&mut self) -> Result<Option<Datom>, SemanticError> {
+        loop {
+            let Some(datom) = self.source.next().transpose()? else {
+                return Ok(None);
+            };
+            let t = tx_to_t(datom.tx)?;
+            if self.as_of_t.is_some_and(|as_of| t > as_of)
+                || self.since_t.is_some_and(|since| t <= since)
+                || !self
+                    .filters
+                    .iter()
+                    .all(|predicate| predicate(&self.filter_database, &datom))
+            {
+                continue;
+            }
+            return Ok(Some(datom));
+        }
+    }
+
+    /// Reverse history visits one logical E/A/V group oldest-first. Match
+    /// recovered `rseek-datoms`: temporal/custom predicates run first, then
+    /// the last visible event determines current membership. Atomic retains
+    /// one winner per strict stored V representation, consistent with the
+    /// native kernel's representation-distinct top-level BigDecimals.
+    fn next_reverse_current(&mut self) -> Result<Option<Datom>, SemanticError> {
+        loop {
+            if let Some(datom) = self.reverse_output.pop_front() {
+                return Ok(Some(datom));
+            }
+
+            let first = match self.reverse_pending.take() {
+                Some(datom) => datom,
+                None => {
+                    let Some(datom) = self.next_filtered()? else {
+                        return Ok(None);
+                    };
+                    datom
+                }
+            };
+            let group = WindowGroup::from_datom(&first);
+            let mut winners = Vec::<Datom>::new();
+
+            let retain = |candidate: Datom, winners: &mut Vec<Datom>| match winners
+                .binary_search_by(|prior| prior.value.stored_cmp(&candidate.value))
+            {
+                Ok(position) => winners[position] = candidate,
+                Err(position) => winners.insert(position, candidate),
+            };
+            retain(first, &mut winners);
+
+            while let Some(candidate) = self.next_filtered()? {
+                if group.matches(&candidate) {
+                    retain(candidate, &mut winners);
+                } else {
+                    self.reverse_pending = Some(candidate);
+                    break;
+                }
+            }
+
+            winners.retain(|datom| datom.added);
+            winners.sort_by(|left, right| right.cmp_in(left, self.order));
+            self.reverse_output.extend(winners);
+        }
+    }
+
+    fn visible_current(&mut self, datom: &Datom) -> bool {
+        if self
+            .group
+            .as_ref()
+            .is_none_or(|group| !group.matches(datom))
+        {
+            self.group = Some(WindowGroup::from_datom(datom));
+            self.retracted_representations.clear();
+        }
+
+        let stored = self
+            .retracted_representations
+            .binary_search_by(|value| value.stored_cmp(&datom.value));
+        if datom.added {
+            // Recovered `filter-retractions` yields every assertion until a
+            // later visible retraction. Atomic deliberately keeps top-level
+            // strict-scale BigDecimal facts representation-distinct, so the
+            // one-group skip set is keyed by stored equality; tuple members
+            // retain their established recursive logical equality.
+            stored.is_err()
+        } else {
+            if let Err(position) = stored {
+                self.retracted_representations
+                    .insert(position, datom.value.clone());
+            }
+            false
+        }
+    }
+
+    fn with_forward_boundary(mut self, boundary: crate::index::NormalizedIndexBoundary) -> Self {
+        self.forward_boundary = Some(boundary);
+        self
+    }
+}
+
+impl Iterator for DatabaseValueWindowCursor<'_> {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        if self.reverse && !self.history {
+            return match self.next_reverse_current() {
+                Ok(Some(datom)) => Some(Ok(datom)),
+                Ok(None) => None,
+                Err(error) => {
+                    self.failed = true;
+                    Some(Err(error))
+                }
+            };
+        }
+        loop {
+            let datom = match self.next_filtered() {
+                Ok(Some(datom)) => datom,
+                Ok(None) => return None,
+                Err(error) => {
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+            };
+            if self.history || self.visible_current(&datom) {
+                if self
+                    .forward_boundary
+                    .as_ref()
+                    .is_some_and(|boundary| boundary.compare_datom(&datom).is_lt())
+                {
+                    continue;
+                }
+                return Some(Ok(datom));
+            }
+        }
+    }
+}
+
 impl fmt::Debug for DatabaseValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -837,6 +1085,20 @@ impl DatabaseValue {
             filters: Arc::default(),
             read_observer: None,
             read_context: None,
+        }
+    }
+
+    /// Borrow the exact native backing value for connection-state adoption.
+    /// Temporal, filtered, history, and speculative overlays are deliberately
+    /// excluded: a live connection may publish only an unmodified committed
+    /// endpoint.
+    pub(crate) fn native_tiered_snapshot(&self) -> Option<TieredSnapshot> {
+        if !self.direct_current() {
+            return None;
+        }
+        match &self.basis {
+            ReadBasis::Native(snapshot) => Some(snapshot.clone()),
+            ReadBasis::Eager(_) | ReadBasis::TransactionOverlay(_) => None,
         }
     }
 
@@ -1127,6 +1389,96 @@ impl DatabaseValue {
         self.since_t
     }
 
+    /// Resolve a documented time point to the boundary used by `as-of` and
+    /// `since`.
+    ///
+    /// T and Tx are exact.  Instant resolution mirrors recovered 1.0.7705
+    /// `as-of-t`: one AVET lower-bound seek finds the first transaction at or
+    /// after the millisecond.  An exact duplicate-millisecond match therefore
+    /// selects the earliest matching transaction; `since` remains exclusive
+    /// of that resolved T and can expose later transactions from the same
+    /// millisecond.  This is the documented imprecision of instant points.
+    pub fn resolve_time_point(&self, time_point: TimePoint) -> Result<u64, SemanticError> {
+        match time_point {
+            TimePoint::T(t) => {
+                crate::t_to_tx(t)?;
+                Ok(t)
+            }
+            TimePoint::Tx(tx) => crate::tx_to_t(tx),
+            TimePoint::Instant(instant) => self.t_at_or_before_instant(instant),
+        }
+    }
+
+    /// Resolve and install an inclusive as-of boundary without changing the
+    /// immutable basis, schema, or ident dictionary.
+    pub fn as_of_time_point(mut self, time_point: TimePoint) -> Result<Self, SemanticError> {
+        let t = self.resolve_time_point(time_point)?;
+        self.read_identity = Arc::new(ReadValueIdentity);
+        self.as_of_t = Some(t);
+        Ok(self)
+    }
+
+    /// Resolve and install an exclusive since boundary without changing the
+    /// immutable basis, schema, or ident dictionary.
+    pub fn since_time_point(mut self, time_point: TimePoint) -> Result<Self, SemanticError> {
+        let t = self.resolve_time_point(time_point)?;
+        self.read_identity = Arc::new(ReadValueIdentity);
+        self.since_t = Some(t);
+        Ok(self)
+    }
+
+    /// Fabricate the EAVT entity boundary for a named or implicit partition.
+    ///
+    /// Recovered `entid-at` uses a different instant rule from `as-of`: it
+    /// selects the first transaction at or after the instant. Recovered
+    /// `partbits` accepts either a partition-zero entity (whose entity-index
+    /// names the partition) or the base eid of any nonzero partition.
+    pub fn entid_at(
+        &self,
+        partition: &EntityIdentifier,
+        time_point: TimePoint,
+    ) -> Result<u64, SemanticError> {
+        let partition_entity = self.resolve_entity_identifier(partition)?.ok_or_else(|| {
+            SemanticError::incorrect(
+                "database/unknown-partition",
+                "partition entity does not resolve in this database value",
+            )
+        })?;
+        let entity_partition = crate::eid_to_part(partition_entity)?;
+        let entity_index = crate::eid_to_eidx(partition_entity)?;
+        let partition_bits = if entity_partition == crate::DB_PARTITION {
+            u32::try_from(entity_index)
+                .ok()
+                .filter(|partition| *partition <= crate::MAX_PARTITION)
+                .ok_or_else(|| {
+                    SemanticError::incorrect(
+                        "database/not-a-partition",
+                        format!(
+                            "partition-zero entity {partition_entity} has out-of-range partition bits {entity_index}"
+                        ),
+                    )
+                })?
+        } else if entity_index == 0 {
+            entity_partition
+        } else {
+            return Err(SemanticError::incorrect(
+                "database/not-a-partition",
+                format!(
+                    "entity {partition_entity} is not partition-zero or a nonzero partition base"
+                ),
+            ));
+        };
+        let t = match time_point {
+            TimePoint::T(t) => {
+                crate::t_to_tx(t)?;
+                t
+            }
+            TimePoint::Tx(tx) => crate::tx_to_t(tx)?,
+            TimePoint::Instant(instant) => self.t_at_or_after_instant(instant)?,
+        };
+        crate::make_eid(partition_bits, t)
+    }
+
     pub fn is_history(&self) -> bool {
         self.history
     }
@@ -1150,6 +1502,150 @@ impl DatabaseValue {
         self.read_identity = Arc::new(ReadValueIdentity);
         self.since_t = Some(t);
         self
+    }
+
+    fn t_at_or_before_instant(&self, instant: i64) -> Result<u64, SemanticError> {
+        let Some(datom) = self.first_tx_instant_at_or_after(instant)? else {
+            return self.next_t();
+        };
+        let (candidate_instant, candidate_t) = self.decode_tx_instant_candidate(&datom, instant)?;
+        if candidate_instant == instant {
+            Ok(candidate_t)
+        } else {
+            candidate_t.checked_sub(1).ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::Fault,
+                    "database/invalid-tx-instant-boundary",
+                    "positive transaction instant has no predecessor T boundary",
+                )
+            })
+        }
+    }
+
+    fn t_at_or_after_instant(&self, instant: i64) -> Result<u64, SemanticError> {
+        let Some(datom) = self.first_tx_instant_at_or_after(instant)? else {
+            return self.next_t();
+        };
+        self.decode_tx_instant_candidate(&datom, instant)
+            .map(|(_, t)| t)
+    }
+
+    fn next_t(&self) -> Result<u64, SemanticError> {
+        self.basis_t().checked_add(1).ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "database/time-boundary-overflow",
+                "database basis has no representable successor time boundary",
+            )
+        })
+    }
+
+    fn first_tx_instant_at_or_after(&self, instant: i64) -> Result<Option<Datom>, SemanticError> {
+        let candidate =
+            self.first_tx_instant_at_or_after_unobserved(instant, self.read_context.as_deref())?;
+        if let (Some(observer), Some(datom)) = (&self.read_observer, &candidate) {
+            observer.charge_datom(datom)?;
+        }
+        Ok(candidate.filter(|datom| datom.attribute == crate::DB_TX_INSTANT as u32))
+    }
+
+    fn first_tx_instant_at_or_after_unobserved(
+        &self,
+        instant: i64,
+        physical_context: Option<&TransactionReadContext>,
+    ) -> Result<Option<Datom>, SemanticError> {
+        let prefix = IndexPrefix::Avet {
+            attribute: crate::DB_TX_INSTANT as u32,
+            value: Some(Value::Instant(instant)),
+            entity: None,
+        };
+        match &self.basis {
+            ReadBasis::Eager(database) => Ok(database.seek_datoms(&prefix)?.first().cloned()),
+            ReadBasis::Native(snapshot) => {
+                // A real datom is sufficient as the physical lower-bound key:
+                // entity zero precedes every transaction entity at equal A/V.
+                // Iteration remains one root-to-leaf path plus one candidate.
+                let start = Datom {
+                    entity: 0,
+                    attribute: crate::DB_TX_INSTANT as u32,
+                    value: Value::Instant(instant),
+                    tx: u64::MAX,
+                    added: true,
+                };
+                let mut cursor =
+                    snapshot.range_cursor(false, IndexOrder::Avet, Some(&start), None)?;
+                let candidate = cursor.next().transpose()?;
+                if let Some(context) = physical_context {
+                    context.record_native_cursor(cursor.stats())?;
+                }
+                Ok(candidate)
+            }
+            ReadBasis::TransactionOverlay(overlay) => {
+                let candidate = overlay
+                    .base
+                    .first_tx_instant_at_or_after_unobserved(instant, physical_context)?;
+                if candidate
+                    .as_ref()
+                    .is_some_and(|datom| datom.attribute == crate::DB_TX_INSTANT as u32)
+                {
+                    return Ok(candidate);
+                }
+                if overlay.last_tx_instant < instant {
+                    return Ok(candidate);
+                }
+                overlay
+                    .tx_data
+                    .iter()
+                    .find(|datom| {
+                        datom.entity == datom.tx
+                            && datom.attribute == crate::DB_TX_INSTANT as u32
+                            && datom.added
+                    })
+                    .cloned()
+                    .map(Some)
+                    .ok_or_else(|| {
+                        SemanticError::new(
+                            ErrorCategory::Fault,
+                            "database/invalid-overlay-tx-instant",
+                            "transaction overlay has no own transaction instant",
+                        )
+                    })
+            }
+        }
+    }
+
+    fn decode_tx_instant_candidate(
+        &self,
+        datom: &Datom,
+        requested: i64,
+    ) -> Result<(i64, u64), SemanticError> {
+        let Value::Instant(candidate) = &datom.value else {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "database/invalid-tx-instant-index",
+                ":db/txInstant AVET contains a non-instant value",
+            ));
+        };
+        let t = tx_to_t(datom.tx).map_err(|error| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "database/invalid-tx-instant-index",
+                format!(":db/txInstant AVET has an invalid transaction id: {error}"),
+            )
+        })?;
+        if datom.entity != datom.tx
+            || !datom.added
+            || *candidate < requested
+            || t == 0
+            || t > self.basis_t()
+        {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "database/invalid-tx-instant-index",
+                ":db/txInstant AVET candidate is not a valid current transaction instant",
+            ));
+        }
+        Ok((*candidate, t))
     }
 
     /// Derive a raw history value. Temporal and custom predicates remain in
@@ -1186,126 +1682,245 @@ impl DatabaseValue {
         Ok(())
     }
 
-    /// Return datoms in one logical index after applying this value's complete
-    /// temporal/custom window.
-    pub fn datoms(&self, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-        if self.direct_current() {
-            return self
-                .basis_scan_cursor(
-                    false,
-                    order,
-                    self.read_observer.clone(),
-                    self.read_context.clone(),
-                )?
-                .collect();
-        }
-        if self.direct_history() {
-            return self
-                .basis_scan_cursor(
-                    true,
-                    order,
-                    self.read_observer.clone(),
-                    self.read_context.clone(),
-                )?
-                .collect();
-        }
-        let datoms = {
-            let datoms = self.basis_datoms(true, order)?;
-            self.window(datoms)?
-        };
-        self.charge_datoms(&datoms)?;
-        Ok(datoms)
-    }
-
-    /// Stream a complete logical index for query evaluation. Point-current
-    /// and raw-history values retain the native lazy cursor all the way into
-    /// the query loop, so a transaction-local broad pattern does not first
-    /// copy the durable database. Temporal/custom windows currently use their
-    /// established materialized collapse path because they need cross-event
-    /// retraction state.
-    pub(crate) fn query_scan_cursor(
+    /// Open a lazy forward cursor over one complete logical index.
+    ///
+    /// Construction does not visit a tree child or scan eager history.
+    /// Temporal predicates and custom filters are applied before incremental
+    /// current retraction collapse, matching recovered `windowed`.
+    pub fn scan_cursor(
         &self,
         order: IndexOrder,
     ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
         if self.direct_current() {
-            self.basis_scan_cursor(
+            return self.basis_scan_cursor(
                 false,
                 order,
                 self.read_observer.clone(),
                 self.read_context.clone(),
-            )
-        } else if self.direct_history() {
-            self.basis_scan_cursor(
+            );
+        }
+        if self.direct_history() {
+            return self.basis_scan_cursor(
                 true,
                 order,
                 self.read_observer.clone(),
                 self.read_context.clone(),
-            )
-        } else {
-            // `datoms` already charges the materialized, windowed result.
-            Ok(DatabaseValueScanCursor {
-                inner: DatabaseValueScanCursorInner::Owned(self.datoms(order)?.into_iter()),
-                observer: None,
-                physical_context: None,
-                physical_recorded: false,
-                failed: false,
-            })
+            );
         }
+        let source = self.basis_scan_cursor(true, order, None, self.read_context.clone())?;
+        Ok(DatabaseValueScanCursor {
+            inner: DatabaseValueScanCursorInner::Window(Box::new(DatabaseValueWindowCursor::new(
+                self,
+                DatabaseValueWindowSource::Scan(Box::new(source)),
+                order,
+                false,
+            ))),
+            observer: self.read_observer.clone(),
+            physical_context: None,
+            physical_recorded: false,
+            failed: false,
+        })
     }
 
-    /// Read a left-contiguous prefix before applying temporal/custom
-    /// predicates. This preserves the important property that filtered and
-    /// historical point reads do not first materialize an entire index.
-    pub fn datoms_with_prefix(&self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
-        prefix.validate()?;
+    /// Open a lazy forward raw-index cursor at a typed virtual boundary.
+    ///
+    /// The supplied components choose only the starting position; iteration
+    /// continues through the rest of the index. Missing suffix components
+    /// position before the lowest match, including every operation/stored
+    /// representation tied at a full E/A/V/T boundary.
+    pub fn seek_cursor(
+        &self,
+        boundary: &IndexBoundary,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        self.validate_raw_boundary_access(boundary)?;
         if self.direct_current() {
-            return self.memoized_prefix_cursor(false, prefix)?.collect();
+            return self.basis_seek_boundary_cursor(
+                false,
+                boundary,
+                self.read_observer.clone(),
+                self.read_context.clone(),
+            );
         }
         if self.direct_history() {
-            return self.memoized_prefix_cursor(true, prefix)?.collect();
+            return self.basis_seek_boundary_cursor(
+                true,
+                boundary,
+                self.read_observer.clone(),
+                self.read_context.clone(),
+            );
         }
-        let datoms = self.window(self.basis_prefix(true, prefix)?)?;
-        self.charge_datoms(&datoms)?;
-        Ok(datoms)
+        let order = boundary.order();
+        let source_boundary = if self.history {
+            boundary.clone()
+        } else {
+            boundary.current_group_start()
+        };
+        let source = self.basis_seek_boundary_cursor(
+            true,
+            &source_boundary,
+            None,
+            self.read_context.clone(),
+        )?;
+        let window = DatabaseValueWindowCursor::new(
+            self,
+            DatabaseValueWindowSource::Scan(Box::new(source)),
+            order,
+            false,
+        );
+        let window = if self.history {
+            window
+        } else {
+            window.with_forward_boundary(boundary.normalized()?)
+        };
+        Ok(DatabaseValueScanCursor {
+            inner: DatabaseValueScanCursorInner::Window(Box::new(window)),
+            observer: self.read_observer.clone(),
+            physical_context: None,
+            physical_recorded: false,
+            failed: false,
+        })
     }
 
-    /// Fallible prefix stream used by query and persisted-program execution.
-    /// Direct current/history values charge the transaction observer as each
-    /// datom is yielded. Temporal/custom values retain the established
-    /// materialized window because visibility requires cross-event state.
-    pub(crate) fn query_prefix_cursor(
+    /// Explicit collecting convenience over [`Self::seek_cursor`].
+    pub fn collect_seek_datoms(
+        &self,
+        boundary: &IndexBoundary,
+    ) -> Result<Vec<Datom>, SemanticError> {
+        self.seek_cursor(boundary)?.collect()
+    }
+
+    /// Open the lazy reverse complement of [`Self::seek_cursor`].
+    ///
+    /// Traversal starts after the highest match of the virtual components and
+    /// proceeds toward the beginning of the index. Temporal/custom predicates
+    /// filter raw history before current retraction collapse, matching
+    /// recovered `rseek-datoms` rather than reversing a collected forward
+    /// result.
+    pub fn reverse_seek_cursor(
+        &self,
+        boundary: &IndexBoundary,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        self.validate_raw_boundary_access(boundary)?;
+        if self.direct_current() {
+            return self.basis_reverse_boundary_cursor(
+                false,
+                boundary,
+                self.read_observer.clone(),
+                self.read_context.clone(),
+            );
+        }
+        if self.direct_history() {
+            return self.basis_reverse_boundary_cursor(
+                true,
+                boundary,
+                self.read_observer.clone(),
+                self.read_context.clone(),
+            );
+        }
+        let order = boundary.order();
+        let source =
+            self.basis_reverse_boundary_cursor(true, boundary, None, self.read_context.clone())?;
+        Ok(DatabaseValueScanCursor {
+            inner: DatabaseValueScanCursorInner::Window(Box::new(DatabaseValueWindowCursor::new(
+                self,
+                DatabaseValueWindowSource::Scan(Box::new(source)),
+                order,
+                true,
+            ))),
+            observer: self.read_observer.clone(),
+            physical_context: None,
+            physical_recorded: false,
+            failed: false,
+        })
+    }
+
+    /// Explicit collecting convenience over [`Self::reverse_seek_cursor`].
+    pub fn collect_reverse_seek_datoms(
+        &self,
+        boundary: &IndexBoundary,
+    ) -> Result<Vec<Datom>, SemanticError> {
+        self.reverse_seek_cursor(boundary)?.collect()
+    }
+
+    /// Explicit collecting convenience over [`Self::scan_cursor`].
+    pub fn collect_datoms(&self, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
+        self.scan_cursor(order)?.collect()
+    }
+
+    /// Compatibility collecting convenience. New streaming callers should
+    /// prefer [`Self::scan_cursor`] or name collection explicitly with
+    /// [`Self::collect_datoms`].
+    pub fn datoms(&self, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
+        self.collect_datoms(order)
+    }
+
+    /// Query evaluation uses the same public lazy scan semantics.
+    pub(crate) fn query_scan_cursor(
+        &self,
+        order: IndexOrder,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        self.scan_cursor(order)
+    }
+
+    /// Open a lazy cursor over one left-contiguous logical index prefix.
+    pub fn prefix_cursor(
         &self,
         prefix: &IndexPrefix,
     ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
         prefix.validate()?;
         if self.direct_current() {
-            self.memoized_prefix_cursor(false, prefix)
-        } else if self.direct_history() {
-            self.memoized_prefix_cursor(true, prefix)
-        } else {
-            // `datoms_with_prefix` charges the completed temporal/custom
-            // result. Keep the collection convenience outside transaction
-            // processing until retraction windows have a streaming form.
-            Ok(DatabaseValuePrefixCursor {
-                inner: DatabaseValuePrefixCursorInner::Owned(
-                    self.datoms_with_prefix(prefix)?.into_iter(),
-                ),
-                observer: None,
-                physical_context: None,
-                physical_recorded: false,
-                memo_source: None,
-                memo_hit: false,
-                failed: false,
-            })
+            return self.memoized_prefix_cursor(false, prefix);
         }
+        if self.direct_history() {
+            return self.memoized_prefix_cursor(true, prefix);
+        }
+        let source = self.basis_prefix_cursor(true, prefix, None, self.read_context.clone())?;
+        Ok(DatabaseValuePrefixCursor {
+            inner: DatabaseValuePrefixCursorInner::Window(Box::new(
+                DatabaseValueWindowCursor::new(
+                    self,
+                    DatabaseValueWindowSource::Prefix(Box::new(source)),
+                    prefix.order(),
+                    false,
+                ),
+            )),
+            observer: self.read_observer.clone(),
+            physical_context: None,
+            physical_recorded: false,
+            memo_source: None,
+            memo_hit: false,
+            failed: false,
+        })
+    }
+
+    /// Explicit collecting convenience over [`Self::prefix_cursor`].
+    pub fn collect_datoms_with_prefix(
+        &self,
+        prefix: &IndexPrefix,
+    ) -> Result<Vec<Datom>, SemanticError> {
+        self.prefix_cursor(prefix)?.collect()
+    }
+
+    /// Compatibility collecting convenience. New streaming callers should
+    /// prefer [`Self::prefix_cursor`] or [`Self::collect_datoms_with_prefix`].
+    pub fn datoms_with_prefix(&self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
+        self.collect_datoms_with_prefix(prefix)
+    }
+
+    /// Query and persisted-program execution use the same public lazy prefix
+    /// semantics.
+    pub(crate) fn query_prefix_cursor(
+        &self,
+        prefix: &IndexPrefix,
+    ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
+        self.prefix_cursor(prefix)
     }
 
     /// Lazily read one left-contiguous prefix of an unfiltered current value.
     ///
     /// Transaction processing requires exactly this point-current capability.
-    /// Temporal, history, and custom-filter values intentionally use the
-    /// existing materializing APIs until their retraction-window semantics can
-    /// be represented by a dedicated streaming cursor.
+    /// Temporal, history, and custom-filter values use [`Self::prefix_cursor`]
+    /// so this stricter transaction-only entry point remains unambiguous.
     pub fn current_prefix_cursor(
         &self,
         prefix: &IndexPrefix,
@@ -1399,6 +2014,315 @@ impl DatabaseValue {
             .map(|datom| datom.entity))
     }
 
+    /// Normalize a zero-to-four-component EAVT boundary against this exact
+    /// database value.
+    pub fn eavt_boundary(
+        &self,
+        components: IndexComponents<
+            EntityIdentifier,
+            AttributeName,
+            RawIndexValue,
+            IndexTransaction,
+        >,
+    ) -> Result<IndexBoundary, SemanticError> {
+        let components = match components {
+            IndexComponents::Empty => IndexComponents::Empty,
+            IndexComponents::One(entity) => {
+                IndexComponents::One(self.require_index_entity(&entity)?)
+            }
+            IndexComponents::Two(entity, attribute) => IndexComponents::Two(
+                self.require_index_entity(&entity)?,
+                self.resolve_attribute(&attribute)?,
+            ),
+            IndexComponents::Three(entity, attribute, value) => {
+                let entity = self.require_index_entity(&entity)?;
+                let attribute = self.resolve_attribute(&attribute)?;
+                let value = self.normalize_index_value(attribute, value)?;
+                IndexComponents::Three(entity, attribute, value)
+            }
+            IndexComponents::Four(entity, attribute, value, transaction) => {
+                let entity = self.require_index_entity(&entity)?;
+                let attribute = self.resolve_attribute(&attribute)?;
+                let value = self.normalize_index_value(attribute, value)?;
+                IndexComponents::Four(entity, attribute, value, transaction)
+            }
+        };
+        Self::validated_boundary(IndexBoundary::Eavt(components))
+    }
+
+    /// Normalize a zero-to-four-component AEVT boundary against this exact
+    /// database value.
+    pub fn aevt_boundary(
+        &self,
+        components: IndexComponents<
+            AttributeName,
+            EntityIdentifier,
+            RawIndexValue,
+            IndexTransaction,
+        >,
+    ) -> Result<IndexBoundary, SemanticError> {
+        let components = match components {
+            IndexComponents::Empty => IndexComponents::Empty,
+            IndexComponents::One(attribute) => {
+                IndexComponents::One(self.resolve_attribute(&attribute)?)
+            }
+            IndexComponents::Two(attribute, entity) => IndexComponents::Two(
+                self.resolve_attribute(&attribute)?,
+                self.require_index_entity(&entity)?,
+            ),
+            IndexComponents::Three(attribute, entity, value) => {
+                let attribute = self.resolve_attribute(&attribute)?;
+                let entity = self.require_index_entity(&entity)?;
+                let value = self.normalize_index_value(attribute, value)?;
+                IndexComponents::Three(attribute, entity, value)
+            }
+            IndexComponents::Four(attribute, entity, value, transaction) => {
+                let attribute = self.resolve_attribute(&attribute)?;
+                let entity = self.require_index_entity(&entity)?;
+                let value = self.normalize_index_value(attribute, value)?;
+                IndexComponents::Four(attribute, entity, value, transaction)
+            }
+        };
+        Self::validated_boundary(IndexBoundary::Aevt(components))
+    }
+
+    /// Normalize a zero-to-four-component AVET boundary and require the
+    /// qualified attribute's logical membership and physical readiness.
+    pub fn avet_boundary(
+        &self,
+        components: IndexComponents<
+            AttributeName,
+            RawIndexValue,
+            EntityIdentifier,
+            IndexTransaction,
+        >,
+    ) -> Result<IndexBoundary, SemanticError> {
+        let components = match components {
+            IndexComponents::Empty => IndexComponents::Empty,
+            IndexComponents::One(attribute) => {
+                IndexComponents::One(self.resolve_ready_avet_attribute(&attribute)?)
+            }
+            IndexComponents::Two(attribute, value) => {
+                let attribute = self.resolve_ready_avet_attribute(&attribute)?;
+                let value = self.normalize_index_value(attribute, value)?;
+                IndexComponents::Two(attribute, value)
+            }
+            IndexComponents::Three(attribute, value, entity) => {
+                let attribute = self.resolve_ready_avet_attribute(&attribute)?;
+                let value = self.normalize_index_value(attribute, value)?;
+                let entity = self.require_index_entity(&entity)?;
+                IndexComponents::Three(attribute, value, entity)
+            }
+            IndexComponents::Four(attribute, value, entity, transaction) => {
+                let attribute = self.resolve_ready_avet_attribute(&attribute)?;
+                let value = self.normalize_index_value(attribute, value)?;
+                let entity = self.require_index_entity(&entity)?;
+                IndexComponents::Four(attribute, value, entity, transaction)
+            }
+        };
+        Self::validated_boundary(IndexBoundary::Avet(components))
+    }
+
+    /// Normalize a zero-to-four-component VAET boundary. Its leading value is
+    /// always an entity reference, independent of whether an attribute suffix
+    /// is present.
+    pub fn vaet_boundary(
+        &self,
+        components: IndexComponents<
+            RawIndexValue,
+            AttributeName,
+            EntityIdentifier,
+            IndexTransaction,
+        >,
+    ) -> Result<IndexBoundary, SemanticError> {
+        let components = match components {
+            IndexComponents::Empty => IndexComponents::Empty,
+            IndexComponents::One(value) => IndexComponents::One(self.normalize_vaet_value(value)?),
+            IndexComponents::Two(value, attribute) => IndexComponents::Two(
+                self.normalize_vaet_value(value)?,
+                self.resolve_attribute(&attribute)?,
+            ),
+            IndexComponents::Three(value, attribute, entity) => IndexComponents::Three(
+                self.normalize_vaet_value(value)?,
+                self.resolve_attribute(&attribute)?,
+                self.require_index_entity(&entity)?,
+            ),
+            IndexComponents::Four(value, attribute, entity, transaction) => IndexComponents::Four(
+                self.normalize_vaet_value(value)?,
+                self.resolve_attribute(&attribute)?,
+                self.require_index_entity(&entity)?,
+                transaction,
+            ),
+        };
+        Self::validated_boundary(IndexBoundary::Vaet(components))
+    }
+
+    fn validated_boundary(boundary: IndexBoundary) -> Result<IndexBoundary, SemanticError> {
+        boundary.validate()?;
+        Ok(boundary)
+    }
+
+    fn require_index_entity(&self, identifier: &EntityIdentifier) -> Result<u64, SemanticError> {
+        self.resolve_entity_identifier(identifier)?.ok_or_else(|| {
+            SemanticError::incorrect(
+                "index/unresolved-entity",
+                "raw index boundary entity does not resolve in this database value",
+            )
+        })
+    }
+
+    fn resolve_ready_avet_attribute(
+        &self,
+        attribute: &AttributeName,
+    ) -> Result<u32, SemanticError> {
+        let attribute = self.resolve_attribute(attribute)?;
+        let schema = self.schema().attribute(attribute)?;
+        if !(schema.indexed || schema.unique.is_some()) {
+            return Err(SemanticError::incorrect(
+                "index/attribute-not-in-avet",
+                format!(
+                    "attribute {} is not present in AVET",
+                    schema.ident.qualified_name()
+                ),
+            ));
+        }
+        if !self.physical_avet_ready(attribute) {
+            return Err(SemanticError::new(
+                ErrorCategory::Unavailable,
+                "index/avet-not-ready",
+                format!(
+                    "AVET backfill is not ready for attribute {}",
+                    schema.ident.qualified_name()
+                ),
+            ));
+        }
+        Ok(attribute)
+    }
+
+    fn normalize_vaet_value(&self, value: RawIndexValue) -> Result<Value, SemanticError> {
+        match value {
+            RawIndexValue::Entity(identifier) => {
+                self.require_index_entity(&identifier).map(Value::Ref)
+            }
+            RawIndexValue::Stored(Value::Ref(entity)) => {
+                eid_to_eidx(entity)?;
+                Ok(Value::Ref(entity))
+            }
+            RawIndexValue::Stored(_) | RawIndexValue::Tuple(_) => Err(SemanticError::incorrect(
+                "index/vaet-value-not-ref",
+                "VAET boundary value must be an entity identifier or stored reference",
+            )),
+        }
+    }
+
+    fn normalize_index_value(
+        &self,
+        attribute: u32,
+        value: RawIndexValue,
+    ) -> Result<Value, SemanticError> {
+        let schema = self.schema().attribute(attribute)?;
+        let value = match (schema.value_type, value) {
+            (ValueType::Ref, RawIndexValue::Entity(identifier)) => {
+                Value::Ref(self.require_index_entity(&identifier)?)
+            }
+            (ValueType::Tuple, RawIndexValue::Tuple(slots)) => {
+                self.normalize_index_tuple(schema, slots)?
+            }
+            (_, RawIndexValue::Stored(value)) => {
+                Self::validate_stored_index_refs(&value)?;
+                value
+            }
+            (_, RawIndexValue::Entity(identifier)) => {
+                Value::Ref(self.require_index_entity(&identifier)?)
+            }
+            (_, RawIndexValue::Tuple(_)) => {
+                return Err(SemanticError::incorrect(
+                    "transaction/value-type",
+                    format!(
+                        "attribute {} requires {:?}, got tuple",
+                        schema.ident.qualified_name(),
+                        schema.value_type
+                    ),
+                ));
+            }
+        };
+        self.schema().validate_value(schema, &value)?;
+        Ok(value)
+    }
+
+    fn normalize_index_tuple(
+        &self,
+        attribute: &crate::Attribute,
+        slots: Vec<Option<RawIndexValue>>,
+    ) -> Result<Value, SemanticError> {
+        let value_types = match attribute.tuple.as_ref() {
+            Some(TupleSpec::Homogeneous(value_type)) => vec![*value_type; slots.len()],
+            Some(TupleSpec::Heterogeneous(value_types)) => value_types.clone(),
+            Some(TupleSpec::Composite(attributes)) => attributes
+                .iter()
+                .map(|attribute| self.schema().attribute(*attribute).map(|a| a.value_type))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => {
+                return Err(SemanticError::incorrect(
+                    "schema/missing-tuple-spec",
+                    "tuple specification missing",
+                ));
+            }
+        };
+        if !matches!(attribute.tuple, Some(TupleSpec::Homogeneous(_)))
+            && value_types.len() != slots.len()
+        {
+            return Err(SemanticError::incorrect(
+                "transaction/invalid-tuple-length",
+                format!("tuple requires {} slots", value_types.len()),
+            ));
+        }
+        let normalized = value_types
+            .into_iter()
+            .zip(slots)
+            .map(|(value_type, slot)| {
+                slot.map(|slot| self.normalize_index_tuple_slot(value_type, slot))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Value::Tuple(normalized))
+    }
+
+    fn normalize_index_tuple_slot(
+        &self,
+        value_type: ValueType,
+        value: RawIndexValue,
+    ) -> Result<Value, SemanticError> {
+        match value {
+            RawIndexValue::Entity(identifier) => {
+                self.require_index_entity(&identifier).map(Value::Ref)
+            }
+            RawIndexValue::Stored(value) => {
+                Self::validate_stored_index_refs(&value)?;
+                Ok(value)
+            }
+            RawIndexValue::Tuple(_) => Err(SemanticError::incorrect(
+                "transaction/invalid-tuple-element",
+                format!("tuple slot requires {value_type:?}, got tuple"),
+            )),
+        }
+    }
+
+    fn validate_stored_index_refs(value: &Value) -> Result<(), SemanticError> {
+        match value {
+            Value::Ref(entity) => {
+                eid_to_eidx(*entity)?;
+            }
+            Value::Tuple(slots) => {
+                for value in slots.iter().flatten() {
+                    Self::validate_stored_index_refs(value)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Resolve the public eid/ident/lookup-ref forms against this exact value.
     pub fn resolve_entity_identifier(
         &self,
@@ -1448,13 +2372,94 @@ impl DatabaseValue {
         !self.history && self.as_of_t.is_none() && self.since_t.is_none() && self.filters.is_empty()
     }
 
+    fn validate_raw_boundary_access(&self, boundary: &IndexBoundary) -> Result<(), SemanticError> {
+        boundary.validate()?;
+        if let Some(attribute) = boundary.avet_attribute() {
+            self.resolve_ready_avet_attribute(&AttributeName::Id(attribute))?;
+        }
+        Ok(())
+    }
+
     fn direct_history(&self) -> bool {
         self.history && self.as_of_t.is_none() && self.since_t.is_none() && self.filters.is_empty()
     }
 
-    fn basis_datoms(&self, history: bool, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-        self.basis_scan_cursor(history, order, None, self.read_context.clone())?
-            .collect()
+    fn basis_seek_boundary_cursor(
+        &self,
+        history: bool,
+        boundary: &IndexBoundary,
+        observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        let normalized = boundary.normalized()?;
+        let order = normalized.order();
+        match &self.basis {
+            ReadBasis::Eager(database) => {
+                let datoms = database.index_datoms(history, order);
+                let start = datoms.partition_point(|datom| normalized.compare_datom(datom).is_lt());
+                Ok(DatabaseValueScanCursor {
+                    inner: DatabaseValueScanCursorInner::Eager(datoms[start..].iter().cloned()),
+                    observer,
+                    physical_context: None,
+                    physical_recorded: false,
+                    failed: false,
+                })
+            }
+            ReadBasis::Native(snapshot) => Ok(DatabaseValueScanCursor {
+                inner: DatabaseValueScanCursorInner::Native(Box::new(
+                    snapshot.seek_boundary_cursor(history, boundary)?,
+                )),
+                observer,
+                physical_context,
+                physical_recorded: false,
+                failed: false,
+            }),
+            ReadBasis::TransactionOverlay(_) => Err(SemanticError::new(
+                ErrorCategory::Unsupported,
+                "database/raw-seek-transaction-overlay",
+                "raw boundary seek is available on committed eager and native database values",
+            )),
+        }
+    }
+
+    fn basis_reverse_boundary_cursor(
+        &self,
+        history: bool,
+        boundary: &IndexBoundary,
+        observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        let normalized = boundary.normalized()?;
+        let order = normalized.order();
+        match &self.basis {
+            ReadBasis::Eager(database) => {
+                let datoms = database.index_datoms(history, order);
+                let end = datoms.partition_point(|datom| !normalized.compare_datom(datom).is_gt());
+                Ok(DatabaseValueScanCursor {
+                    inner: DatabaseValueScanCursorInner::EagerReverse(
+                        datoms[..end].iter().rev().cloned(),
+                    ),
+                    observer,
+                    physical_context: None,
+                    physical_recorded: false,
+                    failed: false,
+                })
+            }
+            ReadBasis::Native(snapshot) => Ok(DatabaseValueScanCursor {
+                inner: DatabaseValueScanCursorInner::Native(Box::new(
+                    snapshot.reverse_boundary_cursor(history, boundary)?,
+                )),
+                observer,
+                physical_context,
+                physical_recorded: false,
+                failed: false,
+            }),
+            ReadBasis::TransactionOverlay(_) => Err(SemanticError::new(
+                ErrorCategory::Unsupported,
+                "database/raw-seek-transaction-overlay",
+                "raw boundary seek is available on committed eager and native database values",
+            )),
+        }
     }
 
     fn basis_scan_cursor(
@@ -1466,17 +2471,8 @@ impl DatabaseValue {
     ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
         match &self.basis {
             ReadBasis::Eager(database) => Ok(DatabaseValueScanCursor {
-                inner: DatabaseValueScanCursorInner::Owned(
-                    database
-                        .datoms(
-                            if history {
-                                crate::View::History
-                            } else {
-                                crate::View::Current
-                            },
-                            order,
-                        )
-                        .into_iter(),
+                inner: DatabaseValueScanCursorInner::Eager(
+                    database.index_datoms(history, order).iter().cloned(),
                 ),
                 observer,
                 physical_context: None,
@@ -1611,50 +2607,11 @@ impl DatabaseValue {
         Ok(cursor)
     }
 
-    fn basis_prefix(
-        &self,
-        history: bool,
-        prefix: &IndexPrefix,
-    ) -> Result<Vec<Datom>, SemanticError> {
-        self.basis_prefix_cursor(history, prefix, None, self.read_context.clone())?
-            .collect()
-    }
-
     fn without_filters(&self) -> Self {
         let mut database = self.clone();
         database.read_identity = Arc::new(ReadValueIdentity);
         database.filters = Arc::default();
         database
-    }
-
-    fn charge_datoms(&self, datoms: &[Datom]) -> Result<(), SemanticError> {
-        if let Some(observer) = &self.read_observer {
-            observer.charge_datoms(datoms)?;
-        }
-        Ok(())
-    }
-
-    fn window(&self, datoms: Vec<Datom>) -> Result<Vec<Datom>, SemanticError> {
-        let unfiltered = self.without_filters();
-        let mut selected = Vec::with_capacity(datoms.len());
-        for datom in datoms {
-            let t = tx_to_t(datom.tx)?;
-            if self.as_of_t.is_some_and(|as_of| t > as_of)
-                || self.since_t.is_some_and(|since| t <= since)
-                || !self
-                    .filters
-                    .iter()
-                    .all(|predicate| predicate(&unfiltered, &datom))
-            {
-                continue;
-            }
-            selected.push(datom);
-        }
-        if self.history {
-            Ok(selected)
-        } else {
-            Ok(collapse_retractions(selected))
-        }
     }
 }
 
@@ -2004,75 +2961,13 @@ impl From<&PeerSnapshot> for DatabaseValue {
     }
 }
 
-fn collapse_retractions(datoms: Vec<Datom>) -> Vec<Datom> {
-    // Establish one E/A/logical-V temporal order independent of the caller's
-    // EAVT/AEVT/AVET/VAET traversal, decide visibility for each exact stored
-    // representation there, then emit in the caller's original index order.
-    let mut temporal_order = (0..datoms.len()).collect::<Vec<_>>();
-    temporal_order.sort_by(|left, right| {
-        let left = &datoms[*left];
-        let right = &datoms[*right];
-        left.entity
-            .cmp(&right.entity)
-            .then(left.attribute.cmp(&right.attribute))
-            .then_with(|| left.value.index_cmp(&right.value))
-            .then_with(|| right.tx.cmp(&left.tx))
-            .then_with(|| right.added.cmp(&left.added))
-            .then_with(|| left.value.stored_cmp(&right.value))
-    });
-
-    let mut visible = vec![false; datoms.len()];
-    let mut start = 0;
-    while let Some(first_offset) = temporal_order.get(start) {
-        let first = &datoms[*first_offset];
-        let mut end = start + 1;
-        while temporal_order.get(end).is_some_and(|offset| {
-            let candidate = &datoms[*offset];
-            candidate.entity == first.entity
-                && candidate.attribute == first.attribute
-                && candidate.value.index_cmp(&first.value).is_eq()
-        }) {
-            end += 1;
-        }
-
-        // Track exact representations separately while walking newest first.
-        // A binary-searched slice avoids cloning potentially large values.
-        let mut retracted = Vec::<&Value>::new();
-        for offset in &temporal_order[start..end] {
-            let datom = &datoms[*offset];
-            let stored = retracted.binary_search_by(|value| value.stored_cmp(&datom.value));
-            if datom.added {
-                // `filter-retractions` returns each assertion until a matching
-                // retraction. This matters when a custom predicate removes an
-                // intervening retraction and exposes multiple assertions.
-                visible[*offset] = stored.is_err();
-            } else if let Err(position) = stored {
-                retracted.insert(position, &datom.value);
-            }
-        }
-
-        // The transaction redundancy path uses recovered
-        // `equals-with-strict-scale`: top-level 1.0M and 1.00M remain distinct
-        // stored facts, while tuple/list members recurse through logical
-        // comparison. Using the same `stored_cmp` boundary here keeps a
-        // current-basis window equal to the unwindowed database value.
-        start = end;
-    }
-    datoms
-        .into_iter()
-        .zip(visible)
-        .filter(|(_, visible)| *visible)
-        .map(|(datom, _)| datom)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         Attribute, Cardinality, Clause, DB_IDENT, DataPattern, EntityRef, FindElement, FindSpec,
-        Query, QueryControl, Term, TxOp, TxReport, TxValue, USER_PARTITION, ValueType, Variable,
-        make_eid, t_to_tx,
+        Query, QueryControl, Term, TxOp, TxReport, TxValue, USER_PARTITION, Unique, ValueType,
+        Variable, make_eid, t_to_tx,
     };
     use bigdecimal::BigDecimal;
     use std::cell::Cell;
@@ -2080,6 +2975,11 @@ mod tests {
 
     const AMOUNT: u32 = 1_000;
     const LINK: u32 = 1_001;
+    const BOUNDARY_EMAIL: u32 = 1_000;
+    const BOUNDARY_TEXT: u32 = 1_001;
+    const BOUNDARY_LINK: u32 = 1_002;
+    const BOUNDARY_HOMOGENEOUS_REFS: u32 = 1_003;
+    const BOUNDARY_HETEROGENEOUS: u32 = 1_004;
 
     fn decimal(value: &str) -> Value {
         Value::BigDec(BigDecimal::from_str(value).unwrap())
@@ -2097,6 +2997,106 @@ mod tests {
         .unwrap()
     }
 
+    fn indexed(mut attribute: Attribute) -> Attribute {
+        attribute.indexed = true;
+        attribute
+    }
+
+    fn raw_boundary_fixture() -> (DatabaseValue, u64, u64, Keyword, Keyword) {
+        let mut schema = Schema::new();
+        schema
+            .install(
+                Attribute::new(
+                    BOUNDARY_EMAIL,
+                    Keyword::new("boundary", "email"),
+                    ValueType::String,
+                    Cardinality::One,
+                )
+                .unique(Unique::Identity),
+            )
+            .unwrap();
+        schema
+            .install(Attribute::new(
+                BOUNDARY_TEXT,
+                Keyword::new("boundary", "text"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        schema
+            .install(indexed(Attribute::new(
+                BOUNDARY_LINK,
+                Keyword::new("boundary", "link"),
+                ValueType::Ref,
+                Cardinality::Many,
+            )))
+            .unwrap();
+        schema
+            .install(indexed(
+                Attribute::new(
+                    BOUNDARY_HOMOGENEOUS_REFS,
+                    Keyword::new("boundary", "homogeneous-refs"),
+                    ValueType::Tuple,
+                    Cardinality::Many,
+                )
+                .tuple(TupleSpec::Homogeneous(ValueType::Ref)),
+            ))
+            .unwrap();
+        schema
+            .install(indexed(
+                Attribute::new(
+                    BOUNDARY_HETEROGENEOUS,
+                    Keyword::new("boundary", "heterogeneous"),
+                    ValueType::Tuple,
+                    Cardinality::Many,
+                )
+                .tuple(TupleSpec::Heterogeneous(vec![
+                    ValueType::Ref,
+                    ValueType::String,
+                    ValueType::Ref,
+                ])),
+            ))
+            .unwrap();
+
+        let alice_ident = Keyword::new("boundary", "alice");
+        let bob_ident = Keyword::new("boundary", "bob");
+        let report = Database::new(schema)
+            .unwrap()
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("alice".into()),
+                        attribute: DB_IDENT as u32,
+                        value: Value::Keyword(alice_ident.clone()).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("alice".into()),
+                        attribute: BOUNDARY_EMAIL,
+                        value: Value::String("alice@example.test".into()).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("bob".into()),
+                        attribute: DB_IDENT as u32,
+                        value: Value::Keyword(bob_ident.clone()).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("bob".into()),
+                        attribute: BOUNDARY_EMAIL,
+                        value: Value::String("bob@example.test".into()).into(),
+                    },
+                ],
+                1_000,
+            )
+            .unwrap();
+        (
+            report.db_after.database_value(),
+            report.tempids["alice"],
+            report.tempids["bob"],
+            alice_ident,
+            bob_ident,
+        )
+    }
+
     fn assert_same_stored_datoms(actual: &[Datom], expected: &[Datom]) {
         assert_eq!(actual.len(), expected.len(), "different datom counts");
         for (actual, expected) in actual.iter().zip(expected) {
@@ -2111,6 +3111,167 @@ mod tests {
                 expected.value
             );
         }
+    }
+
+    fn expected_seek(
+        database: &DatabaseValue,
+        boundary: &IndexBoundary,
+        reverse: bool,
+    ) -> Vec<Datom> {
+        let normalized = boundary.normalized().unwrap();
+        let mut datoms = database
+            .datoms(boundary.order())
+            .unwrap()
+            .into_iter()
+            .filter(|datom| {
+                let comparison = normalized.compare_datom(datom);
+                if reverse {
+                    !comparison.is_gt()
+                } else {
+                    !comparison.is_lt()
+                }
+            })
+            .collect::<Vec<_>>();
+        if reverse {
+            datoms.reverse();
+        }
+        datoms
+    }
+
+    fn assert_bidirectional_seek(database: &DatabaseValue, boundary: &IndexBoundary) {
+        let forward = database
+            .seek_cursor(boundary)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let reverse = database
+            .reverse_seek_cursor(boundary)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_same_stored_datoms(&forward, &expected_seek(database, boundary, false));
+        assert_same_stored_datoms(&reverse, &expected_seek(database, boundary, true));
+        assert_same_stored_datoms(&database.collect_seek_datoms(boundary).unwrap(), &forward);
+        assert_same_stored_datoms(
+            &database.collect_reverse_seek_datoms(boundary).unwrap(),
+            &reverse,
+        );
+    }
+
+    #[test]
+    fn eager_raw_seek_streams_both_directions_across_indexes_and_views() {
+        let (report, _, first, second, ..) = overlay_fixture();
+        let value = report.db_after.database_value();
+        let boundaries = [
+            IndexBoundary::Eavt(IndexComponents::Four(
+                first,
+                AMOUNT,
+                decimal("1.0"),
+                IndexTransaction::T(2),
+            )),
+            IndexBoundary::Aevt(IndexComponents::Three(AMOUNT, first, decimal("1.0"))),
+            IndexBoundary::Avet(IndexComponents::Two(AMOUNT, decimal("1.0"))),
+            IndexBoundary::Vaet(IndexComponents::Three(Value::Ref(second), LINK, first)),
+        ];
+
+        for database in [
+            value.clone(),
+            value.clone().history(),
+            value.clone().as_of(2),
+            value.clone().since(1).as_of(3),
+        ] {
+            for boundary in &boundaries {
+                assert_bidirectional_seek(&database, boundary);
+            }
+        }
+
+        for boundary in [
+            IndexBoundary::Eavt(IndexComponents::Empty),
+            IndexBoundary::Aevt(IndexComponents::Empty),
+            IndexBoundary::Avet(IndexComponents::Empty),
+            IndexBoundary::Vaet(IndexComponents::Empty),
+        ] {
+            assert_bidirectional_seek(&value, &boundary);
+            assert_bidirectional_seek(&value.clone().history(), &boundary);
+        }
+    }
+
+    #[test]
+    fn reverse_filtered_seek_is_lazy_and_collapses_after_filtering() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                AMOUNT,
+                Keyword::new("seek", "amount"),
+                ValueType::BigDec,
+                Cardinality::Many,
+            ))
+            .unwrap();
+        let entity = make_eid(USER_PARTITION, 1).unwrap();
+        let first = Database::new(schema)
+            .unwrap()
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(entity),
+                    attribute: AMOUNT,
+                    value: decimal("1.0").into(),
+                }],
+                1_000,
+            )
+            .unwrap()
+            .db_after;
+        let second = first
+            .with(
+                &[TxOp::Retract {
+                    entity: EntityRef::Id(entity),
+                    attribute: AMOUNT,
+                    value: Some(decimal("1.0").into()),
+                }],
+                2_000,
+            )
+            .unwrap()
+            .db_after;
+        let latest = second
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(entity),
+                    attribute: AMOUNT,
+                    value: decimal("1.0").into(),
+                }],
+                3_000,
+            )
+            .unwrap()
+            .db_after;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let filtered = latest.database_value().filter(move |_, datom| {
+            observed.fetch_add(1, AtomicOrdering::Relaxed);
+            tx_to_t(datom.tx).unwrap() != 3
+        });
+        let boundary = IndexBoundary::Eavt(IndexComponents::Three(entity, AMOUNT, decimal("1.0")));
+
+        let mut cursor = filtered.reverse_seek_cursor(&boundary).unwrap();
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
+        assert!(
+            cursor.next().is_none(),
+            "after filtering T=3, the visible T=2 retraction hides T=1"
+        );
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 3);
+
+        let history_calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&history_calls);
+        let history = latest.database_value().history().filter(move |_, _| {
+            observed.fetch_add(1, AtomicOrdering::Relaxed);
+            true
+        });
+        let mut cursor = history.reverse_seek_cursor(&boundary).unwrap();
+        assert_eq!(history_calls.load(AtomicOrdering::Relaxed), 0);
+        assert!(cursor.next().unwrap().is_ok());
+        assert_eq!(history_calls.load(AtomicOrdering::Relaxed), 1);
+        drop(cursor);
+        assert_eq!(history_calls.load(AtomicOrdering::Relaxed), 1);
     }
 
     #[test]
@@ -2509,6 +3670,75 @@ mod tests {
     }
 
     #[test]
+    fn temporal_prefix_stream_charges_only_yields_and_does_not_memoize_raw_history() {
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                AMOUNT,
+                Keyword::new("window", "amount"),
+                ValueType::BigDec,
+                Cardinality::Many,
+            ))
+            .unwrap();
+        let entity = make_eid(USER_PARTITION, 1).unwrap();
+        let first = Database::new(schema)
+            .unwrap()
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(entity),
+                    attribute: AMOUNT,
+                    value: decimal("2.0").into(),
+                }],
+                1_000,
+            )
+            .unwrap();
+        let retracted = first
+            .db_after
+            .with(
+                &[TxOp::Retract {
+                    entity: EntityRef::Id(entity),
+                    attribute: AMOUNT,
+                    value: Some(decimal("2.0").into()),
+                }],
+                2_000,
+            )
+            .unwrap();
+        let latest = retracted
+            .db_after
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(entity),
+                    attribute: AMOUNT,
+                    value: decimal("2.0").into(),
+                }],
+                3_000,
+            )
+            .unwrap()
+            .db_after;
+        let context = Arc::new(TransactionReadContext::new(1, u64::MAX));
+        let value = latest
+            .database_value()
+            .with_transaction_read_context(Arc::clone(&context))
+            .filter(|_, datom| tx_to_t(datom.tx).unwrap() != 3);
+        let prefix = IndexPrefix::Eavt {
+            entity,
+            attribute: Some(AMOUNT),
+            value: Some(decimal("2.0")),
+        };
+
+        let mut cursor = value.prefix_cursor(&prefix).unwrap();
+        assert_eq!(context.snapshot().unwrap().logical_datoms, 0);
+        assert!(cursor.next().unwrap().is_ok());
+        let after_one = context.snapshot().unwrap();
+        assert_eq!(after_one.logical_datoms, 1);
+        assert_eq!(after_one.memo_admissions, 0);
+        assert_eq!(after_one.memo_rejections, 0);
+        let error = cursor.next().unwrap().unwrap_err();
+        assert_eq!(error.code, "transaction/read-capacity");
+        assert_eq!(context.snapshot().unwrap().logical_datoms, 1);
+    }
+
+    #[test]
     fn prefix_cursor_rejects_non_current_database_values() {
         let value = Database::bootstrap().unwrap().database_value().history();
         assert_eq!(
@@ -2811,5 +4041,241 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(noncanonical.code, "database/overlay-noncanonical-datoms");
+    }
+
+    #[test]
+    fn raw_boundaries_resolve_idents_and_lookup_refs_in_every_index_order() {
+        let (value, alice, bob, alice_ident, bob_ident) = raw_boundary_fixture();
+        let alice_lookup = EntityIdentifier::Lookup {
+            attribute: AttributeName::Ident(Keyword::new("boundary", "email")),
+            value: Value::String("alice@example.test".into()),
+        };
+        let bob_lookup = EntityIdentifier::Lookup {
+            attribute: AttributeName::Id(BOUNDARY_EMAIL),
+            value: Value::String("bob@example.test".into()),
+        };
+        let link = AttributeName::Ident(Keyword::new("boundary", "link"));
+        let t = value.basis_t();
+        let tx = t_to_tx(t).unwrap();
+
+        assert_eq!(
+            value
+                .eavt_boundary(IndexComponents::Four(
+                    alice_lookup.clone(),
+                    link.clone(),
+                    RawIndexValue::Entity(EntityIdentifier::Ident(bob_ident.clone())),
+                    IndexTransaction::T(t),
+                ))
+                .unwrap(),
+            IndexBoundary::Eavt(IndexComponents::Four(
+                alice,
+                BOUNDARY_LINK,
+                Value::Ref(bob),
+                IndexTransaction::T(t),
+            ))
+        );
+        assert_eq!(
+            value
+                .aevt_boundary(IndexComponents::Four(
+                    link.clone(),
+                    EntityIdentifier::Ident(alice_ident.clone()),
+                    RawIndexValue::Entity(bob_lookup.clone()),
+                    IndexTransaction::Tx(tx),
+                ))
+                .unwrap(),
+            IndexBoundary::Aevt(IndexComponents::Four(
+                BOUNDARY_LINK,
+                alice,
+                Value::Ref(bob),
+                IndexTransaction::Tx(tx),
+            ))
+        );
+        assert_eq!(
+            value
+                .avet_boundary(IndexComponents::Four(
+                    link.clone(),
+                    RawIndexValue::Entity(EntityIdentifier::Ident(bob_ident)),
+                    alice_lookup,
+                    IndexTransaction::T(t),
+                ))
+                .unwrap(),
+            IndexBoundary::Avet(IndexComponents::Four(
+                BOUNDARY_LINK,
+                Value::Ref(bob),
+                alice,
+                IndexTransaction::T(t),
+            ))
+        );
+        assert_eq!(
+            value
+                .vaet_boundary(IndexComponents::Four(
+                    RawIndexValue::Entity(bob_lookup),
+                    link,
+                    EntityIdentifier::Ident(alice_ident),
+                    IndexTransaction::Tx(tx),
+                ))
+                .unwrap(),
+            IndexBoundary::Vaet(IndexComponents::Four(
+                Value::Ref(bob),
+                BOUNDARY_LINK,
+                alice,
+                IndexTransaction::Tx(tx),
+            ))
+        );
+
+        assert_eq!(
+            value
+                .avet_boundary(IndexComponents::Two(
+                    AttributeName::Ident(Keyword::new("boundary", "email")),
+                    RawIndexValue::Stored(Value::String("alice@example.test".into())),
+                ))
+                .unwrap(),
+            IndexBoundary::Avet(IndexComponents::Two(
+                BOUNDARY_EMAIL,
+                Value::String("alice@example.test".into()),
+            ))
+        );
+    }
+
+    #[test]
+    fn raw_tuple_boundaries_resolve_only_ref_slots_and_preserve_nil() {
+        let (value, alice, bob, alice_ident, bob_ident) = raw_boundary_fixture();
+        let bob_lookup = EntityIdentifier::Lookup {
+            attribute: AttributeName::Id(BOUNDARY_EMAIL),
+            value: Value::String("bob@example.test".into()),
+        };
+
+        assert_eq!(
+            value
+                .avet_boundary(IndexComponents::Two(
+                    AttributeName::Ident(Keyword::new("boundary", "homogeneous-refs")),
+                    RawIndexValue::Tuple(vec![
+                        Some(RawIndexValue::Entity(EntityIdentifier::Ident(
+                            alice_ident.clone(),
+                        ))),
+                        None,
+                        Some(RawIndexValue::Entity(bob_lookup.clone())),
+                    ]),
+                ))
+                .unwrap(),
+            IndexBoundary::Avet(IndexComponents::Two(
+                BOUNDARY_HOMOGENEOUS_REFS,
+                Value::Tuple(vec![Some(Value::Ref(alice)), None, Some(Value::Ref(bob))]),
+            ))
+        );
+
+        assert_eq!(
+            value
+                .eavt_boundary(IndexComponents::Three(
+                    EntityIdentifier::Id(alice),
+                    AttributeName::Id(BOUNDARY_HETEROGENEOUS),
+                    RawIndexValue::Tuple(vec![
+                        Some(RawIndexValue::Entity(EntityIdentifier::Ident(alice_ident))),
+                        Some(RawIndexValue::Stored(Value::String("middle".into()))),
+                        Some(RawIndexValue::Entity(EntityIdentifier::Ident(bob_ident))),
+                    ]),
+                ))
+                .unwrap(),
+            IndexBoundary::Eavt(IndexComponents::Three(
+                alice,
+                BOUNDARY_HETEROGENEOUS,
+                Value::Tuple(vec![
+                    Some(Value::Ref(alice)),
+                    Some(Value::String("middle".into())),
+                    Some(Value::Ref(bob)),
+                ]),
+            ))
+        );
+    }
+
+    #[test]
+    fn raw_boundaries_reject_unresolved_wrong_typed_and_unqualified_inputs() {
+        let (value, alice, _, _, bob_ident) = raw_boundary_fixture();
+        let missing = EntityIdentifier::Ident(Keyword::new("boundary", "missing"));
+
+        assert_eq!(
+            value
+                .eavt_boundary(IndexComponents::One(missing.clone()))
+                .unwrap_err()
+                .code,
+            "index/unresolved-entity"
+        );
+        assert_eq!(
+            value
+                .eavt_boundary(IndexComponents::Three(
+                    EntityIdentifier::Id(alice),
+                    AttributeName::Id(BOUNDARY_TEXT),
+                    RawIndexValue::Entity(EntityIdentifier::Ident(bob_ident)),
+                ))
+                .unwrap_err()
+                .code,
+            "transaction/value-type"
+        );
+        assert_eq!(
+            value
+                .avet_boundary(IndexComponents::Two(
+                    AttributeName::Id(BOUNDARY_HETEROGENEOUS),
+                    RawIndexValue::Tuple(vec![
+                        Some(RawIndexValue::Entity(EntityIdentifier::Id(alice))),
+                        None,
+                    ]),
+                ))
+                .unwrap_err()
+                .code,
+            "transaction/invalid-tuple-length"
+        );
+        assert_eq!(
+            value
+                .avet_boundary(IndexComponents::Two(
+                    AttributeName::Id(BOUNDARY_HETEROGENEOUS),
+                    RawIndexValue::Tuple(vec![
+                        Some(RawIndexValue::Stored(Value::String("not-a-ref".into()))),
+                        None,
+                        Some(RawIndexValue::Entity(EntityIdentifier::Id(alice))),
+                    ]),
+                ))
+                .unwrap_err()
+                .code,
+            "transaction/invalid-tuple-element"
+        );
+        assert_eq!(
+            value
+                .avet_boundary(IndexComponents::Two(
+                    AttributeName::Id(BOUNDARY_HOMOGENEOUS_REFS),
+                    RawIndexValue::Tuple(vec![
+                        Some(RawIndexValue::Entity(missing)),
+                        Some(RawIndexValue::Entity(EntityIdentifier::Id(alice))),
+                    ]),
+                ))
+                .unwrap_err()
+                .code,
+            "index/unresolved-entity"
+        );
+        assert_eq!(
+            value
+                .vaet_boundary(IndexComponents::One(RawIndexValue::Stored(Value::String(
+                    "not-a-ref".into()
+                ),)))
+                .unwrap_err()
+                .code,
+            "index/vaet-value-not-ref"
+        );
+        assert_eq!(
+            value
+                .avet_boundary(IndexComponents::One(AttributeName::Id(BOUNDARY_TEXT)))
+                .unwrap_err()
+                .code,
+            "index/attribute-not-in-avet"
+        );
+    }
+
+    #[test]
+    fn raw_avet_boundary_rejects_a_logically_enabled_but_pending_projection() {
+        let (_, overlay, ..) = overlay_fixture();
+        let error = overlay
+            .avet_boundary(IndexComponents::One(AttributeName::Id(AMOUNT)))
+            .unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Unavailable);
+        assert_eq!(error.code, "index/avet-not-ready");
     }
 }

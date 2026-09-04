@@ -8,8 +8,9 @@ use crate::persistent_tree::TreeDescriptor;
 use crate::{Digest, ErrorCategory, IndexOrder, SemanticError, sha256};
 
 const MAGIC: &[u8; 4] = b"ATIM";
-const LEGACY_VERSION: u16 = 4;
-const VERSION: u16 = 5;
+const ROOT_REVISION_VERSION: u16 = 4;
+const AVET_PROJECTION_VERSION: u16 = 5;
+const VERSION: u16 = 6;
 const HEADER_LEN: usize = 12;
 const CHECKSUM_LEN: usize = 32;
 const ROOTS: usize = 8;
@@ -63,6 +64,11 @@ pub struct PersistentTreeManifest {
     /// replace a derived root without inventing a transaction.
     pub publication_revision: u64,
     pub basis_t: u64,
+    /// Greatest logical transaction basis fully represented by this physical
+    /// index publication. This is deliberately distinct from `basis_t`: a
+    /// schema transaction can be present in the logical value while its AVET
+    /// projection is still advancing through immutable same-basis roots.
+    pub index_basis_t: u64,
     pub tx_hash: Digest,
     pub state_hash: Digest,
     pub excision_generation: u64,
@@ -80,16 +86,37 @@ impl PersistentTreeManifest {
 
     fn encode_version(&self, version: u16) -> Result<Vec<u8>, SemanticError> {
         self.validate()?;
-        if version == LEGACY_VERSION && !self.pending_avet.is_empty() {
+        if version == ROOT_REVISION_VERSION && !self.pending_avet.is_empty() {
             return Err(SemanticError::incorrect(
                 "tree/manifest-version",
-                "legacy tree manifests cannot carry pending AVET work",
+                "v4 tree manifests cannot carry pending AVET work",
             ));
+        }
+        if version < VERSION {
+            // V4 roots were necessarily complete. V5 added pending AVET work
+            // but did not authenticate an exact index basis; decoding maps an
+            // incomplete V5 root to zero so a new binary cannot falsely
+            // satisfy an index waiter after an in-place upgrade.
+            let represented = if version == AVET_PROJECTION_VERSION && !self.pending_avet.is_empty()
+            {
+                0
+            } else {
+                self.basis_t
+            };
+            if self.index_basis_t != represented {
+                return Err(SemanticError::incorrect(
+                    "tree/manifest-version",
+                    "pre-v6 tree manifests cannot represent this index basis",
+                ));
+            }
         }
         let mut body = Vec::new();
         put_bytes(&mut body, self.database_id.as_bytes())?;
         put_u64(&mut body, self.publication_revision);
         put_u64(&mut body, self.basis_t);
+        if version >= VERSION {
+            put_u64(&mut body, self.index_basis_t);
+        }
         body.extend_from_slice(&self.tx_hash);
         body.extend_from_slice(&self.state_hash);
         put_u64(&mut body, self.excision_generation);
@@ -104,7 +131,7 @@ impl PersistentTreeManifest {
             encode_optional_digest(&mut body, tree.descriptor.first_hash);
             encode_optional_digest(&mut body, tree.descriptor.last_hash);
         }
-        if version >= VERSION {
+        if version >= AVET_PROJECTION_VERSION {
             put_u32(
                 &mut body,
                 u32::try_from(self.pending_avet.len()).map_err(|_| {
@@ -160,7 +187,10 @@ impl PersistentTreeManifest {
             ));
         }
         let version = u16::from_be_bytes(bytes[4..6].try_into().expect("checked header"));
-        if !matches!(version, LEGACY_VERSION | VERSION) {
+        if !matches!(
+            version,
+            ROOT_REVISION_VERSION | AVET_PROJECTION_VERSION | VERSION
+        ) {
             return Err(fault(
                 "tree/manifest-version",
                 format!("tree manifest version {version} is unsupported"),
@@ -197,6 +227,7 @@ impl PersistentTreeManifest {
         })?;
         let publication_revision = cursor.u64()?;
         let basis_t = cursor.u64()?;
+        let encoded_index_basis_t = (version >= VERSION).then(|| cursor.u64()).transpose()?;
         let tx_hash = cursor.digest()?;
         let state_hash = cursor.digest()?;
         let excision_generation = cursor.u64()?;
@@ -228,7 +259,7 @@ impl PersistentTreeManifest {
                 root_bytes,
             });
         }
-        let pending_avet = if version >= VERSION {
+        let pending_avet = if version >= AVET_PROJECTION_VERSION {
             let count = cursor.u32()? as usize;
             if count > usize::try_from(crate::MAX_SCHEMA_ATTRIBUTE_ID).unwrap_or(usize::MAX)
                 || count > cursor.remaining() / AVET_WORK_BYTES
@@ -262,10 +293,21 @@ impl PersistentTreeManifest {
         } else {
             Vec::new()
         };
+        let index_basis_t = encoded_index_basis_t.unwrap_or_else(|| {
+            if version == AVET_PROJECTION_VERSION && !pending_avet.is_empty() {
+                // V5 did not authenticate this coordinate. Zero is the safe
+                // upgrade floor: the next completed V6 publication advances
+                // it precisely, while no waiter can be released too early.
+                0
+            } else {
+                basis_t
+            }
+        });
         cursor.finish()?;
         let manifest = Self {
             database_id,
             publication_revision,
+            index_basis_t,
             basis_t,
             tx_hash,
             state_hash,
@@ -284,11 +326,20 @@ impl PersistentTreeManifest {
         Ok(manifest)
     }
 
-    /// Hash this value's current canonical v5 encoding. This is deliberately
-    /// not called `hash`: a manifest decoded from stored v4 bytes is addressed
-    /// by the hash of those exact bytes, not by re-encoding its logical value.
-    pub fn canonical_v5_hash(&self) -> Result<Digest, SemanticError> {
+    /// Hash this value's current canonical v6 encoding. This is deliberately
+    /// not called `hash`: a manifest decoded from stored v4/v5 bytes is
+    /// addressed by the hash of those exact bytes, not by re-encoding its
+    /// logical value.
+    pub fn canonical_v6_hash(&self) -> Result<Digest, SemanticError> {
         Ok(sha256(&self.encode()?))
+    }
+
+    /// Compatibility spelling retained for callers compiled against the V5
+    /// API. It hashes the current canonical format, just as the old method did
+    /// before the format advanced.
+    #[deprecated(note = "use canonical_v6_hash")]
+    pub fn canonical_v5_hash(&self) -> Result<Digest, SemanticError> {
+        self.canonical_v6_hash()
     }
 
     pub fn tree(&self, order: IndexOrder, history: bool) -> Option<&ManifestTree> {
@@ -305,7 +356,10 @@ impl PersistentTreeManifest {
             ));
         }
         let version = u16::from_be_bytes(bytes[4..6].try_into().expect("checked header"));
-        if !matches!(version, LEGACY_VERSION | VERSION) {
+        if !matches!(
+            version,
+            ROOT_REVISION_VERSION | AVET_PROJECTION_VERSION | VERSION
+        ) {
             return Err(fault(
                 "tree/manifest-version",
                 format!("tree manifest version {version} is unsupported"),
@@ -326,6 +380,25 @@ impl PersistentTreeManifest {
             return Err(SemanticError::incorrect(
                 "tree/manifest-state",
                 "tree manifest cannot bind the legacy zero state commitment",
+            ));
+        }
+        if self.index_basis_t > self.basis_t {
+            return Err(SemanticError::incorrect(
+                "tree/manifest-index-basis",
+                "tree manifest index basis cannot exceed its logical basis",
+            ));
+        }
+        if self.pending_avet.is_empty() {
+            if self.index_basis_t != self.basis_t {
+                return Err(SemanticError::incorrect(
+                    "tree/manifest-index-basis",
+                    "a complete tree manifest must be indexed through its logical basis",
+                ));
+            }
+        } else if self.index_basis_t >= self.basis_t {
+            return Err(SemanticError::incorrect(
+                "tree/manifest-index-basis",
+                "a tree manifest with pending AVET work must retain an earlier index basis",
             ));
         }
         if self.trees.len() != ROOTS {
@@ -596,6 +669,7 @@ mod tests {
         PersistentTreeManifest {
             database_id: "db".into(),
             publication_revision: 1,
+            index_basis_t: 2,
             basis_t: 2,
             tx_hash: [7; 32],
             state_hash: [8; 32],
@@ -611,26 +685,38 @@ mod tests {
         let manifest = manifest();
         let bytes = manifest.encode().unwrap();
         assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
-        assert_eq!(manifest.canonical_v5_hash().unwrap(), sha256(&bytes));
+        assert_eq!(manifest.canonical_v6_hash().unwrap(), sha256(&bytes));
 
         let mut genesis = manifest.clone();
         genesis.basis_t = 0;
+        genesis.index_basis_t = 0;
         let bytes = genesis.encode().unwrap();
         assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), genesis);
     }
 
     #[test]
-    fn legacy_v4_decodes_without_projection_work() {
+    fn legacy_v4_and_v5_decode_without_inventing_progress() {
         let manifest = manifest();
-        let bytes = manifest.encode_version(LEGACY_VERSION).unwrap();
+        let bytes = manifest.encode_version(ROOT_REVISION_VERSION).unwrap();
         assert_eq!(PersistentTreeManifest::encoded_version(&bytes).unwrap(), 4);
         assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
         assert_eq!(sha256(&bytes), sha256(&manifest.encode_version(4).unwrap()));
+
+        let bytes = manifest.encode_version(AVET_PROJECTION_VERSION).unwrap();
+        assert_eq!(PersistentTreeManifest::encoded_version(&bytes).unwrap(), 5);
+        assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
+
+        let mut incomplete = manifest;
+        incomplete.index_basis_t = 0;
+        incomplete.pending_avet = vec![AvetProjectionWork::new(42, true)];
+        let bytes = incomplete.encode_version(AVET_PROJECTION_VERSION).unwrap();
+        assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), incomplete);
     }
 
     #[test]
     fn pending_projection_round_trip_and_count_are_bounded() {
         let mut manifest = manifest();
+        manifest.index_basis_t = 1;
         manifest.pending_avet = vec![AvetProjectionWork {
             attribute: 42,
             adding: true,
@@ -640,6 +726,10 @@ mod tests {
         }];
         let bytes = manifest.encode().unwrap();
         assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
+
+        let mut older_index = manifest.clone();
+        older_index.index_basis_t = 0;
+        assert_ne!(older_index.encode().unwrap(), bytes);
 
         // The pending count is the final body word when there are no rows.
         // Recompute the checksum so decode reaches the allocation guard rather
@@ -685,8 +775,29 @@ mod tests {
         let mut successor = manifest.clone();
         successor.publication_revision += 1;
         assert_ne!(
-            successor.canonical_v5_hash().unwrap(),
-            manifest.canonical_v5_hash().unwrap()
+            successor.canonical_v6_hash().unwrap(),
+            manifest.canonical_v6_hash().unwrap()
+        );
+
+        let mut future_index = manifest.clone();
+        future_index.index_basis_t = future_index.basis_t + 1;
+        assert_eq!(
+            future_index.encode().unwrap_err().code,
+            "tree/manifest-index-basis"
+        );
+
+        let mut lagging_complete = manifest.clone();
+        lagging_complete.index_basis_t -= 1;
+        assert_eq!(
+            lagging_complete.encode().unwrap_err().code,
+            "tree/manifest-index-basis"
+        );
+
+        let mut falsely_complete = manifest.clone();
+        falsely_complete.pending_avet = vec![AvetProjectionWork::new(42, true)];
+        assert_eq!(
+            falsely_complete.encode().unwrap_err().code,
+            "tree/manifest-index-basis"
         );
 
         let mut wrong_order = manifest.clone();
@@ -740,6 +851,7 @@ mod tests {
         let manifest = PersistentTreeManifest {
             database_id: "large-boundary".into(),
             publication_revision: 1,
+            index_basis_t: 2,
             basis_t: 2,
             tx_hash: [7; 32],
             state_hash: [8; 32],

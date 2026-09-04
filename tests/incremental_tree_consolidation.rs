@@ -110,6 +110,32 @@ fn manifest(client: &mut Client, database_id: &str, basis_t: u64) -> PersistentT
     PersistentTreeManifest::decode(&payload).unwrap()
 }
 
+fn manifests_at_basis(
+    connection: &str,
+    database_id: &str,
+    basis_t: u64,
+) -> Vec<PersistentTreeManifest> {
+    let mut client = Client::connect(connection, NoTls).unwrap();
+    client
+        .query(
+            "SELECT manifest.payload FROM atomic_tree_publications publication \
+             JOIN atomic_tree_manifests manifest \
+               ON manifest.manifest_hash = publication.manifest_hash \
+              AND manifest.database_id = publication.database_id \
+              AND manifest.publication_revision = publication.publication_revision \
+              AND manifest.basis_t = publication.basis_t \
+              AND manifest.tx_hash = publication.tx_hash \
+              AND manifest.log_generation = publication.log_generation \
+             WHERE publication.database_id = $1 AND publication.basis_t = $2 \
+             ORDER BY publication.publication_revision",
+            &[&database_id, &(basis_t as i64)],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| PersistentTreeManifest::decode(&row.get::<_, Vec<u8>>(0)).unwrap())
+        .collect()
+}
+
 fn assert_snapshot_matches(
     snapshot: &atomic_core::PeerSnapshot,
     expected: &impl InformationSource,
@@ -421,6 +447,21 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
     let enabled_build = indexer.consolidate().unwrap();
     assert!(enabled_build.reused);
     assert!(enabled.tx_data.len() < 10);
+    let transition = manifests_at_basis(&connection, &database_id, enabled.basis_t);
+    let pending = transition
+        .iter()
+        .filter(|manifest| !manifest.pending_avet.is_empty())
+        .collect::<Vec<_>>();
+    assert!(
+        !pending.is_empty(),
+        "multi-chunk AVET backfill must publish an observable incomplete root"
+    );
+    assert!(pending.iter().all(|manifest| {
+        manifest.index_basis_t == populated.basis_t && manifest.index_basis_t < manifest.basis_t
+    }));
+    let completed = transition.last().expect("AVET transition has a final root");
+    assert!(completed.pending_avet.is_empty());
+    assert_eq!(completed.index_basis_t, enabled.basis_t);
     let enabled_physical_avet = latest_avet_counts(&connection, &database_id);
     assert!(enabled_physical_avet.0 - baseline_physical_avet.0 >= i64::from(AVET_BACKFILL_DATOMS));
     assert!(enabled_physical_avet.1 - baseline_physical_avet.1 >= i64::from(AVET_BACKFILL_DATOMS));

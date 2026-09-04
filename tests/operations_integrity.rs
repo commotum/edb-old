@@ -281,6 +281,7 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
     let forged_manifest = PersistentTreeManifest {
         database_id: database_id.clone(),
         publication_revision: expected_revision + 1,
+        index_basis_t: basis_t,
         basis_t,
         tx_hash,
         // The trusted indexer can copy the authoritative coordinate. That
@@ -308,6 +309,7 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
         database_id: database_id.clone(),
         publication_revision: forged_manifest.publication_revision,
         basis_t,
+        index_basis_t: basis_t,
         tx_hash,
         state_hash,
         excision_generation: generation,

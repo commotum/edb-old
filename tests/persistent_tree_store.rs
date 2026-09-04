@@ -2,9 +2,9 @@ mod common;
 
 use atomic_core::persistent_tree::TreeDescriptor;
 use atomic_core::{
-    Attribute, Cardinality, IndexOrder, Keyword, ManifestTree, PersistentTreeManifest,
-    PostgresStore, PostgresTreeStore, Schema, TreeManifestRecord, TreePublishOutcome,
-    TreeRootBinding, ValueType, sha256,
+    Attribute, AvetProjectionWork, Cardinality, IndexOrder, Keyword, ManifestTree,
+    PersistentTreeManifest, PostgresStore, PostgresTreeStore, Schema, TreeManifestRecord,
+    TreePublishOutcome, TreeRootBinding, ValueType, sha256,
 };
 use postgres::{Client, NoTls};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +74,7 @@ fn manifest_payload(
     PersistentTreeManifest {
         database_id: database_id.to_owned(),
         publication_revision,
+        index_basis_t: basis_t,
         basis_t,
         tx_hash,
         state_hash,
@@ -208,6 +209,7 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
         database_id: database_id.clone(),
         publication_revision,
         basis_t,
+        index_basis_t: basis_t,
         tx_hash,
         state_hash,
         excision_generation: generation,
@@ -309,6 +311,7 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
     let regressing = TreeManifestRecord {
         publication_revision: successor_revision + 1,
         basis_t: 1,
+        index_basis_t: 1,
         tx_hash: old_tx_hash,
         state_hash: old_state_hash,
         manifest_hash: sha256(&old_payload),
@@ -320,6 +323,27 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
         .publish_manifest(&regressing, successor_revision)
         .unwrap_err();
     assert_eq!(regression.code, "tree/publication-basis-regression");
+
+    let mut index_regression_envelope =
+        PersistentTreeManifest::decode(&successor.payload).unwrap();
+    index_regression_envelope.publication_revision = successor_revision + 1;
+    index_regression_envelope.index_basis_t = successor.basis_t - 1;
+    index_regression_envelope.pending_avet = vec![AvetProjectionWork::new(42, true)];
+    let index_regression_payload = index_regression_envelope.encode().unwrap();
+    let index_regression = TreeManifestRecord {
+        publication_revision: successor_revision + 1,
+        index_basis_t: successor.basis_t - 1,
+        manifest_hash: sha256(&index_regression_payload),
+        payload: index_regression_payload,
+        ..successor.clone()
+    };
+    assert_eq!(
+        store
+            .publish_manifest(&index_regression, successor_revision)
+            .unwrap_err()
+            .code,
+        "tree/publication-index-basis-regression"
+    );
 
     let mut gap = successor.clone();
     gap.publication_revision = successor_revision + 2;
@@ -366,6 +390,29 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
             ],
         )
         .is_err()
+    );
+
+    // The relational coordinate is a queryable projection, never a second
+    // source of truth. A privileged fault that keeps the SQL range check
+    // valid but disagrees with the checksummed envelope must fail closed on
+    // read.
+    common::with_replica_triggers_disabled(&mut raw, |raw| {
+        raw.execute(
+            "UPDATE atomic_tree_manifests SET index_basis_t = 0 \
+              WHERE manifest_hash = $1",
+            &[&&successor.manifest_hash[..]],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    drop(raw);
+    let mut verifier = PostgresTreeStore::connect(&connection).unwrap();
+    assert_eq!(
+        verifier
+            .load_manifest(&database_id, successor_revision)
+            .unwrap_err()
+            .code,
+        "tree/unauthenticated-manifest"
     );
 }
 

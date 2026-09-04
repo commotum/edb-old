@@ -5,6 +5,7 @@
 //! deliberately contains no PostgreSQL, network, query, or pull machinery.
 
 mod backup;
+mod connection;
 mod cow_generation;
 mod database;
 mod database_value;
@@ -33,6 +34,7 @@ mod schema;
 mod service;
 mod state_commitment;
 mod tiered_assessor;
+mod time_point;
 mod transaction;
 mod tree_manifest;
 mod tree_store;
@@ -40,8 +42,11 @@ mod value;
 mod vocabulary;
 
 pub use backup::{BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault};
+pub use connection::{Connection, ConnectionTransactionTicket, DatabaseIdentity};
 pub use database::{Database, EntityRef, TxOp, TxReport, TxValue, View};
-pub use database_value::{DatabaseValue, DatabaseValuePrefixCursor};
+pub use database_value::{
+    DatabaseValue, DatabaseValuePrefixCursor, DatabaseValueScanCursor, RawIndexValue,
+};
 pub use datom::{Datom, IndexOrder};
 pub use encoding::{
     Digest, DurableTransaction, IndexManifest, IndexSegment, SegmentRef, decode_genesis,
@@ -56,7 +61,7 @@ pub use identity::{
     PARTITION_BITS, TX_PARTITION, USER_PARTITION, eid_to_eidx, eid_to_part, make_eid, t_to_tx,
     tx_to_t,
 };
-pub use index::IndexPrefix;
+pub use index::{IndexBoundary, IndexComponents, IndexPrefix, IndexTransaction};
 pub use operations::{
     ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
     LogGenerationGarbage, MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC,
@@ -98,6 +103,7 @@ pub use service::{
     TransactionRequest, TransactionService, TransactionServiceConfig, TransactionStandby,
     TransactionTicket,
 };
+pub use time_point::TimePoint;
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
 pub use tree_manifest::{AvetProjectionWork, ManifestTree, PersistentTreeManifest};
 pub use tree_store::{
