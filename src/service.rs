@@ -1143,7 +1143,7 @@ impl TransactionService {
         let lease_millis = duration_millis(config.lease_duration)?;
         let mut store = PostgresStore::connect_configured(&connection)?;
         store.set_capacity_limits(config.capacity_limits)?;
-        store.set_writer_recent_limits(crate::recent::RecentLimits {
+        let writer_recent_limits = crate::recent::RecentLimits {
             soft_datoms: u64::MAX,
             soft_bytes: indexing_config.memory_index_threshold_bytes,
             hard_datoms: u64::MAX,
@@ -1156,7 +1156,8 @@ impl TransactionService {
             hard_bytes: indexing_config
                 .memory_index_max_bytes
                 .saturating_add(max_transaction_novelty_bytes(config.capacity_limits)),
-        })?;
+        };
+        store.set_writer_recent_limits(writer_recent_limits)?;
         let lease = store.acquire_lease(&config.database_id, &config.holder_id, lease_millis)?;
         let mut indexer =
             match PostgresIndexer::connect_configured(&connection, &config.database_id) {
@@ -1204,6 +1205,30 @@ impl TransactionService {
             }
         };
         let initial_writer_residency = store.writer_residency_stats(&config.database_id);
+        // Exact immutable values remain readable when a deployment lowers its
+        // configured limit; a capacity setting cannot make committed history
+        // cease to exist. An accepting transactor is a stricter boundary: it
+        // must not begin service while its recovered recent tier is already
+        // above the hard admission bound and then synchronously hide a full
+        // catch-up build. Leave the log untouched and require the same explicit
+        // administrative consolidation as a missing late root.
+        if initial_writer_residency.recent_datoms > writer_recent_limits.hard_datoms
+            || initial_writer_residency.recent_accounted_bytes > writer_recent_limits.hard_bytes
+        {
+            let error = SemanticError::new(
+                ErrorCategory::Busy,
+                "recent/hard-capacity",
+                format!(
+                    "recovered recent tail requires {} datoms/{} accounted resident bytes, above startup hard limits {}/{}",
+                    initial_writer_residency.recent_datoms,
+                    initial_writer_residency.recent_accounted_bytes,
+                    writer_recent_limits.hard_datoms,
+                    writer_recent_limits.hard_bytes,
+                ),
+            );
+            let _ = store.release_lease(&lease);
+            return Err(native_index_required(&error));
+        }
         let seed = match load_indexing_seed(
             &connection,
             &config.database_id,
