@@ -414,9 +414,9 @@ impl DatabaseValue {
             ReadBasis::Native(snapshot) => DatabaseValuePrefixCursorInner::Native(Box::new(
                 snapshot.prefix_cursor(false, prefix)?,
             )),
-            ReadBasis::TransactionOverlay(overlay) => DatabaseValuePrefixCursorInner::Owned(
-                overlay.prefix(false, prefix)?.into_iter(),
-            ),
+            ReadBasis::TransactionOverlay(overlay) => {
+                DatabaseValuePrefixCursorInner::Owned(overlay.prefix(false, prefix)?.into_iter())
+            }
         };
         Ok(DatabaseValuePrefixCursor { inner })
     }
@@ -581,11 +581,7 @@ impl DatabaseValue {
 }
 
 impl TransactionOverlay {
-    fn prefix(
-        &self,
-        history: bool,
-        prefix: &IndexPrefix,
-    ) -> Result<Vec<Datom>, SemanticError> {
+    fn prefix(&self, history: bool, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
         let source_prefix = match prefix {
             // AVET membership can change when :db/index or :db/unique changes
             // in this transaction. AEVT is the complete attribute source on
@@ -748,7 +744,166 @@ fn collapse_retractions(datoms: Vec<Datom>) -> Vec<Datom> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DB_IDENT, EntityRef, TxOp, TxValue, USER_PARTITION, make_eid};
+    use crate::{
+        Attribute, Cardinality, DB_IDENT, EntityRef, TxOp, TxReport, TxValue, USER_PARTITION,
+        ValueType, make_eid,
+    };
+    use bigdecimal::BigDecimal;
+    use std::str::FromStr;
+
+    const AMOUNT: u32 = 1_000;
+    const LINK: u32 = 1_001;
+
+    fn decimal(value: &str) -> Value {
+        Value::BigDec(BigDecimal::from_str(value).unwrap())
+    }
+
+    fn overlay_for(report: &TxReport, tx_instant: i64) -> DatabaseValue {
+        DatabaseValue::transaction_overlay(
+            report.db_before.database_value(),
+            Arc::from(report.tx_data.clone()),
+            Arc::new(report.db_after.schema().clone()),
+            report.db_after.basis_t(),
+            report.db_after.eidx_frontier(),
+            tx_instant,
+        )
+        .unwrap()
+    }
+
+    fn assert_same_stored_datoms(actual: &[Datom], expected: &[Datom]) {
+        assert_eq!(actual.len(), expected.len(), "different datom counts");
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual.entity, expected.entity);
+            assert_eq!(actual.attribute, expected.attribute);
+            assert_eq!(actual.tx, expected.tx);
+            assert_eq!(actual.added, expected.added);
+            assert!(
+                actual.value.stored_eq(&expected.value),
+                "different stored values: {:?} and {:?}",
+                actual.value,
+                expected.value
+            );
+        }
+    }
+
+    fn assert_prefix_matches_eager(
+        overlay: &DatabaseValue,
+        eager: &DatabaseValue,
+        prefix: &IndexPrefix,
+    ) {
+        let overlay_current = overlay.datoms_with_prefix(prefix).unwrap();
+        let eager_current = eager.datoms_with_prefix(prefix).unwrap();
+        assert_same_stored_datoms(&overlay_current, &eager_current);
+
+        let cursor_current = overlay
+            .current_prefix_cursor(prefix)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_same_stored_datoms(&cursor_current, &eager_current);
+
+        let overlay_history = overlay
+            .clone()
+            .history()
+            .datoms_with_prefix(prefix)
+            .unwrap();
+        let eager_history = eager.clone().history().datoms_with_prefix(prefix).unwrap();
+        assert_same_stored_datoms(&overlay_history, &eager_history);
+    }
+
+    fn overlay_fixture() -> (TxReport, DatabaseValue, u64, u64, Keyword, Keyword, Keyword) {
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                AMOUNT,
+                Keyword::new("measurement", "amount"),
+                ValueType::BigDec,
+                Cardinality::Many,
+            ))
+            .unwrap();
+        schema
+            .install(Attribute::new(
+                LINK,
+                Keyword::new("measurement", "link"),
+                ValueType::Ref,
+                Cardinality::Many,
+            ))
+            .unwrap();
+
+        let old = Keyword::new("overlay", "old");
+        let new = Keyword::new("overlay", "new");
+        let spare = Keyword::new("overlay", "spare");
+        let database = Database::new(schema).unwrap();
+        let seeded = database
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("first".into()),
+                        attribute: DB_IDENT as u32,
+                        value: Value::Keyword(old.clone()).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("first".into()),
+                        attribute: AMOUNT,
+                        value: decimal("1.0").into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("first".into()),
+                        attribute: AMOUNT,
+                        value: decimal("1.00").into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("first".into()),
+                        attribute: LINK,
+                        value: TxValue::Entity(EntityRef::Temp("second".into())),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("second".into()),
+                        attribute: DB_IDENT as u32,
+                        value: Value::Keyword(spare.clone()).into(),
+                    },
+                ],
+                2_000,
+            )
+            .unwrap();
+        let first = seeded.tempids["first"];
+        let second = seeded.tempids["second"];
+        let renamed = seeded
+            .db_after
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(first),
+                    attribute: DB_IDENT as u32,
+                    value: Value::Keyword(new.clone()).into(),
+                }],
+                3_000,
+            )
+            .unwrap();
+
+        let mut indexed = renamed.db_after.schema().attribute(AMOUNT).unwrap().clone();
+        indexed.indexed = true;
+        let report = renamed
+            .db_after
+            .with(
+                &[
+                    TxOp::AlterAttribute(indexed),
+                    TxOp::Retract {
+                        entity: EntityRef::Id(first),
+                        attribute: AMOUNT,
+                        value: Some(decimal("1.0").into()),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Id(second),
+                        attribute: DB_IDENT as u32,
+                        value: Value::Keyword(old.clone()).into(),
+                    },
+                ],
+                4_000,
+            )
+            .unwrap();
+        let overlay = overlay_for(&report, 4_000);
+        (report, overlay, first, second, old, new, spare)
+    }
 
     #[test]
     fn point_current_metadata_and_prefix_cursor_match_the_eager_oracle() {
@@ -801,5 +956,118 @@ mod tests {
                 .code,
             "database/prefix-cursor-requires-current"
         );
+    }
+
+    #[test]
+    fn transaction_overlay_matches_eager_successor_without_materializing_the_base() {
+        let (report, overlay, first, second, old, new, spare) = overlay_fixture();
+        let eager = report.db_after.database_value();
+
+        assert_eq!(overlay.basis_t(), report.db_after.basis_t());
+        assert_eq!(overlay.eidx_frontier(), report.db_after.eidx_frontier());
+        assert_eq!(overlay.last_tx_instant().unwrap(), Some(4_000));
+        assert_eq!(overlay.schema(), report.db_after.schema());
+
+        // Ident lookup is an assertion-history cache, not a projection of
+        // current :db/ident facts. The transaction-local assertion wins over
+        // the base alias without cloning the complete base IdentIndex.
+        assert_eq!(report.db_before.entid(&old), Some(first));
+        assert_eq!(overlay.entid(&old), Some(second));
+        assert_eq!(overlay.entid(&new), Some(first));
+        assert_eq!(overlay.entid(&spare), Some(second));
+        assert_eq!(overlay.ident(first), Some(&new));
+        assert_eq!(overlay.ident(second), Some(&old));
+        assert_eq!(overlay.entid(&old), eager.entid(&old));
+        assert_eq!(overlay.ident(first), eager.ident(first));
+        assert_eq!(overlay.ident(second), eager.ident(second));
+
+        // Enabling :db/index makes pre-existing facts visible in successor
+        // AVET. The exact 1.0M retraction must not hide equal-magnitude 1.00M.
+        let amount_eavt = IndexPrefix::Eavt {
+            entity: first,
+            attribute: Some(AMOUNT),
+            value: None,
+        };
+        let amount_aevt = IndexPrefix::Aevt {
+            attribute: AMOUNT,
+            entity: Some(first),
+            value: None,
+        };
+        let amount_avet = IndexPrefix::Avet {
+            attribute: AMOUNT,
+            value: Some(decimal("1.0")),
+            entity: None,
+        };
+        let link_vaet = IndexPrefix::Vaet {
+            value: Value::Ref(second),
+            attribute: Some(LINK),
+            entity: None,
+        };
+        for prefix in [&amount_eavt, &amount_aevt, &amount_avet, &link_vaet] {
+            assert_prefix_matches_eager(&overlay, &eager, prefix);
+        }
+
+        let amounts = overlay.datoms_with_prefix(&amount_eavt).unwrap();
+        assert_eq!(amounts.len(), 1);
+        assert!(amounts[0].value.stored_eq(&decimal("1.00")));
+        assert!(!amounts[0].value.stored_eq(&decimal("1.0")));
+
+        // Disabling :db/index suppresses both current and historical AVET
+        // membership even though AEVT continues to retain the underlying data.
+        let mut unindexed = report.db_after.schema().attribute(AMOUNT).unwrap().clone();
+        unindexed.indexed = false;
+        let unindexed_report = report
+            .db_after
+            .with(&[TxOp::AlterAttribute(unindexed)], 5_000)
+            .unwrap();
+        let unindexed_overlay = overlay_for(&unindexed_report, 5_000);
+        let unindexed_eager = unindexed_report.db_after.database_value();
+        assert_prefix_matches_eager(&unindexed_overlay, &unindexed_eager, &amount_avet);
+        assert!(
+            unindexed_overlay
+                .datoms_with_prefix(&amount_avet)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            unindexed_overlay
+                .history()
+                .datoms_with_prefix(&amount_avet)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transaction_overlay_rejects_unbounded_reads_chaining_and_noncanonical_delta() {
+        let (report, overlay, ..) = overlay_fixture();
+
+        let unbounded = overlay.datoms(IndexOrder::Eavt).unwrap_err();
+        assert_eq!(unbounded.category, ErrorCategory::Unsupported);
+        assert_eq!(unbounded.code, "database/overlay-unbounded-read");
+
+        let chained = DatabaseValue::transaction_overlay(
+            overlay.clone(),
+            Arc::default(),
+            Arc::new(overlay.schema().clone()),
+            overlay.basis_t() + 1,
+            overlay.eidx_frontier(),
+            5_000,
+        )
+        .unwrap_err();
+        assert_eq!(chained.code, "database/overlay-cannot-chain");
+
+        let mut reversed = report.tx_data.clone();
+        reversed.reverse();
+        let noncanonical = DatabaseValue::transaction_overlay(
+            report.db_before.database_value(),
+            Arc::from(reversed),
+            Arc::new(report.db_after.schema().clone()),
+            report.db_after.basis_t(),
+            report.db_after.eidx_frontier(),
+            4_000,
+        )
+        .unwrap_err();
+        assert_eq!(noncanonical.code, "database/overlay-noncanonical-datoms");
     }
 }
