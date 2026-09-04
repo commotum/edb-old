@@ -57,6 +57,15 @@ pub const MAX_LOG_GENERATIONS_PER_GC: usize = 1;
 /// phases may remove a single row; no phase exceeds this bound.
 pub const MAX_LOG_GENERATION_ROWS_PER_GC: usize = 512;
 
+/// Maximum immutable semantic-root coordinates detached from one terminal
+/// log generation in one operator transaction.
+pub const MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC: usize = 512;
+
+/// Maximum globally unreferenced semantic commitment nodes reclaimed in one
+/// operator transaction. Removing one parent may expose children only to a
+/// later call, keeping every transaction bounded.
+pub const MAX_SEMANTIC_COMMITMENT_NODES_PER_GC: usize = 512;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegrityProblem {
     pub code: String,
@@ -96,6 +105,14 @@ pub struct OperationalMetrics {
     /// Some other database has an undecodable published root. Global orphan
     /// counts are therefore withheld rather than guessed.
     pub shared_reachability_uncertain: bool,
+    /// Immutable semantic-state coordinates retained for this database.
+    pub semantic_commitment_roots: u64,
+    /// Unique semantic commitment nodes reachable from those coordinates.
+    pub semantic_commitment_nodes: u64,
+    pub semantic_commitment_node_bytes: u64,
+    /// Globally stored semantic nodes not reachable from any retained root.
+    /// Collection removes only the no-incoming-reference frontier each call.
+    pub orphan_semantic_commitment_nodes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,7 +142,21 @@ pub struct GarbageInventory {
     /// phase. Empty phases are included because closing admission or moving
     /// the restart cursor is itself material collection progress.
     pub log_generations: Vec<LogGenerationGarbage>,
+    /// Exact semantic root coordinates detached as the first phase of a
+    /// terminal generation's collection.
+    pub semantic_commitment_roots: Vec<SemanticCommitmentRootGarbage>,
+    /// Globally unreferenced immutable semantic nodes removed this call.
+    pub semantic_commitment_node_hashes: Vec<Digest>,
     pub applied: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SemanticCommitmentRootGarbage {
+    pub database_id: String,
+    pub generation: u64,
+    pub basis_t: u64,
+    pub tx_hash: Digest,
+    pub current_root: Option<Digest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -140,6 +171,9 @@ pub struct LogGenerationGarbage {
     /// collector advances the cursor and reports the following phase.
     pub collection_phase: u16,
     pub rows_removed: u64,
+    /// Rows above that were semantic commitment roots. A nonzero value means
+    /// the durable log phase cursor intentionally did not advance.
+    pub semantic_roots_removed: u64,
     pub is_complete: bool,
 }
 
@@ -174,6 +208,8 @@ struct GarbageCandidates {
     tree_manifests: Vec<Digest>,
     tree_nodes: Vec<Digest>,
     log_generations: Vec<LogGenerationGarbage>,
+    semantic_roots: Vec<SemanticCommitmentRootGarbage>,
+    semantic_nodes: Vec<Digest>,
 }
 
 impl GarbageCandidates {
@@ -186,6 +222,8 @@ impl GarbageCandidates {
             tree_manifest_hashes: self.tree_manifests,
             tree_node_hashes: self.tree_nodes,
             log_generations: self.log_generations,
+            semantic_commitment_roots: self.semantic_roots,
+            semantic_commitment_node_hashes: self.semantic_nodes,
             applied,
         }
     }
@@ -595,6 +633,7 @@ impl PostgresOperator {
             &mut metrics,
             &mut problems,
         )?;
+        inspect_semantic_commitments(&mut transaction, database_id, &mut metrics)?;
         metrics.index_lag = basis.saturating_sub(metrics.index_basis_t);
         match global_derived_reachability(&mut transaction, &BTreeSet::new())? {
             Some(reachable) => {
@@ -804,8 +843,60 @@ impl PostgresOperator {
                 "program collection diverged from its same-snapshot preview",
             ));
         }
+        // Drain only the frontier visible in the preview. Semantic roots
+        // removed below may expose parent nodes; those become work for the
+        // next bounded call, mirroring native-tree publication work.
+        let mut collected_semantic_nodes = transaction
+            .query(
+                "SELECT node_hash \
+                   FROM atomic_collect_semantic_commitment_garbage($1, $2) AS node_hash",
+                &[&millis, &(MAX_SEMANTIC_COMMITMENT_NODES_PER_GC as i64)],
+            )
+            .map_err(|error| operation_error("operations/gc-semantic-nodes", error))?
+            .into_iter()
+            .map(|row| digest(row.get(0), "collected semantic commitment node"))
+            .collect::<Result<Vec<_>, _>>()?;
+        collected_semantic_nodes.sort_unstable();
+        if collected_semantic_nodes != candidates.semantic_nodes {
+            return Err(SemanticError::new(
+                crate::ErrorCategory::Conflict,
+                "operations/gc-semantic-node-preview-diverged",
+                "semantic-node collection diverged from its same-snapshot preview",
+            ));
+        }
+        let mut collected_semantic_roots = Vec::new();
         let mut collected_generations = Vec::with_capacity(candidates.log_generations.len());
         for candidate in &candidates.log_generations {
+            if candidate.semantic_roots_removed > 0 {
+                let rows = transaction
+                    .query(
+                        "SELECT basis_t, tx_hash, current_root \
+                           FROM atomic_collect_semantic_commitment_generation_roots(\
+                                $1, $2, $3, $4, $5)",
+                        &[
+                            &candidate.database_id,
+                            &sql_u64(candidate.generation, "log generation")?,
+                            &millis,
+                            &(MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC as i64),
+                            &candidate.abandoned,
+                        ],
+                    )
+                    .map_err(|error| operation_error("operations/gc-semantic-roots", error))?;
+                for row in rows {
+                    collected_semantic_roots.push(SemanticCommitmentRootGarbage {
+                        database_id: candidate.database_id.clone(),
+                        generation: candidate.generation,
+                        basis_t: positive_or_zero(row.get(0), "semantic root basis")?,
+                        tx_hash: digest(row.get(1), "semantic root transaction hash")?,
+                        current_root: optional_digest(
+                            row.get(2),
+                            "semantic commitment current root",
+                        )?,
+                    });
+                }
+                collected_generations.push(candidate.clone());
+                continue;
+            }
             let collector = if candidate.abandoned {
                 "SELECT rows_removed, abandonment_phase, is_complete \
                    FROM atomic_abandon_log_generation($1, $2, $3, $4)"
@@ -830,6 +921,7 @@ impl PostgresOperator {
                 abandoned: candidate.abandoned,
                 collection_phase: positive_i16(row.get(1), "log collection phase")?,
                 rows_removed: positive_or_zero(row.get(0), "collected log-generation rows")?,
+                semantic_roots_removed: 0,
                 is_complete: row.get(2),
             });
         }
@@ -838,6 +930,14 @@ impl PostgresOperator {
                 crate::ErrorCategory::Conflict,
                 "operations/gc-log-generation-preview-diverged",
                 "retired log-generation collection diverged from its same-snapshot preview",
+            ));
+        }
+        collected_semantic_roots.sort_unstable();
+        if collected_semantic_roots != candidates.semantic_roots {
+            return Err(SemanticError::new(
+                crate::ErrorCategory::Conflict,
+                "operations/gc-semantic-root-preview-diverged",
+                "semantic-root collection diverged from its same-snapshot preview",
             ));
         }
         // Publication visibility is independent of derived membership. Move
@@ -2080,6 +2180,65 @@ struct GlobalDerivedReachability {
     tree_nodes: BTreeSet<Digest>,
 }
 
+fn inspect_semantic_commitments<C: postgres::GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    metrics: &mut OperationalMetrics,
+) -> Result<(), SemanticError> {
+    // Content nodes are structurally shared across every immutable database
+    // value. UNION (rather than UNION ALL) makes this a set walk and remains
+    // finite even if owner-level corruption introduced a cycle.
+    let row = client
+        .query_one(
+            "WITH RECURSIVE database_reachable(node_hash) AS ( \
+                 SELECT current_root FROM atomic_semantic_commitment_roots \
+                  WHERE database_id = $1 AND current_root IS NOT NULL \
+                 UNION \
+                 SELECT child.node_hash \
+                   FROM database_reachable reachable \
+                   JOIN atomic_semantic_commitment_nodes parent \
+                     ON parent.node_hash = reachable.node_hash \
+                   CROSS JOIN LATERAL ( \
+                       VALUES (parent.left_hash), (parent.right_hash) \
+                   ) AS child(node_hash) \
+                  WHERE child.node_hash IS NOT NULL \
+             ), global_reachable(node_hash) AS ( \
+                 SELECT current_root FROM atomic_semantic_commitment_roots \
+                  WHERE current_root IS NOT NULL \
+                 UNION \
+                 SELECT child.node_hash \
+                   FROM global_reachable reachable \
+                   JOIN atomic_semantic_commitment_nodes parent \
+                     ON parent.node_hash = reachable.node_hash \
+                   CROSS JOIN LATERAL ( \
+                       VALUES (parent.left_hash), (parent.right_hash) \
+                   ) AS child(node_hash) \
+                  WHERE child.node_hash IS NOT NULL \
+             ) \
+             SELECT (SELECT count(*) FROM atomic_semantic_commitment_roots \
+                      WHERE database_id = $1), \
+                    (SELECT count(*) FROM database_reachable), \
+                    (SELECT COALESCE(sum(octet_length(node.payload)), 0) \
+                       FROM database_reachable reachable \
+                       JOIN atomic_semantic_commitment_nodes node \
+                         ON node.node_hash = reachable.node_hash), \
+                    (SELECT count(*) FROM atomic_semantic_commitment_nodes node \
+                      WHERE NOT EXISTS (SELECT 1 FROM global_reachable reachable \
+                                         WHERE reachable.node_hash = node.node_hash))",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("operations/semantic-commitment-metrics", error))?;
+    metrics.semantic_commitment_roots =
+        positive_or_zero(row.get(0), "semantic commitment root count")?;
+    metrics.semantic_commitment_nodes =
+        positive_or_zero(row.get(1), "semantic commitment node count")?;
+    metrics.semantic_commitment_node_bytes =
+        positive_or_zero(row.get(2), "semantic commitment node bytes")?;
+    metrics.orphan_semantic_commitment_nodes =
+        positive_or_zero(row.get(3), "orphan semantic commitment node count")?;
+    Ok(())
+}
+
 fn inspect_native_trees<C: postgres::GenericClient>(
     client: &mut C,
     database_id: &str,
@@ -2696,6 +2855,23 @@ fn garbage_candidates<C: postgres::GenericClient>(
     client: &mut C,
     older_than_millis: i64,
 ) -> Result<GarbageCandidates, SemanticError> {
+    // Keep one global lock order: semantic admission/collection first, then
+    // tree-manifest and generation locks. Writers take the matching shared
+    // semantic lock before inserting their first content node.
+    let semantic_gc_locked: bool = client
+        .query_one(
+            "SELECT pg_try_advisory_xact_lock(atomic_semantic_commitment_gc_pin_key())",
+            &[],
+        )
+        .map_err(|error| operation_error("operations/gc-semantic-lock", error))?
+        .get(0);
+    if !semantic_gc_locked {
+        return Err(SemanticError::new(
+            crate::ErrorCategory::Busy,
+            "operations/semantic-gc-pinned",
+            "semantic commitment collection is already active",
+        ));
+    }
     // Advance only one globally oldest root in this call. This is a contiguous
     // per-database prefix by construction; a pin on an earlier root prevents
     // a later root of that database from being selected out of order.
@@ -2942,7 +3118,42 @@ fn garbage_candidates<C: postgres::GenericClient>(
         .into_iter()
         .map(|row| digest(row.get(0), "program garbage hash"))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut semantic_nodes = client
+        .query(
+            "SELECT node_hash \
+               FROM atomic_semantic_commitment_nodes node \
+              WHERE node.created_at < clock_timestamp() - \
+                                      $1::bigint * interval '1 millisecond' \
+                AND NOT EXISTS (SELECT 1 FROM atomic_semantic_commitment_roots root \
+                                 WHERE root.current_root = node.node_hash) \
+                AND NOT EXISTS (SELECT 1 FROM atomic_semantic_commitment_nodes parent \
+                                 WHERE parent.left_hash = node.node_hash \
+                                    OR parent.right_hash = node.node_hash) \
+              ORDER BY node.created_at, node.node_hash LIMIT $2",
+            &[
+                &older_than_millis,
+                &(MAX_SEMANTIC_COMMITMENT_NODES_PER_GC as i64),
+            ],
+        )
+        .map_err(|error| operation_error("operations/gc-semantic-node-candidates", error))?
+        .into_iter()
+        .map(|row| digest(row.get(0), "semantic commitment garbage hash"))
+        .collect::<Result<Vec<_>, _>>()?;
+    semantic_nodes.sort_unstable();
     let log_generations = log_generation_candidates(client, older_than_millis)?;
+    let semantic_roots = if let Some(candidate) = log_generations
+        .iter()
+        .find(|candidate| candidate.semantic_roots_removed > 0)
+    {
+        semantic_root_candidates(
+            client,
+            &candidate.database_id,
+            candidate.generation,
+            MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC,
+        )?
+    } else {
+        Vec::new()
+    };
     Ok(GarbageCandidates {
         segments,
         programs,
@@ -2951,6 +3162,8 @@ fn garbage_candidates<C: postgres::GenericClient>(
         tree_manifests,
         tree_nodes,
         log_generations,
+        semantic_roots,
+        semantic_nodes,
     })
 }
 
@@ -3193,6 +3406,26 @@ fn preview_abandoned_log_generation_phase<C: postgres::GenericClient>(
 ) -> Result<LogGenerationGarbage, SemanticError> {
     let generation_sql = sql_u64(generation, "abandoned log generation")?;
     let maximum_rows = MAX_LOG_GENERATION_ROWS_PER_GC as i64;
+    let semantic_roots = bounded_generation_row_count(
+        client,
+        "SELECT 1 FROM atomic_semantic_commitment_roots \
+          WHERE database_id = $1 AND generation = $2 \
+          ORDER BY basis_t LIMIT $3",
+        &database_id,
+        generation_sql,
+        MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC as i64,
+    )?;
+    if semantic_roots > 0 {
+        return Ok(LogGenerationGarbage {
+            database_id,
+            generation,
+            abandoned: true,
+            collection_phase: phase,
+            rows_removed: semantic_roots,
+            semantic_roots_removed: semantic_roots,
+            is_complete: false,
+        });
+    }
     let rows_removed = match phase {
         0 => bounded_generation_row_count(
             client,
@@ -3297,6 +3530,7 @@ fn preview_abandoned_log_generation_phase<C: postgres::GenericClient>(
         abandoned: true,
         collection_phase,
         rows_removed,
+        semantic_roots_removed: 0,
         is_complete,
     })
 }
@@ -3309,6 +3543,26 @@ fn preview_log_generation_phase<C: postgres::GenericClient>(
 ) -> Result<LogGenerationGarbage, SemanticError> {
     let generation_sql = sql_u64(generation, "log generation")?;
     let maximum_rows = MAX_LOG_GENERATION_ROWS_PER_GC as i64;
+    let semantic_roots = bounded_generation_row_count(
+        client,
+        "SELECT 1 FROM atomic_semantic_commitment_roots \
+          WHERE database_id = $1 AND generation = $2 \
+          ORDER BY basis_t LIMIT $3",
+        &database_id,
+        generation_sql,
+        MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC as i64,
+    )?;
+    if semantic_roots > 0 {
+        return Ok(LogGenerationGarbage {
+            database_id,
+            generation,
+            abandoned: false,
+            collection_phase: phase,
+            rows_removed: semantic_roots,
+            semantic_roots_removed: semantic_roots,
+            is_complete: false,
+        });
+    }
     let rows_removed = match phase {
         0 if generation == 0 => bounded_generation_row_count(
             client,
@@ -3443,6 +3697,7 @@ fn preview_log_generation_phase<C: postgres::GenericClient>(
         abandoned: false,
         collection_phase,
         rows_removed,
+        semantic_roots_removed: 0,
         is_complete,
     })
 }
@@ -3460,6 +3715,38 @@ fn bounded_generation_row_count<C: postgres::GenericClient>(
         .map_err(|error| operation_error("operations/gc-log-generation-preview", error))?
         .get(0);
     positive_or_zero(count, "previewed log-generation rows")
+}
+
+fn semantic_root_candidates<C: postgres::GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    maximum_roots: usize,
+) -> Result<Vec<SemanticCommitmentRootGarbage>, SemanticError> {
+    let rows = client
+        .query(
+            "SELECT basis_t, tx_hash, current_root \
+               FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2 \
+              ORDER BY basis_t LIMIT $3",
+            &[
+                &database_id,
+                &sql_u64(generation, "semantic root generation")?,
+                &(maximum_roots as i64),
+            ],
+        )
+        .map_err(|error| operation_error("operations/gc-semantic-root-candidates", error))?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(SemanticCommitmentRootGarbage {
+                database_id: database_id.to_owned(),
+                generation,
+                basis_t: positive_or_zero(row.get(0), "semantic root basis")?,
+                tx_hash: digest(row.get(1), "semantic root transaction hash")?,
+                current_root: optional_digest(row.get(2), "semantic commitment current root")?,
+            })
+        })
+        .collect()
 }
 
 /// Predict the exact bounded value drain after the selected root prefix has
@@ -3835,6 +4122,10 @@ fn digest(bytes: Vec<u8>, label: &str) -> Result<Digest, SemanticError> {
             format!("{label} is not 32 bytes"),
         )
     })
+}
+
+fn optional_digest(bytes: Option<Vec<u8>>, label: &str) -> Result<Option<Digest>, SemanticError> {
+    bytes.map(|bytes| digest(bytes, label)).transpose()
 }
 
 fn problem(

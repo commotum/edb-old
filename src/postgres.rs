@@ -214,12 +214,17 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         17,
         include_str!("../migrations/0017_request_snapshot_bases.sql"),
     ),
+    (
+        18,
+        include_str!("../migrations/0018_semantic_commitment_gc.sql"),
+    ),
+    (19, include_str!("../migrations/0019_dual_predicates.sql")),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 17;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 19;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -1396,6 +1401,7 @@ fn grant_runtime_privileges(
                                        {schema_ident}.atomic_finish_tree_build(bytea), \
                                        {schema_ident}.atomic_apply_tree_publication_work(bytea, bigint), \
                                        {schema_ident}.atomic_tree_database_build_pin_key(text), \
+                                       {schema_ident}.atomic_semantic_commitment_gc_pin_key(), \
                                        {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {writer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {peer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
@@ -1591,6 +1597,7 @@ fn program_kind_i16(kind: ProgramKind) -> i16 {
         ProgramKind::AttributePredicate => 1,
         ProgramKind::Query => 2,
         ProgramKind::EntityPredicate => 3,
+        ProgramKind::DualPredicate => 4,
     }
 }
 
@@ -1979,17 +1986,16 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
         let ident = qualified_program_ident(&name)?;
         let hash = bound_program_hash(db_after, &ident)?;
         let program = resolve_program_in(client, cache, hash)?;
-        let expected = match role {
-            PredicateRole::Attribute => ProgramKind::AttributePredicate,
-            PredicateRole::Entity => ProgramKind::EntityPredicate,
-        };
-        if program.program().kind != expected {
+        if role.requires_attribute() && !program.program().supports_attribute_predicate() {
             return Err(SemanticError::incorrect(
-                match role {
-                    PredicateRole::Attribute => "program/not-attribute-predicate",
-                    PredicateRole::Entity => "program/not-entity-predicate",
-                },
-                format!("active program {name} has the wrong predicate role"),
+                "program/not-attribute-predicate",
+                format!("active program {name} has no attribute-predicate body"),
+            ));
+        }
+        if role.requires_entity() && !program.program().supports_entity_predicate() {
+            return Err(SemanticError::incorrect(
+                "program/not-entity-predicate",
+                format!("active program {name} has no entity-predicate body"),
             ));
         }
     }
@@ -2070,14 +2076,7 @@ fn predicate_roles_in(
             let role = match (attribute, entity) {
                 (true, false) => PredicateRole::Attribute,
                 (false, true) => PredicateRole::Entity,
-                (true, true) => {
-                    return Err(SemanticError::incorrect(
-                        "program/predicate-role-conflict",
-                        format!(
-                            "predicate {name} is used as both an attribute and entity predicate"
-                        ),
-                    ));
-                }
+                (true, true) => PredicateRole::Both,
                 (false, false) => unreachable!("only operative names are inserted"),
             };
             Ok((name, role))
@@ -4320,14 +4319,14 @@ fn persisted_predicates_in<C: GenericClient>(
     for (name, role) in required {
         let hash = bound_program_hash(database, &qualified_program_ident(name)?)?;
         let program = resolve_program_in(client, cache, hash)?;
-        if *role == PredicateRole::Attribute {
-            if program.program().kind != ProgramKind::AttributePredicate {
+        if role.requires_attribute() {
+            if !program.program().supports_attribute_predicate() {
                 return Err(SemanticError::incorrect(
                     "program/not-attribute-predicate",
-                    format!("active program {name} is not an attribute predicate"),
+                    format!("active program {name} has no attribute-predicate body"),
                 ));
             }
-            let predicate_db = database.clone();
+            let program = Arc::clone(&program);
             let budget = Arc::clone(&shared_budget);
             functions.register_attribute_value_predicate(name.clone(), move |value| {
                 let mut budget = budget.lock().map_err(|_| {
@@ -4336,23 +4335,21 @@ fn persisted_predicates_in<C: GenericClient>(
                         "transaction program budget mutex was poisoned",
                     )
                 })?;
-                match ProgramRuntime.execute_prevalidated_exact_with_budget(
+                ProgramRuntime.execute_prevalidated_attribute_predicate_with_budget(
                     &program,
-                    &predicate_db,
-                    std::slice::from_ref(value),
+                    value,
                     &mut budget,
-                )? {
-                    ProgramOutput::AttributePredicate(value) => Ok(value),
-                    _ => unreachable!("program kind was checked"),
-                }
+                )
             });
-        } else {
-            if program.program().kind != ProgramKind::EntityPredicate {
+        }
+        if role.requires_entity() {
+            if !program.program().supports_entity_predicate() {
                 return Err(SemanticError::incorrect(
                     "program/not-entity-predicate",
-                    format!("active program {name} is not an entity predicate"),
+                    format!("active program {name} has no entity-predicate body"),
                 ));
             }
+            let program = Arc::clone(&program);
             let budget = Arc::clone(&shared_budget);
             functions.register_entity_value_predicate(name.clone(), move |db_after, entity| {
                 let mut budget = budget.lock().map_err(|_| {
@@ -4361,15 +4358,12 @@ fn persisted_predicates_in<C: GenericClient>(
                         "transaction program budget mutex was poisoned",
                     )
                 })?;
-                match ProgramRuntime.execute_prevalidated_exact_with_budget(
+                ProgramRuntime.execute_prevalidated_entity_predicate_exact_with_budget(
                     &program,
                     db_after,
-                    &[Value::Ref(entity)],
+                    entity,
                     &mut budget,
-                )? {
-                    ProgramOutput::EntityPredicate(value) => Ok(value),
-                    _ => unreachable!("program kind was checked"),
-                }
+                )
             });
         }
     }

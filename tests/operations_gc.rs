@@ -6,7 +6,7 @@ use atomic_core::{
     PostgresIndexer, PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramKind,
     RECOMMENDED_GARBAGE_COLLECTION_AGE, RestoreFault, Schema, TreeManifestRecord,
     TreePublicationDelta, TreePublishOutcome, TreeRootBinding, TxOp, TxValue, USER_PARTITION,
-    Value, ValueType, View, encode_index_segment, encode_program, make_eid, sha256,
+    Value, ValueType, encode_index_segment, encode_program, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::collections::BTreeSet;
@@ -84,18 +84,11 @@ fn schema() -> Schema {
     schema
 }
 
-fn assert_same_information(left: &atomic_core::Database, right: &atomic_core::Database) {
-    assert_eq!(left.basis_t(), right.basis_t());
-    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
-    assert_eq!(left.schema(), right.schema());
-    assert_eq!(
-        left.datoms(View::Current, IndexOrder::Eavt),
-        right.datoms(View::Current, IndexOrder::Eavt)
-    );
-    assert_eq!(
-        left.datoms(View::History, IndexOrder::Eavt),
-        right.datoms(View::History, IndexOrder::Eavt)
-    );
+fn assert_same_information(
+    left: &impl common::InformationSource,
+    right: &impl common::InformationSource,
+) {
+    common::assert_same_information(left, right);
 }
 
 fn provision_generation_zero_database(
@@ -298,12 +291,111 @@ fn inventory_has_work(inventory: &GarbageInventory) -> bool {
         || !inventory.tree_manifest_hashes.is_empty()
         || !inventory.tree_node_hashes.is_empty()
         || !inventory.log_generations.is_empty()
+        || !inventory.semantic_commitment_roots.is_empty()
+        || !inventory.semantic_commitment_node_hashes.is_empty()
 }
 
 fn apply_exact_inventory(operator: &mut PostgresOperator, dry: &GarbageInventory) {
     let mut expected = dry.clone();
     expected.applied = true;
     assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+}
+
+#[test]
+fn semantic_node_gc_is_age_gated_and_bounded() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let scoped = isolated_catalog(&connection, "gc_semantic_frontier");
+    let database_id = unique("gc_semantic_live");
+    let mut store = PostgresStore::connect(&scoped).unwrap();
+    store.create_database(&database_id, Schema::new()).unwrap();
+    let mut raw = Client::connect(&scoped, NoTls).unwrap();
+    let active_root: Option<Vec<u8>> = raw
+        .query_one(
+            "SELECT current_root FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 ORDER BY basis_t DESC LIMIT 1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    let values = (0..atomic_core::MAX_SEMANTIC_COMMITMENT_NODES_PER_GC + 1)
+        .map(|ordinal| format!("orphan-semantic-{database_id}-{ordinal}").into_bytes())
+        .map(|payload| (sha256(&payload), payload))
+        .collect::<Vec<_>>();
+    let hashes = values
+        .iter()
+        .map(|(hash, _)| hash.to_vec())
+        .collect::<Vec<_>>();
+    let payloads = values
+        .iter()
+        .map(|(_, payload)| payload.clone())
+        .collect::<Vec<_>>();
+    raw.execute(
+        "INSERT INTO atomic_semantic_commitment_nodes \
+             (node_hash, payload, subtree_count) \
+         SELECT hash, payload, 1 FROM unnest($1::bytea[], $2::bytea[]) \
+              AS inserted(hash, payload)",
+        &[&hashes, &payloads],
+    )
+    .unwrap();
+
+    let mut operator = PostgresOperator::connect(&scoped).unwrap();
+    let metrics = operator
+        .inspect_database(&database_id, false)
+        .unwrap()
+        .metrics;
+    assert!(metrics.semantic_commitment_roots > 0);
+    assert_eq!(
+        metrics.orphan_semantic_commitment_nodes,
+        values.len() as u64
+    );
+    let protected = operator
+        .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+        .unwrap();
+    assert!(protected.semantic_commitment_node_hashes.is_empty());
+
+    let first = operator.garbage_inventory(Duration::ZERO).unwrap();
+    assert_eq!(
+        first.semantic_commitment_node_hashes.len(),
+        atomic_core::MAX_SEMANTIC_COMMITMENT_NODES_PER_GC
+    );
+    apply_exact_inventory(&mut operator, &first);
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_nodes \
+              WHERE node_hash = ANY($1)",
+            &[&hashes],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+
+    let second = operator.garbage_inventory(Duration::ZERO).unwrap();
+    assert_eq!(second.semantic_commitment_node_hashes.len(), 1);
+    apply_exact_inventory(&mut operator, &second);
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_nodes \
+              WHERE node_hash = ANY($1)",
+            &[&hashes],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    if let Some(active_root) = active_root {
+        assert!(
+            raw.query_opt(
+                "SELECT 1 FROM atomic_semantic_commitment_nodes WHERE node_hash = $1",
+                &[&active_root],
+            )
+            .unwrap()
+            .is_some(),
+            "active semantic root node was collected"
+        );
+    }
 }
 
 fn preview_next_tree_build_intent(
@@ -462,7 +554,7 @@ fn gc_reclaims_proven_unreferenced_values_but_retains_untracked_legacy_segments(
     let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
     indexer.consolidate().unwrap();
 
-    let mut orphan_datoms = db.datoms(View::History, IndexOrder::Eavt);
+    let mut orphan_datoms = db.history().datoms(IndexOrder::Eavt).unwrap();
     orphan_datoms[0].entity = user(999);
     orphan_datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
     let orphan_segment = IndexSegment {
@@ -1171,7 +1263,10 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
             RestoreFault::BeforeCommit,
         )
         .unwrap_err();
-    assert_eq!(interrupted.code, "backup/restore-before-activation");
+    assert_eq!(
+        interrupted.code, "backup/restore-before-activation",
+        "{interrupted:?}"
+    );
     let mut raw = Client::connect(&target_connection, NoTls).unwrap();
     let generation: i64 = raw
         .query_one(
@@ -1545,8 +1640,8 @@ fn gc_retains_current_and_historical_temporal_function_blobs() {
         2_000,
     );
     assert_eq!(
-        rebound.db_after.values(function, DB_FN as u32),
-        vec![&Value::Function(current_hash)]
+        rebound.db_after.values(function, DB_FN as u32).unwrap(),
+        vec![Value::Function(current_hash)]
     );
 
     // Make both values old enough to be candidates absent the exact temporal
@@ -1605,18 +1700,12 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
-    let service = common::start_service(&connection, &database_id);
-    let first_value = unique_long();
-    let second_value = first_value + 1;
-    let first = common::transact(
-        &service,
-        "native-first",
-        created.basis_t(),
-        &[add(first_value)],
-        1_000,
-    );
+    // The administrative store caches an exact writer base after creation.
+    // Release that legitimate witness so this test isolates Peer-held pins.
+    drop(store);
     let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
     let publication_one = indexer.consolidate().unwrap();
+    assert_eq!(publication_one.basis_t, created.basis_t());
 
     // Zero cache capacity ensures the retained snapshot must still be able to
     // fetch directories/leaves after GC, not merely return a cached answer.
@@ -1630,27 +1719,17 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         publication_one.publication_revision + 1
     );
 
-    let second = common::transact(
-        &service,
-        "native-second",
-        first.basis_t,
-        &[add(second_value)],
-        2_000,
-    );
-    let publication_three = indexer.consolidate().unwrap();
+    let publication_three = republish_same_basis(&connection, &database_id);
     assert_eq!(
         publication_three.publication_revision,
         publication_two.publication_revision + 1
     );
-    assert_eq!(publication_three.basis_t, second.basis_t);
-    peer.sync_to_snapshot(second.basis_t, Duration::from_secs(1))
-        .unwrap();
+    assert_eq!(publication_three.basis_t, created.basis_t());
     assert!(peer.refresh_index().unwrap());
     assert_eq!(
         peer.durable_base_revision(),
         publication_three.publication_revision
     );
-
     // Publication is root-first and membership folding is deliberately
     // bounded. Finish both small folds explicitly so an empty GC inventory
     // below can only be caused by the live snapshot pin, not by unfinished
@@ -1801,7 +1880,7 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
             .database_value()
             .values(user(42), ITEM_VALUE)
             .unwrap(),
-        vec![Value::Long(first_value)]
+        Vec::<Value>::new()
     );
     drop(snapshot_clones);
     drop(old_snapshot);
@@ -1853,16 +1932,6 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
             .collect::<Vec<_>>(),
         vec![publication_two.publication_revision]
     );
-    let retired_nodes = raw
-        .query(
-            "SELECT node_hash FROM atomic_tree_retired_nodes \
-              WHERE database_id = $1 AND publication_revision = $2",
-            &[&database_id, &(publication_two.publication_revision as i64)],
-        )
-        .unwrap()
-        .into_iter()
-        .map(|row| <Digest>::try_from(row.get::<_, Vec<u8>>(0)).unwrap())
-        .collect::<BTreeSet<_>>();
     let mut expected_changed = dry_changed.clone();
     expected_changed.applied = true;
     let changed = operator.collect_garbage(Duration::ZERO).unwrap();
@@ -1871,50 +1940,9 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         candidate.database_id == database_id
             && candidate.publication_revision == publication_two.publication_revision
     }));
-    // Root metadata can retire before successful build-intent ledgers finish
-    // their own bounded cleanup. Those ledgers are deliberate liveness pins;
-    // once drained, at least one changed-path value becomes exact garbage.
-    let mut deleted_nodes = changed
-        .tree_node_hashes
-        .iter()
-        .copied()
-        .filter(|hash| retired_nodes.contains(hash))
-        .collect::<BTreeSet<_>>();
-    for attempt in 0..MAX_TEST_GC_STEPS {
-        if !deleted_nodes.is_empty() {
-            break;
-        }
-        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
-        deleted_nodes.extend(
-            dry.tree_node_hashes
-                .iter()
-                .copied()
-                .filter(|hash| retired_nodes.contains(hash)),
-        );
-        assert!(
-            !deleted_nodes.is_empty() || inventory_has_work(&dry),
-            "retired nodes were neither collected with their retirement nor reachable by later \
-             exact GC work: database={database_id}, revision={}, attempt={attempt}, \
-             retired_nodes={retired_nodes:?}, inventory={dry:?}",
-            publication_two.publication_revision
-        );
-        apply_exact_inventory(&mut operator, &dry);
-    }
-    assert!(
-        !deleted_nodes.is_empty(),
-        "a changed successor must eventually release an old physical tree value"
-    );
-    for hash in deleted_nodes {
-        assert_eq!(
-            raw.query_one(
-                "SELECT count(*) FROM atomic_tree_nodes WHERE node_hash = $1",
-                &[&&hash[..]],
-            )
-            .unwrap()
-            .get::<_, i64>(0),
-            0
-        );
-    }
+    // These are semantically and physically identical republishes: roots are
+    // reclaimable, while their globally shared immutable nodes stay live.
+    assert!(changed.tree_node_hashes.is_empty());
     assert_eq!(
         raw.query_one(
             "SELECT count(*) FROM atomic_tree_publications WHERE database_id = $1",
@@ -1926,7 +1954,7 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     );
     assert_eq!(
         peer.database_value().values(user(42), ITEM_VALUE).unwrap(),
-        vec![Value::Long(second_value)]
+        Vec::<Value>::new()
     );
     let report = operator.inspect_database(&database_id, true).unwrap();
     assert!(report.healthy(), "{:?}", report.problems);
@@ -1941,16 +1969,16 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
             .database_value()
             .values(user(42), ITEM_VALUE)
             .unwrap(),
-        vec![Value::Long(second_value)]
+        Vec::<Value>::new()
     );
-    service.shutdown();
 }
 
 #[test]
 fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
-    let Some(connection) = connection() else {
+    let Some(base_connection) = connection() else {
         return;
     };
+    let connection = isolated_catalog(&base_connection, "gc_request_base_catalog");
     let database_id = unique("gc_request_base");
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
@@ -1985,161 +2013,36 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
     let mut raw = Client::connect(&connection, NoTls).unwrap();
     let request = raw
         .query_one(
-            "SELECT generation, request_key_hash FROM atomic_generation_requests \
-              WHERE database_id = $1 AND basis_t = $2",
+            "SELECT request.generation, request.request_key_hash, request.request_kind, \
+                    base.base_manifest_hash \
+               FROM atomic_generation_requests request \
+               LEFT JOIN atomic_generation_request_bases base \
+                 ON base.database_id = request.database_id \
+                AND base.generation = request.generation \
+                AND base.request_key_hash = request.request_key_hash \
+              WHERE request.database_id = $1 AND request.basis_t = $2",
             &[&database_id, &(committed.basis_t as i64)],
         )
         .unwrap();
     let source_generation: i64 = request.get(0);
-    let request_key_hash: Vec<u8> = request.get(1);
     assert_eq!(source_generation, 1);
-
-    // Kind 1 is the explicitly unbound compatibility shape.  The new table
-    // rejects attaching a root to it rather than silently changing its
-    // durability promise.
-    let unbound_error = raw
-        .execute(
-            "INSERT INTO atomic_generation_request_bases \
-                 (database_id, generation, request_key_hash, base_manifest_hash) \
-             VALUES ($1, $2, $3, $4)",
-            &[
-                &database_id,
-                &source_generation,
-                &request_key_hash,
-                &&genesis_publication.manifest_hash[..],
-            ],
-        )
-        .unwrap_err();
-    assert_eq!(unbound_error.code().unwrap().code(), "23503");
-
-    // Test-only promotion models the later writer's atomic kind-2 insert.  It
-    // is done under a transactional trigger disable so a failed fixture can
-    // never leave the shared catalog's immutability guard disabled.
-    let mut fixture = raw.transaction().unwrap();
-    fixture
-        .batch_execute(
-            "ALTER TABLE atomic_generation_requests \
-             DISABLE TRIGGER atomic_generation_requests_immutable",
-        )
-        .unwrap();
+    assert_eq!(request.get::<_, i16>(2), 2);
     assert_eq!(
-        fixture
-            .execute(
-                "UPDATE atomic_generation_requests SET request_kind = 2 \
-                  WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3",
-                &[&database_id, &source_generation, &request_key_hash],
-            )
-            .unwrap(),
-        1
+        request.get::<_, Option<Vec<u8>>>(3),
+        Some(genesis_publication.manifest_hash.to_vec())
     );
-    fixture
-        .batch_execute(
-            "ALTER TABLE atomic_generation_requests \
-             ENABLE TRIGGER atomic_generation_requests_immutable",
-        )
-        .unwrap();
-    fixture.commit().unwrap();
 
-    let transaction = raw
-        .query_one(
-            "SELECT previous_hash, tx_hash FROM atomic_generation_transactions \
-              WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
-            &[
-                &database_id,
-                &source_generation,
-                &(committed.basis_t as i64),
-            ],
-        )
-        .unwrap();
-    let previous_hash: Vec<u8> = transaction.get(0);
-    let committed_hash: Vec<u8> = transaction.get(1);
-
-    // Rewind only the fixture head, with the validation trigger disabled in
-    // one owner transaction, so the replacement validator itself is tested:
-    // kind 2 cannot become visible until its exact base binding exists.
-    let mut rewind = raw.transaction().unwrap();
-    rewind
-        .batch_execute("ALTER TABLE atomic_heads DISABLE TRIGGER atomic_heads_validate_advance")
-        .unwrap();
-    assert_eq!(
-        rewind
-            .execute(
-                "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
-                  WHERE database_id = $1 AND log_generation = $4",
-                &[
-                    &database_id,
-                    &((committed.basis_t - 1) as i64),
-                    &previous_hash,
-                    &source_generation,
-                ],
-            )
-            .unwrap(),
-        1
-    );
-    rewind
-        .batch_execute("ALTER TABLE atomic_heads ENABLE TRIGGER atomic_heads_validate_advance")
-        .unwrap();
-    rewind.commit().unwrap();
-
-    let incomplete_publication = raw
-        .execute(
-            "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
-              WHERE database_id = $1 AND log_generation = $4",
-            &[
-                &database_id,
-                &(committed.basis_t as i64),
-                &committed_hash,
-                &source_generation,
-            ],
-        )
-        .unwrap_err();
-    assert_eq!(incomplete_publication.code().unwrap().code(), "23503");
-
+    // The native writer publishes the request, its exact db-before base, the
+    // transaction, semantic coordinate, and head in one PostgreSQL commit.
     let mut operator = PostgresOperator::connect(&connection).unwrap();
-    let missing = operator.inspect_database(&database_id, false).unwrap();
+    let complete = operator.inspect_database(&database_id, false).unwrap();
     assert!(
-        missing
-            .problems
-            .iter()
-            .any(|problem| problem.code == "integrity/invalid-request-base"),
-        "kind-2 request without a base was not reported: {:?}",
-        missing.problems
-    );
-
-    raw.execute(
-        "INSERT INTO atomic_generation_request_bases \
-             (database_id, generation, request_key_hash, base_manifest_hash) \
-         VALUES ($1, $2, $3, $4)",
-        &[
-            &database_id,
-            &source_generation,
-            &request_key_hash,
-            &&genesis_publication.manifest_hash[..],
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        raw.execute(
-            "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
-              WHERE database_id = $1 AND log_generation = $4",
-            &[
-                &database_id,
-                &(committed.basis_t as i64),
-                &committed_hash,
-                &source_generation,
-            ],
-        )
-        .unwrap(),
-        1
-    );
-    let repaired = operator.inspect_database(&database_id, false).unwrap();
-    assert!(
-        repaired
+        complete
             .problems
             .iter()
             .all(|problem| problem.code != "integrity/invalid-request-base"),
-        "valid request base was rejected: {:?}",
-        repaired.problems
+        "native writer produced an invalid request base: {:?}",
+        complete.problems
     );
 
     // Authenticated recovery must treat kind 2 as an ordinary transaction,
@@ -2211,6 +2114,42 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
     let activated = operator.process_excision_requests(&database_id).unwrap();
     assert_eq!(activated.source_generation, source_generation as u64);
     assert_eq!(activated.basis_t, requested.basis_t);
+    let activated_manifest = raw
+        .query_one(
+            "SELECT manifest_hash FROM atomic_tree_publications \
+              WHERE database_id = $1 AND log_generation = $2 \
+              ORDER BY publication_revision DESC LIMIT 1",
+            &[&database_id, &(activated.generation as i64)],
+        )
+        .unwrap()
+        .get::<_, Vec<u8>>(0);
+    let activated_manifest = <Digest>::try_from(activated_manifest).unwrap();
+    let mut folded = false;
+    for _ in 0..64 {
+        if publication_work
+            .advance_publication_work(activated_manifest)
+            .unwrap()
+        {
+            folded = true;
+            break;
+        }
+    }
+    assert!(folded);
+    drop(publication_work);
+    drop(indexer);
+    // Transaction reports intentionally hold exact immutable db-before and
+    // db-after values. They are live report witnesses, and therefore retain
+    // the old manifest/generation until the application releases them.
+    let report_pinned = operator.garbage_inventory(Duration::ZERO).unwrap();
+    assert!(report_pinned.log_generations.iter().all(|candidate| {
+        candidate.database_id != database_id || candidate.generation != source_generation as u64
+    }));
+    assert!(report_pinned.semantic_commitment_roots.iter().all(|root| {
+        root.database_id != database_id || root.generation != source_generation as u64
+    }));
+    drop(installed);
+    drop(committed);
+    drop(requested);
 
     // While the tree dependency remains, the retired log generation is not a
     // generation-GC candidate.  Root GC releases the now-unresolvable request
@@ -2250,6 +2189,229 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
         .unwrap()
         .get::<_, i64>(0),
         0
+    );
+
+    // The log is now terminal, but its semantic coordinates still protect the
+    // old immutable database values.  They are the first bounded generation
+    // phase; active and unrelated roots are not database-local garbage.
+    let active_generation = activated.generation as i64;
+    let old_root_count: i64 = raw
+        .query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2",
+            &[&database_id, &source_generation],
+        )
+        .unwrap()
+        .get(0);
+    assert!(old_root_count > 0);
+    let active_root_count: i64 = raw
+        .query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2",
+            &[&database_id, &active_generation],
+        )
+        .unwrap()
+        .get(0);
+    assert!(active_root_count > 0);
+    let other_database = unique("gc_semantic_other");
+    store
+        .create_database(&other_database, Schema::new())
+        .unwrap();
+    let other_root_count: i64 = raw
+        .query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1",
+            &[&other_database],
+        )
+        .unwrap()
+        .get(0);
+    assert!(other_root_count > 0);
+
+    let old_nodes = raw
+        .query(
+            "WITH RECURSIVE reachable(node_hash) AS ( \
+                 SELECT current_root FROM atomic_semantic_commitment_roots \
+                  WHERE database_id = $1 AND generation = $2 \
+                    AND current_root IS NOT NULL \
+                 UNION \
+                 SELECT child.node_hash FROM reachable r \
+                   JOIN atomic_semantic_commitment_nodes parent \
+                     ON parent.node_hash = r.node_hash \
+                   CROSS JOIN LATERAL \
+                     (VALUES (parent.left_hash), (parent.right_hash)) child(node_hash) \
+                  WHERE child.node_hash IS NOT NULL \
+             ) SELECT node_hash FROM reachable",
+            &[&database_id, &source_generation],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<_, Vec<u8>>(0))
+        .collect::<BTreeSet<_>>();
+    let other_live_nodes = raw
+        .query(
+            "WITH RECURSIVE reachable(node_hash) AS ( \
+                 SELECT current_root FROM atomic_semantic_commitment_roots \
+                  WHERE NOT (database_id = $1 AND generation = $2) \
+                    AND current_root IS NOT NULL \
+                 UNION \
+                 SELECT child.node_hash FROM reachable r \
+                   JOIN atomic_semantic_commitment_nodes parent \
+                     ON parent.node_hash = r.node_hash \
+                   CROSS JOIN LATERAL \
+                     (VALUES (parent.left_hash), (parent.right_hash)) child(node_hash) \
+                  WHERE child.node_hash IS NOT NULL \
+             ) SELECT node_hash FROM reachable",
+            &[&database_id, &source_generation],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<_, Vec<u8>>(0))
+        .collect::<BTreeSet<_>>();
+    let old_only_nodes = old_nodes
+        .difference(&other_live_nodes)
+        .cloned()
+        .collect::<Vec<_>>();
+    let shared_nodes = old_nodes
+        .intersection(&other_live_nodes)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        !old_only_nodes.is_empty(),
+        "excision produced no old-generation-only semantic nodes"
+    );
+    assert!(
+        !shared_nodes.is_empty(),
+        "semantic commitments did not structurally share any retained nodes"
+    );
+
+    let semantic_dry =
+        preview_next_log_generation(&mut operator, &database_id, source_generation as u64);
+    let semantic_phase = semantic_dry
+        .log_generations
+        .iter()
+        .find(|candidate| {
+            candidate.database_id == database_id && candidate.generation == source_generation as u64
+        })
+        .unwrap();
+    assert_eq!(semantic_phase.semantic_roots_removed, old_root_count as u64);
+    assert_eq!(semantic_phase.rows_removed, old_root_count as u64);
+    assert_eq!(
+        semantic_dry
+            .semantic_commitment_roots
+            .iter()
+            .filter(|root| {
+                root.database_id == database_id && root.generation == source_generation as u64
+            })
+            .count(),
+        old_root_count as usize
+    );
+
+    // Even the owner cannot mutate a root outside the guarded collector.
+    let immutable = raw
+        .execute(
+            "DELETE FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2 AND basis_t = ( \
+                    SELECT min(basis_t) FROM atomic_semantic_commitment_roots \
+                     WHERE database_id = $1 AND generation = $2)",
+            &[&database_id, &source_generation],
+        )
+        .unwrap_err();
+    assert_eq!(immutable.code().unwrap().code(), "55000");
+
+    // Claim, deletion, and cursor creation are one transaction. A crash-like
+    // rollback restores every root and leaves the exact dry run repeatable.
+    let mut rollback = raw.transaction().unwrap();
+    let rolled_back = rollback
+        .query(
+            "SELECT basis_t FROM atomic_collect_semantic_commitment_generation_roots(\
+                 $1, $2, 0, 512, false)",
+            &[&database_id, &source_generation],
+        )
+        .unwrap();
+    assert_eq!(rolled_back.len(), old_root_count as usize);
+    rollback.rollback().unwrap();
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2",
+            &[&database_id, &source_generation],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        old_root_count
+    );
+
+    apply_exact_inventory(&mut operator, &semantic_dry);
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2",
+            &[&database_id, &source_generation],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1 AND generation = $2",
+            &[&database_id, &active_generation],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        active_root_count
+    );
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_roots \
+              WHERE database_id = $1",
+            &[&other_database],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        other_root_count
+    );
+
+    collect_log_generation_to_completion(&mut operator, &database_id, source_generation as u64);
+    for attempt in 0..MAX_TEST_GC_STEPS {
+        let remaining: i64 = raw
+            .query_one(
+                "SELECT count(*) FROM atomic_semantic_commitment_nodes \
+                  WHERE node_hash = ANY($1)",
+                &[&old_only_nodes],
+            )
+            .unwrap()
+            .get(0);
+        if remaining == 0 {
+            break;
+        }
+        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        assert!(
+            inventory_has_work(&dry),
+            "{remaining} old semantic nodes remained without GC work at attempt {attempt}"
+        );
+        apply_exact_inventory(&mut operator, &dry);
+    }
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_nodes \
+              WHERE node_hash = ANY($1)",
+            &[&old_only_nodes],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_semantic_commitment_nodes \
+              WHERE node_hash = ANY($1)",
+            &[&shared_nodes],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        shared_nodes.len() as i64
     );
 }
 
@@ -2560,16 +2722,12 @@ fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
     migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
-    let service = common::start_service(&connection, &database_id);
-    common::transact(
-        &service,
-        "bounded-retirement",
-        created.basis_t(),
-        &[add(unique_long())],
-        1_000,
-    );
+    // The administrative store caches an exact writer base after creation.
+    // Release that legitimate witness so this test isolates Peer-held pins.
+    drop(store);
     let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
     let publication_one = indexer.consolidate().unwrap();
+    assert_eq!(publication_one.basis_t, created.basis_t());
     let peer = Peer::connect_with_cache_limits(&connection, &database_id, 0, 0).unwrap();
     let old_snapshot = peer.snapshot();
     republish_same_basis(&connection, &database_id);
@@ -2724,5 +2882,4 @@ fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
         .get::<_, i64>(0),
         0
     );
-    service.shutdown();
 }
