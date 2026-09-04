@@ -54,6 +54,34 @@ struct TransactionOverlay {
     last_tx_instant: i64,
 }
 
+/// A scan of one exact immutable basis. Native scans retain the lazy
+/// persistent-tree/recent-tier merge; an assessment overlay adds only its
+/// bounded transaction delta to that stream. This is crate-private until the
+/// complete public raw-index cursor contract (including reverse seeks) lands.
+pub(crate) struct DatabaseValueScanCursor<'a> {
+    inner: Box<dyn Iterator<Item = Result<Datom, SemanticError>> + 'a>,
+}
+
+impl Iterator for DatabaseValueScanCursor<'_> {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+struct TransactionOverlayScanCursor<'a> {
+    base: DatabaseValueScanCursor<'a>,
+    delta: IntoIter<Datom>,
+    removals: Arc<[Datom]>,
+    schema: Arc<Schema>,
+    history: bool,
+    order: IndexOrder,
+    base_next: Option<Datom>,
+    delta_next: Option<Datom>,
+    failed: bool,
+}
+
 /// Lazy current-index cursor over one exact point-in-time database value.
 ///
 /// Eager values borrow their immutable index slice. Native values own a
@@ -388,6 +416,27 @@ impl DatabaseValue {
         self.window(datoms)
     }
 
+    /// Stream a complete logical index for query evaluation. Point-current
+    /// and raw-history values retain the native lazy cursor all the way into
+    /// the query loop, so a transaction-local broad pattern does not first
+    /// copy the durable database. Temporal/custom windows currently use their
+    /// established materialized collapse path because they need cross-event
+    /// retraction state.
+    pub(crate) fn query_scan_cursor(
+        &self,
+        order: IndexOrder,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        if self.direct_current() {
+            self.basis_scan_cursor(false, order)
+        } else if self.direct_history() {
+            self.basis_scan_cursor(true, order)
+        } else {
+            Ok(DatabaseValueScanCursor {
+                inner: Box::new(self.datoms(order)?.into_iter().map(Ok)),
+            })
+        }
+    }
+
     /// Read a left-contiguous prefix before applying temporal/custom
     /// predicates. This preserves the important property that filtered and
     /// historical point reads do not first materialize an entire index.
@@ -432,6 +481,43 @@ impl DatabaseValue {
             }
         };
         Ok(DatabaseValuePrefixCursor { inner })
+    }
+
+    /// Return the first historical datom in a prefix without reading the
+    /// remainder. Schema validation uses this for recovered `has-values?`
+    /// semantics, where even a retracted old value prevents adding uniqueness
+    /// before physical AVET storage exists.
+    pub(crate) fn history_prefix_first(
+        &self,
+        prefix: &IndexPrefix,
+    ) -> Result<Option<Datom>, SemanticError> {
+        prefix.validate()?;
+        match &self.basis {
+            ReadBasis::Eager(database) => {
+                Ok(database.history_with_prefix(prefix)?.first().cloned())
+            }
+            ReadBasis::Native(snapshot) => snapshot.prefix_cursor(true, prefix)?.next().transpose(),
+            ReadBasis::TransactionOverlay(overlay) => {
+                Ok(overlay.prefix(true, prefix)?.into_iter().next())
+            }
+        }
+    }
+
+    /// Whether the physical AVET projection for one logically indexed
+    /// attribute is complete at this immutable basis. Logical schema alone is
+    /// insufficient while a background backfill is pending.
+    pub(crate) fn physical_avet_ready(&self, attribute: u32) -> bool {
+        if !schema_has_avet(self.schema(), attribute) {
+            return false;
+        }
+        match &self.basis {
+            ReadBasis::Eager(_) => true,
+            ReadBasis::Native(snapshot) => snapshot.avet_ready(attribute),
+            ReadBasis::TransactionOverlay(overlay) => {
+                schema_has_avet(overlay.base.schema(), attribute)
+                    && overlay.base.physical_avet_ready(attribute)
+            }
+        }
     }
 
     pub fn values(&self, entity: u64, attribute: u32) -> Result<Vec<Value>, SemanticError> {
@@ -527,22 +613,36 @@ impl DatabaseValue {
     }
 
     fn basis_datoms(&self, history: bool, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-        match &self.basis {
-            ReadBasis::Eager(database) => Ok(database.datoms(
-                if history {
-                    crate::View::History
-                } else {
-                    crate::View::Current
-                },
-                order,
-            )),
-            ReadBasis::Native(snapshot) => Ok(snapshot.datoms(history, order)?.datoms),
-            ReadBasis::TransactionOverlay(_) => Err(SemanticError::new(
-                ErrorCategory::Unsupported,
-                "database/overlay-unbounded-read",
-                "transaction overlays require a bounded index prefix",
-            )),
-        }
+        self.basis_scan_cursor(history, order)?.collect()
+    }
+
+    fn basis_scan_cursor(
+        &self,
+        history: bool,
+        order: IndexOrder,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        let inner: Box<dyn Iterator<Item = Result<Datom, SemanticError>> + '_> = match &self.basis {
+            ReadBasis::Eager(database) => Box::new(
+                database
+                    .datoms(
+                        if history {
+                            crate::View::History
+                        } else {
+                            crate::View::Current
+                        },
+                        order,
+                    )
+                    .into_iter()
+                    .map(Ok),
+            ),
+            ReadBasis::Native(snapshot) => {
+                Box::new(snapshot.range_cursor(history, order, None, None)?)
+            }
+            ReadBasis::TransactionOverlay(overlay) => {
+                Box::new(overlay.scan_cursor(history, order)?)
+            }
+        };
+        Ok(DatabaseValueScanCursor { inner })
     }
 
     fn basis_prefix(
@@ -594,6 +694,82 @@ impl DatabaseValue {
 }
 
 impl TransactionOverlay {
+    fn scan_cursor(
+        &self,
+        history: bool,
+        order: IndexOrder,
+    ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
+        let base = self.base.basis_scan_cursor(history, order)?;
+        let removals: Arc<[Datom]> = if history {
+            Arc::from([])
+        } else {
+            self.tx_data
+                .iter()
+                .filter(|datom| !datom.added)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into()
+        };
+        let mut delta = Vec::new();
+
+        // `add-avet` copies the attribute's existing AEVT working set into
+        // the transaction-local AVET. Do the same bounded, attribute-local
+        // backfill when this transaction first enables AVET; the durable base
+        // remains streamed and untouched.
+        if order == IndexOrder::Avet {
+            for attribute in self.schema.attributes().filter(|attribute| {
+                schema_has_avet(&self.schema, attribute.id)
+                    && !schema_has_avet(self.base.schema(), attribute.id)
+            }) {
+                delta.extend(
+                    self.base
+                        .basis_prefix(
+                            history,
+                            &IndexPrefix::Aevt {
+                                attribute: attribute.id,
+                                entity: None,
+                                value: None,
+                            },
+                        )?
+                        .into_iter()
+                        .filter(|datom| {
+                            history
+                                || !removals
+                                    .iter()
+                                    .any(|removal| same_stored_eav(removal, datom))
+                        }),
+                );
+            }
+        }
+
+        for datom in self
+            .tx_data
+            .iter()
+            .filter(|datom| overlay_index_member(&self.schema, datom, order))
+            .filter(|datom| history || datom.added)
+        {
+            if history
+                || !delta
+                    .iter()
+                    .any(|existing| same_stored_eav(existing, datom))
+            {
+                delta.push(datom.clone());
+            }
+        }
+        delta.sort_by(|left, right| left.cmp_in(right, order));
+        Ok(TransactionOverlayScanCursor {
+            base,
+            delta: delta.into_iter(),
+            removals,
+            schema: Arc::clone(&self.schema),
+            history,
+            order,
+            base_next: None,
+            delta_next: None,
+            failed: false,
+        })
+    }
+
     fn prefix(&self, history: bool, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
         let source_prefix = self.source_prefix(prefix);
         let mut datoms = self.base.basis_prefix(history, &source_prefix)?;
@@ -643,6 +819,73 @@ impl TransactionOverlay {
                 }
             }
             _ => prefix.clone(),
+        }
+    }
+}
+
+impl TransactionOverlayScanCursor<'_> {
+    fn fill_base(&mut self) -> Result<(), SemanticError> {
+        while self.base_next.is_none() {
+            let Some(candidate) = self.base.next().transpose()? else {
+                break;
+            };
+            if !overlay_index_member(&self.schema, &candidate, self.order) {
+                continue;
+            }
+            if !self.history
+                && self
+                    .removals
+                    .iter()
+                    .any(|removal| same_stored_eav(removal, &candidate))
+            {
+                continue;
+            }
+            self.base_next = Some(candidate);
+        }
+        Ok(())
+    }
+
+    fn next_result(&mut self) -> Result<Option<Datom>, SemanticError> {
+        self.fill_base()?;
+        if self.delta_next.is_none() {
+            self.delta_next = self.delta.next();
+        }
+        match (&self.base_next, &self.delta_next) {
+            (None, None) => Ok(None),
+            (Some(_), None) => Ok(self.base_next.take()),
+            (None, Some(_)) => Ok(self.delta_next.take()),
+            (Some(base), Some(delta)) if !self.history && same_stored_eav(base, delta) => {
+                // A repeated assertion is a transaction event in history but
+                // leaves the original assertion coordinate current.
+                self.delta_next = None;
+                Ok(self.base_next.take())
+            }
+            (Some(base), Some(delta)) => match base.cmp_in(delta, self.order) {
+                std::cmp::Ordering::Less => Ok(self.base_next.take()),
+                std::cmp::Ordering::Greater => Ok(self.delta_next.take()),
+                std::cmp::Ordering::Equal => {
+                    self.delta_next = None;
+                    Ok(self.base_next.take())
+                }
+            },
+        }
+    }
+}
+
+impl Iterator for TransactionOverlayScanCursor<'_> {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        match self.next_result() {
+            Ok(Some(datom)) => Some(Ok(datom)),
+            Ok(None) => None,
+            Err(error) => {
+                self.failed = true;
+                Some(Err(error))
+            }
         }
     }
 }
@@ -772,8 +1015,9 @@ fn collapse_retractions(datoms: Vec<Datom>) -> Vec<Datom> {
 mod tests {
     use super::*;
     use crate::{
-        Attribute, Cardinality, DB_IDENT, EntityRef, TxOp, TxReport, TxValue, USER_PARTITION,
-        ValueType, make_eid,
+        Attribute, Cardinality, Clause, DB_IDENT, DataPattern, EntityRef, FindElement, FindSpec,
+        Query, QueryControl, Term, TxOp, TxReport, TxValue, USER_PARTITION, ValueType, Variable,
+        make_eid,
     };
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
@@ -1119,12 +1363,53 @@ mod tests {
     }
 
     #[test]
-    fn transaction_overlay_rejects_unbounded_reads_chaining_and_noncanonical_delta() {
+    fn transaction_overlay_streams_unbounded_reads_and_rejects_invalid_construction() {
         let (report, overlay, ..) = overlay_fixture();
+        let eager = report.db_after.database_value();
+        for order in [
+            IndexOrder::Eavt,
+            IndexOrder::Aevt,
+            IndexOrder::Avet,
+            IndexOrder::Vaet,
+        ] {
+            assert_same_stored_datoms(
+                &overlay.datoms(order).unwrap(),
+                &eager.datoms(order).unwrap(),
+            );
+            assert_same_stored_datoms(
+                &overlay.clone().history().datoms(order).unwrap(),
+                &eager.clone().history().datoms(order).unwrap(),
+            );
+        }
 
-        let unbounded = overlay.datoms(IndexOrder::Eavt).unwrap_err();
-        assert_eq!(unbounded.category, ErrorCategory::Unsupported);
-        assert_eq!(unbounded.code, "database/overlay-unbounded-read");
+        // A fully unbound data pattern is the observable path that exposed
+        // the former overlay-only limitation: eager and native values could
+        // scan it, while an entity predicate's exact db-after could not.
+        let entity = Variable::new("e").unwrap();
+        let attribute = Variable::new("a").unwrap();
+        let value = Variable::new("v").unwrap();
+        let query = Query::new(
+            FindSpec::Relation(vec![
+                FindElement::Variable(entity.clone()),
+                FindElement::Variable(attribute.clone()),
+                FindElement::Variable(value.clone()),
+            ]),
+            vec![Clause::Pattern(Box::new(DataPattern::new(
+                Term::Variable(entity),
+                Term::Variable(attribute),
+                Term::Variable(value),
+            )))],
+        );
+        assert_eq!(
+            overlay
+                .query(&query, &[], &QueryControl::default())
+                .unwrap()
+                .result,
+            eager
+                .query(&query, &[], &QueryControl::default())
+                .unwrap()
+                .result,
+        );
 
         let chained = DatabaseValue::transaction_overlay(
             overlay.clone(),

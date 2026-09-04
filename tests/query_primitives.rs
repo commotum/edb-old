@@ -438,6 +438,14 @@ fn finite_rules_can_converge_beyond_128_derivation_rounds() {
             value: TxValue::Entity(EntityRef::Temp(format!("node-{}", index + 1))),
         });
     }
+    // The terminal tempid must name an entity in E position as well as being
+    // referenced from V. Datomic does not allocate a tempid used only as a
+    // transaction value.
+    edges.push(TxOp::Add {
+        entity: EntityRef::Temp(format!("node-{EDGE_COUNT}")),
+        attribute: AGE,
+        value: TxValue::Scalar(Value::Long(0)),
+    });
     let report = Database::new(schema())
         .unwrap()
         .with(&edges, 1_000)

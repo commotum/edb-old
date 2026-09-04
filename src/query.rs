@@ -1250,9 +1250,10 @@ fn evaluate_pattern(
         if access != "EAVT scan" {
             state.stats.index_seeks += 1;
         }
-        state.stats.datoms_examined += datoms.len() as u64;
         for datom in datoms {
+            let datom = datom?;
             state.check(1)?;
+            state.stats.datoms_examined = state.stats.datoms_examined.saturating_add(1);
             let mut candidate = row.clone();
             if unify_entity_term(
                 database,
@@ -1293,13 +1294,19 @@ fn evaluate_pattern(
     Ok((next, access))
 }
 
-fn select_datoms(
-    database: &DatabaseValue,
+fn select_datoms<'a>(
+    database: &'a DatabaseValue,
     entity: Option<u64>,
     attribute: Option<u32>,
     value: Option<&Value>,
     force_scan: bool,
-) -> Result<(Vec<crate::Datom>, String), SemanticError> {
+) -> Result<
+    (
+        Box<dyn Iterator<Item = Result<crate::Datom, SemanticError>> + 'a>,
+        String,
+    ),
+    SemanticError,
+> {
     if !force_scan {
         if let Some(entity) = entity {
             let prefix = IndexPrefix::Eavt {
@@ -1307,7 +1314,10 @@ fn select_datoms(
                 attribute,
                 value: attribute.and(value).cloned(),
             };
-            return Ok((database.datoms_with_prefix(&prefix)?, "EAVT seek".into()));
+            return Ok((
+                Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                "EAVT seek".into(),
+            ));
         }
         if let Some(attribute) = attribute {
             if let Some(value) = value
@@ -1321,14 +1331,20 @@ fn select_datoms(
                     value: Some(value.clone()),
                     entity: None,
                 };
-                return Ok((database.datoms_with_prefix(&prefix)?, "AVET seek".into()));
+                return Ok((
+                    Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                    "AVET seek".into(),
+                ));
             }
             let prefix = IndexPrefix::Aevt {
                 attribute,
                 entity: None,
                 value: None,
             };
-            return Ok((database.datoms_with_prefix(&prefix)?, "AEVT seek".into()));
+            return Ok((
+                Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                "AEVT seek".into(),
+            ));
         }
         if let Some(Value::Ref(referenced)) = value {
             let prefix = IndexPrefix::Vaet {
@@ -1336,10 +1352,16 @@ fn select_datoms(
                 attribute: None,
                 entity: None,
             };
-            return Ok((database.datoms_with_prefix(&prefix)?, "VAET seek".into()));
+            return Ok((
+                Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                "VAET seek".into(),
+            ));
         }
     }
-    Ok((database.datoms(IndexOrder::Eavt)?, "EAVT scan".into()))
+    Ok((
+        Box::new(database.query_scan_cursor(IndexOrder::Eavt)?),
+        "EAVT scan".into(),
+    ))
 }
 
 fn clause_ready(clause: &Clause, row: &Row, rules: &[Rule]) -> bool {
