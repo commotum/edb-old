@@ -1,11 +1,19 @@
-use crate::database::{AssessedTransaction, PredicateRole};
+use crate::database::PredicateRole;
 use crate::encoding::program_call_digest;
 use crate::log_generation::{
     LineageTransactionContent, generation_transaction_hash, request_key_hash,
 };
+use crate::peer::{ExactEndpoint, TieredSnapshot};
+use crate::persistent_commitment::{
+    PersistentCommitmentCoordinate, advance_persistent_commitment, exact_semantic_changes,
+    load_persistent_coordinate, record_persistent_coordinate,
+};
 use crate::persistent_tree::{TreeNode, decode_tree_node};
 use crate::program::ValidatedProgram;
+use crate::recent::RecentLimits;
+use crate::state_commitment::CommitmentWork;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
+use crate::tiered_assessor::{AssessmentLimits, AssessmentReadWork, assess_tiered_with_limits};
 use crate::{
     CallableRef, Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory,
     PostgresConnectionConfig, Program, ProgramBudget, ProgramCall, ProgramHash, ProgramKind,
@@ -1903,15 +1911,14 @@ fn expand_program_call_in<C: GenericClient>(
 fn validate_successor_program_bindings_in<C: GenericClient>(
     client: &mut C,
     cache: &SharedProgramCache,
-    assessed: &AssessedTransaction,
+    db_before: &DatabaseValue,
+    db_after: &DatabaseValue,
+    tx_data: &[Datom],
 ) -> Result<(), SemanticError> {
-    let report = assessed.report();
-    let db_before = report.db_before.database_value();
-    let db_after = report.db_after.database_value();
     let mut changed_function_entities = BTreeSet::new();
     let mut changed_predicate_names = BTreeSet::new();
 
-    for datom in &report.tx_data {
+    for datom in tx_data {
         match u64::from(datom.attribute) {
             crate::DB_FN => {
                 changed_function_entities.insert(datom.entity);
@@ -1940,7 +1947,7 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
     // ident rename is included only because it can break a symbol-named
     // predicate reference even when the hash itself is unchanged.
     for entity in changed_function_entities {
-        for database in [&db_before, &db_after] {
+        for database in [db_before, db_after] {
             for value in database.values(entity, crate::DB_IDENT as u32)? {
                 if let Value::Keyword(ident) = value {
                     changed_predicate_names.insert(ident.qualified_name());
@@ -1964,13 +1971,13 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
     // Validate only dependency names whose binding/reference changed. An old
     // unused bad binding is not transaction input and must not become a
     // global availability gate for unrelated writes.
-    let changed_roles = predicate_roles_in(&db_after, &changed_predicate_names)?;
+    let changed_roles = predicate_roles_in(db_after, &changed_predicate_names)?;
     for name in changed_predicate_names {
         let Some(role) = changed_roles.get(&name).copied() else {
             continue;
         };
         let ident = qualified_program_ident(&name)?;
-        let hash = bound_program_hash(&db_after, &ident)?;
+        let hash = bound_program_hash(db_after, &ident)?;
         let program = resolve_program_in(client, cache, hash)?;
         let expected = match role {
             PredicateRole::Attribute => ProgramKind::AttributePredicate,
@@ -2091,8 +2098,8 @@ pub(crate) enum CommitFault {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CommitReceipt {
-    pub db_before: Database,
-    pub database: Database,
+    pub db_before: DatabaseValue,
+    pub database: DatabaseValue,
     pub basis_t: u64,
     pub tx_hash: Digest,
     pub tempids: BTreeMap<String, u64>,
@@ -2112,6 +2119,10 @@ pub struct CapacityLimits {
     pub max_transaction_ops: usize,
     pub max_transaction_bytes: usize,
     pub max_history_transactions: u64,
+    pub max_transaction_read_datoms: u64,
+    pub max_transaction_read_bytes: u64,
+    pub writer_tree_cache_entries: usize,
+    pub writer_tree_cache_bytes: usize,
     pub program: ProgramLimits,
 }
 
@@ -2131,6 +2142,12 @@ pub struct WriterResidencyStats {
     pub recent_accounted_bytes: u64,
     pub tree_cache_entries: usize,
     pub tree_cache_bytes: usize,
+    pub publication_revision: u64,
+    pub last_transaction_read_datoms: u64,
+    pub last_transaction_read_bytes: u64,
+    pub last_commitment_node_visits: u64,
+    pub last_commitment_node_hashes: u64,
+    pub last_commitment_leaf_changes: u64,
 }
 
 impl Default for CapacityLimits {
@@ -2139,9 +2156,22 @@ impl Default for CapacityLimits {
             max_transaction_ops: 100_000,
             max_transaction_bytes: 64 * 1024 * 1024,
             max_history_transactions: i64::MAX as u64,
+            max_transaction_read_datoms: 1_000_000,
+            max_transaction_read_bytes: 64 * 1024 * 1024,
+            writer_tree_cache_entries: 4_096,
+            writer_tree_cache_bytes: 64 * 1024 * 1024,
             program: ProgramLimits::default(),
         }
     }
+}
+
+#[derive(Clone)]
+struct WriterState {
+    database: TieredSnapshot,
+    commitment: PersistentCommitmentCoordinate,
+    publication_revision: u64,
+    last_read_work: AssessmentReadWork,
+    last_commitment_work: CommitmentWork,
 }
 
 /// The one concrete durable boundary for Atomic.
@@ -2151,9 +2181,10 @@ impl Default for CapacityLimits {
 pub struct PostgresStore {
     client: Client,
     connection: Option<PostgresConnectionConfig>,
-    current: BTreeMap<String, (Digest, Database)>,
+    current: BTreeMap<String, WriterState>,
     program_cache: SharedProgramCache,
     capacity_limits: CapacityLimits,
+    writer_recent_limits: RecentLimits,
 }
 
 impl PostgresStore {
@@ -2176,6 +2207,7 @@ impl PostgresStore {
             current: BTreeMap::new(),
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
+            writer_recent_limits: RecentLimits::default(),
         }
     }
 
@@ -2190,6 +2222,7 @@ impl PostgresStore {
             current: BTreeMap::new(),
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
+            writer_recent_limits: RecentLimits::default(),
         }
     }
 
@@ -2200,6 +2233,10 @@ impl PostgresStore {
         if limits.max_transaction_ops == 0
             || limits.max_transaction_bytes == 0
             || limits.max_history_transactions == 0
+            || limits.max_transaction_read_datoms == 0
+            || limits.max_transaction_read_bytes == 0
+            || limits.writer_tree_cache_entries == 0
+            || limits.writer_tree_cache_bytes == 0
             || !limits.program.is_valid()
         {
             return Err(SemanticError::incorrect(
@@ -2208,6 +2245,26 @@ impl PostgresStore {
             ));
         }
         self.capacity_limits = limits;
+        Ok(())
+    }
+
+    pub(crate) fn set_writer_recent_limits(
+        &mut self,
+        limits: RecentLimits,
+    ) -> Result<(), SemanticError> {
+        if limits.soft_datoms == 0
+            || limits.soft_bytes == 0
+            || limits.hard_datoms == 0
+            || limits.hard_bytes == 0
+            || limits.soft_datoms > limits.hard_datoms
+            || limits.soft_bytes > limits.hard_bytes
+        {
+            return Err(SemanticError::incorrect(
+                "postgres/invalid-writer-recent-limits",
+                "writer recent-tier soft limits must be positive and cannot exceed hard limits",
+            ));
+        }
+        self.writer_recent_limits = limits;
         Ok(())
     }
 
@@ -2235,15 +2292,25 @@ impl PostgresStore {
     /// operator diagnostics. This does not walk PostgreSQL or materialize a
     /// database value.
     pub fn writer_residency_stats(&self, database_id: &str) -> WriterResidencyStats {
-        let Some((_, database)) = self.current.get(database_id) else {
+        let Some(state) = self.current.get(database_id) else {
             return WriterResidencyStats::default();
         };
-        let (current, history) = database.retained_fact_counts();
+        let recent = state.database.recent_stats();
+        let cache = state.database.tree_cache_stats();
         WriterResidencyStats {
-            eager_database_values: 1,
-            eager_current_facts: current,
-            eager_history_datoms: history,
-            ..WriterResidencyStats::default()
+            eager_database_values: 0,
+            eager_current_facts: 0,
+            eager_history_datoms: 0,
+            recent_datoms: recent.datoms,
+            recent_accounted_bytes: recent.accounted_bytes,
+            tree_cache_entries: cache.current_entries,
+            tree_cache_bytes: cache.current_bytes,
+            publication_revision: state.publication_revision,
+            last_transaction_read_datoms: state.last_read_work.datoms,
+            last_transaction_read_bytes: state.last_read_work.retained_bytes,
+            last_commitment_node_visits: state.last_commitment_work.node_visits,
+            last_commitment_node_hashes: state.last_commitment_work.node_hashes,
+            last_commitment_leaf_changes: state.last_commitment_work.leaf_changes,
         }
     }
 
@@ -2282,6 +2349,13 @@ impl PostgresStore {
         lease_millis: u64,
     ) -> Result<crate::RecoveryStats, SemanticError> {
         let database_id = lease.database_id.clone();
+        let connection = self.connection.clone().ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Unsupported,
+                "postgres/native-writer-unconfigured",
+                "the native writer requires a configured PostgreSQL connection",
+            )
+        })?;
         let mut transaction = self
             .client
             .build_transaction()
@@ -2291,17 +2365,37 @@ impl PostgresStore {
         verify_lease(&mut transaction, lease, &database_id)?;
         let head = transaction
             .query_one(
-                "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
+                "SELECT basis_t, tx_hash, log_generation FROM atomic_heads \
+                  WHERE database_id = $1 FOR UPDATE",
                 &[&database_id],
             )
             .map_err(|error| postgres_error("postgres/activation-head", error))?;
         let target_t = pg_basis(head.get(0), "activation head")?;
         let target_hash = digest(head.get(1), "activation head hash")?;
-        let (database, hash, stats) = crate::peer::recover_transactor_state(
-            &mut transaction,
-            &database_id,
-            target_t,
-            target_hash,
+        let generation = pg_basis(head.get(2), "activation log generation")?;
+        let commitment =
+            load_persistent_coordinate(&mut transaction, &database_id, generation, target_t)?
+                .ok_or_else(|| {
+                    fault(
+                        "postgres/activation-semantic-root-missing",
+                        "head has no exact v2 semantic commitment coordinate",
+                    )
+                })?;
+        if commitment.tx_hash != target_hash {
+            return Err(fault(
+                "postgres/activation-coordinate-mismatch",
+                "head transaction hash disagrees with its v2 semantic commitment",
+            ));
+        }
+        let endpoint = exact_endpoint(&commitment);
+        let (database, opened) = TieredSnapshot::open_exact_configured(
+            &connection,
+            database_id.clone(),
+            endpoint,
+            None,
+            self.capacity_limits.writer_tree_cache_entries,
+            self.capacity_limits.writer_tree_cache_bytes,
+            self.writer_recent_limits,
         )?;
 
         // Recovery may be longer than the normal heartbeat interval. The row
@@ -2324,8 +2418,77 @@ impl PostgresStore {
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/activation-commit", error))?;
-        self.current.insert(database_id, (hash, database));
-        Ok(stats)
+        self.current.insert(
+            database_id,
+            WriterState {
+                database,
+                commitment,
+                publication_revision: opened.selected_publication_revision,
+                last_read_work: AssessmentReadWork::default(),
+                last_commitment_work: CommitmentWork::default(),
+            },
+        );
+        Ok(crate::RecoveryStats {
+            base_t: target_t.saturating_sub(opened.tail_transactions),
+            target_t,
+            tail_transactions: opened.tail_transactions,
+            rejected_manifests: opened.rejected_candidates,
+        })
+    }
+
+    /// Adopt one index publication without changing the writer's exact
+    /// logical endpoint. The old immutable value remains valid for reports;
+    /// this only shortens the live writer's recent tail.
+    pub(crate) fn adopt_published_tree(
+        &mut self,
+        database_id: &str,
+        published_revision: u64,
+    ) -> Result<(), SemanticError> {
+        let Some(current) = self.current.get(database_id).cloned() else {
+            return Err(SemanticError::new(
+                ErrorCategory::Unavailable,
+                "postgres/writer-not-activated",
+                "the native writer has no activated immutable value",
+            ));
+        };
+        if published_revision <= current.publication_revision {
+            return Ok(());
+        }
+        let revision = sql_basis(published_revision)?;
+        let generation = sql_basis(current.commitment.generation)?;
+        let row = self
+            .client
+            .query_opt(
+                "SELECT manifest_hash FROM atomic_tree_publications \
+                  WHERE database_id = $1 AND publication_revision = $2 \
+                    AND log_generation = $3",
+                &[&database_id, &revision, &generation],
+            )
+            .map_err(|error| postgres_error("postgres/writer-rebase-publication", error))?
+            .ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::NotFound,
+                    "postgres/writer-publication-not-found",
+                    "the requested native publication does not exist in the writer generation",
+                )
+            })?;
+        let manifest = digest(row.get::<_, Vec<u8>>(0), "writer publication manifest")?;
+        let (database, opened) = current.database.rebase_exact(Some(manifest))?;
+        if database.endpoint() != exact_endpoint(&current.commitment) {
+            return Err(fault(
+                "postgres/writer-rebase-endpoint",
+                "rebasing changed the writer's immutable logical endpoint",
+            ));
+        }
+        self.current.insert(
+            database_id.to_owned(),
+            WriterState {
+                database,
+                publication_revision: opened.selected_publication_revision,
+                ..current
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn acquire_lease(
@@ -2568,7 +2731,7 @@ impl PostgresStore {
                 &[&database_id, &generation_i64],
             )
             .map_err(|error| postgres_error("postgres/create-generation-completion", error))?;
-        let final_hash = if let Some((envelope, request_hash, state_hash)) = &initial_envelope {
+        if let Some((envelope, request_hash, state_hash)) = &initial_envelope {
             let content = LineageTransactionContent::from_transaction(
                 &lineage_id,
                 bootstrap.eidx_frontier(),
@@ -2666,15 +2829,10 @@ impl PostgresStore {
                     "new database head no longer identifies its exact genesis",
                 ));
             }
-            tx_hash
-        } else {
-            genesis_hash
-        };
+        }
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/create-commit", error))?;
-        self.current
-            .insert(database_id.to_owned(), (final_hash, database.clone()));
         Ok(database)
     }
 
@@ -2689,10 +2847,7 @@ impl PostgresStore {
             .ok_or_else(|| not_found(database_id))?;
         let basis = pg_basis(row.get::<_, i64>(0), "head")?;
         let hash = digest(row.get::<_, Vec<u8>>(1), "head transaction hash")?;
-        let recovered = recover_to(&mut self.client, database_id, basis, hash)?.database;
-        self.current
-            .insert(database_id.to_owned(), (hash, recovered.clone()));
-        Ok(recovered)
+        Ok(recover_to(&mut self.client, database_id, basis, hash)?.database)
     }
 
     pub fn recover_basis(
@@ -2770,6 +2925,13 @@ impl PostgresStore {
                 "idempotency request key cannot be empty",
             ));
         }
+        let connection = self.connection.clone().ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Unsupported,
+                "postgres/native-writer-unconfigured",
+                "exact request reconstruction requires a configured PostgreSQL connection",
+            )
+        })?;
         let mut transaction = self
             .client
             .build_transaction()
@@ -2823,51 +2985,23 @@ impl PostgresStore {
         }
         let basis = pg_basis(row.get::<_, i64>(0), "request outcome")?;
         let hash = digest(row.get::<_, Vec<u8>>(1), "request transaction hash")?;
-        let recovered =
-            recover_generation_to(&mut transaction, database_id, generation, basis, hash)?;
-        let previous_hash = recovered
-            .final_transaction
-            .as_ref()
-            .ok_or_else(|| {
-                fault(
-                    "recovery/invalid-request-basis",
-                    "durable request does not identify a positive transaction",
-                )
-            })?
-            .previous_hash;
-        let previous_basis = basis.checked_sub(1).ok_or_else(|| {
-            fault(
-                "recovery/invalid-request-basis",
-                "durable request does not identify a positive transaction",
-            )
-        })?;
-        let db_before = recover_generation_to(
+        let (receipt, _) = reconstruct_exact_request_receipt(
             &mut transaction,
+            &connection,
             database_id,
             generation,
-            previous_basis,
-            previous_hash,
-        )?
-        .database;
-        let receipt_tempids = if generation == 0 {
-            None
-        } else {
-            Some(load_request_tempids(
-                &mut transaction,
-                database_id,
-                generation,
-                key_hash,
-            )?)
-        };
+            basis,
+            hash,
+            row.get::<_, i16>(2),
+            key_hash,
+            self.capacity_limits.writer_tree_cache_entries,
+            self.capacity_limits.writer_tree_cache_bytes,
+            self.writer_recent_limits,
+        )?;
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/request-outcome-commit", error))?;
-        Ok(Some(receipt_with_tempids(
-            recovered,
-            db_before,
-            true,
-            receipt_tempids,
-        )))
+        Ok(Some(receipt))
     }
 
     /// Upload immutable native program content. This is preparation only:
@@ -2952,11 +3086,10 @@ impl PostgresStore {
                         "transaction program budget mutex was poisoned",
                     )
                 })?;
-                let db_before = db_before.database_value();
                 let forms = expand_submission_forms_in(
                     transaction,
                     program_cache,
-                    &db_before,
+                    db_before,
                     forms,
                     &mut budget,
                 )?;
@@ -3008,7 +3141,7 @@ impl PostgresStore {
     where
         F: FnOnce(
             &mut postgres::Transaction<'_>,
-            &Database,
+            &DatabaseValue,
             &SharedProgramBudget,
             &SharedProgramCache,
         ) -> Result<Vec<TxOp>, SemanticError>,
@@ -3020,6 +3153,13 @@ impl PostgresStore {
             ));
         }
         let cached = self.current.get(database_id).cloned();
+        let connection = self.connection.clone().ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Unsupported,
+                "postgres/native-writer-unconfigured",
+                "the native writer requires a configured PostgreSQL connection",
+            )
+        })?;
         let program_cache = Arc::clone(&self.program_cache);
         let mut transaction = self
             .client
@@ -3056,6 +3196,20 @@ impl PostgresStore {
         let log_generation = pg_basis(log_generation_i64, "head log generation")?;
         let lineage_id: String = head.get(3);
         let idem_key_hash = request_key_hash(&lineage_id, request_key)?;
+        let head_commitment =
+            load_persistent_coordinate(&mut transaction, database_id, log_generation, head_basis)?
+                .ok_or_else(|| {
+                    fault(
+                        "postgres/head-semantic-root-missing",
+                        "the locked head has no exact v2 semantic commitment coordinate",
+                    )
+                })?;
+        if head_commitment.tx_hash != head_hash {
+            return Err(fault(
+                "postgres/head-coordinate-mismatch",
+                "the locked head disagrees with its v2 semantic commitment coordinate",
+            ));
+        }
 
         let existing_request = if log_generation == 0 {
             transaction.query_opt(
@@ -3090,41 +3244,28 @@ impl PostgresStore {
             }
             let basis = pg_basis(row.get::<_, i64>(1), "request outcome")?;
             let hash = digest(row.get::<_, Vec<u8>>(2), "request transaction hash")?;
-            let recovered =
-                recover_generation_to(&mut transaction, database_id, log_generation, basis, hash)?;
-            let previous_hash = recovered
-                .final_transaction
-                .as_ref()
-                .expect("durable requests always name a positive transaction")
-                .previous_hash;
-            let db_before = recover_generation_to(
+            let (receipt, replay_state) = reconstruct_exact_request_receipt(
                 &mut transaction,
+                &connection,
                 database_id,
                 log_generation,
-                basis.saturating_sub(1),
-                previous_hash,
-            )?
-            .database;
-            let receipt_tempids = if log_generation == 0 {
-                None
-            } else {
-                Some(load_request_tempids(
-                    &mut transaction,
-                    database_id,
-                    log_generation,
-                    idem_key_hash,
-                )?)
-            };
-            transaction.commit().map_err(|_error| {
-                unknown_outcome(
+                basis,
+                hash,
+                row.get::<_, i16>(3),
+                idem_key_hash,
+                self.capacity_limits.writer_tree_cache_entries,
+                self.capacity_limits.writer_tree_cache_bytes,
+                self.writer_recent_limits,
+            )?;
+            if transaction.commit().is_err() {
+                self.current.remove(database_id);
+                return Err(unknown_outcome(
                     idem_key_hash,
                     "PostgreSQL did not acknowledge the idempotent outcome read",
-                )
-            })?;
-            let receipt = receipt_with_tempids(recovered, db_before, true, receipt_tempids);
+                ));
+            }
             if basis == head_basis && hash == head_hash {
-                self.current
-                    .insert(database_id.to_owned(), (hash, receipt.database.clone()));
+                self.current.insert(database_id.to_owned(), replay_state);
             }
             return Ok(receipt);
         }
@@ -3147,12 +3288,25 @@ impl PostgresStore {
             ));
         }
 
-        let db_before = match cached {
-            Some((hash, database)) if hash == head_hash && database.basis_t() == head_basis => {
-                database
+        let writer_before = match cached {
+            Some(state)
+                if state.commitment == head_commitment
+                    && state.database.endpoint() == exact_endpoint(&head_commitment) =>
+            {
+                state
             }
-            _ => recover_to(&mut transaction, database_id, head_basis, head_hash)?.database,
+            _ => open_writer_state(
+                &connection,
+                database_id,
+                head_commitment.clone(),
+                None,
+                self.capacity_limits.writer_tree_cache_entries,
+                self.capacity_limits.writer_tree_cache_bytes,
+                self.writer_recent_limits,
+            )?,
         };
+        let db_before_snapshot = writer_before.database.clone();
+        let db_before = db_before_snapshot.database_value();
         let shared_budget = Arc::new(Mutex::new(ProgramBudget::new(
             self.capacity_limits.program.control(),
         )?));
@@ -3166,8 +3320,22 @@ impl PostgresStore {
                 "transaction exceeds the configured operation limit",
             ));
         }
-        let assessed = db_before.assess_with_context(&ops, tx_instant)?;
-        validate_successor_program_bindings_in(&mut transaction, &program_cache, &assessed)?;
+        let assessed = assess_tiered_with_limits(
+            &db_before,
+            &ops,
+            tx_instant,
+            AssessmentLimits {
+                max_read_datoms: self.capacity_limits.max_transaction_read_datoms,
+                max_read_bytes: self.capacity_limits.max_transaction_read_bytes,
+            },
+        )?;
+        validate_successor_program_bindings_in(
+            &mut transaction,
+            &program_cache,
+            &assessed.db_before,
+            &assessed.db_after,
+            &assessed.tx_data,
+        )?;
         let persisted_functions;
         let functions = match functions {
             Some(functions) => Some(functions),
@@ -3175,21 +3343,28 @@ impl PostgresStore {
                 persisted_functions = persisted_predicates_in(
                     &mut transaction,
                     &program_cache,
-                    &db_before.database_value(),
+                    &db_before,
                     &assessed.predicate_requirements()?,
                     Arc::clone(&shared_budget),
                 )?;
                 Some(&persisted_functions)
             }
         };
-        let report = assessed.validate(functions)?;
+        assessed.validate_exact(functions)?;
+        let semantic_changes = exact_semantic_changes(&db_before, &assessed.tx_data)?;
+        let (next_root, commitment_work) = advance_persistent_commitment(
+            &mut transaction,
+            head_commitment.root,
+            &semantic_changes,
+        )?;
+        let state_hash = next_root.state_hash(assessed.basis_t, assessed.eidx_frontier);
         let envelope = DurableTransaction {
             database_id: database_id.to_owned(),
-            basis_t: report.db_after.basis_t(),
+            basis_t: assessed.basis_t,
             previous_hash: head_hash,
-            eidx_frontier: report.db_after.eidx_frontier(),
-            tempids: report.tempids.clone(),
-            tx_data: report.tx_data.clone(),
+            eidx_frontier: assessed.eidx_frontier,
+            tempids: assessed.tempids.clone(),
+            tx_data: assessed.tx_data.clone(),
         };
         let (payload, content_hash, tx_hash) = if log_generation == 0 {
             let payload = encode_transaction(&envelope)?;
@@ -3203,7 +3378,6 @@ impl PostgresStore {
             )?;
             let payload = content.encode()?;
             let content_hash = sha256(&payload);
-            let state_hash = checkpoint_state_hash(&report.db_after)?;
             let tx_hash = generation_transaction_hash(
                 &lineage_id,
                 log_generation,
@@ -3222,8 +3396,46 @@ impl PostgresStore {
                 "transaction exceeds the configured encoded-byte limit",
             ));
         }
-        let state_hash = checkpoint_state_hash(&report.db_after)?;
         let next_basis = sql_basis(envelope.basis_t)?;
+        let successor = db_before_snapshot.authenticated_successor(
+            tx_hash,
+            state_hash,
+            envelope.clone(),
+            &assessed.successor_schema,
+        )?;
+        if successor.endpoint()
+            != (ExactEndpoint {
+                generation: log_generation,
+                basis_t: envelope.basis_t,
+                tx_hash,
+                state_hash,
+                eidx_frontier: envelope.eidx_frontier,
+            })
+        {
+            return Err(fault(
+                "postgres/successor-coordinate",
+                "the prepared native successor disagrees with its transaction coordinate",
+            ));
+        }
+        let next_commitment = PersistentCommitmentCoordinate {
+            database_id: database_id.to_owned(),
+            generation: log_generation,
+            basis_t: envelope.basis_t,
+            tx_hash,
+            state_hash,
+            eidx_frontier: envelope.eidx_frontier,
+            root: next_root,
+        };
+        let request_base_manifest = if log_generation == 0 {
+            None
+        } else {
+            Some(db_before_snapshot.durable_manifest_hash().ok_or_else(|| {
+                fault(
+                    "postgres/native-request-base-missing",
+                    "a native generation commit requires an authenticated durable db-before base",
+                )
+            })?)
+        };
 
         if fault_point == CommitFault::BeforeTransactionInsert {
             return Err(injected("before transaction insert"));
@@ -3324,7 +3536,7 @@ impl PostgresStore {
                     "INSERT INTO atomic_generation_requests \
                          (database_id, generation, request_key_hash, request_digest, \
                           request_kind, basis_t, tx_hash) \
-                     VALUES ($1, $2, $3, $4, 1, $5, $6)",
+                     VALUES ($1, $2, $3, $4, 2, $5, $6)",
                     &[
                         &database_id,
                         &log_generation_i64,
@@ -3335,6 +3547,21 @@ impl PostgresStore {
                     ],
                 )
                 .map_err(|error| postgres_error("postgres/generation-idempotency-insert", error))?;
+            let request_base_manifest =
+                request_base_manifest.expect("positive generation has a durable native base");
+            transaction
+                .execute(
+                    "INSERT INTO atomic_generation_request_bases \
+                         (database_id, generation, request_key_hash, base_manifest_hash) \
+                     VALUES ($1, $2, $3, $4)",
+                    &[
+                        &database_id,
+                        &log_generation_i64,
+                        &&idem_key_hash[..],
+                        &&request_base_manifest[..],
+                    ],
+                )
+                .map_err(|error| postgres_error("postgres/request-base-insert", error))?;
             for (name, entity) in &envelope.tempids {
                 transaction
                     .execute(
@@ -3358,6 +3585,7 @@ impl PostgresStore {
                 &envelope.tx_data,
             )?;
         }
+        record_persistent_coordinate(&mut transaction, &next_commitment)?;
         let updated = transaction
             .execute(
                 "UPDATE atomic_heads SET basis_t = $1, tx_hash = $2 \
@@ -3386,31 +3614,40 @@ impl PostgresStore {
             std::process::abort();
         }
 
-        transaction.commit().map_err(|_error| {
-            unknown_outcome(
+        // Construct every report and process-local successor object before
+        // publication. After PostgreSQL acknowledges the commit, installing
+        // this already-built immutable state is infallible.
+        let receipt = CommitReceipt {
+            db_before: db_before.clone(),
+            database: successor.database_value(),
+            basis_t: envelope.basis_t,
+            tx_hash,
+            tempids: envelope.tempids.clone(),
+            tx_data: envelope.tx_data.clone(),
+            replayed: false,
+        };
+        let next_writer = WriterState {
+            database: successor,
+            commitment: next_commitment,
+            publication_revision: writer_before.publication_revision,
+            last_read_work: assessed.read_work,
+            last_commitment_work: commitment_work,
+        };
+        if transaction.commit().is_err() {
+            self.current.remove(database_id);
+            return Err(unknown_outcome(
                 idem_key_hash,
                 "PostgreSQL did not acknowledge the transaction commit",
-            )
-        })?;
+            ));
+        }
         if fault_point == CommitFault::AfterCommitBeforeResponse {
+            self.current.remove(database_id);
             return Err(unknown_outcome(
                 idem_key_hash,
                 "injected acknowledgment loss after PostgreSQL commit",
             ));
         }
-        let receipt = CommitReceipt {
-            db_before,
-            database: report.db_after,
-            basis_t: envelope.basis_t,
-            tx_hash,
-            tempids: envelope.tempids,
-            tx_data: envelope.tx_data,
-            replayed: false,
-        };
-        self.current.insert(
-            database_id.to_owned(),
-            (receipt.tx_hash, receipt.database.clone()),
-        );
+        self.current.insert(database_id.to_owned(), next_writer);
         Ok(receipt)
     }
 }
@@ -3861,25 +4098,196 @@ fn load_request_tempids<C: GenericClient>(
         .collect()
 }
 
-fn receipt_with_tempids(
-    recovered: Recovered,
-    db_before: Database,
-    replayed: bool,
-    tempids: Option<BTreeMap<String, u64>>,
-) -> CommitReceipt {
-    let basis_t = recovered.database.basis_t();
-    let transaction = recovered
-        .final_transaction
-        .expect("idempotent outcomes always have a positive basis");
-    CommitReceipt {
-        db_before,
-        database: recovered.database,
-        basis_t,
-        tx_hash: recovered.final_hash,
-        tempids: tempids.unwrap_or(transaction.tempids),
-        tx_data: transaction.tx_data,
-        replayed,
+fn exact_endpoint(coordinate: &PersistentCommitmentCoordinate) -> ExactEndpoint {
+    ExactEndpoint {
+        generation: coordinate.generation,
+        basis_t: coordinate.basis_t,
+        tx_hash: coordinate.tx_hash,
+        state_hash: coordinate.state_hash,
+        eidx_frontier: coordinate.eidx_frontier,
     }
+}
+
+fn open_writer_state(
+    connection: &PostgresConnectionConfig,
+    database_id: &str,
+    commitment: PersistentCommitmentCoordinate,
+    required_manifest: Option<Digest>,
+    cache_entries: usize,
+    cache_bytes: usize,
+    recent_limits: RecentLimits,
+) -> Result<WriterState, SemanticError> {
+    let endpoint = exact_endpoint(&commitment);
+    let (database, opened) = TieredSnapshot::open_exact_configured(
+        connection,
+        database_id.to_owned(),
+        endpoint,
+        required_manifest,
+        cache_entries,
+        cache_bytes,
+        recent_limits,
+    )?;
+    if database.endpoint() != endpoint {
+        return Err(fault(
+            "postgres/native-open-endpoint",
+            "the native writer opened a value at the wrong logical endpoint",
+        ));
+    }
+    Ok(WriterState {
+        database,
+        commitment,
+        publication_revision: opened.selected_publication_revision,
+        last_read_work: AssessmentReadWork::default(),
+        last_commitment_work: CommitmentWork::default(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_exact_request_receipt<C: GenericClient>(
+    client: &mut C,
+    connection: &PostgresConnectionConfig,
+    database_id: &str,
+    generation: u64,
+    basis_t: u64,
+    tx_hash: Digest,
+    request_kind: i16,
+    request_key_hash: Digest,
+    cache_entries: usize,
+    cache_bytes: usize,
+    recent_limits: RecentLimits,
+) -> Result<(CommitReceipt, WriterState), SemanticError> {
+    if !matches!(request_kind, 1 | 2) {
+        return Err(fault(
+            "postgres/request-kind",
+            "only ordinary requests have reconstructable transaction reports",
+        ));
+    }
+    if generation == 0 && request_kind == 2 {
+        return Err(fault(
+            "postgres/request-base-generation",
+            "generation-zero request records cannot name a native base binding",
+        ));
+    }
+    let before_basis = basis_t.checked_sub(1).ok_or_else(|| {
+        fault(
+            "postgres/request-basis",
+            "a transaction request cannot identify the genesis basis",
+        )
+    })?;
+    let committed = load_persistent_coordinate(client, database_id, generation, basis_t)?
+        .ok_or_else(|| {
+            fault(
+                "postgres/request-semantic-root-missing",
+                "request outcome has no exact v2 semantic commitment coordinate",
+            )
+        })?;
+    if committed.tx_hash != tx_hash {
+        return Err(fault(
+            "postgres/request-coordinate-mismatch",
+            "request outcome disagrees with its semantic commitment coordinate",
+        ));
+    }
+    let before = load_persistent_coordinate(client, database_id, generation, before_basis)?
+        .ok_or_else(|| {
+            fault(
+                "postgres/request-before-root-missing",
+                "request db-before has no exact v2 semantic commitment coordinate",
+            )
+        })?;
+    let required_manifest = if request_kind == 2 {
+        let generation_sql = sql_basis(generation)?;
+        let row = client
+            .query_opt(
+                "SELECT base_manifest_hash FROM atomic_generation_request_bases \
+                  WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3",
+                &[&database_id, &generation_sql, &&request_key_hash[..]],
+            )
+            .map_err(|error| postgres_error("postgres/request-base-read", error))?
+            .ok_or_else(|| {
+                fault(
+                    "postgres/request-base-missing",
+                    "native request outcome has no immutable db-before base binding",
+                )
+            })?;
+        Some(digest(
+            row.get::<_, Vec<u8>>(0),
+            "request base manifest hash",
+        )?)
+    } else {
+        None
+    };
+    let before_state = open_writer_state(
+        connection,
+        database_id,
+        before,
+        required_manifest,
+        cache_entries,
+        cache_bytes,
+        recent_limits,
+    )?;
+    let mut transactions = read_authenticated_log_range(
+        client,
+        database_id,
+        generation,
+        before_basis,
+        basis_t,
+        before_state.commitment.tx_hash,
+    )?;
+    if transactions.len() != 1 {
+        return Err(fault(
+            "postgres/request-transaction-count",
+            "request receipt reconstruction requires exactly one authenticated transaction",
+        ));
+    }
+    let authenticated = transactions.pop().expect("length checked");
+    if authenticated.tx_hash != tx_hash || authenticated.state_hash != committed.state_hash {
+        return Err(fault(
+            "postgres/request-transaction-coordinate",
+            "authenticated request transaction disagrees with its committed coordinate",
+        ));
+    }
+    if generation > 0 && authenticated.request_key_hash != Some(request_key_hash) {
+        return Err(fault(
+            "postgres/request-identity-mismatch",
+            "authenticated transaction names a different idempotency key",
+        ));
+    }
+    let transaction = authenticated.transaction;
+    let db_after = before_state.database.authenticated_successor_from_log(
+        tx_hash,
+        committed.state_hash,
+        transaction.clone(),
+    )?;
+    if db_after.endpoint() != exact_endpoint(&committed) {
+        return Err(fault(
+            "postgres/request-successor-endpoint",
+            "reconstructed request successor has the wrong logical endpoint",
+        ));
+    }
+    let tempids = if generation == 0 {
+        transaction.tempids.clone()
+    } else {
+        load_request_tempids(client, database_id, generation, request_key_hash)?
+    };
+    let receipt = CommitReceipt {
+        db_before: before_state.database.database_value(),
+        database: db_after.database_value(),
+        basis_t,
+        tx_hash,
+        tempids,
+        tx_data: transaction.tx_data,
+        replayed: true,
+    };
+    Ok((
+        receipt,
+        WriterState {
+            database: db_after,
+            commitment: committed,
+            publication_revision: before_state.publication_revision,
+            last_read_work: AssessmentReadWork::default(),
+            last_commitment_work: CommitmentWork::default(),
+        },
+    ))
 }
 
 fn postgres_now_millis<C: GenericClient>(client: &mut C) -> Result<i64, SemanticError> {
@@ -3960,7 +4368,7 @@ fn persisted_predicates_in<C: GenericClient>(
 }
 
 fn select_tx_instant(
-    db_before: &Database,
+    db_before: &DatabaseValue,
     server_now: i64,
     option_override: Option<i64>,
     ops: &[TxOp],
@@ -3991,7 +4399,7 @@ fn select_tx_instant(
         (Some(instant), _) | (_, Some(instant)) => Some(instant),
         (None, None) => None,
     };
-    let previous = db_before.last_tx_instant();
+    let previous = db_before.last_tx_instant()?;
     if let Some(instant) = explicit {
         if instant > server_now {
             return Err(SemanticError::incorrect(

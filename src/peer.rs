@@ -3975,12 +3975,40 @@ impl TieredSnapshot {
         transaction: DurableTransaction,
         successor_schema: &crate::Schema,
     ) -> Result<Self, SemanticError> {
+        self.authenticated_successor_checked(
+            tx_hash,
+            state_hash,
+            transaction,
+            Some(successor_schema),
+        )
+    }
+
+    /// Reconstruct a known committed successor from one authenticated log
+    /// member. Unlike the assessment path there is no independently derived
+    /// schema to compare; metadata is deterministically folded from the
+    /// authenticated transaction itself.
+    pub(crate) fn authenticated_successor_from_log(
+        &self,
+        tx_hash: Digest,
+        state_hash: Digest,
+        transaction: DurableTransaction,
+    ) -> Result<Self, SemanticError> {
+        self.authenticated_successor_checked(tx_hash, state_hash, transaction, None)
+    }
+
+    fn authenticated_successor_checked(
+        &self,
+        tx_hash: Digest,
+        state_hash: Digest,
+        transaction: DurableTransaction,
+        successor_schema: Option<&crate::Schema>,
+    ) -> Result<Self, SemanticError> {
         let metadata = Arc::new(
             self.state
                 .metadata
                 .apply(std::slice::from_ref(&transaction))?,
         );
-        if metadata.schema.as_ref() != successor_schema {
+        if successor_schema.is_some_and(|schema| metadata.schema.as_ref() != schema) {
             return Err(fault(
                 "peer/successor-schema-mismatch",
                 "committed transaction metadata does not derive the assessed successor schema",

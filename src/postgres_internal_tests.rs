@@ -89,6 +89,52 @@ fn assert_database_eq(left: &Database, right: &Database) {
     }
 }
 
+fn assert_value_eq_database(left: &crate::DatabaseValue, right: &Database) {
+    assert_eq!(left.basis_t(), right.basis_t());
+    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
+    assert_eq!(left.schema(), right.schema());
+    for order in [
+        IndexOrder::Eavt,
+        IndexOrder::Aevt,
+        IndexOrder::Avet,
+        IndexOrder::Vaet,
+    ] {
+        assert_eq!(
+            left.datoms(order).unwrap(),
+            right.datoms(View::Current, order)
+        );
+        assert_eq!(
+            left.clone().history().datoms(order).unwrap(),
+            right.datoms(View::History, order)
+        );
+    }
+}
+
+fn assert_database_values_eq(left: &crate::DatabaseValue, right: &crate::DatabaseValue) {
+    assert_eq!(left.basis_t(), right.basis_t());
+    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
+    assert_eq!(left.schema(), right.schema());
+    for order in [
+        IndexOrder::Eavt,
+        IndexOrder::Aevt,
+        IndexOrder::Avet,
+        IndexOrder::Vaet,
+    ] {
+        assert_eq!(left.datoms(order).unwrap(), right.datoms(order).unwrap());
+        assert_eq!(
+            left.clone().history().datoms(order).unwrap(),
+            right.clone().history().datoms(order).unwrap()
+        );
+    }
+}
+
+fn publish_native_base(connection: &str, database_id: &str) {
+    crate::PostgresIndexer::connect(connection, database_id)
+        .unwrap()
+        .consolidate()
+        .unwrap();
+}
+
 fn create_isolated_schema(connection: &str, prefix: &str) -> String {
     let schema = unique(prefix);
     let mut client = Client::connect(connection, NoTls).unwrap();
@@ -493,6 +539,7 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
         let database_id = unique("private_rollback");
         let mut store = migrated_store(&connection);
         store.create_database(&database_id, schema()).unwrap();
+        publish_native_base(&connection, &database_id);
         let error = store
             .transact_with_fault(
                 &database_id,
@@ -516,6 +563,7 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
     let database_id = unique("private_unknown");
     let mut store = migrated_store(&connection);
     let db_before = store.create_database(&database_id, schema()).unwrap();
+    publish_native_base(&connection, &database_id);
     let error = store
         .transact_with_fault(
             &database_id,
@@ -533,7 +581,7 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
         .expect("the committed request has a durable outcome");
     assert!(resolved.replayed);
     assert_eq!(resolved.basis_t, 2);
-    assert_database_eq(&resolved.db_before, &db_before);
+    assert_value_eq_database(&resolved.db_before, &db_before);
     assert_eq!(resolved.database.basis_t(), 2);
     let resolved_again = store
         .resolve_request_outcome(&database_id, "request-unknown")
@@ -542,8 +590,42 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
     assert_eq!(resolved_again.tx_hash, resolved.tx_hash);
     assert_eq!(resolved_again.tempids, resolved.tempids);
     assert_eq!(resolved_again.tx_data, resolved.tx_data);
-    assert_database_eq(&resolved_again.db_before, &resolved.db_before);
-    assert_database_eq(&resolved_again.database, &resolved.database);
+    assert_database_values_eq(&resolved_again.db_before, &resolved.db_before);
+    assert_database_values_eq(&resolved_again.database, &resolved.database);
+
+    // Retrying through the authoritative writer reconstructs exactly the
+    // bound old root plus one authenticated transaction, then installs that
+    // immutable value without retaining an eager database.
+    let replayed = store
+        .transact_with_fault(
+            &database_id,
+            "request-unknown",
+            1,
+            &add_item("committed", 1),
+            1_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert!(replayed.replayed);
+    assert_database_values_eq(&replayed.db_before, &resolved.db_before);
+    assert_database_values_eq(&replayed.database, &resolved.database);
+    let residency = store.writer_residency_stats(&database_id);
+    assert_eq!(residency.eager_database_values, 0);
+    assert_eq!(residency.eager_current_facts, 0);
+    assert_eq!(residency.eager_history_datoms, 0);
+
+    let mut verifier = Client::connect(&connection, NoTls).unwrap();
+    let bound: (i64, i64) = verifier
+        .query_one(
+            "SELECT count(*) FILTER (WHERE request_kind = 2), \
+                    (SELECT count(*) FROM atomic_generation_request_bases b \
+                      WHERE b.database_id = $1) \
+               FROM atomic_generation_requests r WHERE r.database_id = $1",
+            &[&database_id],
+        )
+        .map(|row| (row.get(0), row.get(1)))
+        .unwrap();
+    assert_eq!(bound, (1, 1));
 }
 
 #[test]
@@ -554,6 +636,7 @@ fn process_death_at_private_precommit_kill_point_is_invisible() {
     let database_id = unique("private_process_death");
     let mut store = migrated_store(&connection);
     store.create_database(&database_id, schema()).unwrap();
+    publish_native_base(&connection, &database_id);
     drop(store);
 
     let status = Command::new(std::env::current_exe().unwrap())
