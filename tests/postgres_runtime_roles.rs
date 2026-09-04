@@ -28,6 +28,9 @@ const PEER_TABLES: &[&str] = &[
     "atomic_generation_transactions",
     "atomic_generation_requests",
     "atomic_generation_request_bases",
+    "atomic_request_base_archives",
+    "atomic_request_base_archive_roots",
+    "atomic_request_base_archive_completions",
     "atomic_log_generation_activations",
     "atomic_completed_excision_requests",
     "atomic_log_generation_completions",
@@ -94,6 +97,8 @@ const WRITER_FUNCTIONS: &[&str] = &[
     "atomic_heartbeat_tree_build(bytea)",
     "atomic_log_generation_pin_key(text,bigint)",
     "atomic_publish_tree(text,bigint,bigint,bytea,bytea)",
+    "atomic_request_base_archive_build_live(text,bigint)",
+    "atomic_semantic_commitment_gc_pin_key()",
     "atomic_tree_database_build_pin_key(text)",
 ];
 const PEER_FUNCTIONS: &[&str] = &["atomic_log_generation_pin_key(text,bigint)"];
@@ -681,6 +686,42 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
             .map(|name| (*name).to_owned())
             .collect()
     );
+    for relation in [
+        "atomic_request_base_archives",
+        "atomic_request_base_archive_nodes",
+        "atomic_request_base_archive_roots",
+        "atomic_request_base_archive_completions",
+    ] {
+        let may_stage_archive: bool = roles
+            .admin
+            .query_one(
+                "SELECT has_table_privilege($1::name, $2::text, 'INSERT')",
+                &[&writer, &relation],
+            )
+            .unwrap()
+            .get(0);
+        assert!(
+            !may_stage_archive,
+            "ordinary writer may stage restore-only archive relation {relation}"
+        );
+    }
+    for function in [
+        "atomic_complete_request_base_archive(text,bigint,bytea)",
+        "atomic_collect_request_base_archive(text,bigint,bytea,bigint,bigint)",
+    ] {
+        let may_manage_archive: bool = roles
+            .admin
+            .query_one(
+                "SELECT has_function_privilege($1::name, $2::text, 'EXECUTE')",
+                &[&writer, &function],
+            )
+            .unwrap()
+            .get(0);
+        assert!(
+            !may_manage_archive,
+            "ordinary writer may execute restore/operator-only function {function}"
+        );
+    }
     let expected_path = format!("{}, pg_catalog, pg_temp", _schema.name);
     let definer_paths = roles
         .admin

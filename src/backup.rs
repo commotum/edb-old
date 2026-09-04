@@ -32,6 +32,7 @@ use crate::{
 };
 use crate::{PersistentTreeManifest, persistent_tree};
 use postgres::{Client, IsolationLevel};
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -44,7 +45,8 @@ const LEGACY_VERSION: u16 = 3;
 const CLAIM_MAGIC: &[u8; 4] = b"ATCL";
 const CLAIM_VERSION: u16 = 1;
 const REQUEST_MAGIC: &[u8; 4] = b"ATRQ";
-const REQUEST_VERSION: u16 = 2;
+const REQUEST_VERSION: u16 = 3;
+const LEGACY_REQUEST_VERSION: u16 = 2;
 const COMPLETED_EXCISION_MAGIC: &[u8; 4] = b"ATEX";
 const COMPLETED_EXCISION_VERSION: u16 = 1;
 const LEGACY_MEMBERSHIP_DOMAIN: &[u8] = b"atomic/backup-legacy-membership/v1\0";
@@ -124,6 +126,10 @@ struct BackupRequestRecord {
     request_key_hash: Digest,
     digest: Digest,
     request_kind: u8,
+    /// Portable immutable native tree that is the exact db-before base for a
+    /// kind-2 request. The request-chain checksum makes this binding part of
+    /// the logical backup root; tree nodes remain deduplicated objects.
+    base_manifest_hash: Option<Digest>,
     receipt_tempids: BTreeMap<String, u64>,
 }
 
@@ -724,6 +730,9 @@ impl PortableBackup {
         if let Some(tree) = &manifest.tree {
             verify_tree_presence(directory, &manifest, &log, tree)?;
         }
+        for tree in request_base_trees(&log) {
+            verify_tree_presence(directory, &manifest, &log, &tree)?;
+        }
         Ok(BackupPoint {
             lineage_id: manifest.lineage_id,
             log_generation: manifest.log_generation,
@@ -806,7 +815,16 @@ impl PortableBackup {
             }
             previous = entry.transaction_hash;
             database = if manifest.version == VERSION && manifest.log_generation > 0 {
-                database.apply_excised_committed(&entry.transaction)?
+                match entry.request.request_kind {
+                    0 => database.apply_excised_committed(&entry.transaction)?,
+                    1 | 2 => database.apply_committed(&entry.transaction)?,
+                    _ => {
+                        return Err(fault(
+                            "backup/request-kind",
+                            "backup transaction has an invalid request kind",
+                        ));
+                    }
+                }
             } else {
                 database.apply_committed(&entry.transaction)?
             };
@@ -861,6 +879,19 @@ impl PortableBackup {
                     verify_tree_backup(directory, &manifest, &log, tree, tree_state_hash)?;
             } else {
                 verify_tree_presence(directory, &manifest, &log, tree)?;
+            }
+        }
+        for tree in request_base_trees(&log) {
+            if deep {
+                objects_read += verify_tree_backup(
+                    directory,
+                    &manifest,
+                    &log,
+                    &tree,
+                    None,
+                )?;
+            } else {
+                verify_tree_presence(directory, &manifest, &log, &tree)?;
             }
         }
         Ok(BackupVerification {
@@ -1053,6 +1084,23 @@ impl PortableBackup {
                 target_database_id,
                 candidate,
                 fault_at,
+            )?;
+            stage_restore_semantic_coordinates(
+                &mut self.client,
+                directory,
+                &manifest,
+                &rows,
+                target_database_id,
+                candidate,
+            )?;
+            restore_request_base_trees(
+                &self.connection,
+                &mut self.client,
+                directory,
+                &manifest,
+                &log,
+                target_database_id,
+                candidate.generation,
             )?;
             Ok((candidate, restored))
         })();
@@ -1943,6 +1991,113 @@ fn stage_restore_generation(
     })
 }
 
+/// Rebuild v2 semantic coordinates for a restored generation in one forward
+/// pass. Request-base publications are authenticated against these rows, and
+/// retaining them lets exact historical receipts open without replaying an
+/// eager database. Nodes are content-addressed and path-copied, so successive
+/// bases share all unaffected structure.
+fn stage_restore_semantic_coordinates(
+    client: &mut Client,
+    directory: &Path,
+    manifest: &Manifest,
+    prepared: &PreparedRestore,
+    target_database_id: &str,
+    candidate: RestoreCandidate,
+) -> Result<(), SemanticError> {
+    if !prepared
+        .rows
+        .iter()
+        .any(|row| row.request.base_manifest_hash.is_some())
+    {
+        return Ok(());
+    }
+    let genesis = read_object(directory, manifest.genesis_hash)?;
+    let mut database = Database::from_genesis(decode_genesis(&genesis)?)?;
+    let genesis_state_hash = checkpoint_state_hash(&database)?;
+    let mut transaction = client.transaction().map_err(|error| {
+        crate::postgres::postgres_error("backup/restore-semantic-genesis-begin", error)
+    })?;
+    let mut root = crate::persistent_commitment::record_eager_endpoint(
+        &mut transaction,
+        target_database_id,
+        candidate.generation,
+        manifest.genesis_hash,
+        genesis_state_hash,
+        &database,
+    )?;
+    transaction.commit().map_err(|error| {
+        crate::postgres::postgres_error("backup/restore-semantic-genesis-commit", error)
+    })?;
+
+    let mut previous = manifest.genesis_hash;
+    for chunk in prepared.rows.chunks(RESTORE_BATCH_ROWS) {
+        let mut transaction = client.transaction().map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-semantic-begin", error)
+        })?;
+        for row in chunk {
+            let content = LineageTransactionContent::decode(&row.content_payload)?;
+            let mut durable = content.to_transaction(previous);
+            durable.database_id = target_database_id.to_owned();
+            let changes = crate::persistent_commitment::eager_semantic_changes(
+                &database,
+                &durable.tx_data,
+            )?;
+            let (next_root, _) = crate::persistent_commitment::advance_persistent_commitment(
+                &mut transaction,
+                root,
+                &changes,
+            )?;
+            let next_database = match row.request.request_kind {
+                0 => database.apply_excised_committed(&durable)?,
+                1 | 2 => database.apply_committed(&durable)?,
+                _ => {
+                    return Err(fault(
+                        "backup/restore-request-kind",
+                        "restored semantic coordinate has an invalid request kind",
+                    ));
+                }
+            };
+            let state_hash = next_root.state_hash(row.basis_t, row.eidx_frontier);
+            if state_hash != row.state_hash
+                || checkpoint_state_hash(&next_database)? != row.state_hash
+            {
+                return Err(fault(
+                    "backup/restore-semantic-state",
+                    "restored transaction does not reproduce its v2 semantic commitment",
+                ));
+            }
+            let tx_hash = crate::log_generation::generation_transaction_hash(
+                &manifest.lineage_id,
+                candidate.generation,
+                row.basis_t,
+                previous,
+                row.content_hash,
+                row.state_hash,
+                row.eidx_frontier,
+            )?;
+            crate::persistent_commitment::record_persistent_coordinate(
+                &mut transaction,
+                &crate::persistent_commitment::PersistentCommitmentCoordinate {
+                    database_id: target_database_id.to_owned(),
+                    generation: candidate.generation,
+                    basis_t: row.basis_t,
+                    tx_hash,
+                    state_hash: row.state_hash,
+                    eidx_frontier: row.eidx_frontier,
+                    root: next_root,
+                },
+            )?;
+            root = next_root;
+            database = next_database;
+            previous = tx_hash;
+        }
+        transaction.commit().map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-semantic-commit", error)
+        })?;
+    }
+    Ok(())
+}
+
 fn stage_restore_completions(
     client: &mut Client,
     target_database_id: &str,
@@ -2209,27 +2364,43 @@ fn activate_restore_candidate(
         if let Some(probe) = activation_probe {
             probe();
         }
-        // Restore staging has already paid to authenticate a complete log.
-        // Reconstruct its terminal value once at this broad administrative
-        // boundary, persist the exact semantic treap, and publish both root
-        // and head atomically below. Ordinary commits never take this eager
-        // path.
-        let endpoint = crate::postgres::recover_generation_to(
+        // A restore carrying native request bases has already rebuilt every
+        // semantic coordinate in one forward pass. Do not replay the full
+        // database again merely to rediscover its endpoint. Older backups do
+        // not carry those roots, so retain the one eager administrative seed
+        // for that compatibility path.
+        if let Some(endpoint) = crate::persistent_commitment::load_persistent_coordinate(
             &mut transaction,
             target_database_id,
             candidate.generation,
             manifest.basis,
-            restored.head_hash,
-        )?
-        .database;
-        crate::persistent_commitment::record_eager_endpoint(
-            &mut transaction,
-            target_database_id,
-            candidate.generation,
-            restored.head_hash,
-            restored.state_hash,
-            &endpoint,
-        )?;
+        )? {
+            if endpoint.tx_hash != restored.head_hash
+                || endpoint.state_hash != restored.state_hash
+            {
+                return Err(fault(
+                    "backup/restore-semantic-endpoint",
+                    "staged semantic endpoint disagrees with the restored generation head",
+                ));
+            }
+        } else {
+            let endpoint = crate::postgres::recover_generation_to(
+                &mut transaction,
+                target_database_id,
+                candidate.generation,
+                manifest.basis,
+                restored.head_hash,
+            )?
+            .database;
+            crate::persistent_commitment::record_eager_endpoint(
+                &mut transaction,
+                target_database_id,
+                candidate.generation,
+                restored.head_hash,
+                restored.state_hash,
+                &endpoint,
+            )?;
+        }
         let generation_sql = sql_u64(candidate.generation, "restore activation generation")?;
         let basis_sql = sql_u64(manifest.basis, "restore activation basis")?;
         if candidate.initial {
@@ -2494,6 +2665,7 @@ fn capture_log_tail<C: postgres::GenericClient>(
                 request_key_hash: request_key_hash(lineage_id, &request_key)?,
                 digest: request_digest,
                 request_kind: 1,
+                base_manifest_hash: None,
                 receipt_tempids: source.tempids.clone(),
             };
             let request_payload = encode_request_record(&request)?;
@@ -2560,12 +2732,16 @@ fn capture_log_tail<C: postgres::GenericClient>(
                 "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.content_hash, \
                         t.state_hash, t.eidx_frontier, c.lineage_id, \
                         c.basis_t, c.eidx_frontier, c.envelope_version, c.payload, \
-                        r.request_key_hash, r.request_digest, r.request_kind, r.tx_hash \
+                        r.request_key_hash, r.request_digest, r.request_kind, r.tx_hash, \
+                        b.base_manifest_hash \
                    FROM atomic_generation_transactions t \
                    JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
                    JOIN atomic_generation_requests r \
                      ON r.database_id = t.database_id AND r.generation = t.generation \
                     AND r.basis_t = t.basis_t \
+                   LEFT JOIN atomic_generation_request_bases b \
+                     ON b.database_id = r.database_id AND b.generation = r.generation \
+                    AND b.request_key_hash = r.request_key_hash \
                   WHERE t.database_id = $1 AND t.generation = $2 \
                     AND t.basis_t >= $3 AND t.basis_t <= $4 ORDER BY t.basis_t",
                 &[
@@ -2582,6 +2758,7 @@ fn capture_log_tail<C: postgres::GenericClient>(
                 "active generation does not contain one transaction and request per basis",
             ));
         }
+        let mut captured_bases = BTreeMap::new();
         for (offset, row) in rows.into_iter().enumerate() {
             let basis = unsigned(row.get(0), "generation transaction basis")?;
             let stored_previous = digest(row.get(1), "generation predecessor hash")?;
@@ -2598,6 +2775,10 @@ fn capture_log_tail<C: postgres::GenericClient>(
             let request_digest = digest(row.get(12), "generation request digest")?;
             let request_kind_i16: i16 = row.get(13);
             let request_tx_hash = digest(row.get(14), "generation request transaction hash")?;
+            let source_base_manifest = row
+                .get::<_, Option<Vec<u8>>>(15)
+                .map(|hash| digest(hash, "generation request base manifest"))
+                .transpose()?;
             let membership = BackupMembershipRecord {
                 lineage_id: lineage_id.to_owned(),
                 log_generation,
@@ -2622,7 +2803,8 @@ fn capture_log_tail<C: postgres::GenericClient>(
                 || content.eidx_frontier != eidx_frontier
                 || content_version != 1
                 || state_hash == [0; 32]
-                || !matches!(request_kind_i16, 0 | 1)
+                || !matches!(request_kind_i16, 0 | 1 | 2)
+                || (request_kind_i16 == 2) != source_base_manifest.is_some()
                 || (request_kind_i16 == 0
                     && request_digest
                         != tombstone_request_digest(
@@ -2642,7 +2824,11 @@ fn capture_log_tail<C: postgres::GenericClient>(
                 collect_function_hashes(&datom.value, temporal_programs);
             }
             if let Some(database) = reconstructed.take() {
-                let database = database.apply_excised_committed(&transaction)?;
+                let database = if request_kind_i16 == 0 {
+                    database.apply_excised_committed(&transaction)?
+                } else {
+                    database.apply_committed(&transaction)?
+                };
                 if checkpoint_state_hash(&database)? != state_hash {
                     return Err(fault(
                         "backup/state-commitment",
@@ -2660,6 +2846,26 @@ fn capture_log_tail<C: postgres::GenericClient>(
                     "generation request receipt disagrees with its request identity",
                 ));
             }
+            let base_manifest_hash = match source_base_manifest {
+                None => None,
+                Some(source_hash) => {
+                    let portable = if let Some(portable) = captured_bases.get(&source_hash) {
+                        *portable
+                    } else {
+                        let portable = capture_bound_request_tree(
+                            client,
+                            database_id,
+                            lineage_id,
+                            log_generation,
+                            source_hash,
+                            publisher,
+                        )?;
+                        captured_bases.insert(source_hash, portable);
+                        portable
+                    };
+                    Some(portable)
+                }
+            };
             let request = BackupRequestRecord {
                 lineage_id: lineage_id.to_owned(),
                 log_generation,
@@ -2669,6 +2875,7 @@ fn capture_log_tail<C: postgres::GenericClient>(
                 request_key_hash,
                 digest: request_digest,
                 request_kind: request_kind_i16 as u8,
+                base_manifest_hash,
                 receipt_tempids: receipt,
             };
             let request_payload = encode_request_record(&request)?;
@@ -2874,7 +3081,7 @@ fn restore_tree_backup(
     };
     let payload = target.encode()?;
     let manifest_hash = sha256(&payload);
-    let roots = target
+    let roots: Vec<TreeRootBinding> = target
         .trees
         .iter()
         .map(|tree| TreeRootBinding {
@@ -2982,6 +3189,368 @@ fn restore_tree_backup(
     }
 }
 
+fn restore_request_base_trees(
+    connection: &PostgresConnectionConfig,
+    client: &mut Client,
+    directory: &Path,
+    manifest: &Manifest,
+    log: &LoadedBackupLog,
+    target_database_id: &str,
+    target_generation: u64,
+) -> Result<(), SemanticError> {
+    let mut bindings = BTreeMap::<Digest, Vec<Digest>>::new();
+    for entry in &log.entries {
+        match (entry.request.request_kind, entry.request.base_manifest_hash) {
+            (2, Some(base)) => bindings
+                .entry(base)
+                .or_default()
+                .push(entry.request.request_key_hash),
+            (0 | 1, None) => {}
+            _ => {
+                return Err(fault(
+                    "backup/request-base-binding",
+                    "request kind and portable base-tree binding disagree",
+                ));
+            }
+        }
+    }
+    let mut archives = bindings
+        .into_iter()
+        .map(|(portable_manifest_hash, request_keys)| {
+            let tree = TreeBackup {
+                manifest_hash: portable_manifest_hash,
+                legacy_node_hashes: None,
+            };
+            let source = decode_bound_tree_manifest(directory, manifest, log, &tree, None)?;
+            Ok((source.basis_t, portable_manifest_hash, source, request_keys))
+        })
+        .collect::<Result<Vec<_>, SemanticError>>()?;
+    // The archive revision is local to this restore generation and derived
+    // solely from authenticated backup content, so interrupted staging
+    // resumes at the identical immutable coordinates.
+    archives.sort_by_key(|(basis, portable, _, _)| (*basis, *portable));
+    for (offset, (_, _portable_manifest_hash, source, request_keys)) in
+        archives.into_iter().enumerate()
+    {
+        let archive_revision = request_base_archive_revision(offset)?;
+        restore_request_base_archive(
+            connection,
+            client,
+            directory,
+            manifest,
+            target_database_id,
+            target_generation,
+            archive_revision,
+            source,
+            &request_keys,
+        )?;
+    }
+    Ok(())
+}
+
+/// PersistentTreeManifest retains the source implementation's numeric
+/// publication coordinate. Archive roots are not members of the ordinary
+/// monotonically increasing publication chain, so allocate them downward
+/// from PostgreSQL BIGINT's ceiling. This deterministic disjoint namespace
+/// prevents an otherwise identical basis-zero archive and accelerator from
+/// acquiring the same content hash and becoming an ambiguous request base.
+fn request_base_archive_revision(offset: usize) -> Result<u64, SemanticError> {
+    (i64::MAX as u64)
+        .checked_sub(u64::try_from(offset).map_err(|_| {
+            SemanticError::new(
+                ErrorCategory::Unsupported,
+                "backup/request-base-archive-count",
+                "restored request-base archive count is not representable",
+            )
+        })?)
+        .filter(|revision| *revision > 0)
+        .ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Unsupported,
+                "backup/request-base-archive-count",
+                "restored request-base archive count exceeds its revision namespace",
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_request_base_archive(
+    connection: &PostgresConnectionConfig,
+    binding_client: &mut Client,
+    directory: &Path,
+    backup: &Manifest,
+    target_database_id: &str,
+    target_generation: u64,
+    archive_revision: u64,
+    source: PersistentTreeManifest,
+    request_keys: &[Digest],
+) -> Result<(), SemanticError> {
+    let generation_sql = sql_u64(target_generation, "restored request-base generation")?;
+    let basis_sql = sql_u64(source.basis_t, "restored request-base basis")?;
+    let (target_tx_hash, target_state_hash) = if source.basis_t == 0 {
+        (backup.genesis_hash, source.state_hash)
+    } else {
+        let row = binding_client
+            .query_opt(
+                "SELECT tx_hash, state_hash FROM atomic_generation_transactions \
+                  WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
+                &[&target_database_id, &generation_sql, &basis_sql],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-request-base-log", error)
+            })?
+            .ok_or_else(|| {
+                fault(
+                    "backup/restore-request-base-log",
+                    "restored request base has no target generation coordinate",
+                )
+            })?;
+        (
+            digest(row.get(0), "restored request-base transaction hash")?,
+            digest(row.get(1), "restored request-base state hash")?,
+        )
+    };
+    if target_state_hash != source.state_hash {
+        return Err(fault(
+            "backup/restore-request-base-state",
+            "restored request base has a different semantic state commitment",
+        ));
+    }
+    let target = PersistentTreeManifest {
+        database_id: target_database_id.to_owned(),
+        publication_revision: archive_revision,
+        basis_t: source.basis_t,
+        tx_hash: target_tx_hash,
+        state_hash: target_state_hash,
+        excision_generation: target_generation,
+        eidx_frontier: source.eidx_frontier,
+        trees: source.trees,
+    };
+    let payload = target.encode()?;
+    let target_manifest_hash = sha256(&payload);
+    let roots: Vec<TreeRootBinding> = target
+        .trees
+        .iter()
+        .map(|tree| TreeRootBinding {
+            order: tree.descriptor.order,
+            history: tree.descriptor.history,
+            root_hash: tree.descriptor.root_hash,
+            datom_count: tree.descriptor.count,
+            encoded_bytes: tree.root_bytes,
+        })
+        .collect();
+    let mut reachable = BTreeSet::new();
+    for tree_root in &target.trees {
+        let root_hash = tree_root.descriptor.root_hash;
+        let expected_root_bytes = tree_root.root_bytes;
+        let validated = persistent_tree::validate_tree_streaming(&tree_root.descriptor, |hash| {
+            let payload = read_object(directory, *hash)?;
+            if *hash == root_hash && payload.len() as u64 != expected_root_bytes {
+                return Err(fault(
+                    "backup/tree-root-bytes",
+                    "backed-up request-base root size disagrees with its manifest",
+                ));
+            }
+            Ok(payload)
+        })?;
+        reachable.extend(validated.node_hashes);
+    }
+    let node_set_hash = request_base_archive_node_set_hash(&reachable);
+    let expected_node_count = sql_u64(reachable.len() as u64, "request-base archive nodes")?;
+    let archive_revision_sql = sql_u64(archive_revision, "request-base archive revision")?;
+    binding_client
+        .execute(
+            "INSERT INTO atomic_request_base_archives \
+                 (database_id, generation, archive_revision, basis_t, tx_hash, state_hash, \
+                  eidx_frontier, manifest_version, manifest_hash, payload, \
+                  expected_node_count, node_set_hash) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11) \
+             ON CONFLICT (manifest_hash) DO NOTHING",
+            &[
+                &target_database_id,
+                &generation_sql,
+                &archive_revision_sql,
+                &basis_sql,
+                &&target.tx_hash[..],
+                &&target.state_hash[..],
+                &sql_u64(target.eidx_frontier, "request-base archive frontier")?,
+                &&target_manifest_hash[..],
+                &payload,
+                &expected_node_count,
+                &&node_set_hash[..],
+            ],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-request-base-archive", error)
+        })?;
+    let stored = binding_client
+        .query_one(
+            "SELECT database_id, generation, archive_revision, basis_t, tx_hash, state_hash, \
+                    eidx_frontier, manifest_version, payload, expected_node_count, node_set_hash \
+               FROM atomic_request_base_archives WHERE manifest_hash = $1",
+            &[&&target_manifest_hash[..]],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-request-base-archive-verify", error)
+        })?;
+    if stored.get::<_, String>(0) != target_database_id
+        || stored.get::<_, i64>(1) != generation_sql
+        || stored.get::<_, i64>(2) != archive_revision_sql
+        || stored.get::<_, i64>(3) != basis_sql
+        || digest(stored.get(4), "request-base archive transaction")? != target.tx_hash
+        || digest(stored.get(5), "request-base archive state")? != target.state_hash
+        || unsigned(stored.get(6), "request-base archive frontier")? != target.eidx_frontier
+        || stored.get::<_, i16>(7) != 4
+        || stored.get::<_, Vec<u8>>(8) != payload
+        || stored.get::<_, i64>(9) != expected_node_count
+        || digest(stored.get(10), "request-base archive node set")? != node_set_hash
+    {
+        return Err(fault(
+            "backup/restore-request-base-archive-conflict",
+            "request-base archive identity is occupied by different immutable content",
+        ));
+    }
+
+    let already_complete: bool = binding_client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_request_base_archive_completions \
+                             WHERE manifest_hash = $1)",
+            &[&&target_manifest_hash[..]],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-request-base-completion-read", error)
+        })?
+        .get(0);
+    if !already_complete {
+        let hashes = reachable.iter().copied().collect::<Vec<_>>();
+        for chunk in hashes.chunks(RESTORE_BATCH_ROWS) {
+            let batch = chunk.iter().map(|hash| hash.to_vec()).collect::<Vec<_>>();
+            binding_client
+                .execute(
+                    "INSERT INTO atomic_request_base_archive_nodes(manifest_hash, node_hash) \
+                     SELECT $1, node_hash FROM unnest($2::bytea[]) AS node_hash \
+                     ON CONFLICT DO NOTHING",
+                    &[&&target_manifest_hash[..], &batch],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error(
+                        "backup/restore-request-base-node-plan",
+                        error,
+                    )
+                })?;
+        }
+        let mut store = PostgresTreeStore::connect_configured(connection)?;
+        for hash in &reachable {
+            store.insert_node(*hash, &read_object(directory, *hash)?)?;
+        }
+        for root in &roots {
+            let order: i16 = match root.order {
+                crate::IndexOrder::Eavt => 0,
+                crate::IndexOrder::Aevt => 1,
+                crate::IndexOrder::Avet => 2,
+                crate::IndexOrder::Vaet => 3,
+            };
+            binding_client
+                .execute(
+                    "INSERT INTO atomic_request_base_archive_roots \
+                         (manifest_hash, index_order, history, root_hash, datom_count, encoded_bytes) \
+                     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                    &[
+                        &&target_manifest_hash[..],
+                        &order,
+                        &root.history,
+                        &&root.root_hash[..],
+                        &sql_u64(root.datom_count, "request-base root datoms")?,
+                        &sql_u64(root.encoded_bytes, "request-base root bytes")?,
+                    ],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-request-base-root", error)
+                })?;
+        }
+        binding_client
+            .query_one(
+                "SELECT atomic_complete_request_base_archive($1, $2, $3)",
+                &[
+                    &target_database_id,
+                    &generation_sql,
+                    &&target_manifest_hash[..],
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-request-base-complete", error)
+            })?;
+    }
+    // The complete archive and every immutable request binding are durable
+    // before the candidate head is made visible. Ordinary peer selection has
+    // no path to this table; only the exact bound-manifest reader can open it.
+    insert_restored_request_base_bindings(
+        binding_client,
+        target_database_id,
+        target_generation,
+        target_manifest_hash,
+        request_keys,
+    )
+}
+
+fn request_base_archive_node_set_hash(node_hashes: &BTreeSet<Digest>) -> Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"atomic/request-base-archive-node-set/v1\0");
+    hasher.update((node_hashes.len() as u64).to_be_bytes());
+    for node_hash in node_hashes {
+        hasher.update(node_hash);
+    }
+    hasher.finalize().into()
+}
+
+fn insert_restored_request_base_bindings(
+    client: &mut Client,
+    target_database_id: &str,
+    target_generation: u64,
+    target_manifest_hash: Digest,
+    request_keys: &[Digest],
+) -> Result<(), SemanticError> {
+    let generation_sql = sql_u64(target_generation, "restored request-base generation")?;
+    let mut transaction = client.transaction().map_err(|error| {
+        crate::postgres::postgres_error("backup/restore-request-base-bind-begin", error)
+    })?;
+    for request_key in request_keys {
+        transaction
+            .execute(
+                "INSERT INTO atomic_generation_request_bases \
+                     (database_id, generation, request_key_hash, base_manifest_hash) \
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                &[
+                    &target_database_id,
+                    &generation_sql,
+                    &&request_key[..],
+                    &&target_manifest_hash[..],
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-request-base-bind", error)
+            })?;
+        let stored = transaction
+            .query_one(
+                "SELECT base_manifest_hash FROM atomic_generation_request_bases \
+                  WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3",
+                &[&target_database_id, &generation_sql, &&request_key[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-request-base-verify", error)
+            })?;
+        if digest(stored.get(0), "restored request-base binding")? != target_manifest_hash {
+            return Err(fault(
+                "backup/restore-request-base-conflict",
+                "restored request already names a different immutable db-before base",
+            ));
+        }
+    }
+    transaction.commit().map_err(|error| {
+        crate::postgres::postgres_error("backup/restore-request-base-bind-commit", error)
+    })
+}
+
 /// Captured-log coordinates needed to authenticate a replaceable tree root.
 /// Keeping them together makes the invariant visible: every selected tree is
 /// checked against one immutable snapshot tail, never against independently
@@ -2993,6 +3562,15 @@ struct TreeCaptureLog<'a> {
     portable_transaction_hashes: &'a [Digest],
     portable_frontiers: &'a [u64],
     state_hashes: &'a [Digest],
+}
+
+#[derive(Clone, Copy)]
+enum TreeCaptureSource {
+    Publication,
+    RequestBaseArchive {
+        expected_node_count: u64,
+        node_set_hash: Digest,
+    },
 }
 
 fn capture_tree_backup<C: postgres::GenericClient>(
@@ -3056,6 +3634,7 @@ fn capture_tree_backup<C: postgres::GenericClient>(
         if let Some(tree) = capture_tree_candidate(
             client,
             &row,
+            TreeCaptureSource::Publication,
             database_id,
             lineage_id,
             log_generation,
@@ -3071,6 +3650,7 @@ fn capture_tree_backup<C: postgres::GenericClient>(
 fn capture_tree_candidate<C: postgres::GenericClient>(
     client: &mut C,
     row: &postgres::Row,
+    source: TreeCaptureSource,
     database_id: &str,
     lineage_id: &str,
     log_generation: u64,
@@ -3142,11 +3722,21 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
             )],
         )
         .map_err(|error| crate::postgres::postgres_error("backup/tree-root-pin", error))?;
-    let root_rows = client
-        .query(
+    let roots_sql = match source {
+        TreeCaptureSource::Publication => {
             "SELECT index_order, history, root_hash, datom_count, encoded_bytes \
                FROM atomic_tree_manifest_roots WHERE manifest_hash = $1 \
-              ORDER BY history, index_order",
+              ORDER BY history, index_order"
+        }
+        TreeCaptureSource::RequestBaseArchive { .. } => {
+            "SELECT index_order, history, root_hash, datom_count, encoded_bytes \
+               FROM atomic_request_base_archive_roots WHERE manifest_hash = $1 \
+              ORDER BY history, index_order"
+        }
+    };
+    let root_rows = client
+        .query(
+            roots_sql,
             &[&&manifest_hash[..]],
         )
         .map_err(|error| crate::postgres::postgres_error("backup/tree-roots-read", error))?;
@@ -3222,6 +3812,15 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
         debug_assert_eq!(validated.peak_live_payloads, 1);
         node_hashes.extend(validated.node_hashes);
     }
+    if let TreeCaptureSource::RequestBaseArchive {
+        expected_node_count,
+        node_set_hash,
+    } = source
+        && (node_hashes.len() as u64 != expected_node_count
+            || request_base_archive_node_set_hash(&node_hashes) != node_set_hash)
+    {
+        return Ok(None);
+    }
 
     // Publish children only after the whole physical graph proved valid. The
     // portable manifest follows its children, and the snapshot root follows
@@ -3265,6 +3864,208 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
         manifest_hash: portable_manifest_hash,
         legacy_node_hashes: None,
     }))
+}
+
+/// Copy the exact physical db-before authority retained by a native request.
+/// Unlike the optional endpoint accelerator, this tree is receipt data: a
+/// corrupt or missing binding must fail backup rather than fall back to a
+/// broad log replay that may exceed the writer's bounded recent tier.
+fn capture_bound_request_tree<C: postgres::GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    lineage_id: &str,
+    log_generation: u64,
+    source_manifest_hash: Digest,
+    publisher: &mut ObjectPublisher<'_>,
+) -> Result<Digest, SemanticError> {
+    if log_generation == 0 {
+        return Err(fault(
+            "backup/request-base-generation",
+            "native request bases require a positive source generation",
+        ));
+    }
+    let generation_sql = sql_u64(log_generation, "request base generation")?;
+    let variants = client
+        .query_one(
+            "SELECT (SELECT count(*) FROM atomic_tree_publications publication \
+                      WHERE publication.database_id = $1 \
+                        AND publication.log_generation = $2 \
+                        AND publication.manifest_hash = $3), \
+                    (SELECT count(*) FROM atomic_request_base_archives archive \
+                      WHERE archive.database_id = $1 \
+                        AND archive.generation = $2 \
+                        AND archive.manifest_hash = $3)",
+            &[&database_id, &generation_sql, &&source_manifest_hash[..]],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/request-base-variants", error)
+        })?;
+    let normal_count = unsigned(variants.get(0), "request base publication variants")?;
+    let archive_count = unsigned(variants.get(1), "request base archive variants")?;
+    if normal_count.saturating_add(archive_count) != 1 {
+        return Err(fault(
+            "backup/request-base-variant",
+            "native request must name exactly one normal publication or completed archive",
+        ));
+    }
+    let (row, source) = if normal_count == 1 {
+        let row = client
+            .query_opt(
+                "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
+                        m.excision_generation, m.eidx_frontier, m.manifest_hash, m.payload \
+                   FROM atomic_tree_publications p \
+                   JOIN atomic_tree_manifests m \
+                     ON m.database_id = p.database_id \
+                    AND m.publication_revision = p.publication_revision \
+                    AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
+                    AND m.manifest_hash = p.manifest_hash \
+                    AND m.log_generation = p.log_generation \
+                  WHERE p.database_id = $1 AND p.log_generation = $2 \
+                    AND p.manifest_hash = $3 \
+                    AND EXISTS ( \
+                        SELECT 1 FROM atomic_semantic_commitment_roots semantic \
+                         WHERE semantic.database_id = m.database_id \
+                           AND semantic.generation = m.log_generation \
+                           AND semantic.basis_t = m.basis_t \
+                           AND semantic.tx_hash = m.tx_hash \
+                           AND semantic.state_hash = m.state_hash \
+                           AND semantic.eidx_frontier = m.eidx_frontier \
+                           AND semantic.commitment_version = 2 \
+                    )",
+                &[&database_id, &generation_sql, &&source_manifest_hash[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/request-base-read", error)
+            })?
+            .ok_or_else(|| {
+                fault(
+                    "backup/request-base-corrupt",
+                    "normal request base has no authenticated manifest and semantic coordinate",
+                )
+            })?;
+        (row, TreeCaptureSource::Publication)
+    } else {
+        let row = client
+            .query_opt(
+                "SELECT archive.archive_revision, archive.basis_t, archive.tx_hash, \
+                        archive.state_hash, archive.generation, archive.eidx_frontier, \
+                        archive.manifest_hash, archive.payload, \
+                        archive.expected_node_count, archive.node_set_hash \
+                   FROM atomic_request_base_archives archive \
+                   JOIN atomic_request_base_archive_completions complete \
+                     ON complete.manifest_hash = archive.manifest_hash \
+                  WHERE archive.database_id = $1 AND archive.generation = $2 \
+                    AND archive.manifest_hash = $3 \
+                    AND EXISTS ( \
+                        SELECT 1 FROM atomic_semantic_commitment_roots semantic \
+                         WHERE semantic.database_id = archive.database_id \
+                           AND semantic.generation = archive.generation \
+                           AND semantic.basis_t = archive.basis_t \
+                           AND semantic.tx_hash = archive.tx_hash \
+                           AND semantic.state_hash = archive.state_hash \
+                           AND semantic.eidx_frontier = archive.eidx_frontier \
+                           AND semantic.commitment_version = 2 \
+                    )",
+                &[&database_id, &generation_sql, &&source_manifest_hash[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/request-base-archive-read", error)
+            })?
+            .ok_or_else(|| {
+                fault(
+                    "backup/request-base-archive-corrupt",
+                    "request-base archive is incomplete or has no authenticated semantic coordinate",
+                )
+            })?;
+        let expected_node_count = unsigned(row.get(8), "request-base archive node count")?;
+        let node_set_hash = digest(row.get(9), "request-base archive node-set hash")?;
+        (
+            row,
+            TreeCaptureSource::RequestBaseArchive {
+                expected_node_count,
+                node_set_hash,
+            },
+        )
+    };
+    let basis = unsigned(row.get(1), "request base basis")?;
+    let (tx_hash, state_hash, eidx_frontier) = if basis == 0 {
+        let catalog = client
+            .query_one(
+                "SELECT genesis, genesis_hash FROM atomic_databases WHERE database_id = $1",
+                &[&database_id],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/request-base-genesis", error)
+            })?;
+        let genesis: Vec<u8> = catalog.get(0);
+        let genesis_hash = digest(catalog.get(1), "request base genesis hash")?;
+        if sha256(&genesis) != genesis_hash {
+            return Err(fault(
+                "backup/request-base-genesis",
+                "request base genesis payload does not match its hash",
+            ));
+        }
+        let database = Database::from_genesis(decode_genesis(&genesis)?)?;
+        (
+            genesis_hash,
+            checkpoint_state_hash(&database)?,
+            database.eidx_frontier(),
+        )
+    } else {
+        let basis_sql = sql_u64(basis, "request base basis")?;
+        let coordinate = client
+            .query_opt(
+                "SELECT tx_hash, state_hash, eidx_frontier \
+                   FROM atomic_generation_transactions \
+                  WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
+                &[&database_id, &generation_sql, &basis_sql],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/request-base-coordinate", error)
+            })?
+            .ok_or_else(|| {
+                fault(
+                    "backup/request-base-coordinate",
+                    "request base has no immutable generation transaction coordinate",
+                )
+            })?;
+        (
+            digest(coordinate.get(0), "request base transaction hash")?,
+            digest(coordinate.get(1), "request base state hash")?,
+            unsigned(coordinate.get(2), "request base entity frontier")?,
+        )
+    };
+    let source_hashes = [tx_hash];
+    // Positive-generation ATLG membership hashes are already portable: they
+    // bind the immutable lineage, never the mutable database alias.
+    let portable_hashes = source_hashes;
+    let frontiers = [eidx_frontier];
+    let states = [state_hash];
+    let log = TreeCaptureLog {
+        start_basis: basis,
+        backup_basis: basis,
+        source_transaction_hashes: &source_hashes,
+        portable_transaction_hashes: &portable_hashes,
+        portable_frontiers: &frontiers,
+        state_hashes: &states,
+    };
+    let tree = capture_tree_candidate(
+        client,
+        &row,
+        source,
+        database_id,
+        lineage_id,
+        log_generation,
+        &log,
+        publisher,
+    )?
+    .ok_or_else(|| {
+        fault(
+            "backup/request-base-corrupt",
+            "native request db-before tree is corrupt or disagrees with its log coordinate",
+        )
+    })?;
+    Ok(tree.manifest_hash)
 }
 
 fn decode_tree_order(value: i16) -> Result<crate::IndexOrder, SemanticError> {
@@ -3394,6 +4195,7 @@ fn load_backup_log(
                     request_key_hash: request_key_hash(&manifest.lineage_id, &request.key)?,
                     digest: request.digest,
                     request_kind: 1,
+                    base_manifest_hash: None,
                     receipt_tempids,
                 },
                 legacy_state_hash: Some(manifest.state_hashes[offset]),
@@ -3482,29 +4284,41 @@ fn decode_bound_tree_manifest(
 ) -> Result<PersistentTreeManifest, SemanticError> {
     let payload = read_object(directory, tree.manifest_hash)?;
     let manifest = PersistentTreeManifest::decode(&payload)?;
-    if manifest.basis_t == 0 {
-        return Err(fault("backup/tree-basis", "backed-up tree has basis zero"));
-    }
-    let offset = usize::try_from(manifest.basis_t - 1).map_err(|_| {
-        fault(
-            "backup/tree-basis",
-            "backed-up tree basis is not representable",
+    let (transaction_hash, frontier, derived_state) = if manifest.basis_t == 0 {
+        let genesis = read_object(directory, backup.genesis_hash)?;
+        let database = Database::from_genesis(decode_genesis(&genesis)?)?;
+        (
+            backup.genesis_hash,
+            database.eidx_frontier(),
+            Some(checkpoint_state_hash(&database)?),
         )
-    })?;
-    let entry = log.entries.get(offset).ok_or_else(|| {
-        fault(
-            "backup/tree-basis",
-            "backed-up tree basis is outside the transaction chain",
+    } else {
+        let offset = usize::try_from(manifest.basis_t - 1).map_err(|_| {
+            fault(
+                "backup/tree-basis",
+                "backed-up tree basis is not representable",
+            )
+        })?;
+        let entry = log.entries.get(offset).ok_or_else(|| {
+            fault(
+                "backup/tree-basis",
+                "backed-up tree basis is outside the transaction chain",
+            )
+        })?;
+        (
+            entry.transaction_hash,
+            entry.transaction.eidx_frontier,
+            entry.legacy_state_hash,
         )
-    })?;
-    let required_state = expected_state_hash.or(entry.legacy_state_hash);
+    };
+    let required_state = expected_state_hash.or(derived_state);
     if manifest.database_id != backup.lineage_id
         || manifest.publication_revision != 1
         || manifest.basis_t > backup.basis
-        || entry.transaction_hash != manifest.tx_hash
+        || transaction_hash != manifest.tx_hash
         || required_state.is_some_and(|state| state != manifest.state_hash)
         || manifest.excision_generation != backup.log_generation
-        || manifest.eidx_frontier != entry.transaction.eidx_frontier
+        || manifest.eidx_frontier != frontier
         || manifest.hash()? != tree.manifest_hash
     {
         return Err(fault(
@@ -3513,6 +4327,19 @@ fn decode_bound_tree_manifest(
         ));
     }
     Ok(manifest)
+}
+
+fn request_base_trees(log: &LoadedBackupLog) -> Vec<TreeBackup> {
+    log.entries
+        .iter()
+        .filter_map(|entry| entry.request.base_manifest_hash)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|manifest_hash| TreeBackup {
+            manifest_hash,
+            legacy_node_hashes: None,
+        })
+        .collect()
 }
 
 fn verify_tree_presence(
@@ -3626,6 +4453,288 @@ fn verify_tree_backup(
     Ok(objects_read)
 }
 
+/// Prove that every restored kind-2 receipt names the deterministic archive
+/// rebuilt from its portable base, and that no extra archive/binding entered
+/// the active generation. This is part of ambiguous-acknowledgement replay:
+/// merely matching the log head is insufficient if its db-before values can
+/// no longer be reopened exactly.
+fn match_restored_request_base_archives<C: postgres::GenericClient>(
+    client: &mut C,
+    directory: &Path,
+    backup: &Manifest,
+    log: &LoadedBackupLog,
+    target_database_id: &str,
+    target_generation: u64,
+) -> Result<BTreeMap<Digest, Digest>, SemanticError> {
+    let generation_sql = sql_u64(target_generation, "restored request-base generation")?;
+    let mut portable_hashes = BTreeSet::new();
+    let mut expected_bindings = 0_u64;
+    for entry in &log.entries {
+        match (entry.request.request_kind, entry.request.base_manifest_hash) {
+            (2, Some(hash)) => {
+                portable_hashes.insert(hash);
+                expected_bindings = expected_bindings.saturating_add(1);
+            }
+            (0 | 1, None) => {}
+            _ => {
+                return Err(fault(
+                    "backup/restore-check-request-base",
+                    "portable request kind and db-before binding disagree",
+                ));
+            }
+        }
+    }
+    let stored_counts = client
+        .query_one(
+            "SELECT (SELECT count(*) FROM atomic_request_base_archives archive \
+                      WHERE archive.database_id = $1 AND archive.generation = $2), \
+                    (SELECT count(*) FROM atomic_generation_request_bases base \
+                      WHERE base.database_id = $1 AND base.generation = $2)",
+            &[&target_database_id, &generation_sql],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-check-request-base-counts", error)
+        })?;
+    if unsigned(stored_counts.get(0), "restored request-base archive count")?
+        != portable_hashes.len() as u64
+        || unsigned(stored_counts.get(1), "restored request-base binding count")?
+            != expected_bindings
+    {
+        return Err(fault(
+            "backup/restore-check-request-base-counts",
+            "restored generation has missing or extra request-base authority",
+        ));
+    }
+
+    let mut archives = portable_hashes
+        .into_iter()
+        .map(|portable_hash| {
+            let tree = TreeBackup {
+                manifest_hash: portable_hash,
+                legacy_node_hashes: None,
+            };
+            let source = decode_bound_tree_manifest(directory, backup, log, &tree, None)?;
+            Ok((source.basis_t, portable_hash, source))
+        })
+        .collect::<Result<Vec<_>, SemanticError>>()?;
+    archives.sort_by_key(|(basis, portable_hash, _)| (*basis, *portable_hash));
+    let mut matched = BTreeMap::new();
+    for (offset, (_, portable_hash, source)) in archives.into_iter().enumerate() {
+        let archive_revision = request_base_archive_revision(offset)?;
+        let target_tx_hash = if source.basis_t == 0 {
+            backup.genesis_hash
+        } else {
+            let row = client
+                .query_opt(
+                    "SELECT tx_hash, state_hash, eidx_frontier \
+                       FROM atomic_generation_transactions \
+                      WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
+                    &[
+                        &target_database_id,
+                        &generation_sql,
+                        &sql_u64(source.basis_t, "restored request-base basis")?,
+                    ],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error(
+                        "backup/restore-check-request-base-coordinate",
+                        error,
+                    )
+                })?
+                .ok_or_else(|| {
+                    fault(
+                        "backup/restore-check-request-base-coordinate",
+                        "restored request base has no generation transaction coordinate",
+                    )
+                })?;
+            let tx_hash = digest(row.get(0), "restored request-base transaction hash")?;
+            if digest(row.get(1), "restored request-base state hash")? != source.state_hash
+                || unsigned(row.get(2), "restored request-base frontier")?
+                    != source.eidx_frontier
+            {
+                return Err(fault(
+                    "backup/restore-check-request-base-coordinate",
+                    "restored request-base coordinate disagrees with its portable source",
+                ));
+            }
+            tx_hash
+        };
+        let target = PersistentTreeManifest {
+            database_id: target_database_id.to_owned(),
+            publication_revision: archive_revision,
+            basis_t: source.basis_t,
+            tx_hash: target_tx_hash,
+            state_hash: source.state_hash,
+            excision_generation: target_generation,
+            eidx_frontier: source.eidx_frontier,
+            trees: source.trees,
+        };
+        let expected_payload = target.encode()?;
+        let expected_hash = sha256(&expected_payload);
+        let row = client
+            .query_opt(
+                "SELECT archive.database_id, archive.generation, archive.archive_revision, \
+                        archive.basis_t, archive.tx_hash, archive.state_hash, \
+                        archive.eidx_frontier, archive.manifest_version, archive.payload, \
+                        archive.expected_node_count, archive.node_set_hash \
+                   FROM atomic_request_base_archives archive \
+                   JOIN atomic_request_base_archive_completions complete \
+                     ON complete.manifest_hash = archive.manifest_hash \
+                   JOIN atomic_semantic_commitment_roots semantic \
+                     ON semantic.database_id = archive.database_id \
+                    AND semantic.generation = archive.generation \
+                    AND semantic.basis_t = archive.basis_t \
+                    AND semantic.tx_hash = archive.tx_hash \
+                    AND semantic.state_hash = archive.state_hash \
+                    AND semantic.eidx_frontier = archive.eidx_frontier \
+                    AND semantic.commitment_version = 2 \
+                  WHERE archive.manifest_hash = $1",
+                &[&&expected_hash[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-check-request-base-archive", error)
+            })?
+            .ok_or_else(|| {
+                fault(
+                    "backup/restore-check-request-base-archive",
+                    "expected completed request-base archive is absent",
+                )
+            })?;
+        let expected_node_count = unsigned(row.get(9), "restored archive node count")?;
+        let expected_node_set_hash = digest(row.get(10), "restored archive node-set hash")?;
+        if row.get::<_, String>(0) != target_database_id
+            || unsigned(row.get(1), "restored archive generation")? != target_generation
+            || unsigned(row.get(2), "restored archive revision")? != archive_revision
+            || unsigned(row.get(3), "restored archive basis")? != target.basis_t
+            || digest(row.get(4), "restored archive transaction")? != target.tx_hash
+            || digest(row.get(5), "restored archive state")? != target.state_hash
+            || unsigned(row.get(6), "restored archive frontier")? != target.eidx_frontier
+            || row.get::<_, i16>(7) != 4
+            || row.get::<_, Vec<u8>>(8) != expected_payload
+            || client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications \
+                                     WHERE manifest_hash = $1)",
+                    &[&&expected_hash[..]],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error(
+                        "backup/restore-check-request-base-variant",
+                        error,
+                    )
+                })?
+                .get::<_, bool>(0)
+        {
+            return Err(fault(
+                "backup/restore-check-request-base-archive",
+                "restored request-base archive is noncanonical or ambiguous",
+            ));
+        }
+
+        let root_rows = client
+            .query(
+                "SELECT index_order, history, root_hash, datom_count, encoded_bytes \
+                   FROM atomic_request_base_archive_roots WHERE manifest_hash = $1 \
+                  ORDER BY history, index_order",
+                &[&&expected_hash[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error(
+                    "backup/restore-check-request-base-roots",
+                    error,
+                )
+            })?;
+        if root_rows.len() != target.trees.len() {
+            return Err(fault(
+                "backup/restore-check-request-base-roots",
+                "restored request-base archive has an incomplete root projection",
+            ));
+        }
+        for (root_row, tree) in root_rows.into_iter().zip(&target.trees) {
+            if decode_tree_order(root_row.get(0))? != tree.descriptor.order
+                || root_row.get::<_, bool>(1) != tree.descriptor.history
+                || digest(root_row.get(2), "restored archive root hash")?
+                    != tree.descriptor.root_hash
+                || unsigned(root_row.get(3), "restored archive root count")?
+                    != tree.descriptor.count
+                || unsigned(root_row.get(4), "restored archive root bytes")?
+                    != tree.root_bytes
+            {
+                return Err(fault(
+                    "backup/restore-check-request-base-roots",
+                    "restored request-base root projection disagrees with its manifest",
+                ));
+            }
+        }
+
+        let mut reachable = BTreeSet::new();
+        for tree in &target.trees {
+            let root_hash = tree.descriptor.root_hash;
+            let expected_root_bytes = tree.root_bytes;
+            let validated = persistent_tree::validate_tree_streaming(
+                &tree.descriptor,
+                |node_hash| {
+                    let payload: Vec<u8> = client
+                        .query_opt(
+                            "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
+                            &[&&node_hash[..]],
+                        )
+                        .map_err(|error| {
+                            crate::postgres::postgres_error(
+                                "backup/restore-check-request-base-node",
+                                error,
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            fault(
+                                "backup/restore-check-request-base-node",
+                                "restored request-base archive references a missing node",
+                            )
+                        })?
+                        .get(0);
+                    if payload != read_object(directory, *node_hash)?
+                        || (*node_hash == root_hash
+                            && payload.len() as u64 != expected_root_bytes)
+                    {
+                        return Err(fault(
+                            "backup/restore-check-request-base-node",
+                            "restored request-base node differs from its portable source",
+                        ));
+                    }
+                    Ok(payload)
+                },
+            )?;
+            reachable.extend(validated.node_hashes);
+        }
+        let planned = client
+            .query(
+                "SELECT node_hash FROM atomic_request_base_archive_nodes \
+                  WHERE manifest_hash = $1 ORDER BY node_hash",
+                &[&&expected_hash[..]],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error(
+                    "backup/restore-check-request-base-node-plan",
+                    error,
+                )
+            })?
+            .into_iter()
+            .map(|row| digest(row.get(0), "restored request-base planned node"))
+            .collect::<Result<BTreeSet<_>, SemanticError>>()?;
+        if planned != reachable
+            || expected_node_count != reachable.len() as u64
+            || expected_node_set_hash != request_base_archive_node_set_hash(&reachable)
+        {
+            return Err(fault(
+                "backup/restore-check-request-base-closure",
+                "restored request-base closure disagrees with its completion commitment",
+            ));
+        }
+        matched.insert(portable_hash, expected_hash);
+    }
+    Ok(matched)
+}
+
 fn target_matches_backup<C: postgres::GenericClient>(
     client: &mut C,
     directory: &Path,
@@ -3684,12 +4793,15 @@ fn target_matches_backup<C: postgres::GenericClient>(
             "SELECT t.basis_t, t.previous_hash, t.tx_hash, t.content_hash, t.state_hash, \
                     t.eidx_frontier, c.lineage_id, c.basis_t, c.eidx_frontier, \
                     c.envelope_version, c.payload, r.request_key_hash, r.request_digest, \
-                    r.request_kind, r.tx_hash \
+                    r.request_kind, r.tx_hash, base.base_manifest_hash \
                FROM atomic_generation_transactions t \
                JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
                JOIN atomic_generation_requests r \
                  ON r.database_id = t.database_id AND r.generation = t.generation \
                 AND r.basis_t = t.basis_t \
+               LEFT JOIN atomic_generation_request_bases base \
+                 ON base.database_id = r.database_id AND base.generation = r.generation \
+                AND base.request_key_hash = r.request_key_hash \
               WHERE t.database_id = $1 AND t.generation = $2 ORDER BY t.basis_t",
             &[&target_database_id, &generation_sql],
         )
@@ -3697,6 +4809,14 @@ fn target_matches_backup<C: postgres::GenericClient>(
     if rows.len() != log.entries.len() {
         return Ok(false);
     }
+    let restored_request_bases = match_restored_request_base_archives(
+        client,
+        directory,
+        manifest,
+        log,
+        target_database_id,
+        target_generation,
+    )?;
     let mut receipts: BTreeMap<u64, (Digest, BTreeMap<String, u64>)> = BTreeMap::new();
     for row in client
         .query(
@@ -3746,6 +4866,10 @@ fn target_matches_backup<C: postgres::GenericClient>(
         let request_digest = digest(row.get(12), "restored request digest")?;
         let request_kind: i16 = row.get(13);
         let request_tx_hash = digest(row.get(14), "restored request transaction hash")?;
+        let request_base_hash = row
+            .get::<_, Option<Vec<u8>>>(15)
+            .map(|hash| digest(hash, "restored request base hash"))
+            .transpose()?;
         let content = LineageTransactionContent::decode(&content_payload)?;
         let expected_content = LineageTransactionContent::from_transaction(
             &manifest.lineage_id,
@@ -3788,6 +4912,11 @@ fn target_matches_backup<C: postgres::GenericClient>(
             || request_digest != expected_request_digest
             || request_kind != i16::from(entry.request.request_kind)
             || request_tx_hash != row_hash
+            || request_base_hash
+                != entry
+                    .request
+                    .base_manifest_hash
+                    .and_then(|portable| restored_request_bases.get(&portable).copied())
             || receipt != entry.request.receipt_tempids
         {
             return Ok(false);
@@ -4776,10 +5905,21 @@ fn decode_backup_membership(
 }
 
 fn encode_request_record(record: &BackupRequestRecord) -> Result<Vec<u8>, SemanticError> {
+    encode_request_record_version(record, REQUEST_VERSION)
+}
+
+fn encode_request_record_version(
+    record: &BackupRequestRecord,
+    version: u16,
+) -> Result<Vec<u8>, SemanticError> {
     if !valid_lineage_id(&record.lineage_id)
         || record.basis == 0
         || record.request_key_hash == [0; 32]
-        || !matches!(record.request_kind, 0 | 1)
+        || !matches!(record.request_kind, 0 | 1 | 2)
+        || (record.request_kind == 2) != record.base_manifest_hash.is_some()
+        || (version == LEGACY_REQUEST_VERSION
+            && (record.request_kind == 2 || record.base_manifest_hash.is_some()))
+        || !matches!(version, LEGACY_REQUEST_VERSION | REQUEST_VERSION)
         || (record.request_kind == 0 && !record.receipt_tempids.is_empty())
         || record
             .receipt_tempids
@@ -4793,7 +5933,7 @@ fn encode_request_record(record: &BackupRequestRecord) -> Result<Vec<u8>, Semant
     }
     let mut bytes = Vec::new();
     bytes.extend_from_slice(REQUEST_MAGIC);
-    bytes.extend_from_slice(&REQUEST_VERSION.to_be_bytes());
+    bytes.extend_from_slice(&version.to_be_bytes());
     put_string(&mut bytes, &record.lineage_id)?;
     put_u64(&mut bytes, record.log_generation);
     put_u64(&mut bytes, record.basis);
@@ -4802,6 +5942,15 @@ fn encode_request_record(record: &BackupRequestRecord) -> Result<Vec<u8>, Semant
     bytes.extend_from_slice(&record.request_key_hash);
     bytes.extend_from_slice(&record.digest);
     bytes.push(record.request_kind);
+    if version == REQUEST_VERSION {
+        match record.base_manifest_hash {
+            None => bytes.push(0),
+            Some(hash) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&hash);
+            }
+        }
+    }
     put_u32(&mut bytes, record.receipt_tempids.len())?;
     for (name, entity) in &record.receipt_tempids {
         put_string(&mut bytes, name)?;
@@ -4819,7 +5968,8 @@ fn decode_request_record(bytes: &[u8]) -> Result<BackupRequestRecord, SemanticEr
             "backup request record header is invalid",
         ));
     }
-    if u16::from_be_bytes([bytes[4], bytes[5]]) != REQUEST_VERSION {
+    let version = u16::from_be_bytes([bytes[4], bytes[5]]);
+    if !matches!(version, LEGACY_REQUEST_VERSION | REQUEST_VERSION) {
         return Err(SemanticError::new(
             ErrorCategory::Unsupported,
             "backup/request-record-version",
@@ -4842,6 +5992,20 @@ fn decode_request_record(bytes: &[u8]) -> Result<BackupRequestRecord, SemanticEr
     let request_key_hash = cursor.digest()?;
     let digest = cursor.digest()?;
     let request_kind = cursor.u8()?;
+    let base_manifest_hash = if version == REQUEST_VERSION {
+        match cursor.u8()? {
+            0 => None,
+            1 => Some(cursor.digest()?),
+            _ => {
+                return Err(fault(
+                    "backup/request-record-base-tag",
+                    "backup request record has an invalid base-tree tag",
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let count = cursor.count_with_minimum(12)?;
     let mut receipt_tempids = BTreeMap::new();
     for _ in 0..count {
@@ -4863,12 +6027,13 @@ fn decode_request_record(bytes: &[u8]) -> Result<BackupRequestRecord, SemanticEr
         request_key_hash,
         digest,
         request_kind,
+        base_manifest_hash,
         receipt_tempids,
     };
     cursor.finish()?;
     if !valid_lineage_id(&record.lineage_id)
         || record.basis == 0
-        || encode_request_record(&record)? != bytes
+        || encode_request_record_version(&record, version)? != bytes
     {
         return Err(fault(
             "backup/noncanonical-request-record",
@@ -5440,6 +6605,7 @@ fn program_kind(program: &Program) -> i16 {
         crate::ProgramKind::AttributePredicate => 1,
         crate::ProgramKind::Query => 2,
         crate::ProgramKind::EntityPredicate => 3,
+        crate::ProgramKind::DualPredicate => 4,
     }
 }
 
@@ -5694,7 +6860,7 @@ mod tests {
 
     #[test]
     fn linked_request_record_is_canonical_and_tamper_evident() {
-        let record = BackupRequestRecord {
+        let mut record = BackupRequestRecord {
             lineage_id: "12345678-1234-4abc-8def-123456789abc".into(),
             log_generation: 42,
             basis: 7,
@@ -5703,6 +6869,7 @@ mod tests {
             request_key_hash: sha256(b"client-request-7"),
             digest: sha256(b"request payload"),
             request_kind: 1,
+            base_manifest_hash: None,
             receipt_tempids: BTreeMap::from([("new-entity".into(), 1234)]),
         };
         let encoded = encode_request_record(&record).unwrap();
@@ -5712,6 +6879,21 @@ mod tests {
         assert_eq!(
             decode_request_record(&damaged).unwrap_err().code,
             "backup/request-record-checksum"
+        );
+
+        // Version two remains a readable archive format; version three adds
+        // only the authenticated optional native db-before root.
+        let legacy = encode_request_record_version(&record, LEGACY_REQUEST_VERSION).unwrap();
+        assert_eq!(decode_request_record(&legacy).unwrap(), record);
+        record.request_kind = 2;
+        record.base_manifest_hash = Some(sha256(b"portable db-before manifest"));
+        let native = encode_request_record(&record).unwrap();
+        assert_eq!(decode_request_record(&native).unwrap(), record);
+        assert_eq!(
+            encode_request_record_version(&record, LEGACY_REQUEST_VERSION)
+                .unwrap_err()
+                .code,
+            "backup/noncanonical-request-record"
         );
     }
 

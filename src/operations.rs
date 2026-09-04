@@ -46,6 +46,11 @@ pub const MAX_TREE_BUILD_INTENT_NODES_PER_GC: usize = 512;
 /// Maximum exact immutable values drained in one operator transaction.
 pub const MAX_TREE_NODES_PER_GC: usize = 512;
 
+/// Maximum request-base archive closure pins released in one operator
+/// transaction. Raw values are merely marked here and become eligible for the
+/// ordinary exact tree-node collector on a later call.
+pub const MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC: usize = 512;
+
 /// Maximum detached program blobs drained in one operator transaction.
 pub const MAX_PROGRAMS_PER_GC: usize = 512;
 
@@ -99,6 +104,14 @@ pub struct OperationalMetrics {
     /// publications, including roots, directories, and leaves.
     pub tree_nodes: u64,
     pub tree_node_bytes: u64,
+    /// Immutable exact-retry roots retained outside the ordinary accelerator
+    /// publication chain for this database.
+    pub request_base_archives: u64,
+    /// Closure-membership rows currently pinning archive tree values.
+    pub request_base_archive_nodes: u64,
+    /// Durable native request receipts bound to either a normal publication
+    /// or an exact-retry archive.
+    pub request_base_bindings: u64,
     /// Globally stored native nodes proven unreachable only when shared
     /// reachability is complete. Zero is conservative when it is not.
     pub orphan_tree_nodes: u64,
@@ -138,6 +151,9 @@ pub struct GarbageInventory {
     /// Exact post-publication garbage marks drained after all current and
     /// pending memberships have ceased to retain them.
     pub tree_node_hashes: Vec<Digest>,
+    /// Restored exact-retry roots advanced by one bounded archive release.
+    /// These roots never participate in ordinary accelerator selection.
+    pub request_base_archives: Vec<RequestBaseArchiveGarbage>,
     /// Retired authoritative log generations advanced by exactly one durable
     /// phase. Empty phases are included because closing admission or moving
     /// the restart cursor is itself material collection progress.
@@ -199,6 +215,15 @@ pub struct TreeBuildIntentGarbage {
     pub abandoned: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct RequestBaseArchiveGarbage {
+    pub database_id: String,
+    pub generation: u64,
+    pub manifest_hash: Digest,
+    pub rows_removed: u64,
+    pub is_complete: bool,
+}
+
 #[derive(Default)]
 struct GarbageCandidates {
     segments: Vec<Digest>,
@@ -207,6 +232,7 @@ struct GarbageCandidates {
     tree_build_intents: Vec<TreeBuildIntentGarbage>,
     tree_manifests: Vec<Digest>,
     tree_nodes: Vec<Digest>,
+    request_base_archives: Vec<RequestBaseArchiveGarbage>,
     log_generations: Vec<LogGenerationGarbage>,
     semantic_roots: Vec<SemanticCommitmentRootGarbage>,
     semantic_nodes: Vec<Digest>,
@@ -221,6 +247,7 @@ impl GarbageCandidates {
             tree_build_intents: self.tree_build_intents,
             tree_manifest_hashes: self.tree_manifests,
             tree_node_hashes: self.tree_nodes,
+            request_base_archives: self.request_base_archives,
             log_generations: self.log_generations,
             semantic_commitment_roots: self.semantic_roots,
             semantic_commitment_node_hashes: self.semantic_nodes,
@@ -480,18 +507,42 @@ impl PostgresOperator {
                         AND semantic.state_hash = manifest.state_hash \
                         AND semantic.eidx_frontier = manifest.eidx_frontier \
                         AND semantic.commitment_version = 2 \
+                       LEFT JOIN atomic_request_base_archives archive \
+                         ON archive.manifest_hash = base.base_manifest_hash \
+                        AND archive.database_id = request.database_id \
+                        AND archive.generation = request.generation \
+                       LEFT JOIN atomic_request_base_archive_completions archive_complete \
+                         ON archive_complete.manifest_hash = archive.manifest_hash \
+                       LEFT JOIN atomic_semantic_commitment_roots archive_semantic \
+                         ON archive_semantic.database_id = archive.database_id \
+                        AND archive_semantic.generation = archive.generation \
+                        AND archive_semantic.basis_t = archive.basis_t \
+                        AND archive_semantic.tx_hash = archive.tx_hash \
+                        AND archive_semantic.state_hash = archive.state_hash \
+                        AND archive_semantic.eidx_frontier = archive.eidx_frontier \
+                        AND archive_semantic.commitment_version = 2 \
                       WHERE request.database_id = $1 AND request.generation = $2 \
                         AND ( \
                              (request.request_kind = 2 AND ( \
                                   base.base_manifest_hash IS NULL \
-                                  OR publication.manifest_hash IS NULL \
-                                  OR manifest.manifest_hash IS NULL \
-                                  OR semantic.database_id IS NULL \
-                                  OR publication.basis_t > request.basis_t - 1 \
-                                  OR EXISTS ( \
-                                       SELECT 1 FROM atomic_tree_retirement_progress progress \
-                                        WHERE progress.manifest_hash = base.base_manifest_hash \
-                                  ) \
+                                  OR ( \
+                                      CASE WHEN publication.manifest_hash IS NOT NULL \
+                                                AND manifest.manifest_hash IS NOT NULL \
+                                                AND manifest.manifest_version = 4 \
+                                                AND semantic.database_id IS NOT NULL \
+                                                AND publication.basis_t <= request.basis_t - 1 \
+                                                AND NOT EXISTS ( \
+                                                    SELECT 1 FROM atomic_tree_retirement_progress progress \
+                                                     WHERE progress.manifest_hash = base.base_manifest_hash \
+                                                ) \
+                                           THEN 1 ELSE 0 END \
+                                      + CASE WHEN archive.manifest_hash IS NOT NULL \
+                                                   AND archive.manifest_version = 4 \
+                                                   AND archive_complete.manifest_hash IS NOT NULL \
+                                                   AND archive_semantic.database_id IS NOT NULL \
+                                                   AND archive.basis_t <= request.basis_t - 1 \
+                                              THEN 1 ELSE 0 END \
+                                  ) <> 1 \
                              )) \
                              OR (request.request_kind <> 2 \
                                  AND base.base_manifest_hash IS NOT NULL) \
@@ -632,6 +683,24 @@ impl PostgresOperator {
             deep_derived,
             &mut metrics,
             &mut problems,
+        )?;
+        metrics.request_base_archives = count(
+            &mut transaction,
+            "SELECT count(*) FROM atomic_request_base_archives WHERE database_id = $1",
+            database_id,
+        )?;
+        metrics.request_base_archive_nodes = count(
+            &mut transaction,
+            "SELECT count(*) FROM atomic_request_base_archive_nodes node \
+              JOIN atomic_request_base_archives archive \
+                ON archive.manifest_hash = node.manifest_hash \
+             WHERE archive.database_id = $1",
+            database_id,
+        )?;
+        metrics.request_base_bindings = count(
+            &mut transaction,
+            "SELECT count(*) FROM atomic_generation_request_bases WHERE database_id = $1",
+            database_id,
         )?;
         inspect_semantic_commitments(&mut transaction, database_id, &mut metrics)?;
         metrics.index_lag = basis.saturating_sub(metrics.index_basis_t);
@@ -824,6 +893,44 @@ impl PostgresOperator {
                 crate::ErrorCategory::Conflict,
                 "operations/gc-tree-preview-diverged",
                 "tree-value collection diverged from its same-snapshot preview",
+            ));
+        }
+        // Receipt archives are generation roots, not ordinary accelerator
+        // publications. Release one bounded archive before any semantic/log
+        // phase so the owning generation becomes irrevocably collectible
+        // before its exact db-before bindings disappear.
+        let mut collected_request_base_archives =
+            Vec::with_capacity(candidates.request_base_archives.len());
+        for candidate in &candidates.request_base_archives {
+            let row = transaction
+                .query_one(
+                    "SELECT rows_removed, is_complete \
+                       FROM atomic_collect_request_base_archive($1, $2, $3, $4, $5)",
+                    &[
+                        &candidate.database_id,
+                        &sql_u64(candidate.generation, "request-base archive generation")?,
+                        &&candidate.manifest_hash[..],
+                        &millis,
+                        &(MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC as i64),
+                    ],
+                )
+                .map_err(|error| operation_error("operations/gc-request-base-archive", error))?;
+            collected_request_base_archives.push(RequestBaseArchiveGarbage {
+                database_id: candidate.database_id.clone(),
+                generation: candidate.generation,
+                manifest_hash: candidate.manifest_hash,
+                rows_removed: positive_or_zero(
+                    row.get(0),
+                    "collected request-base archive rows",
+                )?,
+                is_complete: row.get(1),
+            });
+        }
+        if collected_request_base_archives != candidates.request_base_archives {
+            return Err(SemanticError::new(
+                crate::ErrorCategory::Conflict,
+                "operations/gc-request-base-archive-preview-diverged",
+                "request-base archive collection diverged from its same-snapshot preview",
             ));
         }
         let mut collected_programs = transaction
@@ -2803,13 +2910,31 @@ fn global_derived_reachability<C: postgres::GenericClient>(
             native_trees.push(tree.descriptor.clone());
         }
     }
-    reachable.tree_nodes.extend(native_nodes.keys().copied());
     let native_node_set = TreeNodeSet::from_nodes(native_nodes);
     if native_trees
         .iter()
         .any(|tree| validate_tree(tree, &native_node_set).is_err())
     {
         return Ok(None);
+    }
+    reachable
+        .tree_nodes
+        .extend(native_node_set.iter().map(|(hash, _)| *hash));
+    // Both partial content-first plans and completed request-base archives
+    // are exact liveness roots. Their own completion/open path authenticates
+    // the full graph; orphan metrics must conservatively retain every planned
+    // hash even while an interrupted upload is still incomplete.
+    for row in client
+        .query(
+            "SELECT DISTINCT node_hash FROM atomic_request_base_archive_nodes",
+            &[],
+        )
+        .map_err(|error| operation_error("operations/reachability-request-base-archive", error))?
+    {
+        reachable.tree_nodes.insert(digest(
+            row.get(0),
+            "request-base archive reachable node hash",
+        )?);
     }
     Ok(Some(reachable))
 }
@@ -3118,7 +3243,10 @@ fn garbage_candidates<C: postgres::GenericClient>(
         .into_iter()
         .map(|row| digest(row.get(0), "program garbage hash"))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut semantic_nodes = client
+    let request_base_archives =
+        request_base_archive_candidates(client, older_than_millis)?;
+    let mut semantic_nodes = if request_base_archives.is_empty() {
+        client
         .query(
             "SELECT node_hash \
                FROM atomic_semantic_commitment_nodes node \
@@ -3138,9 +3266,16 @@ fn garbage_candidates<C: postgres::GenericClient>(
         .map_err(|error| operation_error("operations/gc-semantic-node-candidates", error))?
         .into_iter()
         .map(|row| digest(row.get(0), "semantic commitment garbage hash"))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     semantic_nodes.sort_unstable();
-    let log_generations = log_generation_candidates(client, older_than_millis)?;
+    let log_generations = if request_base_archives.is_empty() {
+        log_generation_candidates(client, older_than_millis)?
+    } else {
+        Vec::new()
+    };
     let semantic_roots = if let Some(candidate) = log_generations
         .iter()
         .find(|candidate| candidate.semantic_roots_removed > 0)
@@ -3161,10 +3296,233 @@ fn garbage_candidates<C: postgres::GenericClient>(
         tree_build_intents,
         tree_manifests,
         tree_nodes,
+        request_base_archives,
         log_generations,
         semantic_roots,
         semantic_nodes,
     })
+}
+
+/// Select one inactive exact-retry archive and acquire the same generation,
+/// manifest, and restore/build fences that the owner SQL function repeats.
+/// A partially released archive remains first-class work until its header is
+/// gone; only then may semantic/log generation collection advance.
+fn request_base_archive_candidates<C: postgres::GenericClient>(
+    client: &mut C,
+    older_than_millis: i64,
+) -> Result<Vec<RequestBaseArchiveGarbage>, SemanticError> {
+    const PROBE_PAGE: i64 = 64;
+    let maximum_rows = MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC as u64;
+    let mut offset = 0_i64;
+    loop {
+        let rows = client
+            .query(
+                "SELECT archive.database_id, archive.generation, archive.manifest_hash, \
+                        (SELECT count(*) FROM atomic_generation_request_bases base \
+                          WHERE base.database_id = archive.database_id \
+                            AND base.generation = archive.generation \
+                            AND base.base_manifest_hash = archive.manifest_hash), \
+                        (SELECT count(*) FROM atomic_request_base_archive_completions complete \
+                          WHERE complete.manifest_hash = archive.manifest_hash), \
+                        (SELECT count(*) FROM atomic_request_base_archive_nodes node \
+                          WHERE node.manifest_hash = archive.manifest_hash), \
+                        (SELECT count(*) FROM atomic_request_base_archive_roots root \
+                          WHERE root.manifest_hash = archive.manifest_hash), \
+                        retirement.generation IS NOT NULL \
+                   FROM atomic_request_base_archives archive \
+                   JOIN atomic_log_generations generation \
+                     ON generation.database_id = archive.database_id \
+                    AND generation.generation = archive.generation \
+                   JOIN atomic_databases database \
+                     ON database.database_id = archive.database_id \
+                   LEFT JOIN atomic_log_generation_builds build \
+                     ON build.database_id = archive.database_id \
+                    AND build.generation = archive.generation \
+                   LEFT JOIN atomic_log_generation_retirements retirement \
+                     ON retirement.database_id = archive.database_id \
+                    AND retirement.generation = archive.generation \
+                   LEFT JOIN atomic_log_generation_abandonment_progress abandonment \
+                     ON abandonment.database_id = archive.database_id \
+                    AND abandonment.generation = archive.generation \
+                  WHERE NOT EXISTS ( \
+                            SELECT 1 FROM atomic_heads active \
+                             WHERE active.database_id = archive.database_id \
+                               AND active.log_generation = archive.generation \
+                        ) \
+                    AND ( \
+                        (retirement.generation IS NOT NULL \
+                         AND (retirement.collecting_at IS NOT NULL \
+                              OR retirement.retired_at \
+                                 + $1::bigint * interval '1 millisecond' \
+                                    <= clock_timestamp())) \
+                        OR \
+                        (retirement.generation IS NULL \
+                         AND build.generation IS NOT NULL \
+                         AND NOT EXISTS ( \
+                               SELECT 1 FROM atomic_log_generation_activations activation \
+                                WHERE activation.database_id = archive.database_id \
+                                  AND activation.generation = archive.generation \
+                         ) \
+                         AND ( \
+                              (generation.build_kind = 0 \
+                               AND build.source_generation IS NULL \
+                               AND build.captured_basis_t = 0 \
+                               AND build.captured_head_hash = database.genesis_hash \
+                               AND build.frozen_plan_hash IS NOT NULL \
+                               AND build.restore_manifest_hash IS NULL \
+                               AND build.restore_basis_t IS NULL \
+                               AND build.restore_head_hash IS NULL \
+                               AND NOT EXISTS ( \
+                                     SELECT 1 FROM atomic_heads any_head \
+                                      WHERE any_head.database_id = archive.database_id \
+                               ) \
+                               AND NOT EXISTS ( \
+                                     SELECT 1 FROM atomic_log_generations other \
+                                      WHERE other.database_id = archive.database_id \
+                                        AND other.generation <> archive.generation \
+                               )) \
+                              OR (generation.build_kind = 2 \
+                                  AND build.source_generation IS NOT NULL) \
+                         ) \
+                         AND (abandonment.generation IS NOT NULL OR ( \
+                              generation.created_at \
+                                + $1::bigint * interval '1 millisecond' \
+                                    <= clock_timestamp() \
+                              AND (generation.build_kind = 0 OR NOT EXISTS ( \
+                                   SELECT 1 FROM atomic_heads source \
+                                    WHERE source.database_id = archive.database_id \
+                                      AND source.log_generation = build.source_generation \
+                              )) \
+                         ))) \
+                    ) \
+                  ORDER BY (retirement.collecting_at IS NULL \
+                            AND abandonment.generation IS NULL), \
+                           COALESCE(retirement.collecting_at, abandonment.updated_at, \
+                                    retirement.retired_at, generation.created_at), \
+                           archive.database_id, archive.generation, archive.archive_revision \
+                  LIMIT $2 OFFSET $3",
+                &[&older_than_millis, &PROBE_PAGE, &offset],
+            )
+            .map_err(|error| {
+                operation_error("operations/gc-request-base-archive-candidates", error)
+            })?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let row_count = rows.len() as i64;
+        for row in rows {
+            let database_id: String = row.get(0);
+            let generation = positive_or_zero(row.get(1), "request-base archive generation")?;
+            let manifest_hash = digest(row.get(2), "request-base archive manifest hash")?;
+            let binding_count = positive_or_zero(row.get(3), "request-base binding count")?;
+            let completion_count =
+                positive_or_zero(row.get(4), "request-base archive completion count")?;
+            let node_count = positive_or_zero(row.get(5), "request-base archive node count")?;
+            let root_count = positive_or_zero(row.get(6), "request-base archive root count")?;
+            let retired: bool = row.get(7);
+            let generation_sql = sql_u64(generation, "request-base archive generation")?;
+            let generation_key: Option<i64> = client
+                .query_one(
+                    "SELECT atomic_log_generation_pin_key($1, $2)",
+                    &[&database_id, &generation_sql],
+                )
+                .map_err(|error| {
+                    operation_error("operations/gc-request-base-generation-pin-key", error)
+                })?
+                .get(0);
+            let Some(generation_key) = generation_key else {
+                continue;
+            };
+            let generation_locked: bool = client
+                .query_one(
+                    "SELECT pg_try_advisory_xact_lock($1)",
+                    &[&generation_key],
+                )
+                .map_err(|error| {
+                    operation_error("operations/gc-request-base-generation-pin", error)
+                })?
+                .get(0);
+            let manifest_locked = if generation_locked {
+                try_lock_tree_manifest_for_gc(client, manifest_hash)?
+            } else {
+                false
+            };
+            if !generation_locked || !manifest_locked {
+                continue;
+            }
+            if !retired {
+                let lock_row = client
+                    .query_one(
+                        "SELECT atomic_tree_database_build_pin_key($1), \
+                                hashtextextended('atomic/excision-worker/v1/' || lineage_id, \
+                                                 4707476001900298240::bigint), \
+                                hashtextextended('atomic/restore/' || $1, 0) \
+                           FROM atomic_databases WHERE database_id = $1",
+                        &[&database_id],
+                    )
+                    .map_err(|error| {
+                        operation_error("operations/gc-request-base-restore-pin-keys", error)
+                    })?;
+                let lock_keys = [
+                    lock_row.get::<_, Option<i64>>(0),
+                    lock_row.get::<_, Option<i64>>(1),
+                    lock_row.get::<_, Option<i64>>(2),
+                ];
+                let mut all_locked = true;
+                for lock_key in lock_keys {
+                    let Some(lock_key) = lock_key else {
+                        all_locked = false;
+                        break;
+                    };
+                    let locked: bool = client
+                        .query_one(
+                            "SELECT pg_try_advisory_xact_lock($1)",
+                            &[&lock_key],
+                        )
+                        .map_err(|error| {
+                            operation_error("operations/gc-request-base-restore-pin", error)
+                        })?
+                        .get(0);
+                    if !locked {
+                        all_locked = false;
+                        break;
+                    }
+                }
+                if !all_locked {
+                    continue;
+                }
+            }
+            let (rows_removed, is_complete) = if binding_count > maximum_rows {
+                (maximum_rows, false)
+            } else {
+                let bounded_nodes = node_count.min(maximum_rows);
+                let complete = node_count <= maximum_rows;
+                let terminal_rows = if complete {
+                    root_count.saturating_add(1)
+                } else {
+                    0
+                };
+                (
+                    binding_count
+                        .saturating_add(completion_count)
+                        .saturating_add(bounded_nodes)
+                        .saturating_add(terminal_rows),
+                    complete,
+                )
+            };
+            return Ok(vec![RequestBaseArchiveGarbage {
+                database_id,
+                generation,
+                manifest_hash,
+                rows_removed,
+                is_complete,
+            }]);
+        }
+        if row_count < PROBE_PAGE {
+            return Ok(Vec::new());
+        }
+        offset = offset.saturating_add(PROBE_PAGE);
+    }
 }
 
 /// Select and preview one retired physical log generation without closing
@@ -3214,6 +3572,9 @@ fn log_generation_candidates<C: postgres::GenericClient>(
                     AND NOT EXISTS (SELECT 1 FROM atomic_generation_request_bases base \
                                      WHERE base.database_id = r.database_id \
                                        AND base.generation = r.generation) \
+                    AND NOT EXISTS (SELECT 1 FROM atomic_request_base_archives archive \
+                                     WHERE archive.database_id = r.database_id \
+                                       AND archive.generation = r.generation) \
                   ORDER BY progress.generation IS NULL, \
                            COALESCE(progress.updated_at, r.retired_at), \
                            r.database_id, r.generation \
@@ -3328,6 +3689,9 @@ fn abandoned_log_generation_candidates<C: postgres::GenericClient>(
                     AND NOT EXISTS (SELECT 1 FROM atomic_generation_request_bases base \
                                      WHERE base.database_id = g.database_id \
                                        AND base.generation = g.generation) \
+                    AND NOT EXISTS (SELECT 1 FROM atomic_request_base_archives archive \
+                                     WHERE archive.database_id = g.database_id \
+                                       AND archive.generation = g.generation) \
                   ORDER BY progress.generation IS NULL, \
                            COALESCE(progress.updated_at, g.created_at), \
                            g.database_id, g.generation \
@@ -3875,6 +4239,14 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
                                SELECT 1 FROM finishing_abandoned_manifests finishing \
                                 WHERE finishing.manifest_hash = r.manifest_hash \
                            ) \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_request_base_archive_nodes archive \
+                         WHERE archive.node_hash = p.node_hash \
+                    ) \
+                AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_request_base_archive_roots archive_root \
+                         WHERE archive_root.root_hash = p.node_hash \
                     ) \
                 AND NOT EXISTS ( \
                         SELECT 1 \

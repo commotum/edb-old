@@ -1,13 +1,15 @@
 use atomic_core::{
     Attribute, Cardinality, DB_EXCISE, DB_FN, DB_IDENT, Digest, EntityRef, ExcisionFault,
     GarbageInventory, IndexBuildFault, IndexOrder, IndexSegment, Instruction, Keyword,
-    MAX_LOG_GENERATION_ROWS_PER_GC, MAX_TREE_BUILD_INTENT_NODES_PER_GC,
+    MAX_LOG_GENERATION_ROWS_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
+    MAX_TREE_BUILD_INTENT_NODES_PER_GC,
     MAX_TREE_RETIREMENT_NODES_PER_GC, Peer, PersistentTreeManifest, PortableBackup,
     PostgresIndexer, PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramKind,
     RECOMMENDED_GARBAGE_COLLECTION_AGE, RestoreFault, Schema, TreeManifestRecord,
     TreePublicationDelta, TreePublishOutcome, TreeRootBinding, TxOp, TxValue, USER_PARTITION,
     Value, ValueType, encode_index_segment, encode_program, make_eid, sha256,
 };
+use atomic_core::persistent_tree::TreeConfig;
 use postgres::{Client, NoTls};
 use std::collections::BTreeSet;
 use std::fs;
@@ -290,6 +292,7 @@ fn inventory_has_work(inventory: &GarbageInventory) -> bool {
         || !inventory.tree_build_intents.is_empty()
         || !inventory.tree_manifest_hashes.is_empty()
         || !inventory.tree_node_hashes.is_empty()
+        || !inventory.request_base_archives.is_empty()
         || !inventory.log_generations.is_empty()
         || !inventory.semantic_commitment_roots.is_empty()
         || !inventory.semantic_commitment_node_hashes.is_empty()
@@ -1239,12 +1242,30 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
     let created = store.create_database(&source, schema()).unwrap();
     let service = common::start_service(&connection, &source);
     let value = unique_long();
-    let committed = common::transact(
+    let seeded = common::transact(
         &service,
         "initial-restore-abandonment-seed",
         created.basis_t(),
         &[add(value)],
         1_000,
+    );
+    service.shutdown();
+    let mut tiny_leaves = TreeConfig::default();
+    tiny_leaves.max_leaf_datoms = 1;
+    tiny_leaves.target_leaf_bytes = 64;
+    let mut indexer = PostgresIndexer::connect(&connection, &source)
+        .unwrap()
+        .with_tree_config(tiny_leaves)
+        .unwrap();
+    indexer.consolidate().unwrap();
+    drop(indexer);
+    let service = common::start_service(&connection, &source);
+    let committed = common::transact(
+        &service,
+        "initial-restore-abandonment-large-base",
+        seeded.basis_t,
+        &[add(value.saturating_add(1))],
+        2_000,
     );
     service.shutdown();
     let mut backup = PortableBackup::connect(&connection).unwrap();
@@ -1291,6 +1312,29 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
             .iter()
             .all(|candidate| candidate.database_id != target),
         "the normal retention age must protect a newly interrupted initial restore"
+    );
+    let mut archive_steps = 0_usize;
+    let mut saw_bounded_resume = false;
+    for _ in 0..MAX_TEST_GC_STEPS {
+        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let Some(candidate) = dry.request_base_archives.iter().find(|candidate| {
+            candidate.database_id == target && candidate.generation == generation as u64
+        }) else {
+            break;
+        };
+        archive_steps += 1;
+        saw_bounded_resume |= !candidate.is_complete;
+        assert!(
+            candidate.rows_removed
+                <= MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC as u64 + 10,
+            "one archive release exceeded its bounded node batch plus fixed root metadata"
+        );
+        apply_exact_inventory(&mut operator, &dry);
+    }
+    assert!(archive_steps >= 2, "both exact request bases were not released");
+    assert!(
+        saw_bounded_resume,
+        "large request-base archive did not exercise resumable bounded release"
     );
     let first = preview_next_log_generation(&mut operator, &target, generation as u64);
     assert!(first.log_generations.iter().any(|candidate| {
