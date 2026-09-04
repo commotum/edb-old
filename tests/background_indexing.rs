@@ -1,7 +1,8 @@
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, BackgroundIndexingStats, Cardinality, EntityRef,
-    ErrorCategory, Keyword, PostgresStore, Schema, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TxOp, TxValue, USER_PARTITION, Value, ValueType, make_eid, sha256,
+    ErrorCategory, Keyword, PostgresIndexer, PostgresStore, Schema, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxOp, TxValue, USER_PARTITION, Value, ValueType,
+    make_eid, sha256,
 };
 use postgres::{Client, GenericClient, NoTls};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -138,7 +139,7 @@ fn finish_zero_delta_publication_work(client: &mut impl GenericClient, manifest_
     );
 }
 
-fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, u64) {
+fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, u64, [u8; 32]) {
     let mut transaction = client.transaction().unwrap();
     let authoritative = transaction
         .query_one(
@@ -229,7 +230,64 @@ fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, 
     (
         u64::try_from(basis_t).unwrap(),
         u64::try_from(poison_revision).unwrap(),
+        poison_hash,
     )
+}
+
+fn assert_incremental_publication(
+    client: &mut Client,
+    database_id: &str,
+    publication_revision: u64,
+    predecessor_manifest_hash: [u8; 32],
+) {
+    let row = client
+        .query_one(
+            "SELECT state.delta_mode, state.predecessor_manifest_hash \
+               FROM atomic_tree_publications publication \
+               JOIN atomic_tree_publication_states state \
+                 ON state.manifest_hash = publication.manifest_hash \
+              WHERE publication.database_id = $1 \
+                AND publication.publication_revision = $2",
+            &[&database_id, &(publication_revision as i64)],
+        )
+        .unwrap();
+    assert_eq!(row.get::<_, i16>(0), 2, "background work rebuilt in full");
+    assert_eq!(
+        row.get::<_, Option<Vec<u8>>>(1).as_deref(),
+        Some(predecessor_manifest_hash.as_slice()),
+        "background delta did not name the immediate physical predecessor"
+    );
+}
+
+fn corrupt_latest_manifest_in_place(client: &mut Client, database_id: &str) -> (u64, [u8; 32]) {
+    let row = client
+        .query_one(
+            "SELECT p.publication_revision, p.manifest_hash, m.payload \
+               FROM atomic_tree_publications p \
+               JOIN atomic_tree_manifests m ON m.manifest_hash = p.manifest_hash \
+              WHERE p.database_id = $1 \
+              ORDER BY p.publication_revision DESC LIMIT 1",
+            &[&database_id],
+        )
+        .unwrap();
+    let revision = u64::try_from(row.get::<_, i64>(0)).unwrap();
+    let manifest_hash: [u8; 32] = row.get::<_, Vec<u8>>(1).try_into().unwrap();
+    let mut payload: Vec<u8> = row.get(2);
+    let last = payload.len() - 1;
+    payload[last] ^= 1;
+    client
+        .batch_execute("SET session_replication_role = replica")
+        .unwrap();
+    client
+        .execute(
+            "UPDATE atomic_tree_manifests SET payload = $1 WHERE manifest_hash = $2",
+            &[&payload, &&manifest_hash[..]],
+        )
+        .unwrap();
+    client
+        .batch_execute("SET session_replication_role = origin")
+        .unwrap();
+    (revision, manifest_hash)
 }
 
 fn service_config(connection: &str, database_id: &str, holder: &str) -> TransactionServiceConfig {
@@ -346,6 +404,95 @@ fn basis_zero_is_published_at_creation_and_first_novelty_advances_it() {
 }
 
 #[test]
+fn incomplete_live_fold_is_finished_before_the_bounded_tail_merge() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("background_index_incomplete_fold");
+    setup(&connection, &database_id);
+
+    // Build enough immutable paths that the publication's fixed 512-node
+    // post-commit fold cannot finish in the publishing call itself.
+    let seed_service = TransactionService::start(service_config(
+        &connection,
+        &database_id,
+        "background-incomplete-seed",
+    ))
+    .unwrap();
+    let operations = (0..1_024)
+        .map(|ordinal| TxOp::Add {
+            entity: EntityRef::Temp(format!("seed-{ordinal}")),
+            attribute: ITEM_COUNT,
+            value: TxValue::Scalar(Value::Long(ordinal)),
+        })
+        .collect::<Vec<_>>();
+    seed_service
+        .client()
+        .transact(
+            TransactionRequest::new("background-incomplete-populate", operations),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    seed_service.shutdown();
+
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .with_segment_datoms(8)
+        .unwrap();
+    let large = indexer.consolidate().unwrap();
+    assert!(large.segment_count > 500, "witness tree is not large");
+    let mut sql = Client::connect(&connection, NoTls).unwrap();
+    let fold = sql
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_tree_delta_headers \
+                             WHERE manifest_hash = $1 AND delta_state = 2), \
+                    EXISTS (SELECT 1 FROM atomic_tree_live_sets \
+                             WHERE database_id = $2 AND manifest_hash = $1 AND complete)",
+            &[&&large.manifest_hash[..], &database_id],
+        )
+        .unwrap();
+    assert!(fold.get::<_, bool>(0), "large fold unexpectedly finished");
+    assert!(!fold.get::<_, bool>(1));
+
+    let service = TransactionService::start_with_indexing(
+        service_config(&connection, &database_id, "background-incomplete-merge"),
+        indexing_config(1024 * 1024),
+    )
+    .unwrap();
+    let committed = service
+        .client()
+        .transact(
+            request("background-incomplete-tail", 9),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    let indexed = wait_for_stats(&service, |stats| {
+        stats.published_basis_t == committed.basis_t
+            && stats.published_revision > large.publication_revision
+            && stats.jobs_completed == 1
+            && stats.total_bytes == 0
+    });
+    assert_eq!(indexed.published_revision, large.publication_revision + 1);
+    assert_eq!(indexed.jobs_failed, 0);
+    assert_incremental_publication(
+        &mut sql,
+        &database_id,
+        indexed.published_revision,
+        large.manifest_hash,
+    );
+    let old_work: i64 = sql
+        .query_one(
+            "SELECT count(*) FROM atomic_tree_delta_headers WHERE manifest_hash = $1",
+            &[&&large.manifest_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(old_work, 0, "predecessor fold was not sealed");
+    assert!(service.client().is_available());
+    service.shutdown();
+}
+
+#[test]
 fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
     let Some(connection) = connection() else {
         return;
@@ -366,7 +513,8 @@ fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
     first_service.shutdown();
 
     let mut sql = Client::connect(&connection, NoTls).unwrap();
-    let (poison_basis, poison_revision) = publish_corrupt_v4_manifest(&mut sql, &database_id);
+    let (poison_basis, poison_revision, poison_hash) =
+        publish_corrupt_v4_manifest(&mut sql, &database_id);
     assert_eq!(poison_basis, initial_basis);
     assert_eq!(poison_revision, first.published_revision + 1);
     let head_before: i64 = sql
@@ -440,6 +588,92 @@ fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
         repaired.published_revision
     );
     assert_eq!(u64::try_from(latest_basis).unwrap(), initial_basis);
+    assert_incremental_publication(
+        &mut sql,
+        &database_id,
+        repaired.published_revision,
+        poison_hash,
+    );
+}
+
+#[test]
+fn divergent_corrupt_root_requires_explicit_administrative_rebuild() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("background_index_divergent_corrupt");
+    setup(&connection, &database_id);
+    let seed_service = TransactionService::start(service_config(
+        &connection,
+        &database_id,
+        "background-divergent-seed",
+    ))
+    .unwrap();
+    seed_service
+        .client()
+        .transact(
+            request("background-divergent-value", 41),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    seed_service.shutdown();
+
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+    let divergent = indexer.consolidate().unwrap();
+    let mut sql = Client::connect(&connection, NoTls).unwrap();
+    let (corrupt_revision, _corrupt_hash) =
+        corrupt_latest_manifest_in_place(&mut sql, &database_id);
+    assert_eq!(corrupt_revision, divergent.publication_revision);
+
+    let service = TransactionService::start_with_indexing(
+        service_config(&connection, &database_id, "background-divergent-bounded"),
+        indexing_config(1024 * 1024),
+    )
+    .unwrap();
+    let failed = wait_for_stats(&service, |stats| stats.jobs_failed == 1);
+    let failure = failed
+        .last_failure
+        .expect("bounded background refusal was not observable");
+    assert_eq!(failure.category, ErrorCategory::Unavailable);
+    assert_eq!(failure.code, "index/background-rebuild-required");
+    assert!(!service.client().is_available());
+    let latest_after_failure: i64 = sql
+        .query_one(
+            "SELECT max(publication_revision) FROM atomic_tree_publications \
+              WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        u64::try_from(latest_after_failure).unwrap(),
+        corrupt_revision
+    );
+    service.shutdown();
+
+    // The broad recovery path remains an explicit operator decision.
+    let repaired = indexer.consolidate().unwrap();
+    assert_eq!(repaired.publication_revision, corrupt_revision + 1);
+    let mode: i16 = sql
+        .query_one(
+            "SELECT state.delta_mode FROM atomic_tree_publications publication \
+               JOIN atomic_tree_publication_states state \
+                 ON state.manifest_hash = publication.manifest_hash \
+              WHERE publication.database_id = $1 \
+                AND publication.publication_revision = $2",
+            &[&database_id, &(repaired.publication_revision as i64)],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(mode, 1, "administrative repair was not a replacement");
+    let restarted = TransactionService::start(service_config(
+        &connection,
+        &database_id,
+        "background-divergent-restarted",
+    ))
+    .unwrap();
+    assert!(restarted.client().is_available());
+    restarted.shutdown();
 }
 
 #[test]
@@ -762,6 +996,13 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     assert_eq!(repaired.jobs_failed, 0);
     assert!(repaired.last_failure.is_none());
     assert!(client.is_available());
+    let mut evidence = Client::connect(&connection, NoTls).unwrap();
+    assert_incremental_publication(
+        &mut evidence,
+        &database_id,
+        repaired.published_revision,
+        poison_hash,
+    );
 
     let after_race = client
         .transact(request("race-after", 8), Duration::from_secs(2))

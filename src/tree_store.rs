@@ -682,6 +682,30 @@ impl PostgresTreeStore {
         expected_revision: u64,
         delta: &TreePublicationDelta,
     ) -> Result<TreePublishOutcome, SemanticError> {
+        self.publish_manifest_with_delta_policy(manifest, expected_revision, delta, true)
+    }
+
+    /// Publish without draining a predecessor that raced this build. The
+    /// root trigger still requires complete immediate-predecessor membership,
+    /// so a race fails closed and lets the automatic indexer reselect and
+    /// advance one bounded fold batch. Explicit administrative callers use
+    /// [`Self::publish_manifest_with_delta`] and retain eager drain behavior.
+    pub(crate) fn publish_manifest_with_delta_bounded(
+        &mut self,
+        manifest: &TreeManifestRecord,
+        expected_revision: u64,
+        delta: &TreePublicationDelta,
+    ) -> Result<TreePublishOutcome, SemanticError> {
+        self.publish_manifest_with_delta_policy(manifest, expected_revision, delta, false)
+    }
+
+    fn publish_manifest_with_delta_policy(
+        &mut self,
+        manifest: &TreeManifestRecord,
+        expected_revision: u64,
+        delta: &TreePublicationDelta,
+        drain_predecessor_work: bool,
+    ) -> Result<TreePublishOutcome, SemanticError> {
         self.stats.manifest_write_attempts = self.stats.manifest_write_attempts.saturating_add(1);
         validate_manifest(manifest)?;
         validate_publication_delta(manifest, expected_revision, delta)?;
@@ -719,7 +743,9 @@ impl PostgresTreeStore {
         // A database has at most one incomplete publication fold: the SQL
         // root validator will not admit its successor until this work seals.
         // Drain a predecessor outside the root lock in bounded transactions.
-        self.drain_publication_work(&manifest.database_id)?;
+        if drain_predecessor_work {
+            self.drain_publication_work(&manifest.database_id)?;
+        }
         let already_published: bool = self
             .client
             .query_one(

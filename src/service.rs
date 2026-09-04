@@ -5,9 +5,8 @@ use crate::postgres::{
     read_authenticated_log_range, shared_program_cache_stats,
 };
 use crate::{
-    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, IndexBuildFault,
-    PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
-    SemanticError, TxForm, TxOp,
+    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, PostgresConnectionConfig,
+    PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::mem::size_of;
@@ -1630,36 +1629,49 @@ fn run_index_worker(
             let began = shared.indexing.begin_job();
             if began {
                 let mut reconnect_before_attempt = false;
-                match retry_index_job(
-                    || {
-                        if reconnect_before_attempt {
-                            indexer.reconnect()?;
+                loop {
+                    match retry_index_job(
+                        || {
+                            if reconnect_before_attempt {
+                                indexer.reconnect()?;
+                            }
+                            let result = indexer.consolidate_background_once();
+                            reconnect_before_attempt =
+                                result.as_ref().is_err_and(is_postgres_connection_error);
+                            result
+                        },
+                        || shared.accepting.load(Ordering::Acquire),
+                    ) {
+                        Ok(Some(receipt)) => {
+                            shared
+                                .indexing
+                                .complete_job(receipt.publication_revision, receipt.basis_t);
+                            break;
                         }
-                        let result = indexer.consolidate_with_fault(IndexBuildFault::None);
-                        reconnect_before_attempt =
-                            result.as_ref().is_err_and(is_postgres_connection_error);
-                        result
-                    },
-                    || shared.accepting.load(Ordering::Acquire),
-                ) {
-                    Ok(receipt) => {
-                        shared
-                            .indexing
-                            .complete_job(receipt.publication_revision, receipt.basis_t);
-                        if shared.indexing.should_continue() {
-                            continue;
+                        Ok(None) => {
+                            // One fixed live-set batch made durable progress.
+                            // Reselect before the next step, and observe service
+                            // shutdown between batches rather than hiding an
+                            // uninterruptible whole-database fold.
+                            if !shared.accepting.load(Ordering::Acquire) {
+                                return;
+                            }
+                            thread::yield_now();
+                        }
+                        Err(error) => {
+                            shared.indexing.fail_job(error);
+                            // A writer that can no longer consolidate its bounded
+                            // recent tier must relinquish service ownership so a
+                            // repaired standby can fence and recover. Retaining
+                            // the lease while rejecting forever creates a zombie
+                            // leader and contradicts the failover contract.
+                            shared.accepting.store(false, Ordering::Release);
+                            return;
                         }
                     }
-                    Err(error) => {
-                        shared.indexing.fail_job(error);
-                        // A writer that can no longer consolidate its bounded
-                        // recent tier must relinquish service ownership so a
-                        // repaired standby can fence and recover. Retaining
-                        // the lease while rejecting forever creates a zombie
-                        // leader and contradicts the failover contract.
-                        shared.accepting.store(false, Ordering::Release);
-                        return;
-                    }
+                }
+                if shared.indexing.should_continue() {
+                    continue;
                 }
             }
         }

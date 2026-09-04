@@ -41,6 +41,12 @@ pub enum IndexBuildFault {
     AfterSegments,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexBuildScope {
+    Administrative,
+    Background,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexBuildReceipt {
     pub publication_revision: u64,
@@ -661,6 +667,26 @@ impl PostgresIndexer {
         &mut self,
         fault_point: IndexBuildFault,
     ) -> Result<IndexBuildReceipt, SemanticError> {
+        Ok(self
+            .consolidate_once(fault_point, IndexBuildScope::Administrative)?
+            .expect("administrative consolidation never yields bounded publication work"))
+    }
+
+    /// Advance one bounded automatic-indexing step. `None` means one durable
+    /// live-set fold batch was advanced and the caller should reselect before
+    /// doing more work. Unlike explicit administrative consolidation, this
+    /// entry point never reconstructs the full database from the log.
+    pub(crate) fn consolidate_background_once(
+        &mut self,
+    ) -> Result<Option<IndexBuildReceipt>, SemanticError> {
+        self.consolidate_once(IndexBuildFault::None, IndexBuildScope::Background)
+    }
+
+    fn consolidate_once(
+        &mut self,
+        fault_point: IndexBuildFault,
+        scope: IndexBuildScope,
+    ) -> Result<Option<IndexBuildReceipt>, SemanticError> {
         self.tree_store.reset_stats();
         let mut transaction = self
             .client
@@ -687,6 +713,21 @@ impl PostgresIndexer {
             basis_t,
             excision_generation,
         )?;
+        if scope == IndexBuildScope::Background && !selection.newest_live_complete {
+            let manifest_hash = selection.newest_observed_manifest_hash.ok_or_else(|| {
+                background_rebuild_required(
+                    "automatic indexing has no native publication to extend",
+                )
+            })?;
+            if !selection.newest_live_work_pending {
+                return Err(background_rebuild_required(
+                    "the newest native publication has no resumable live-set work",
+                ));
+            }
+            drop(transaction);
+            self.tree_store.advance_publication_work(manifest_hash)?;
+            return Ok(None);
+        }
         if let Some((previous, _, _)) = selection.usable.as_ref()
             && previous.publication_revision == selection.newest_observed_revision
             && selection.newest_live_complete
@@ -696,7 +737,7 @@ impl PostgresIndexer {
         {
             let manifest_hash = previous.hash()?;
             let stats = self.tree_store.stats();
-            return Ok(IndexBuildReceipt {
+            return Ok(Some(IndexBuildReceipt {
                 publication_revision: previous.publication_revision,
                 basis_t,
                 manifest_hash,
@@ -711,7 +752,7 @@ impl PostgresIndexer {
                 tail_datoms: 0,
                 encoded_bytes: 0,
                 max_depth: 3,
-            });
+            }));
         }
         let expected_publication_revision = selection.newest_observed_revision;
         let publication_revision =
@@ -727,9 +768,40 @@ impl PostgresIndexer {
 
         let can_increment = selection.usable.as_ref().is_some_and(|(previous, _, _)| {
             selection.newest_live_complete
-                && previous.publication_revision == selection.newest_observed_revision
+                && (scope == IndexBuildScope::Background
+                    || previous.publication_revision == selection.newest_observed_revision)
         });
-        let build = if can_increment {
+        let fallback_predecessor = if can_increment
+            && scope == IndexBuildScope::Background
+            && selection.usable.as_ref().is_some_and(|(previous, _, _)| {
+                previous.publication_revision != selection.newest_observed_revision
+            }) {
+            if selection.newest_observed_generation != Some(excision_generation) {
+                return Err(background_rebuild_required(
+                    "the newest native publication belongs to a different log generation",
+                ));
+            }
+            let newest_hash = selection
+                .newest_observed_manifest_hash
+                .expect("a positive newest revision has a manifest hash");
+            let newest_roots = load_relational_root_hashes(&mut transaction, newest_hash)?;
+            let previous_roots = manifest_root_hashes(
+                &selection
+                    .usable
+                    .as_ref()
+                    .expect("incremental eligibility requires a usable predecessor")
+                    .0,
+            );
+            if newest_roots != previous_roots {
+                return Err(background_rebuild_required(
+                    "the corrupt newest publication does not share the authenticated base roots",
+                ));
+            }
+            Some(newest_hash)
+        } else {
+            None
+        };
+        let mut build = if can_increment {
             let (previous, base_projection, old_cache) = selection
                 .usable
                 .expect("incremental eligibility requires a usable predecessor");
@@ -766,6 +838,10 @@ impl PostgresIndexer {
                 &self.tree_config,
                 old_cache,
             )?
+        } else if scope == IndexBuildScope::Background {
+            return Err(background_rebuild_required(
+                "automatic indexing found no authenticated incremental base",
+            ));
         } else {
             // The first native root is the one intentional full pass. Legacy
             // flat manifests are a read-only migration fallback; they are not
@@ -783,6 +859,16 @@ impl PostgresIndexer {
             drop(transaction);
             build_initial_native(&database, &self.tree_config)?
         };
+        if let Some(predecessor_manifest_hash) = fallback_predecessor {
+            let TreePublicationDelta::Incremental {
+                predecessor_manifest_hash: claimed_predecessor,
+                ..
+            } = &mut build.publication_delta
+            else {
+                unreachable!("incremental repair produced a replacement delta");
+            };
+            *claimed_predecessor = predecessor_manifest_hash;
+        }
 
         let tree_manifest = PersistentTreeManifest {
             database_id: self.database_id.clone(),
@@ -838,11 +924,19 @@ impl PostgresIndexer {
                     "injected failure after immutable tree-node insertion",
                 ));
             }
-            self.tree_store.publish_manifest_with_delta(
-                &tree_record,
-                expected_publication_revision,
-                &build.publication_delta,
-            )
+            if scope == IndexBuildScope::Background {
+                self.tree_store.publish_manifest_with_delta_bounded(
+                    &tree_record,
+                    expected_publication_revision,
+                    &build.publication_delta,
+                )
+            } else {
+                self.tree_store.publish_manifest_with_delta(
+                    &tree_record,
+                    expected_publication_revision,
+                    &build.publication_delta,
+                )
+            }
         })();
         let release = self.tree_store.release_build_intent();
         let publication = match publication {
@@ -856,7 +950,7 @@ impl PostgresIndexer {
             }
         };
         let tree_store_stats = self.tree_store.stats();
-        Ok(IndexBuildReceipt {
+        Ok(Some(IndexBuildReceipt {
             publication_revision,
             basis_t,
             manifest_hash: tree_manifest_hash,
@@ -871,8 +965,16 @@ impl PostgresIndexer {
             tail_datoms: build.tail_datoms,
             encoded_bytes: build.encoded_bytes,
             max_depth: 3,
-        })
+        }))
     }
+}
+
+fn background_rebuild_required(message: &'static str) -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Unavailable,
+        "index/background-rebuild-required",
+        message,
+    )
 }
 
 struct NativeIndexBuild {
@@ -1050,7 +1152,10 @@ pub(crate) fn stage_full_generation_tree(
 
 struct NativeManifestSelection {
     newest_observed_revision: u64,
+    newest_observed_manifest_hash: Option<Digest>,
+    newest_observed_generation: Option<u64>,
     newest_live_complete: bool,
+    newest_live_work_pending: bool,
     usable: Option<(PersistentTreeManifest, MetadataProjection, TreeNodeSet)>,
 }
 
@@ -1064,10 +1169,13 @@ fn load_latest_native_manifest<C: GenericClient>(
     // Read the physical root coordinate independently of manifest validity.
     // A corrupt newest candidate still consumed its revision and the repair
     // must CAS after it, never reuse its coordinate.
-    let newest_observed_revision = tree_store.current_publication_revision(database_id)?;
-    let newest_live_complete = client
+    let newest = client
         .query_opt(
-            "SELECT l.complete \
+            "SELECT p.publication_revision, p.manifest_hash, p.log_generation, \
+                    COALESCE(l.complete, false), \
+                    EXISTS (SELECT 1 FROM atomic_tree_delta_headers h \
+                             WHERE h.manifest_hash = p.manifest_hash \
+                               AND h.delta_state = 2) \
                FROM atomic_tree_publications p \
                LEFT JOIN atomic_tree_live_sets l \
                  ON l.database_id = p.database_id \
@@ -1076,8 +1184,24 @@ fn load_latest_native_manifest<C: GenericClient>(
               ORDER BY p.publication_revision DESC LIMIT 1",
             &[&database_id],
         )
-        .map_err(|error| postgres_error("index/tree-live-membership", error))?
-        .is_some_and(|row| row.get::<_, Option<bool>>(0) == Some(true));
+        .map_err(|error| postgres_error("index/tree-live-membership", error))?;
+    let (
+        newest_observed_revision,
+        newest_observed_manifest_hash,
+        newest_observed_generation,
+        newest_live_complete,
+        newest_live_work_pending,
+    ) = if let Some(row) = newest {
+        (
+            pg_basis(row.get(0), "newest tree publication revision")?,
+            Some(digest(row.get(1), "newest tree manifest hash")?),
+            Some(pg_basis(row.get(2), "newest tree log generation")?),
+            row.get(3),
+            row.get(4),
+        )
+    } else {
+        (0, None, None, false, false)
+    };
     let rows = client
         .query(
             "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
@@ -1206,16 +1330,75 @@ fn load_latest_native_manifest<C: GenericClient>(
         if let Ok(base) = candidate {
             return Ok(NativeManifestSelection {
                 newest_observed_revision,
+                newest_observed_manifest_hash,
+                newest_observed_generation,
                 newest_live_complete,
+                newest_live_work_pending,
                 usable: Some(base),
             });
         }
     }
     Ok(NativeManifestSelection {
         newest_observed_revision,
+        newest_observed_manifest_hash,
+        newest_observed_generation,
         newest_live_complete,
+        newest_live_work_pending,
         usable: None,
     })
+}
+
+fn manifest_root_hashes(manifest: &PersistentTreeManifest) -> BTreeMap<(bool, u8), Digest> {
+    manifest
+        .trees
+        .iter()
+        .map(|tree| {
+            (
+                (tree.descriptor.history, order_tag(tree.descriptor.order)),
+                tree.descriptor.root_hash,
+            )
+        })
+        .collect()
+}
+
+fn load_relational_root_hashes<C: GenericClient>(
+    client: &mut C,
+    manifest_hash: Digest,
+) -> Result<BTreeMap<(bool, u8), Digest>, SemanticError> {
+    let rows = client
+        .query(
+            "SELECT index_order, history, root_hash \
+               FROM atomic_tree_manifest_roots WHERE manifest_hash = $1 \
+              ORDER BY history, index_order",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("index/tree-repair-roots", error))?;
+    if rows.len() != 8 {
+        return Err(background_rebuild_required(
+            "the corrupt newest publication does not retain eight relational roots",
+        ));
+    }
+    let mut roots = BTreeMap::new();
+    for row in rows {
+        let order = u8::try_from(row.get::<_, i16>(0)).map_err(|_| {
+            background_rebuild_required(
+                "the corrupt newest publication has an invalid relational root order",
+            )
+        })?;
+        if order > 3
+            || roots
+                .insert(
+                    (row.get(1), order),
+                    digest(row.get(2), "tree repair root hash")?,
+                )
+                .is_some()
+        {
+            return Err(background_rebuild_required(
+                "the corrupt newest publication has invalid relational root coordinates",
+            ));
+        }
+    }
+    Ok(roots)
 }
 
 fn load_authenticated_index_tail<C: GenericClient>(
