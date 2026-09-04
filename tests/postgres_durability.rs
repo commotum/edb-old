@@ -72,25 +72,11 @@ fn migrated_store(connection: &str) -> PostgresStore {
     PostgresStore::connect(connection).unwrap()
 }
 
-fn assert_database_eq(left: &Database, right: &Database) {
-    assert_eq!(left.basis_t(), right.basis_t());
-    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
-    assert_eq!(
-        left.schema().attributes().collect::<Vec<_>>(),
-        right.schema().attributes().collect::<Vec<_>>()
-    );
-    for view in [View::Current, View::History] {
-        for order in [
-            IndexOrder::Eavt,
-            IndexOrder::Aevt,
-            IndexOrder::Avet,
-            IndexOrder::Vaet,
-        ] {
-            assert_eq!(left.datoms(view, order), right.datoms(view, order));
-        }
-    }
-    left.validate_invariants().unwrap();
-    right.validate_invariants().unwrap();
+fn assert_database_eq(
+    left: &impl common::InformationSource,
+    right: &impl common::InformationSource,
+) {
+    common::assert_same_information(left, right);
 }
 
 #[test]

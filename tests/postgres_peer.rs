@@ -15,6 +15,7 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod common;
+use common::InformationSource;
 
 const ITEM_NAME: u32 = 1_000;
 const ITEM_COUNT: u32 = 1_001;
@@ -68,9 +69,9 @@ fn schema(no_history: bool) -> Schema {
     schema
 }
 
-fn assert_current_eq(left: &Database, right: &Database) {
-    assert_eq!(left.basis_t(), right.basis_t());
-    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
+fn assert_current_eq(left: &impl InformationSource, right: &impl InformationSource) {
+    assert_eq!(left.test_basis_t(), right.test_basis_t());
+    assert_eq!(left.test_eidx_frontier(), right.test_eidx_frontier());
     for order in [
         IndexOrder::Eavt,
         IndexOrder::Aevt,
@@ -78,8 +79,8 @@ fn assert_current_eq(left: &Database, right: &Database) {
         IndexOrder::Vaet,
     ] {
         assert_eq!(
-            left.datoms(View::Current, order),
-            right.datoms(View::Current, order)
+            left.test_datoms(View::Current, order),
+            right.test_datoms(View::Current, order)
         );
     }
 }
@@ -430,7 +431,8 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
     assert_eq!(cache_peer.load_stats().compatibility_materializations, 0);
     let live_key = committed
         .db_after
-        .datoms(View::Current, IndexOrder::Eavt)
+        .datoms(IndexOrder::Eavt)
+        .unwrap()
         .into_iter()
         .find(|datom| datom.entity == entity && datom.attribute == ITEM_COUNT)
         .unwrap();

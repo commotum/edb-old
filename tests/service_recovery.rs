@@ -1,11 +1,13 @@
 use atomic_core::{
-    Attribute, Cardinality, EntityRef, IndexOrder, Keyword, PostgresIndexer, PostgresStore, Schema,
+    Attribute, Cardinality, EntityRef, Keyword, PostgresIndexer, PostgresStore, Schema,
     TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue,
-    USER_PARTITION, Value, ValueType, View, make_eid, sha256,
+    USER_PARTITION, Value, ValueType, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod common;
 
 const ITEM_COUNT: u32 = 1_000;
 
@@ -64,20 +66,11 @@ fn set(value: i64) -> TransactionRequest {
     )
 }
 
-fn assert_same_information(left: &atomic_core::Database, right: &atomic_core::Database) {
-    assert_eq!(left.basis_t(), right.basis_t());
-    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
-    assert_eq!(left.schema(), right.schema());
-    for view in [View::Current, View::History] {
-        for order in [
-            IndexOrder::Eavt,
-            IndexOrder::Aevt,
-            IndexOrder::Avet,
-            IndexOrder::Vaet,
-        ] {
-            assert_eq!(left.datoms(view, order), right.datoms(view, order));
-        }
-    }
+fn assert_same_information(
+    left: &impl common::InformationSource,
+    right: &impl common::InformationSource,
+) {
+    common::assert_same_information(left, right);
 }
 
 #[test]
@@ -129,28 +122,70 @@ fn transactor_adopts_verified_base_and_replays_only_the_exact_tail() {
     // authoritative tail remain sufficient. The row is intentionally
     // self-inconsistent without mutating any already-published immutable row.
     let mut sql = Client::connect(&connection, NoTls).unwrap();
-    let head = sql
+    let published = sql
         .query_one(
-            "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
+            "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
+                    m.excision_generation, m.eidx_frontier, m.manifest_version, \
+                    m.log_generation, m.lineage_id \
+               FROM atomic_tree_publications p \
+               JOIN atomic_tree_manifests m \
+                 ON m.database_id = p.database_id \
+                AND m.publication_revision = p.publication_revision \
+                AND m.manifest_hash = p.manifest_hash \
+              WHERE p.database_id = $1 \
+              ORDER BY p.publication_revision DESC LIMIT 1",
             &[&database_id],
         )
         .unwrap();
-    let target_t: i64 = head.get(0);
-    let target_hash: Vec<u8> = head.get(1);
-    let bogus_hash = sha256(format!("bogus-{database_id}").as_bytes());
+    let publication_revision = published.get::<_, i64>(0) + 1;
+    let basis_t: i64 = published.get(1);
+    let tx_hash: Vec<u8> = published.get(2);
+    let state_hash: Vec<u8> = published.get(3);
+    let excision_generation: i64 = published.get(4);
+    let eidx_frontier: i64 = published.get(5);
+    let manifest_version: i16 = published.get(6);
+    let log_generation: i64 = published.get(7);
+    let lineage_id: Option<String> = published.get(8);
     let bogus_payload = [0x5A_u8; 48];
-    sql.execute(
-        "INSERT INTO atomic_index_manifests \
-         (database_id, basis_t, tx_hash, manifest_hash, payload) \
-         VALUES ($1, $2, $3, $4, $5)",
-        &[
-            &database_id,
-            &target_t,
-            &target_hash,
-            &&bogus_hash[..],
-            &&bogus_payload[..],
-        ],
-    )
+    let bogus_hash = sha256(&bogus_payload);
+    common::with_replica_triggers_disabled(&mut sql, |sql| {
+        sql.execute(
+            "INSERT INTO atomic_tree_manifests \
+                 (database_id, publication_revision, basis_t, tx_hash, state_hash, \
+                  excision_generation, eidx_frontier, manifest_version, manifest_hash, \
+                  payload, log_generation, lineage_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            &[
+                &database_id,
+                &publication_revision,
+                &basis_t,
+                &tx_hash,
+                &state_hash,
+                &excision_generation,
+                &eidx_frontier,
+                &manifest_version,
+                &&bogus_hash[..],
+                &&bogus_payload[..],
+                &log_generation,
+                &lineage_id,
+            ],
+        )?;
+        sql.execute(
+            "INSERT INTO atomic_tree_publications \
+                 (database_id, publication_revision, basis_t, tx_hash, manifest_hash, \
+                  log_generation) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &database_id,
+                &publication_revision,
+                &basis_t,
+                &tx_hash,
+                &&bogus_hash[..],
+                &log_generation,
+            ],
+        )?;
+        Ok(())
+    })
     .unwrap();
     drop(sql);
 

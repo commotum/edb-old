@@ -259,7 +259,10 @@ fn persisted_entity_spec_predicate_validates_complete_db_after_via_service() {
     assert!(
         valid
             .db_after
-            .datoms(View::History, IndexOrder::Eavt)
+            .clone()
+            .history()
+            .datoms(IndexOrder::Eavt)
+            .unwrap()
             .iter()
             .all(|datom| datom.attribute != DB_ENSURE as u32)
     );
@@ -337,8 +340,8 @@ fn persisted_functions_compose_on_db_before_and_predicates_guard_commit() {
         2_000,
     );
     assert_eq!(
-        initial.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(10)]
+        initial.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(10)]
     );
 
     let composed = transact_calls(
@@ -357,12 +360,12 @@ fn persisted_functions_compose_on_db_before_and_predicates_guard_commit() {
     )
     .unwrap();
     assert_eq!(
-        composed.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(99)]
+        composed.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(99)]
     );
     assert_eq!(
-        composed.db_after.values(user(42), SNAPSHOT),
-        vec![&Value::Long(10)]
+        composed.db_after.values(user(42), SNAPSHOT).unwrap(),
+        vec![Value::Long(10)]
     );
 
     let error = transact_calls(
@@ -460,8 +463,8 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
         .transact(retry_request(), Duration::from_secs(5))
         .unwrap();
     assert_eq!(
-        first.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(5)]
+        first.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(5)]
     );
 
     // Datomic's Db.getFn boundary reads the immutable db-before. Therefore a
@@ -485,16 +488,16 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
     )
     .unwrap();
     assert_eq!(
-        rebound.db_before.values(function_eid, DB_FN as u32),
-        vec![&Value::Function(v1)]
+        rebound.db_before.values(function_eid, DB_FN as u32).unwrap(),
+        vec![Value::Function(v1)]
     );
     assert_eq!(
-        rebound.db_after.values(function_eid, DB_FN as u32),
-        vec![&Value::Function(v2)]
+        rebound.db_after.values(function_eid, DB_FN as u32).unwrap(),
+        vec![Value::Function(v2)]
     );
     assert_eq!(
-        rebound.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(6)]
+        rebound.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(6)]
     );
 
     let after_rebind = transact_calls(
@@ -510,13 +513,16 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
     )
     .unwrap();
     assert_eq!(
-        after_rebind.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(7)]
+        after_rebind.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(7)]
     );
 
     let v1_as_of_install = after_rebind
         .db_after
-        .datoms(View::AsOf(installed.basis_t), IndexOrder::Eavt);
+        .clone()
+        .as_of(installed.basis_t)
+        .datoms(IndexOrder::Eavt)
+        .unwrap();
     assert!(v1_as_of_install.iter().any(|datom| {
         datom.entity == function_eid
             && datom.attribute == DB_FN as u32
@@ -535,8 +541,8 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
     assert!(replay.replayed);
     assert_eq!(replay.basis_t, first.basis_t);
     assert_eq!(
-        replay.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(5)]
+        replay.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(5)]
     );
     let error = transact_calls(
         &service,
@@ -653,8 +659,8 @@ fn database_function_without_an_ident_is_callable_by_eid() {
     )
     .unwrap();
     assert_eq!(
-        called.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(17)]
+        called.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(17)]
     );
     service.shutdown();
 }

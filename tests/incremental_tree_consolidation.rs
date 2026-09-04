@@ -7,6 +7,7 @@ use postgres::{Client, NoTls};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod common;
+use common::InformationSource;
 
 const ITEM_COUNT: u32 = 1_000;
 
@@ -57,7 +58,10 @@ fn manifest(client: &mut Client, database_id: &str, basis_t: u64) -> PersistentT
     PersistentTreeManifest::decode(&payload).unwrap()
 }
 
-fn assert_snapshot_matches(snapshot: &atomic_core::PeerSnapshot, expected: &atomic_core::Database) {
+fn assert_snapshot_matches(
+    snapshot: &atomic_core::PeerSnapshot,
+    expected: &impl InformationSource,
+) {
     for history in [false, true] {
         for order in [
             IndexOrder::Eavt,
@@ -67,12 +71,8 @@ fn assert_snapshot_matches(snapshot: &atomic_core::PeerSnapshot, expected: &atom
         ] {
             assert_eq!(
                 snapshot.datoms(history, order).unwrap().datoms,
-                expected.datoms(
-                    if history {
-                        View::History
-                    } else {
-                        View::Current
-                    },
+                expected.test_datoms(
+                    if history { View::History } else { View::Current },
                     order,
                 ),
                 "tree/oracle mismatch for {order:?} history={history}"
@@ -344,7 +344,8 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
     );
     let enabled_avet = enabled
         .db_after
-        .datoms(View::Current, IndexOrder::Avet)
+        .datoms(IndexOrder::Avet)
+        .unwrap()
         .into_iter()
         .filter(|datom| datom.attribute == ITEM_COUNT)
         .count();
@@ -380,7 +381,8 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
     assert_eq!(
         disabled
             .db_after
-            .datoms(View::Current, IndexOrder::Avet)
+            .datoms(IndexOrder::Avet)
+            .unwrap()
             .into_iter()
             .filter(|datom| datom.attribute == ITEM_COUNT)
             .count(),

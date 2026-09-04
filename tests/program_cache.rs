@@ -155,8 +155,8 @@ fn authoritative_ident_calls_and_predicates_share_decoded_programs() {
     let first = call("cached-call-one", installed.basis_t, 10, 2_000);
     let second = call("cached-call-two", first.basis_t, 20, 3_000);
     assert_eq!(
-        second.db_after.values(user(42), BALANCE),
-        vec![&Value::Long(20)]
+        second.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(20)]
     );
 
     let after_calls = service.program_cache_stats();

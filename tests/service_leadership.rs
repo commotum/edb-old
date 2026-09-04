@@ -142,8 +142,8 @@ fn service_owns_the_lease_and_takeover_advances_its_epoch() {
         .unwrap();
     assert_eq!(two.basis_t, initial_basis + 2);
     assert_eq!(
-        two.db_after.values(user(42), ITEM_COUNT),
-        vec![&Value::Long(2)]
+        two.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        vec![Value::Long(2)]
     );
     second.shutdown();
 }

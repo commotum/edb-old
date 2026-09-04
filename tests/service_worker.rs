@@ -156,8 +156,8 @@ fn authoritative_request_accepts_entity_maps_as_transaction_data() {
     assert_eq!(report.basis_t, initial_basis + 1);
     let mapped = report.tempids["mapped"];
     assert_eq!(
-        report.db_after.values(mapped, ITEM_COUNT),
-        vec![&Value::Long(41)]
+        report.db_after.values(mapped, ITEM_COUNT).unwrap(),
+        vec![Value::Long(41)]
     );
     service.shutdown();
 }
@@ -277,8 +277,8 @@ fn worker_serializes_reports_and_resolves_durable_retry() {
         (initial_basis + 1, initial_basis + 2)
     );
     assert_eq!(
-        two.db_after.values(user(42), ITEM_COUNT),
-        vec![&Value::Long(2)]
+        two.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        vec![Value::Long(2)]
     );
     assert_eq!(
         reports
@@ -342,8 +342,8 @@ fn originating_result_is_enqueued_before_the_subscription_report() {
     assert_eq!(subscribed.tx_data, originating.tx_data);
     assert_eq!(subscribed.tempids, originating.tempids);
     assert_eq!(
-        subscribed.db_after.values(user(42), ITEM_COUNT),
-        vec![&Value::Long(7)]
+        subscribed.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        vec![Value::Long(7)]
     );
     service.shutdown();
 }

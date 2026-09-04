@@ -306,7 +306,9 @@ fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
     assert!(
         anonymous
             .iter()
-            .all(|entity| { emitted.db_after.values(*entity, BALANCE) == vec![&Value::Long(11)] })
+            .all(|entity| {
+                emitted.db_after.values(*entity, BALANCE).unwrap() == vec![Value::Long(11)]
+            })
     );
     first.shutdown();
 
@@ -508,33 +510,34 @@ fn persisted_stage_four_control_flow_is_atomic_and_db_before_consistent() {
     // the sibling two-pattern query saw the exact immutable db-before where
     // source and same-balance both had value 5.
     assert_eq!(
-        applied.db_after.values(source, BALANCE),
-        vec![&Value::Long(9)]
+        applied.db_after.values(source, BALANCE).unwrap(),
+        vec![Value::Long(9)]
     );
     assert_eq!(
-        applied.db_after.values(source, OBSERVED_BALANCE),
-        vec![&Value::Long(5)]
+        applied.db_after.values(source, OBSERVED_BALANCE).unwrap(),
+        vec![Value::Long(5)]
     );
     assert_eq!(
-        applied.db_after.values(source, BATCH_VALUE),
-        vec![&Value::Long(101)]
+        applied.db_after.values(source, BATCH_VALUE).unwrap(),
+        vec![Value::Long(101)]
     );
     assert_eq!(
-        applied.db_after.values(other_balance, BATCH_VALUE),
-        vec![&Value::Long(202)]
+        applied.db_after.values(other_balance, BATCH_VALUE).unwrap(),
+        vec![Value::Long(202)]
     );
     assert_eq!(
-        applied.db_after.values(source, QUERY_MATCH),
-        vec![&Value::Bool(true)]
+        applied.db_after.values(source, QUERY_MATCH).unwrap(),
+        vec![Value::Bool(true)]
     );
     assert_eq!(
-        applied.db_after.values(same_balance, QUERY_MATCH),
-        vec![&Value::Bool(true)]
+        applied.db_after.values(same_balance, QUERY_MATCH).unwrap(),
+        vec![Value::Bool(true)]
     );
     assert!(
         applied
             .db_after
             .values(other_balance, QUERY_MATCH)
+            .unwrap()
             .is_empty()
     );
 

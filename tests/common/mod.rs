@@ -1,12 +1,106 @@
 use atomic_core::{
-    CapacityLimits, SemanticError, ServiceTransactionReport, TransactionClient, TransactionRequest,
-    TransactionService, TransactionServiceConfig, TxOp,
+    CapacityLimits, Database, DatabaseValue, Datom, IndexOrder, Schema, SemanticError,
+    ServiceTransactionReport, TransactionClient, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TxOp, View,
 };
 use postgres::Client;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 static NEXT_HOLDER: AtomicU64 = AtomicU64::new(1);
+
+/// Uniform test-only observation of eager oracle values and native report
+/// values. Production code deliberately has no eager materialization escape
+/// hatch; differential fixtures compare through exact ordered reads.
+pub trait InformationSource {
+    fn test_basis_t(&self) -> u64;
+    fn test_eidx_frontier(&self) -> u64;
+    fn test_schema(&self) -> &Schema;
+    fn test_datoms(&self, view: View, order: IndexOrder) -> Vec<Datom>;
+}
+
+impl InformationSource for Database {
+    fn test_basis_t(&self) -> u64 {
+        self.basis_t()
+    }
+
+    fn test_eidx_frontier(&self) -> u64 {
+        self.eidx_frontier()
+    }
+
+    fn test_schema(&self) -> &Schema {
+        self.schema()
+    }
+
+    fn test_datoms(&self, view: View, order: IndexOrder) -> Vec<Datom> {
+        self.datoms(view, order)
+    }
+}
+
+impl InformationSource for Arc<Database> {
+    fn test_basis_t(&self) -> u64 {
+        self.basis_t()
+    }
+
+    fn test_eidx_frontier(&self) -> u64 {
+        self.eidx_frontier()
+    }
+
+    fn test_schema(&self) -> &Schema {
+        self.schema()
+    }
+
+    fn test_datoms(&self, view: View, order: IndexOrder) -> Vec<Datom> {
+        self.datoms(view, order)
+    }
+}
+
+impl InformationSource for DatabaseValue {
+    fn test_basis_t(&self) -> u64 {
+        self.basis_t()
+    }
+
+    fn test_eidx_frontier(&self) -> u64 {
+        self.eidx_frontier()
+    }
+
+    fn test_schema(&self) -> &Schema {
+        self.schema()
+    }
+
+    fn test_datoms(&self, view: View, order: IndexOrder) -> Vec<Datom> {
+        match view {
+            View::Current => self.datoms(order),
+            View::History => self.clone().history().datoms(order),
+            View::AsOf(t) => self.clone().as_of(t).datoms(order),
+            View::Since(t) => self.clone().since(t).datoms(order),
+        }
+        .expect("exact test database read")
+    }
+}
+
+#[allow(dead_code)]
+pub fn assert_same_information(left: &impl InformationSource, right: &impl InformationSource) {
+    assert_eq!(left.test_basis_t(), right.test_basis_t());
+    assert_eq!(left.test_eidx_frontier(), right.test_eidx_frontier());
+    assert_eq!(left.test_schema(), right.test_schema());
+    for view in [View::Current, View::History] {
+        for order in [
+            IndexOrder::Eavt,
+            IndexOrder::Aevt,
+            IndexOrder::Avet,
+            IndexOrder::Vaet,
+        ] {
+            assert_eq!(
+                left.test_datoms(view, order),
+                right.test_datoms(view, order)
+            );
+        }
+    }
+}
 
 /// Deliberately bypass ordinary PostgreSQL triggers for one tightly scoped
 /// fault-injection or maintenance operation, then restore them before
