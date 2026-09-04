@@ -400,20 +400,65 @@ impl MetadataProjection {
     fn endpoint(&self) -> EndpointProjection {
         EndpointProjection::from_schema(Arc::clone(&self.schema))
     }
+}
 
-    fn avet_unready_after(&self, endpoint: &Self) -> BTreeSet<u32> {
-        endpoint
-            .schema
-            .attributes()
-            .filter(|attribute| attribute.indexed || attribute.unique.is_some())
-            .filter_map(|attribute| {
-                self.schema
-                    .attribute(attribute.id)
-                    .is_ok_and(|base| !base.indexed && base.unique.is_none())
-                    .then_some(attribute.id)
-            })
-            .collect()
+/// Fold the recovered `storageHasAVET`/`needsAVET` state alongside ordinary
+/// authenticated schema information.  A logical false->true AVET transition
+/// needs a background backfill exactly when the attribute had values *before*
+/// that transaction. Values asserted by the enabling transaction itself are
+/// already classified into the recent AVET tier and need no durable backfill.
+///
+/// `has_base_history` is deliberately a one-datom AEVT probe.  It is invoked
+/// only for newly enabled attributes and memoized across the tail, preserving
+/// the recovered `has-values?` decision without scanning an attribute range.
+fn apply_metadata_and_avet_readiness<F>(
+    base: &MetadataProjection,
+    initial_unready: &BTreeSet<u32>,
+    transactions: &[DurableTransaction],
+    mut has_base_history: F,
+) -> Result<(MetadataProjection, BTreeSet<u32>), SemanticError>
+where
+    F: FnMut(u32) -> Result<bool, SemanticError>,
+{
+    let mut metadata = base.clone();
+    let mut unready = initial_unready.clone();
+    let mut base_history = BTreeMap::<u32, bool>::new();
+    let mut prior_tail_history = BTreeSet::<u32>::new();
+
+    for transaction in transactions {
+        let endpoint = metadata.apply(std::slice::from_ref(transaction))?;
+        for (attribute, before, after) in
+            changed_avet_attributes(&metadata.schema, &endpoint.schema)
+        {
+            if !after {
+                // Dropping AVET also drops any pending backfill. This matters
+                // to an unqualified AVET scan, which must not be poisoned by
+                // a no-longer-indexed attribute.
+                unready.remove(&attribute);
+            } else if !before {
+                let had_history = if prior_tail_history.contains(&attribute) {
+                    true
+                } else if let Some(had_history) = base_history.get(&attribute) {
+                    *had_history
+                } else {
+                    let had_history = has_base_history(attribute)?;
+                    base_history.insert(attribute, had_history);
+                    had_history
+                };
+                if had_history {
+                    unready.insert(attribute);
+                } else {
+                    // Empty attributes can toggle physical AVET membership
+                    // synchronously, matching recovered add-avet/add-unique.
+                    unready.remove(&attribute);
+                }
+            }
+        }
+        prior_tail_history.extend(transaction.tx_data.iter().map(|datom| datom.attribute));
+        metadata = endpoint;
     }
+
+    Ok((metadata, unready))
 }
 
 /// Keep only the current install/alter hooks and facts belonging to the
@@ -2709,8 +2754,22 @@ impl Peer {
                     "native tree plus authenticated tail does not reach observed head",
                 ));
             }
-            let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
-            let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
+            let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
+                &base_metadata,
+                &BTreeSet::new(),
+                &tail.transactions,
+                |attribute| {
+                    tree_base_has_attribute_history(
+                        &mut client,
+                        base,
+                        attribute,
+                        &load_counters,
+                        &mut tree_cache,
+                    )
+                },
+            )?;
+            let metadata = Arc::new(metadata);
+            let avet_unready = Arc::new(avet_unready);
             let AuthenticatedTail {
                 transactions,
                 transaction_hashes,
@@ -3214,8 +3273,27 @@ impl Peer {
             ));
         }
         let base_metadata = Arc::clone(&tree_base.metadata);
-        let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
-        let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
+        let (metadata, avet_unready) = {
+            let PeerIo {
+                client, tree_cache, ..
+            } = &mut *io;
+            apply_metadata_and_avet_readiness(
+                &base_metadata,
+                &BTreeSet::new(),
+                &tail.transactions,
+                |attribute| {
+                    tree_base_has_attribute_history(
+                        client,
+                        &tree_base,
+                        attribute,
+                        &self.core.read.load_counters,
+                        tree_cache,
+                    )
+                },
+            )?
+        };
+        let metadata = Arc::new(metadata);
+        let avet_unready = Arc::new(avet_unready);
         let recent = Arc::new(RecentTier::new_authenticated_existing(
             &self.core.read.database_id,
             tree_base.manifest.basis_t,
@@ -3271,9 +3349,17 @@ impl Peer {
             },
             target,
         )?;
-        let metadata = Arc::new(state.metadata.apply(&tail.transactions)?);
-        let mut avet_unready = (*state.avet_unready).clone();
-        avet_unready.extend(state.metadata.avet_unready_after(&metadata));
+        let before = TieredSnapshot {
+            core: Arc::clone(&self.core.read),
+            state: Arc::clone(&state.tiered),
+        };
+        let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
+            &state.metadata,
+            &state.avet_unready,
+            &tail.transactions,
+            |attribute| before.has_attribute_history(attribute),
+        )?;
+        let metadata = Arc::new(metadata);
         let recent = state.recent.extend_authenticated_existing(
             tail.transaction_hashes
                 .iter()
@@ -3388,8 +3474,27 @@ impl Peer {
                     "post-excision native base and tail do not reach the new head",
                 ));
             }
-            let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
-            let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
+            let (metadata, avet_unready) = {
+                let PeerIo {
+                    client, tree_cache, ..
+                } = &mut *io;
+                apply_metadata_and_avet_readiness(
+                    &base_metadata,
+                    &BTreeSet::new(),
+                    &tail.transactions,
+                    |attribute| {
+                        tree_base_has_attribute_history(
+                            client,
+                            base,
+                            attribute,
+                            &self.core.read.load_counters,
+                            tree_cache,
+                        )
+                    },
+                )?
+            };
+            let metadata = Arc::new(metadata);
+            let avet_unready = Arc::new(avet_unready);
             let recent = Arc::new(RecentTier::new_authenticated_existing(
                 &self.core.read.database_id,
                 base.manifest.basis_t,
@@ -3840,6 +3945,8 @@ impl TieredSnapshot {
             root_pin,
             recent_limits,
             0,
+            &counters,
+            &mut tree_cache,
         )?;
         let stats = exact_open_stats(&state, scan_stats, tail_transactions)?;
         let core = Arc::new(TieredReadCore {
@@ -3915,16 +4022,23 @@ impl TieredSnapshot {
             .acquire(Some(&base))
             .map_err(|error| exact_pin_error(error, required_manifest))?;
         let local_generation = self.state.generation.saturating_add(1);
-        let (state, tail_transactions) = build_exact_tiered_state(
-            &mut io.client,
-            &self.core.database_id,
-            endpoint,
-            base,
-            generation_pin,
-            root_pin,
-            self.core.recent_limits,
-            local_generation,
-        )?;
+        let (state, tail_transactions) = {
+            let PeerIo {
+                client, tree_cache, ..
+            } = &mut *io;
+            build_exact_tiered_state(
+                client,
+                &self.core.database_id,
+                endpoint,
+                base,
+                generation_pin,
+                root_pin,
+                self.core.recent_limits,
+                local_generation,
+                &self.core.load_counters,
+                tree_cache,
+            )?
+        };
         let stats = exact_open_stats(&state, scan_stats, tail_transactions)?;
         Ok((
             Self {
@@ -3998,6 +4112,27 @@ impl TieredSnapshot {
         &self.state.metadata.schema
     }
 
+    /// Physical AVET availability is an immutable property of this native
+    /// value, distinct from the logical `:db/index`/`:db/unique` facts in its
+    /// schema.  The distinction is the recovered `Attribute.hasAVET` boundary
+    /// used by `add-unique` while a background backfill is outstanding.
+    pub(crate) fn avet_ready(&self, attribute: u32) -> bool {
+        effective_avet(&self.state.metadata.schema, attribute)
+            && !self.state.avet_unready.contains(&attribute)
+    }
+
+    fn has_attribute_history(&self, attribute: u32) -> Result<bool, SemanticError> {
+        let mut cursor = self.prefix_cursor(
+            true,
+            &IndexPrefix::Aevt {
+                attribute,
+                entity: None,
+                value: None,
+            },
+        )?;
+        cursor.next().transpose().map(|datom| datom.is_some())
+    }
+
     /// Path-copy one authenticated committed transaction into a successor
     /// native value. This is the recovered `Db.acceptDataCheck` boundary: the
     /// caller prepares it before publication, then installs the returned value
@@ -4037,19 +4172,19 @@ impl TieredSnapshot {
         transaction: DurableTransaction,
         successor_schema: Option<&crate::Schema>,
     ) -> Result<Self, SemanticError> {
-        let metadata = Arc::new(
-            self.state
-                .metadata
-                .apply(std::slice::from_ref(&transaction))?,
-        );
+        let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
+            &self.state.metadata,
+            &self.state.avet_unready,
+            std::slice::from_ref(&transaction),
+            |attribute| self.has_attribute_history(attribute),
+        )?;
+        let metadata = Arc::new(metadata);
         if successor_schema.is_some_and(|schema| metadata.schema.as_ref() != schema) {
             return Err(fault(
                 "peer/successor-schema-mismatch",
                 "committed transaction metadata does not derive the assessed successor schema",
             ));
         }
-        let mut avet_unready = (*self.state.avet_unready).clone();
-        avet_unready.extend(self.state.metadata.avet_unready_after(&metadata));
         let basis_t = transaction.basis_t;
         let eidx_frontier = transaction.eidx_frontier;
         let recent = if successor_schema.is_some() {
@@ -4981,6 +5116,126 @@ fn current_tree_publication_revision<C: GenericClient>(
         .map(|revision| revision.unwrap_or(0))
 }
 
+fn load_cached_tree_node_from_client<C: GenericClient>(
+    client: &mut C,
+    hash: Digest,
+    counters: &PeerLoadCounters,
+    cache: &mut TreeNodeCache,
+) -> Result<Arc<TreeNode>, SemanticError> {
+    if let Some(node) = cache.get(&hash) {
+        return Ok(node);
+    }
+    let row = client
+        .query_opt(
+            "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
+            &[&&hash[..]],
+        )
+        .map_err(|error| postgres_error("peer/avet-readiness-node-read", error))?
+        .ok_or_else(|| {
+            fault(
+                "peer/missing-avet-readiness-node",
+                "published AEVT history path references missing immutable content",
+            )
+        })?;
+    let bytes: Vec<u8> = row.get(0);
+    let node = Arc::new(decode_tree_node(&hash, &bytes)?);
+    match node.as_ref() {
+        TreeNode::Directory(_) => {
+            counters.directory_reads.fetch_add(1, Ordering::Relaxed);
+        }
+        TreeNode::Leaf(_) => {
+            counters.leaf_reads.fetch_add(1, Ordering::Relaxed);
+        }
+        TreeNode::Root(_) => {}
+    }
+    let retained = usize::try_from(node.retained_bytes()).unwrap_or(usize::MAX);
+    cache.insert(
+        hash,
+        Arc::clone(&node),
+        bytes.len().saturating_add(retained),
+    );
+    Ok(node)
+}
+
+/// Test recovered `has-values?` against only the durable base of a tail.
+/// Construction-time callers do not yet own a `TieredSnapshot`, so this is a
+/// direct root-to-one-leaf AEVT probe rather than a full range materialization.
+fn tree_base_has_attribute_history<C: GenericClient>(
+    client: &mut C,
+    base: &TreeBase,
+    attribute: u32,
+    counters: &PeerLoadCounters,
+    cache: &mut TreeNodeCache,
+) -> Result<bool, SemanticError> {
+    let history = true;
+    let order = IndexOrder::Aevt;
+    let root = base
+        .roots
+        .get(&(history, order_tag(order)))
+        .ok_or_else(|| {
+            fault(
+                "peer/missing-history-aevt-root",
+                "native base omitted its history AEVT root",
+            )
+        })?;
+    if root.directories.is_empty() {
+        return Ok(false);
+    }
+    let prefix = IndexPrefix::Aevt {
+        attribute,
+        entity: None,
+        value: None,
+    };
+    let first_directory = prefix_start_child(&root.directories, &prefix);
+    for (directory_index, reference) in root.directories.iter().enumerate().skip(first_directory) {
+        let node = load_cached_tree_node_from_client(client, reference.hash, counters, cache)?;
+        let TreeNode::Directory(directory) = node.as_ref() else {
+            return Err(fault(
+                "peer/avet-readiness-directory-kind",
+                "history AEVT root child is not a directory",
+            ));
+        };
+        validate_loaded_child_key(
+            reference,
+            directory.order,
+            directory.history,
+            directory.count,
+            directory.leaves.first().map(|child| &child.key),
+            order,
+            history,
+        )?;
+        let first_leaf = if directory_index == first_directory {
+            prefix_start_child(&directory.leaves, &prefix)
+        } else {
+            0
+        };
+        for leaf_reference in directory.leaves.iter().skip(first_leaf) {
+            let node =
+                load_cached_tree_node_from_client(client, leaf_reference.hash, counters, cache)?;
+            let TreeNode::Leaf(leaf) = node.as_ref() else {
+                return Err(fault(
+                    "peer/avet-readiness-leaf-kind",
+                    "history AEVT directory child is not a leaf",
+                ));
+            };
+            validate_loaded_child_datom(
+                leaf_reference,
+                leaf.order,
+                leaf.history,
+                leaf.len() as u64,
+                leaf.datom(0).as_ref(),
+                order,
+                history,
+            )?;
+            let offset = leaf_prefix_lower_bound(leaf, &prefix);
+            if let Some(candidate) = leaf.datom(offset) {
+                return Ok(crate::index::compare_prefix(&candidate, &prefix).is_eq());
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn derive_metadata_from_client<C: GenericClient>(
     client: &mut C,
     roots: &BTreeMap<(bool, u8), Arc<RootNode>>,
@@ -5671,6 +5926,8 @@ fn build_exact_tiered_state<C: GenericClient>(
     root_pin: Option<Arc<RootPin>>,
     recent_limits: RecentLimits,
     local_generation: u64,
+    counters: &PeerLoadCounters,
+    tree_cache: &mut TreeNodeCache,
 ) -> Result<(TieredState, u64), SemanticError> {
     let base_metadata = Arc::clone(&base.metadata);
     let tail = read_authenticated_tail(
@@ -5695,8 +5952,14 @@ fn build_exact_tiered_state<C: GenericClient>(
         ));
     }
     let tail_transactions = tail.transactions.len() as u64;
-    let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
-    let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
+    let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
+        &base_metadata,
+        &BTreeSet::new(),
+        &tail.transactions,
+        |attribute| tree_base_has_attribute_history(client, &base, attribute, counters, tree_cache),
+    )?;
+    let metadata = Arc::new(metadata);
+    let avet_unready = Arc::new(avet_unready);
     let recent = Arc::new(RecentTier::new_authenticated_existing(
         database_id,
         base.manifest.basis_t,

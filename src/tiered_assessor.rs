@@ -5,7 +5,7 @@
 //! ranges from the db-before value and keeps the proposed successor as a small
 //! logical delta.  It deliberately contains no `materialize` fallback.
 
-use crate::database::{UpsertIdentityValue, validated_entity_tempids};
+use crate::database::{UpsertIdentityValue, normalize_excision_before_t, validated_entity_tempids};
 use crate::identity::{validate_frontier, validate_supported_eid};
 use crate::idents::IdentIndex;
 use crate::vocabulary::{supported_system_attributes, supported_system_idents};
@@ -211,6 +211,7 @@ struct Reader<'a> {
     limits: AssessmentLimits,
     work: AssessmentReadWork,
     prefix_memo: BTreeMap<IndexPrefix, Arc<[Datom]>>,
+    history_first_memo: BTreeMap<IndexPrefix, Option<Datom>>,
 }
 
 impl<'a> Reader<'a> {
@@ -220,7 +221,42 @@ impl<'a> Reader<'a> {
             limits,
             work: AssessmentReadWork::default(),
             prefix_memo: BTreeMap::new(),
+            history_first_memo: BTreeMap::new(),
         }
+    }
+
+    fn charge(&mut self, datom: &Datom) -> Result<(), SemanticError> {
+        let next_datoms = self.work.datoms.checked_add(1).ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Busy,
+                "transaction/read-capacity",
+                "transaction assessment read count overflowed",
+            )
+        })?;
+        let next_bytes = self
+            .work
+            .retained_bytes
+            .checked_add(datom.retained_bytes())
+            .ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::Busy,
+                    "transaction/read-capacity",
+                    "transaction assessment read-byte count overflowed",
+                )
+            })?;
+        if next_datoms > self.limits.max_read_datoms || next_bytes > self.limits.max_read_bytes {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "transaction/read-capacity",
+                format!(
+                    "transaction assessment exceeds {} datoms or {} retained bytes",
+                    self.limits.max_read_datoms, self.limits.max_read_bytes
+                ),
+            ));
+        }
+        self.work.datoms = next_datoms;
+        self.work.retained_bytes = next_bytes;
+        Ok(())
     }
 
     fn prefix(&mut self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
@@ -238,42 +274,32 @@ impl<'a> Reader<'a> {
         let mut datoms = Vec::new();
         for datom in self.base.current_prefix_cursor(prefix)? {
             let datom = datom?;
-            let next_datoms = self.work.datoms.checked_add(1).ok_or_else(|| {
-                SemanticError::new(
-                    ErrorCategory::Busy,
-                    "transaction/read-capacity",
-                    "transaction assessment read count overflowed",
-                )
-            })?;
-            let next_bytes = self
-                .work
-                .retained_bytes
-                .checked_add(datom.retained_bytes())
-                .ok_or_else(|| {
-                    SemanticError::new(
-                        ErrorCategory::Busy,
-                        "transaction/read-capacity",
-                        "transaction assessment read-byte count overflowed",
-                    )
-                })?;
-            if next_datoms > self.limits.max_read_datoms || next_bytes > self.limits.max_read_bytes
-            {
-                return Err(SemanticError::new(
-                    ErrorCategory::Busy,
-                    "transaction/read-capacity",
-                    format!(
-                        "transaction assessment exceeds {} datoms or {} retained bytes",
-                        self.limits.max_read_datoms, self.limits.max_read_bytes
-                    ),
-                ));
-            }
-            self.work.datoms = next_datoms;
-            self.work.retained_bytes = next_bytes;
+            self.charge(&datom)?;
             datoms.push(datom);
         }
         self.prefix_memo
             .insert(prefix.clone(), Arc::from(datoms.clone()));
         Ok(datoms)
+    }
+
+    fn has_historical_values(&mut self, attribute: u32) -> Result<bool, SemanticError> {
+        let prefix = IndexPrefix::Aevt {
+            attribute,
+            entity: None,
+            value: None,
+        };
+        if let Some(first) = self.history_first_memo.get(&prefix) {
+            self.work.prefix_hits = self.work.prefix_hits.saturating_add(1);
+            return Ok(first.is_some());
+        }
+        self.work.prefixes = self.work.prefixes.saturating_add(1);
+        let first = self.base.history_prefix_first(&prefix)?;
+        if let Some(datom) = &first {
+            self.charge(datom)?;
+        }
+        let present = first.is_some();
+        self.history_first_memo.insert(prefix, first);
+        Ok(present)
     }
 
     fn values(&mut self, entity: u64, attribute: u32) -> Result<Vec<Value>, SemanticError> {
@@ -872,10 +898,18 @@ fn validate_schema_transition(
                     }
                 }
                 if current.unique.is_none() && proposed.unique.is_some() {
-                    if !current.indexed {
+                    // `:db/index true` is only the logical schema fact. The
+                    // recovered Attribute.hasAVET also requires physical
+                    // storage availability; while a background backfill is
+                    // pending, adding uniqueness must still fail. The sole
+                    // synchronous exception is an attribute with no history,
+                    // for which there is nothing to backfill.
+                    if !reader.base.physical_avet_ready(proposed.id)
+                        && reader.has_historical_values(proposed.id)?
+                    {
                         return Err(SemanticError::incorrect(
                             "schema/unique-requires-avet",
-                            "adding uniqueness requires an existing AVET index",
+                            "adding uniqueness to an attribute with historical values requires a physically ready AVET index",
                         ));
                     }
                     validate_attribute_uniqueness(&successor_attribute_datoms(
@@ -1654,6 +1688,13 @@ fn validate_delta_successor(
         }
     }
     for entity in excision_entities {
+        // Cutoff attributes are ordinary information until this entity
+        // actually retains an A=15 excision request in the successor. This
+        // matches eager `validate_excision_requests` and avoids rejecting an
+        // entity which merely edits or retracts request metadata.
+        if successor_values(reader, logical, entity, DB_EXCISE as u32)?.is_empty() {
+            continue;
+        }
         let before_t = successor_values(reader, logical, entity, DB_EXCISE_BEFORE_T as u32)?;
         let before = successor_values(reader, logical, entity, DB_EXCISE_BEFORE as u32)?;
         if !before_t.is_empty() && !before.is_empty() {
@@ -1661,6 +1702,16 @@ fn validate_delta_successor(
                 "transaction/excision-cutoff-conflict",
                 "an excision request may use at most one cutoff",
             ));
+        }
+        if let Some(value) = before_t.first() {
+            let Value::Long(value) = value else {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "kernel/excision-cutoff-type",
+                    ":db.excise/beforeT does not contain a long",
+                ));
+            };
+            normalize_excision_before_t(*value)?;
         }
     }
     Ok(())
@@ -2198,6 +2249,138 @@ mod tests {
             assessed_alter.db_after.schema(),
             expected_alter.db_after.schema()
         );
+    }
+
+    #[test]
+    fn unique_enablement_uses_history_and_matches_the_eager_oracle() {
+        let initial = Database::new(schema()).unwrap();
+        let mut unique_empty = initial.schema().attribute(COUNT).unwrap().clone();
+        unique_empty.unique = Some(Unique::Identity);
+        let empty_ops = vec![TxOp::AlterAttribute(unique_empty)];
+        let eager = initial.with(&empty_ops, 10).unwrap();
+        let tiered = assess_tiered(
+            &DatabaseValue::eager(Arc::new(initial.clone())),
+            &empty_ops,
+            10,
+        )
+        .unwrap();
+        assert_eq!(tiered.tx_data, eager.tx_data);
+
+        let asserted = initial.with(&add("past", 1), 10).unwrap();
+        let entity = asserted.tempids["item"];
+        let historical = asserted
+            .db_after
+            .with(
+                &[TxOp::Retract {
+                    entity: EntityRef::Id(entity),
+                    attribute: COUNT,
+                    value: Some(TxValue::Scalar(Value::Long(1))),
+                }],
+                11,
+            )
+            .unwrap()
+            .db_after;
+        assert!(historical.values(entity, COUNT).is_empty());
+        let mut unique_historical = historical.schema().attribute(COUNT).unwrap().clone();
+        unique_historical.unique = Some(Unique::Identity);
+        let history_ops = vec![TxOp::AlterAttribute(unique_historical)];
+        let eager = historical.with(&history_ops, 12).unwrap_err();
+        let tiered = assess_tiered(
+            &DatabaseValue::eager(Arc::new(historical)),
+            &history_ops,
+            12,
+        )
+        .unwrap_err();
+        assert_eq!(eager.code, "schema/unique-requires-avet");
+        assert_eq!(tiered.category, eager.category);
+        assert_eq!(tiered.code, eager.code);
+    }
+
+    #[test]
+    fn excision_cutoff_domain_and_request_scope_match_the_eager_oracle() {
+        fn request(before_t: i64) -> Vec<TxOp> {
+            vec![
+                TxOp::Add {
+                    entity: EntityRef::Temp("request".into()),
+                    attribute: DB_EXCISE as u32,
+                    value: TxValue::Entity(EntityRef::Id(crate::DB_FULLTEXT)),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("request".into()),
+                    attribute: DB_EXCISE_BEFORE_T as u32,
+                    value: TxValue::Scalar(Value::Long(before_t)),
+                },
+            ]
+        }
+
+        fn assert_same_outcome(ops: &[TxOp]) {
+            let database = Database::bootstrap().unwrap();
+            let eager = database.with(ops, 10);
+            let tiered = assess_tiered(&DatabaseValue::eager(Arc::new(database)), ops, 10);
+            match (eager, tiered) {
+                (Ok(eager), Ok(tiered)) => assert_eq!(tiered.tx_data, eager.tx_data),
+                (Err(eager), Err(tiered)) => {
+                    assert_eq!(tiered.category, eager.category);
+                    assert_eq!(tiered.code, eager.code);
+                }
+                outcomes => panic!("eager/tiered excision divergence: {outcomes:?}"),
+            }
+        }
+
+        for invalid in [
+            -1,
+            i64::try_from(make_eid(USER_PARTITION, 1).unwrap()).unwrap(),
+        ] {
+            let ops = request(invalid);
+            assert_same_outcome(&ops);
+            assert_eq!(
+                Database::bootstrap()
+                    .unwrap()
+                    .with(&ops, 10)
+                    .unwrap_err()
+                    .code,
+                "transaction/excision-before-t"
+            );
+        }
+        assert_same_outcome(&request(1));
+        assert_same_outcome(&request(i64::try_from(t_to_tx(1).unwrap()).unwrap()));
+
+        let both = vec![
+            TxOp::Add {
+                entity: EntityRef::Temp("request".into()),
+                attribute: DB_EXCISE as u32,
+                value: TxValue::Entity(EntityRef::Id(crate::DB_FULLTEXT)),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp("request".into()),
+                attribute: DB_EXCISE_BEFORE_T as u32,
+                value: TxValue::Scalar(Value::Long(-1)),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp("request".into()),
+                attribute: DB_EXCISE_BEFORE as u32,
+                value: TxValue::Scalar(Value::Instant(1)),
+            },
+        ];
+        assert_same_outcome(&both);
+        assert_eq!(
+            Database::bootstrap()
+                .unwrap()
+                .with(&both, 10)
+                .unwrap_err()
+                .code,
+            "transaction/excision-cutoff-conflict"
+        );
+
+        // A cutoff-shaped fact is not an excision request by itself. Even an
+        // otherwise invalid cutoff remains ordinary data until A=15 survives
+        // in the same successor entity.
+        let metadata_only = vec![TxOp::Add {
+            entity: EntityRef::Temp("metadata".into()),
+            attribute: DB_EXCISE_BEFORE_T as u32,
+            value: TxValue::Scalar(Value::Long(-1)),
+        }];
+        assert_same_outcome(&metadata_only);
     }
 
     #[test]

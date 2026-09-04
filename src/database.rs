@@ -1112,10 +1112,21 @@ impl Database {
             }
         }
         if current.unique.is_none() && proposed.unique.is_some() {
-            if !current.indexed {
+            // Recovered Datomic Pro distinguishes logical `:db/index` from
+            // physical AVET availability (`Attribute.hasAVET`).  The eager
+            // oracle has no asynchronous physical tier, so an existing
+            // logical AVET member is ready.  An unindexed attribute may gain
+            // uniqueness only when it has never had a value: in that case
+            // there is no historical range to backfill and AVET can become
+            // available synchronously.  `has-values?` in 1.0.7705 makes this
+            // exact test against history AEVT, not merely current facts.
+            let has_historical_values = self
+                .history_datoms()
+                .any(|datom| datom.attribute == proposed.id);
+            if !current.indexed && has_historical_values {
                 return Err(SemanticError::incorrect(
                     "schema/unique-requires-avet",
-                    "adding uniqueness in the Pro model requires an existing AVET index",
+                    "adding uniqueness to an attribute with historical values requires a physically ready AVET index",
                 ));
             }
             validate_uniqueness_for_attribute(facts, proposed.id)?;
@@ -3002,7 +3013,7 @@ fn validate_excision_requests(facts: &[CurrentFact]) -> Result<(), SemanticError
     Ok(())
 }
 
-fn normalize_excision_before_t(value: i64) -> Result<u64, SemanticError> {
+pub(crate) fn normalize_excision_before_t(value: i64) -> Result<u64, SemanticError> {
     let encoded = u64::try_from(value).map_err(|_| {
         SemanticError::incorrect(
             "transaction/excision-before-t",
