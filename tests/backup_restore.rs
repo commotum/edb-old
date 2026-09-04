@@ -958,7 +958,7 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
             .unwrap()
             .is_none()
     );
-    let unpublished_coordinates: i64 = client
+    let staged_coordinates: i64 = client
         .query_one(
             "SELECT count(*) FROM atomic_semantic_commitment_roots \
               WHERE database_id = $1",
@@ -967,8 +967,9 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
         .unwrap()
         .get(0);
     assert_eq!(
-        unpublished_coordinates, 0,
-        "a staged restore has no endpoint coordinate before activation"
+        staged_coordinates,
+        i64::try_from(committed.basis_t + 1).unwrap(),
+        "restore stages every immutable historical coordinate before activation"
     );
     let candidate = client
         .query_one(
@@ -1375,6 +1376,17 @@ fn corrupt_derived_roots_fall_back_to_older_tree_then_log_only() {
         .unwrap()
         .get(0);
     assert_eq!(restored_tree_count, 0);
+    let restored_request_base_count: i64 = log_catalog
+        .query_one(
+            "SELECT count(*) FROM atomic_request_base_archives archive \
+              JOIN atomic_request_base_archive_completions complete \
+                ON complete.manifest_hash = archive.manifest_hash \
+             WHERE archive.database_id = $1",
+            &[&log_target],
+        )
+        .unwrap()
+        .get(0);
+    assert!(restored_request_base_count > 0);
 
     fs::remove_dir_all(tree_directory).unwrap();
     fs::remove_dir_all(log_directory).unwrap();

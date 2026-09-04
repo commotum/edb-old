@@ -23,6 +23,8 @@ use crate::log_generation::{
     GenerationTransactionMembership, LineageTransactionContent,
     encode_generation_transaction_membership, request_key_hash, tombstone_request_digest,
 };
+use crate::peer::build_full_native_tree;
+use crate::postgres::recover_generation_to;
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
     Database, Digest, DurableTransaction, ErrorCategory, PostgresConnectionConfig, PostgresStore,
@@ -2803,7 +2805,7 @@ fn capture_log_tail<C: postgres::GenericClient>(
                 || content.eidx_frontier != eidx_frontier
                 || content_version != 1
                 || state_hash == [0; 32]
-                || !matches!(request_kind_i16, 0 | 1 | 2)
+                || !matches!(request_kind_i16, 0..=2)
                 || (request_kind_i16 == 2) != source_base_manifest.is_some()
                 || (request_kind_i16 == 0
                     && request_digest
@@ -3565,6 +3567,14 @@ struct TreeCaptureLog<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct TreeCaptureContext<'a, 'log> {
+    database_id: &'a str,
+    lineage_id: &'a str,
+    log_generation: u64,
+    log: &'a TreeCaptureLog<'log>,
+}
+
+#[derive(Clone, Copy)]
 enum TreeCaptureSource {
     Publication,
     RequestBaseArchive {
@@ -3635,10 +3645,12 @@ fn capture_tree_backup<C: postgres::GenericClient>(
             client,
             &row,
             TreeCaptureSource::Publication,
-            database_id,
-            lineage_id,
-            log_generation,
-            log,
+            TreeCaptureContext {
+                database_id,
+                lineage_id,
+                log_generation,
+                log,
+            },
             publisher,
         )? {
             return Ok(Some(tree));
@@ -3651,12 +3663,15 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
     client: &mut C,
     row: &postgres::Row,
     source: TreeCaptureSource,
-    database_id: &str,
-    lineage_id: &str,
-    log_generation: u64,
-    log: &TreeCaptureLog<'_>,
+    context: TreeCaptureContext<'_, '_>,
     publisher: &mut ObjectPublisher<'_>,
 ) -> Result<Option<TreeBackup>, SemanticError> {
+    let TreeCaptureContext {
+        database_id,
+        lineage_id,
+        log_generation,
+        log,
+    } = context;
     let Ok(publication_revision) = unsigned(row.get(0), "tree publication revision") else {
         return Ok(None);
     };
@@ -3866,10 +3881,11 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
     }))
 }
 
-/// Copy the exact physical db-before authority retained by a native request.
-/// Unlike the optional endpoint accelerator, this tree is receipt data: a
-/// corrupt or missing binding must fail backup rather than fall back to a
-/// broad log replay that may exceed the writer's bounded recent tier.
+/// Copy the exact db-before retained by a native request. The binding and its
+/// semantic coordinate are receipt authority; its physical tree remains a
+/// replaceable accelerator. At this explicit administrative boundary a
+/// corrupt tree is rebuilt from the pinned immutable generation log rather
+/// than imposing unbounded replay on the ordinary writer.
 fn capture_bound_request_tree<C: postgres::GenericClient>(
     client: &mut C,
     database_id: &str,
@@ -4049,23 +4065,91 @@ fn capture_bound_request_tree<C: postgres::GenericClient>(
         portable_frontiers: &frontiers,
         state_hashes: &states,
     };
-    let tree = capture_tree_candidate(
+    if let Some(tree) = capture_tree_candidate(
         client,
         &row,
         source,
-        database_id,
-        lineage_id,
-        log_generation,
-        &log,
+        TreeCaptureContext {
+            database_id,
+            lineage_id,
+            log_generation,
+            log: &log,
+        },
         publisher,
-    )?
-    .ok_or_else(|| {
-        fault(
-            "backup/request-base-corrupt",
-            "native request db-before tree is corrupt or disagrees with its log coordinate",
-        )
-    })?;
-    Ok(tree.manifest_hash)
+    )? {
+        return Ok(tree.manifest_hash);
+    }
+    reconstruct_bound_request_tree(
+        client,
+        BoundRequestCoordinate {
+            source_database_id: database_id,
+            portable_lineage_id: lineage_id,
+            log_generation,
+            basis,
+            tx_hash,
+            state_hash,
+            eidx_frontier,
+        },
+        publisher,
+    )
+}
+
+struct BoundRequestCoordinate<'a> {
+    source_database_id: &'a str,
+    portable_lineage_id: &'a str,
+    log_generation: u64,
+    basis: u64,
+    tx_hash: Digest,
+    state_hash: Digest,
+    eidx_frontier: u64,
+}
+
+fn reconstruct_bound_request_tree<C: postgres::GenericClient>(
+    client: &mut C,
+    coordinate: BoundRequestCoordinate<'_>,
+    publisher: &mut ObjectPublisher<'_>,
+) -> Result<Digest, SemanticError> {
+    let recovered = recover_generation_to(
+        client,
+        coordinate.source_database_id,
+        coordinate.log_generation,
+        coordinate.basis,
+        coordinate.tx_hash,
+    )?;
+    if recovered.final_hash != coordinate.tx_hash
+        || recovered.database.basis_t() != coordinate.basis
+        || recovered.database.eidx_frontier() != coordinate.eidx_frontier
+        || checkpoint_state_hash(&recovered.database)? != coordinate.state_hash
+    {
+        return Err(fault(
+            "backup/request-base-reconstruction",
+            "authoritative generation log does not reproduce the bound request db-before",
+        ));
+    }
+
+    let build = build_full_native_tree(
+        coordinate.portable_lineage_id,
+        1,
+        coordinate.log_generation,
+        coordinate.tx_hash,
+        coordinate.state_hash,
+        &recovered.database,
+    )?;
+    if build.manifest.basis_t != coordinate.basis
+        || build.manifest.eidx_frontier != coordinate.eidx_frontier
+    {
+        return Err(fault(
+            "backup/request-base-reconstruction",
+            "rebuilt request db-before has the wrong immutable coordinate",
+        ));
+    }
+    for (hash, payload) in build.nodes.iter() {
+        publisher.publish(*hash, payload)?;
+    }
+    let payload = build.manifest.encode()?;
+    let manifest_hash = sha256(&payload);
+    publisher.publish(manifest_hash, &payload)?;
+    Ok(manifest_hash)
 }
 
 fn decode_tree_order(value: i16) -> Result<crate::IndexOrder, SemanticError> {
@@ -5915,7 +5999,7 @@ fn encode_request_record_version(
     if !valid_lineage_id(&record.lineage_id)
         || record.basis == 0
         || record.request_key_hash == [0; 32]
-        || !matches!(record.request_kind, 0 | 1 | 2)
+        || !matches!(record.request_kind, 0..=2)
         || (record.request_kind == 2) != record.base_manifest_hash.is_some()
         || (version == LEGACY_REQUEST_VERSION
             && (record.request_kind == 2 || record.base_manifest_hash.is_some()))
@@ -6889,11 +6973,13 @@ mod tests {
         record.base_manifest_hash = Some(sha256(b"portable db-before manifest"));
         let native = encode_request_record(&record).unwrap();
         assert_eq!(decode_request_record(&native).unwrap(), record);
+        // This is an encoder input/version mismatch, not a byte stream that
+        // reached decode-side canonicality checking.
         assert_eq!(
             encode_request_record_version(&record, LEGACY_REQUEST_VERSION)
                 .unwrap_err()
                 .code,
-            "backup/noncanonical-request-record"
+            "backup/request-record"
         );
     }
 

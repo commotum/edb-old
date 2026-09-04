@@ -886,6 +886,15 @@ struct NativeIndexBuild {
     publication_delta: TreePublicationDelta,
 }
 
+/// Fully materialize the eight immutable native roots for an explicitly
+/// named logical value. This is the intentional broad builder used by initial
+/// indexing, generation staging, and administrative log reconstruction; the
+/// ordinary writer and peer remain root-plus-tail.
+pub(crate) struct FullNativeTreeBuild {
+    pub(crate) manifest: PersistentTreeManifest,
+    pub(crate) nodes: TreeNodeSet,
+}
+
 fn build_initial_native(
     database: &Database,
     config: &TreeConfig,
@@ -936,6 +945,30 @@ fn build_initial_native(
     })
 }
 
+pub(crate) fn build_full_native_tree(
+    database_id: &str,
+    publication_revision: u64,
+    log_generation: u64,
+    tx_hash: Digest,
+    state_hash: Digest,
+    database: &Database,
+) -> Result<FullNativeTreeBuild, SemanticError> {
+    let build = build_initial_native(database, &TreeConfig::default())?;
+    Ok(FullNativeTreeBuild {
+        manifest: PersistentTreeManifest {
+            database_id: database_id.to_owned(),
+            publication_revision,
+            basis_t: database.basis_t(),
+            tx_hash,
+            state_hash,
+            excision_generation: log_generation,
+            eidx_frontier: build.eidx_frontier,
+            trees: build.trees,
+        },
+        nodes: build.nodes,
+    })
+}
+
 /// Prepare the derived tree for an inactive log generation without exposing
 /// its root. The caller deliberately keeps this store's build-intent session
 /// pin through log activation and root-last tree publication.
@@ -955,17 +988,15 @@ pub(crate) fn stage_full_generation_tree(
             "persistent tree publication revision is exhausted",
         )
     })?;
-    let build = build_initial_native(database, &TreeConfig::default())?;
-    let manifest = PersistentTreeManifest {
-        database_id: database_id.to_owned(),
+    let build = build_full_native_tree(
+        database_id,
         publication_revision,
-        basis_t: database.basis_t(),
+        log_generation,
         tx_hash,
         state_hash,
-        excision_generation: log_generation,
-        eidx_frontier: build.eidx_frontier,
-        trees: build.trees,
-    };
+        database,
+    )?;
+    let manifest = build.manifest;
     let payload = manifest.encode()?;
     let manifest_hash = sha256(&payload);
     let record = TreeManifestRecord {
@@ -1002,7 +1033,13 @@ pub(crate) fn stage_full_generation_tree(
         for (hash, bytes) in build.nodes.iter() {
             store.insert_node(*hash, bytes)?;
         }
-        store.stage_manifest_with_delta(&record, expected_revision, &build.publication_delta)
+        store.stage_manifest_with_delta(
+            &record,
+            expected_revision,
+            &TreePublicationDelta::Replace {
+                live_nodes: build.nodes.iter().map(|(hash, _)| *hash).collect(),
+            },
+        )
     })();
     if let Err(error) = staged {
         store.release_build_intent()?;
@@ -3977,14 +4014,16 @@ impl TieredSnapshot {
             .map_err(|error| exact_pin_error(error, required_manifest))?;
         let (state, tail_transactions) = build_exact_tiered_state(
             &mut client,
-            &database_id,
-            endpoint,
-            base,
-            generation_pin,
-            root_pin,
-            recent_limits,
-            0,
-            &counters,
+            ExactTieredBuild {
+                database_id: &database_id,
+                endpoint,
+                base,
+                generation_pin,
+                root_pin,
+                recent_limits,
+                local_generation: 0,
+                counters: &counters,
+            },
             &mut tree_cache,
         )?;
         let stats = exact_open_stats(&state, scan_stats, tail_transactions)?;
@@ -4067,14 +4106,16 @@ impl TieredSnapshot {
             } = &mut *io;
             build_exact_tiered_state(
                 client,
-                &self.core.database_id,
-                endpoint,
-                base,
-                generation_pin,
-                root_pin,
-                self.core.recent_limits,
-                local_generation,
-                &self.core.load_counters,
+                ExactTieredBuild {
+                    database_id: &self.core.database_id,
+                    endpoint,
+                    base,
+                    generation_pin,
+                    root_pin,
+                    recent_limits: self.core.recent_limits,
+                    local_generation,
+                    counters: &self.core.load_counters,
+                },
                 tree_cache,
             )?
         };
@@ -4282,14 +4323,6 @@ impl TieredSnapshot {
             core: Arc::clone(&self.core),
             state: Arc::new(state),
         })
-    }
-
-    pub(crate) fn state_hash(&self) -> Digest {
-        self.state.current_state_hash
-    }
-
-    pub(crate) fn excision_generation(&self) -> u64 {
-        self.state.excision_generation
     }
 
     pub(crate) fn recent_stats(&self) -> crate::recent::RecentStats {
@@ -5362,7 +5395,7 @@ struct TreeBaseScanStats {
 }
 
 enum TreeBaseScan {
-    Selected(TreeBase, TreeBaseScanStats),
+    Selected(Box<TreeBase>, TreeBaseScanStats),
     NoPublication(TreeBaseScanStats),
     AllInvalid(TreeBaseScanStats),
     RequiredCollecting(TreeBaseScanStats),
@@ -5422,7 +5455,7 @@ fn scan_latest_tree_base<C: GenericClient>(
                 counters,
                 cache,
             ) {
-                Ok(base) => Ok(TreeBaseScan::Selected(base, stats)),
+                Ok(base) => Ok(TreeBaseScan::Selected(Box::new(base), stats)),
                 Err(error) if is_postgres_connection_error(&error) => Err(error),
                 Err(_) => {
                     stats.rejected_candidates = 1;
@@ -5664,7 +5697,7 @@ fn scan_latest_tree_base<C: GenericClient>(
             })
         })();
         if let Ok(base) = candidate {
-            return Ok(TreeBaseScan::Selected(base, stats));
+            return Ok(TreeBaseScan::Selected(Box::new(base), stats));
         }
         stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
     }
@@ -5897,7 +5930,7 @@ fn load_latest_tree_base<C: GenericClient>(
         counters,
         cache,
     )? {
-        TreeBaseScan::Selected(base, _) => Ok(Some(base)),
+        TreeBaseScan::Selected(base, _) => Ok(Some(*base)),
         TreeBaseScan::NoPublication(_) => Ok(None),
         TreeBaseScan::AllInvalid(stats) => Err(fault(
             "peer/all-native-publications-invalid",
@@ -5918,7 +5951,7 @@ fn exact_tree_selection(
     required_manifest: Option<Digest>,
 ) -> Result<(TreeBase, TreeBaseScanStats), SemanticError> {
     match scan {
-        TreeBaseScan::Selected(base, stats) => Ok((base, stats)),
+        TreeBaseScan::Selected(base, stats) => Ok((*base, stats)),
         TreeBaseScan::NoPublication(stats) => {
             let (code, message) = if required_manifest.is_some() {
                 (
@@ -5987,18 +6020,32 @@ fn exact_pin_error(error: SemanticError, required_manifest: Option<Digest>) -> S
     }
 }
 
-fn build_exact_tiered_state<C: GenericClient>(
-    client: &mut C,
-    database_id: &str,
+struct ExactTieredBuild<'a> {
+    database_id: &'a str,
     endpoint: ExactEndpoint,
     base: TreeBase,
     generation_pin: Arc<GenerationPin>,
     root_pin: Option<Arc<RootPin>>,
     recent_limits: RecentLimits,
     local_generation: u64,
-    counters: &PeerLoadCounters,
+    counters: &'a PeerLoadCounters,
+}
+
+fn build_exact_tiered_state<C: GenericClient>(
+    client: &mut C,
+    build: ExactTieredBuild<'_>,
     tree_cache: &mut TreeNodeCache,
 ) -> Result<(TieredState, u64), SemanticError> {
+    let ExactTieredBuild {
+        database_id,
+        endpoint,
+        base,
+        generation_pin,
+        root_pin,
+        recent_limits,
+        local_generation,
+        counters,
+    } = build;
     let base_metadata = Arc::clone(&base.metadata);
     let tail = read_authenticated_tail(
         client,
@@ -6264,69 +6311,6 @@ fn load_latest_base_with_stats<C: GenericClient>(
         rejected += 1;
     }
     Ok((None, rejected))
-}
-
-pub(crate) fn recover_transactor_state<C: GenericClient>(
-    client: &mut C,
-    database_id: &str,
-    target_t: u64,
-    target_hash: Digest,
-) -> Result<(Database, Digest, RecoveryStats), SemanticError> {
-    let mut cache = SegmentCache::new(0);
-    let log_generation = read_excision_generation(client, database_id)?;
-    let (base, rejected_manifests) = if log_generation == 0 {
-        load_latest_base_with_stats(client, database_id, target_t, &mut cache)?
-    } else {
-        (None, 0)
-    };
-    let (mut database, mut hash, base_t) = match base {
-        Some((database, hash, basis)) => (database, hash, basis),
-        None => {
-            let recovered = recover_to(client, database_id, target_t, target_hash)?;
-            return Ok((
-                recovered.database,
-                recovered.final_hash,
-                RecoveryStats {
-                    base_t: 0,
-                    target_t,
-                    tail_transactions: target_t,
-                    rejected_manifests,
-                },
-            ));
-        }
-    };
-    let tail_transactions = target_t.checked_sub(base_t).ok_or_else(|| {
-        fault(
-            "peer/base-ahead-of-head",
-            "selected persistent base is ahead of the authoritative head",
-        )
-    })?;
-    if tail_transactions > 0 {
-        apply_tail(
-            client,
-            database_id,
-            log_generation,
-            &mut database,
-            &mut hash,
-            target_t,
-        )?;
-    }
-    if database.basis_t() != target_t || hash != target_hash {
-        return Err(fault(
-            "peer/head-mismatch",
-            "verified base plus log tail did not reach the authoritative head",
-        ));
-    }
-    Ok((
-        database,
-        hash,
-        RecoveryStats {
-            base_t,
-            target_t,
-            tail_transactions,
-            rejected_manifests,
-        },
-    ))
 }
 
 fn load_manifest_database<C: GenericClient>(
