@@ -1537,6 +1537,16 @@ mod tests {
                         attribute: 1_001,
                         value: TxValue::Entity(EntityRef::Temp("parent".into())),
                     },
+                    // A tempid denotes a newly asserted entity, not a
+                    // free-standing reference value. Give `parent` its own
+                    // information so this tail fixture exercises a valid
+                    // ref-valued transaction under the recovered
+                    // `tempid-not-an-entity` rule.
+                    TxOp::Add {
+                        entity: EntityRef::Temp("parent".into()),
+                        attribute: 1_002,
+                        value: TxValue::Scalar(Value::String("parent".into())),
+                    },
                     TxOp::Add {
                         entity: EntityRef::Temp("item".into()),
                         attribute: 1_002,
