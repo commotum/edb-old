@@ -12,10 +12,10 @@ use crate::{
     Cardinality, DB_ALTER_ATTRIBUTE, DB_ATTR_PREDS, DB_CARDINALITY, DB_ENSURE, DB_ENTITY_ATTRS,
     DB_ENTITY_PREDS, DB_EXCISE, DB_EXCISE_BEFORE, DB_EXCISE_BEFORE_T, DB_IDENT, DB_INDEX,
     DB_INSTALL_ATTRIBUTE, DB_IS_COMPONENT, DB_NO_HISTORY, DB_PART_DB, DB_TUPLE_ATTRS,
-    DB_TUPLE_DISCONTINUED, DB_TUPLE_TYPE, DB_TUPLE_TYPES, DB_TX_INSTANT, DB_UNIQUE,
-    DB_VALUE_TYPE, DatabaseValue, Datom, EntityRef, ErrorCategory, IndexOrder, IndexPrefix, Schema,
-    SemanticError, TX_PARTITION, TupleSpec, TxOp, TxValue, USER_PARTITION, Unique, Value,
-    ValueType, eid_to_eidx, eid_to_part, make_eid, t_to_tx,
+    DB_TUPLE_DISCONTINUED, DB_TUPLE_TYPE, DB_TUPLE_TYPES, DB_TX_INSTANT, DB_UNIQUE, DB_VALUE_TYPE,
+    DatabaseValue, Datom, EntityRef, ErrorCategory, IndexOrder, IndexPrefix, Schema, SemanticError,
+    TX_PARTITION, TupleSpec, TxFunctions, TxOp, TxValue, USER_PARTITION, Unique, Value, ValueType,
+    eid_to_eidx, eid_to_part, make_eid, t_to_tx,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +37,8 @@ pub(crate) struct EnsureRequirement {
 
 #[derive(Clone, Debug)]
 pub(crate) struct TieredAssessment {
+    pub(crate) db_before: DatabaseValue,
+    pub(crate) db_after: DatabaseValue,
     pub(crate) basis_t: u64,
     pub(crate) eidx_frontier: u64,
     pub(crate) tx_data: Vec<Datom>,
@@ -44,6 +46,140 @@ pub(crate) struct TieredAssessment {
     pub(crate) ensures: Vec<EnsureRequirement>,
     pub(crate) successor_schema: Arc<Schema>,
     pub(crate) read_work: AssessmentReadWork,
+}
+
+impl TieredAssessment {
+    /// Resolve only predicates this assessed transaction can execute.  As in
+    /// the eager oracle, missing required attributes short-circuit before
+    /// persisted predicate bindings are looked up.
+    pub(crate) fn predicate_requirements(
+        &self,
+    ) -> Result<BTreeMap<String, crate::database::PredicateRole>, SemanticError> {
+        self.validate_ensure_attributes()?;
+        let mut required = BTreeMap::new();
+        for datom in self.tx_data.iter().filter(|datom| datom.added) {
+            let attribute = self.db_before.schema().attribute(datom.attribute)?;
+            for predicate in &attribute.predicates {
+                insert_predicate_role(
+                    &mut required,
+                    predicate,
+                    crate::database::PredicateRole::Attribute,
+                )?;
+            }
+        }
+        for ensure in &self.ensures {
+            for predicate in &ensure.predicates {
+                insert_predicate_role(
+                    &mut required,
+                    predicate,
+                    crate::database::PredicateRole::Entity,
+                )?;
+            }
+        }
+        Ok(required)
+    }
+
+    /// Run the delayed add-data and ensure hooks against the exact immutable
+    /// db-before/db-after pair. Persisted entity predicates use the lazy
+    /// `DatabaseValue`; eager Rust callbacks remain an oracle-only adapter.
+    pub(crate) fn validate_exact(
+        &self,
+        functions: Option<&TxFunctions>,
+    ) -> Result<(), SemanticError> {
+        for datom in self.tx_data.iter().filter(|datom| datom.added) {
+            let attribute = self.db_before.schema().attribute(datom.attribute)?;
+            for predicate in &attribute.predicates {
+                let result = functions
+                    .ok_or_else(|| {
+                        SemanticError::incorrect(
+                            "transaction/missing-predicate-context",
+                            format!(
+                                "attribute {} requires predicate {predicate}",
+                                attribute.ident.qualified_name()
+                            ),
+                        )
+                    })?
+                    .validate_attribute_predicate(predicate, &datom.value)?;
+                if !crate::is_exact_true(&result) {
+                    return Err(SemanticError::incorrect(
+                        "transaction/attribute-predicate",
+                        format!(
+                            "entity {} attribute {} value {:?} failed predicate {predicate} with result {result:?}",
+                            datom.entity,
+                            attribute.ident.qualified_name(),
+                            datom.value,
+                        ),
+                    )
+                    .detail("entity", datom.entity.to_string())
+                    .detail("attribute", attribute.ident.qualified_name())
+                    .detail("value", format!("{:?}", datom.value))
+                    .detail("predicate", predicate.clone())
+                    .detail("pred_return", format!("{result:?}")));
+                }
+            }
+        }
+        self.validate_ensure_attributes()?;
+        for ensure in &self.ensures {
+            for predicate in &ensure.predicates {
+                let result = functions
+                    .ok_or_else(|| {
+                        SemanticError::incorrect(
+                            "transaction/missing-predicate-context",
+                            format!("entity spec {} requires predicate {predicate}", ensure.spec),
+                        )
+                    })?
+                    .validate_entity_predicate_exact(predicate, &self.db_after, ensure.entity)?;
+                if !crate::is_exact_true(&result) {
+                    return Err(SemanticError::incorrect(
+                        "transaction/entity-predicate",
+                        format!(
+                            "entity {} failed predicate {predicate} of spec {}",
+                            ensure.entity, ensure.spec
+                        ),
+                    )
+                    .detail("pred_return", format!("{result:?}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_ensure_attributes(&self) -> Result<(), SemanticError> {
+        for ensure in &self.ensures {
+            let mut missing = Vec::new();
+            for attribute in &ensure.required {
+                if self.db_after.values(ensure.entity, *attribute)?.is_empty() {
+                    missing.push(*attribute);
+                }
+            }
+            if !missing.is_empty() {
+                return Err(SemanticError::incorrect(
+                    "transaction/entity-spec",
+                    format!(
+                        "entity {} is missing attributes {missing:?} of spec {}",
+                        ensure.entity, ensure.spec
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn insert_predicate_role(
+    required: &mut BTreeMap<String, crate::database::PredicateRole>,
+    predicate: &str,
+    role: crate::database::PredicateRole,
+) -> Result<(), SemanticError> {
+    if let Some(existing) = required.insert(predicate.to_owned(), role)
+        && existing != role
+    {
+        return Err(SemanticError::incorrect(
+            "program/predicate-role-conflict",
+            format!("predicate {predicate} is required as both an attribute and entity predicate"),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -154,26 +290,22 @@ pub(crate) fn assess_tiered(
         )
     })?;
     let tx = t_to_tx(basis_t)?;
-    let initial_allocation_start = base
-        .eidx_frontier()
-        .max(basis_t.checked_add(1).ok_or_else(|| {
-            SemanticError::incorrect(
-                "transaction/basis-overflow",
-                "transaction time cannot advance the issued frontier",
-            )
-        })?);
+    let initial_allocation_start =
+        base.eidx_frontier()
+            .max(basis_t.checked_add(1).ok_or_else(|| {
+                SemanticError::incorrect(
+                    "transaction/basis-overflow",
+                    "transaction time cannot advance the issued frontier",
+                )
+            })?);
     validate_frontier(initial_allocation_start)?;
 
     let mut ordered = ops.to_vec();
     ordered.sort_by(crate::transaction::compare_tx_op);
     validate_tx_instant_forms(&ordered, tx_instant)?;
     let mut reader = Reader::new(base);
-    let (mut logical, allocation_start) = prepare_schema_information(
-        &mut reader,
-        &ordered,
-        tx,
-        initial_allocation_start,
-    )?;
+    let (mut logical, allocation_start) =
+        prepare_schema_information(&mut reader, &ordered, tx, initial_allocation_start)?;
     let (tempids, eidx_frontier) = resolve_tempids(&mut reader, &ordered, allocation_start)?;
     let mut ensures = Vec::new();
     let mut touched = BTreeSet::new();
@@ -216,7 +348,18 @@ pub(crate) fn assess_tiered(
     let mut tx_data = material_changes(&mut reader, &logical, tx)?;
     tx_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
 
+    let db_after = DatabaseValue::transaction_overlay(
+        base.clone(),
+        Arc::from(tx_data.clone()),
+        Arc::clone(&successor_schema),
+        basis_t,
+        eidx_frontier,
+        tx_instant,
+    )?;
+
     Ok(TieredAssessment {
+        db_before: base.clone(),
+        db_after,
         basis_t,
         eidx_frontier,
         tx_data,
@@ -225,6 +368,574 @@ pub(crate) fn assess_tiered(
         successor_schema,
         read_work: reader.work,
     })
+}
+
+fn prepare_schema_information(
+    reader: &mut Reader<'_>,
+    ops: &[TxOp],
+    tx: u64,
+    mut allocation_frontier: u64,
+) -> Result<(Vec<LogicalDatom>, u64), SemanticError> {
+    let mut seen = BTreeSet::new();
+    let mut installed = Vec::new();
+    let mut candidate = reader.base.schema().clone();
+    let mut changes = Vec::<(crate::Attribute, bool)>::new();
+    let exact_upgrade = is_exact_excision_bootstrap_ops(reader.base.schema(), ops);
+
+    for op in ops {
+        let (attribute, install) = match op {
+            TxOp::InstallAttribute(attribute) => (attribute, true),
+            TxOp::AlterAttribute(attribute) => (attribute, false),
+            _ => continue,
+        };
+        if !seen.insert(attribute.id) {
+            return Err(SemanticError::conflict(
+                "schema/multiple-changes",
+                format!(
+                    "attribute {} has multiple schema changes in one transaction",
+                    attribute.id
+                ),
+            ));
+        }
+        crate::schema_eid_to_attr_id(u64::from(attribute.id))?;
+        if install {
+            let reserved = supported_system_idents()
+                .iter()
+                .any(|(entity, _)| *entity == u64::from(attribute.id));
+            if reserved && !exact_upgrade {
+                return Err(SemanticError::incorrect(
+                    "schema/reserved-system-entity",
+                    format!(
+                        "entity {} is reserved by the native vocabulary",
+                        attribute.id
+                    ),
+                ));
+            }
+            if u64::from(attribute.id) >= allocation_frontier {
+                if u64::from(attribute.id) != allocation_frontier {
+                    return Err(SemanticError::incorrect(
+                        "schema/noncontiguous-attribute-id",
+                        format!(
+                            "fresh schema entity {} must use issued frontier {}",
+                            attribute.id, allocation_frontier
+                        ),
+                    ));
+                }
+                allocation_frontier = allocation_frontier.checked_add(1).ok_or_else(|| {
+                    SemanticError::incorrect(
+                        "schema/attribute-id-overflow",
+                        "schema entity allocation exhausted the entity-index space",
+                    )
+                })?;
+            }
+            candidate.install(attribute.clone())?;
+            installed.push(attribute.id);
+        } else {
+            candidate.alter(attribute.clone())?;
+        }
+        changes.push((attribute.clone(), install));
+    }
+    candidate.validate_tuple_installations(&installed)?;
+
+    let metadata_attributes = [
+        DB_IDENT as u32,
+        DB_VALUE_TYPE as u32,
+        DB_CARDINALITY as u32,
+        DB_UNIQUE as u32,
+        DB_IS_COMPONENT as u32,
+        DB_INDEX as u32,
+        DB_NO_HISTORY as u32,
+        DB_TUPLE_TYPE as u32,
+        DB_TUPLE_TYPES as u32,
+        DB_TUPLE_ATTRS as u32,
+        DB_ATTR_PREDS as u32,
+        DB_TUPLE_DISCONTINUED as u32,
+    ];
+    let mut logical = Vec::new();
+    for (attribute, install) in changes {
+        let desired = crate::schema::attribute_information_datoms(&attribute, &candidate, tx)?;
+        let current = (!install)
+            .then(|| reader.base.schema().attribute(attribute.id))
+            .transpose()?;
+        let property_changed = |metadata_attribute| {
+            install
+                || current.is_some_and(|current| {
+                    attribute_property_changed(current, &attribute, metadata_attribute)
+                })
+        };
+        for fact in reader.prefix(&IndexPrefix::Eavt {
+            entity: u64::from(attribute.id),
+            attribute: None,
+            value: None,
+        })? {
+            if metadata_attributes.contains(&fact.attribute)
+                && property_changed(fact.attribute)
+                && !desired.iter().any(|wanted| same_eav(wanted, &fact))
+            {
+                logical.push(LogicalDatom {
+                    entity: fact.entity,
+                    attribute: fact.attribute,
+                    value: fact.value,
+                    added: false,
+                });
+            }
+        }
+        for datom in desired {
+            if property_changed(datom.attribute)
+                && !reader.contains(datom.entity, datom.attribute, &datom.value)?
+            {
+                logical.push(LogicalDatom {
+                    entity: datom.entity,
+                    attribute: datom.attribute,
+                    value: datom.value,
+                    added: true,
+                });
+            }
+        }
+    }
+    validate_frontier(allocation_frontier)?;
+    Ok((logical, allocation_frontier))
+}
+
+fn is_exact_excision_bootstrap_ops(schema: &Schema, ops: &[TxOp]) -> bool {
+    let ids = [
+        DB_EXCISE as u32,
+        crate::DB_EXCISE_ATTRS as u32,
+        DB_EXCISE_BEFORE_T as u32,
+        DB_EXCISE_BEFORE as u32,
+    ];
+    if ops.len() != ids.len() || ids.iter().any(|id| schema.attribute(*id).is_ok()) {
+        return false;
+    }
+    ids.iter().all(|id| {
+        let expected = supported_system_attributes()
+            .into_iter()
+            .find(|attribute| attribute.id == *id);
+        ops.iter().any(|op| {
+            matches!((op, &expected), (TxOp::InstallAttribute(actual), Some(expected)) if actual == expected)
+        })
+    })
+}
+
+fn synthesize_schema_hooks(
+    reader: &mut Reader<'_>,
+    logical: &mut Vec<LogicalDatom>,
+) -> Result<(), SemanticError> {
+    let mut explicit = BTreeMap::<u64, u32>::new();
+    for datom in logical.iter().filter(|datom| {
+        matches!(
+            u64::from(datom.attribute),
+            DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
+        )
+    }) {
+        if !datom.added || datom.entity != DB_PART_DB {
+            return Err(SemanticError::incorrect(
+                "schema/invalid-hook-datom",
+                "attribute install/alter hooks must be assertions on :db.part/db",
+            ));
+        }
+        let Value::Ref(target) = datom.value else {
+            return Err(SemanticError::incorrect(
+                "schema/invalid-hook-target",
+                "attribute install/alter hook values must be entity references",
+            ));
+        };
+        let attribute = crate::schema_eid_to_attr_id(target)?;
+        let expected = if reader.base.schema().attribute(attribute).is_ok() {
+            DB_ALTER_ATTRIBUTE as u32
+        } else {
+            DB_INSTALL_ATTRIBUTE as u32
+        };
+        if datom.attribute != expected {
+            return Err(SemanticError::incorrect(
+                "schema/wrong-hook-kind",
+                "schema hook kind does not match db-before installation state",
+            ));
+        }
+        if let Some(prior) = explicit.insert(target, datom.attribute)
+            && prior != datom.attribute
+        {
+            return Err(SemanticError::conflict(
+                "schema/conflicting-hooks",
+                "one schema entity cannot be installed and altered together",
+            ));
+        }
+    }
+
+    let mut touched = BTreeSet::new();
+    for datom in logical
+        .iter()
+        .filter(|datom| is_attribute_hook_property(datom.attribute))
+    {
+        crate::schema_eid_to_attr_id(datom.entity)?;
+        if reader.contains(datom.entity, datom.attribute, &datom.value)? != datom.added {
+            touched.insert(datom.entity);
+        }
+    }
+    logical.retain(|datom| {
+        !matches!(
+            u64::from(datom.attribute),
+            DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
+        )
+    });
+    for target in touched {
+        let attribute = crate::schema_eid_to_attr_id(target)?;
+        logical.push(LogicalDatom {
+            entity: DB_PART_DB,
+            attribute: if reader.base.schema().attribute(attribute).is_ok() {
+                DB_ALTER_ATTRIBUTE as u32
+            } else {
+                DB_INSTALL_ATTRIBUTE as u32
+            },
+            value: Value::Ref(target),
+            added: true,
+        });
+    }
+    Ok(())
+}
+
+fn derive_successor_schema(
+    reader: &mut Reader<'_>,
+    logical: &[LogicalDatom],
+    tx: u64,
+) -> Result<Schema, SemanticError> {
+    let mut current = reader
+        .prefix(&IndexPrefix::Eavt {
+            entity: DB_PART_DB,
+            attribute: None,
+            value: None,
+        })?
+        .into_iter()
+        .filter(|datom| {
+            matches!(
+                u64::from(datom.attribute),
+                DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
+            )
+        })
+        .collect::<Vec<_>>();
+    let attributes = reader
+        .base
+        .schema()
+        .attributes()
+        .map(|attribute| attribute.id)
+        .collect::<Vec<_>>();
+    for attribute in attributes {
+        current.extend(
+            reader
+                .prefix(&IndexPrefix::Eavt {
+                    entity: u64::from(attribute),
+                    attribute: None,
+                    value: None,
+                })?
+                .into_iter()
+                .filter(|datom| schema_information_attribute(datom.attribute)),
+        );
+    }
+    for datom in logical.iter().filter(|datom| {
+        schema_information_attribute(datom.attribute)
+            || matches!(
+                u64::from(datom.attribute),
+                DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
+            )
+    }) {
+        if datom.added {
+            if !current.iter().any(|fact| {
+                fact.entity == datom.entity
+                    && fact.attribute == datom.attribute
+                    && fact.value.stored_eq(&datom.value)
+            }) {
+                current.push(Datom {
+                    entity: datom.entity,
+                    attribute: datom.attribute,
+                    value: datom.value.clone(),
+                    tx,
+                    added: true,
+                });
+            }
+        } else {
+            current.retain(|fact| {
+                !(fact.entity == datom.entity
+                    && fact.attribute == datom.attribute
+                    && fact.value.stored_eq(&datom.value))
+            });
+        }
+    }
+
+    // Only attribute and system aliases are required to derive Schema. The
+    // full general ident cache remains resident in the concrete tiered value
+    // and is updated delta-first by TransactionOverlay.
+    let mut ident_assertions = Vec::new();
+    for (entity, ident) in supported_system_idents() {
+        ident_assertions.push(ident_datom(entity, ident, 0));
+    }
+    for attribute in reader.base.schema().attributes() {
+        ident_assertions.push(ident_datom(
+            u64::from(attribute.id),
+            attribute.ident.clone(),
+            0,
+        ));
+    }
+    for (ident, attribute) in reader.base.schema().ident_aliases() {
+        ident_assertions.push(ident_datom(u64::from(attribute), ident.clone(), 0));
+    }
+    ident_assertions.extend(
+        logical
+            .iter()
+            .filter(|datom| datom.added && u64::from(datom.attribute) == DB_IDENT)
+            .map(|datom| Datom {
+                entity: datom.entity,
+                attribute: datom.attribute,
+                value: datom.value.clone(),
+                tx,
+                added: true,
+            }),
+    );
+    let idents = IdentIndex::derive(ident_assertions.iter(), DB_IDENT as u32)?;
+    Schema::derive_from_information(&current, &idents)
+}
+
+fn ident_datom(entity: u64, ident: crate::Keyword, tx: u64) -> Datom {
+    Datom {
+        entity,
+        attribute: DB_IDENT as u32,
+        value: Value::Keyword(ident),
+        tx,
+        added: true,
+    }
+}
+
+fn validate_schema_transition(
+    reader: &mut Reader<'_>,
+    successor: &Schema,
+    logical: &[LogicalDatom],
+) -> Result<(), SemanticError> {
+    for required in crate::canonical_genesis_datoms() {
+        if logical.iter().any(|datom| {
+            !datom.added
+                && datom.entity == required.entity
+                && datom.attribute == required.attribute
+                && datom.value.stored_eq(&required.value)
+        }) {
+            return Err(SemanticError::incorrect(
+                "schema/native-information-immutable",
+                "native genesis information cannot be retracted or replaced",
+            ));
+        }
+    }
+    for system in supported_system_attributes() {
+        if reader.base.schema().attribute(system.id).is_ok()
+            && successor.attribute(system.id)? != &system
+        {
+            return Err(SemanticError::incorrect(
+                "schema/native-attribute-immutable",
+                format!(
+                    "native attribute {} cannot be altered",
+                    system.ident.qualified_name()
+                ),
+            ));
+        }
+    }
+    for current in reader.base.schema().attributes() {
+        if successor.attribute(current.id).is_err() {
+            return Err(SemanticError::incorrect(
+                "schema/removed-attribute",
+                format!("committed information removed attribute {}", current.id),
+            ));
+        }
+    }
+
+    let mut installed = Vec::new();
+    for proposed in successor.attributes() {
+        match reader.base.schema().attribute(proposed.id) {
+            Ok(current) if current == proposed => {}
+            Ok(current) => {
+                if current.value_type != proposed.value_type {
+                    return Err(SemanticError::incorrect(
+                        "schema/value-type-immutable",
+                        "an installed attribute's value type cannot change",
+                    ));
+                }
+                if current.tuple != proposed.tuple {
+                    return Err(SemanticError::incorrect(
+                        "schema/tuple-definition-immutable",
+                        "an installed tuple definition cannot change",
+                    ));
+                }
+                if current.tuple_discontinued && !proposed.tuple_discontinued {
+                    return Err(SemanticError::incorrect(
+                        "schema/tuple-discontinuation-irreversible",
+                        "a discontinued composite tuple cannot be resumed",
+                    ));
+                }
+                if current.cardinality == Cardinality::Many
+                    && proposed.cardinality == Cardinality::One
+                {
+                    let facts = successor_attribute_datoms(reader, logical, proposed.id)?;
+                    let mut counts = BTreeMap::<u64, usize>::new();
+                    for fact in facts {
+                        *counts.entry(fact.entity).or_default() += 1;
+                    }
+                    if counts.values().any(|count| *count > 1) {
+                        return Err(SemanticError::conflict(
+                            "schema/cardinality-change-conflict",
+                            "current data contains multiple values for one entity",
+                        ));
+                    }
+                }
+                if current.unique.is_none() && proposed.unique.is_some() {
+                    if !current.indexed {
+                        return Err(SemanticError::incorrect(
+                            "schema/unique-requires-avet",
+                            "adding uniqueness requires an existing AVET index",
+                        ));
+                    }
+                    validate_attribute_uniqueness(&successor_attribute_datoms(
+                        reader,
+                        logical,
+                        proposed.id,
+                    )?)?;
+                }
+            }
+            Err(_) => {
+                let reserved = supported_system_idents()
+                    .iter()
+                    .any(|(entity, _)| *entity == u64::from(proposed.id));
+                if reserved
+                    && supported_system_attributes()
+                        .iter()
+                        .find(|attribute| attribute.id == proposed.id)
+                        != Some(proposed)
+                {
+                    return Err(SemanticError::incorrect(
+                        "schema/reserved-system-entity",
+                        format!(
+                            "entity {} is reserved by the native vocabulary",
+                            proposed.id
+                        ),
+                    ));
+                }
+                installed.push(proposed.id);
+            }
+        }
+    }
+    successor.validate_tuple_installations(&installed)
+}
+
+fn successor_attribute_datoms(
+    reader: &mut Reader<'_>,
+    logical: &[LogicalDatom],
+    attribute: u32,
+) -> Result<Vec<Datom>, SemanticError> {
+    let mut facts = reader.prefix(&IndexPrefix::Aevt {
+        attribute,
+        entity: None,
+        value: None,
+    })?;
+    for datom in logical.iter().filter(|datom| datom.attribute == attribute) {
+        if datom.added {
+            if !facts
+                .iter()
+                .any(|fact| fact.entity == datom.entity && fact.value.stored_eq(&datom.value))
+            {
+                facts.push(Datom {
+                    entity: datom.entity,
+                    attribute,
+                    value: datom.value.clone(),
+                    tx: 0,
+                    added: true,
+                });
+            }
+        } else {
+            facts.retain(|fact| {
+                !(fact.entity == datom.entity && fact.value.stored_eq(&datom.value))
+            });
+        }
+    }
+    Ok(facts)
+}
+
+fn validate_attribute_uniqueness(facts: &[Datom]) -> Result<(), SemanticError> {
+    for (index, left) in facts.iter().enumerate() {
+        if left.value.is_nan() {
+            return Err(SemanticError::incorrect(
+                "transaction/nan-cannot-identify",
+                "NaN cannot participate in uniqueness",
+            ));
+        }
+        if facts[index + 1..]
+            .iter()
+            .any(|right| left.entity != right.entity && left.value.index_cmp(&right.value).is_eq())
+        {
+            return Err(SemanticError::conflict(
+                "schema/unique-change-conflict",
+                "current values must be unique before adding uniqueness",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn schema_information_attribute(attribute: u32) -> bool {
+    matches!(
+        u64::from(attribute),
+        DB_IDENT
+            | DB_INSTALL_ATTRIBUTE
+            | DB_ALTER_ATTRIBUTE
+            | DB_VALUE_TYPE
+            | DB_CARDINALITY
+            | DB_UNIQUE
+            | DB_IS_COMPONENT
+            | DB_INDEX
+            | DB_NO_HISTORY
+            | DB_TUPLE_TYPE
+            | DB_TUPLE_TYPES
+            | DB_TUPLE_ATTRS
+            | DB_TUPLE_DISCONTINUED
+            | DB_ATTR_PREDS
+    )
+}
+
+fn is_attribute_hook_property(attribute: u32) -> bool {
+    matches!(
+        u64::from(attribute),
+        DB_VALUE_TYPE
+            | DB_CARDINALITY
+            | DB_UNIQUE
+            | DB_IS_COMPONENT
+            | DB_INDEX
+            | DB_NO_HISTORY
+            | DB_TUPLE_TYPE
+            | DB_TUPLE_TYPES
+            | DB_TUPLE_ATTRS
+            | DB_ATTR_PREDS
+            | DB_TUPLE_DISCONTINUED
+    )
+}
+
+fn attribute_property_changed(
+    current: &crate::Attribute,
+    proposed: &crate::Attribute,
+    attribute: u32,
+) -> bool {
+    match u64::from(attribute) {
+        DB_IDENT => current.ident != proposed.ident,
+        DB_VALUE_TYPE => current.value_type != proposed.value_type,
+        DB_CARDINALITY => current.cardinality != proposed.cardinality,
+        DB_UNIQUE => current.unique != proposed.unique,
+        DB_IS_COMPONENT => current.component != proposed.component,
+        DB_INDEX => current.indexed != proposed.indexed,
+        DB_NO_HISTORY => current.no_history != proposed.no_history,
+        DB_TUPLE_TYPE | DB_TUPLE_TYPES | DB_TUPLE_ATTRS => current.tuple != proposed.tuple,
+        DB_ATTR_PREDS => current.predicates != proposed.predicates,
+        DB_TUPLE_DISCONTINUED => current.tuple_discontinued != proposed.tuple_discontinued,
+        _ => false,
+    }
+}
+
+fn same_eav(left: &Datom, right: &Datom) -> bool {
+    left.entity == right.entity
+        && left.attribute == right.attribute
+        && left.value.stored_eq(&right.value)
 }
 
 fn resolve_tempids(
@@ -470,7 +1181,7 @@ fn expand_op(
             let spec = resolve_entity(reader, spec, tx, tempids)?;
             ensures.push(resolve_entity_spec(reader, entity, spec)?);
         }
-        TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => unreachable!(),
+        TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
     }
     Ok(())
 }
@@ -772,6 +1483,7 @@ fn derive_composites(
 
 fn validate_delta_successor(
     reader: &mut Reader<'_>,
+    successor_schema: &Schema,
     logical: &[LogicalDatom],
 ) -> Result<(), SemanticError> {
     let mut touched_ea = BTreeSet::new();
@@ -779,7 +1491,7 @@ fn validate_delta_successor(
     let mut excision_entities = BTreeSet::new();
     for datom in logical {
         touched_ea.insert((datom.entity, datom.attribute));
-        let descriptor = reader.base.schema().attribute(datom.attribute)?;
+        let descriptor = successor_schema.attribute(datom.attribute)?;
         if descriptor.unique.is_some()
             && !touched_av.iter().any(|(attribute, value)| {
                 *attribute == datom.attribute && value.stored_eq(&datom.value)
@@ -795,7 +1507,7 @@ fn validate_delta_successor(
         }
     }
     for (entity, attribute) in touched_ea {
-        let descriptor = reader.base.schema().attribute(attribute)?;
+        let descriptor = successor_schema.attribute(attribute)?;
         let values = successor_values(reader, logical, entity, attribute)?;
         if descriptor.cardinality == Cardinality::One && values.len() > 1 {
             return Err(SemanticError::conflict(
@@ -920,7 +1632,9 @@ fn material_changes(
     let mut result = Vec::new();
     for datom in logical {
         let existed = reader.contains(datom.entity, datom.attribute, &datom.value)?;
-        if existed != datom.added {
+        if existed != datom.added
+            || (datom.added && u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE)
+        {
             result.push(Datom {
                 entity: datom.entity,
                 attribute: datom.attribute,
@@ -1256,11 +1970,26 @@ mod tests {
         ];
         let expected = seeded.with(&ops, 11).unwrap();
         let value = DatabaseValue::eager(Arc::new(seeded));
-        let assessed = assess_tiered_ordinary(&value, &ops, 11).unwrap();
+        let assessed = assess_tiered(&value, &ops, 11).unwrap();
         assert_eq!(assessed.basis_t, expected.db_after.basis_t());
         assert_eq!(assessed.eidx_frontier, expected.db_after.eidx_frontier());
         assert_eq!(assessed.tempids, expected.tempids);
         assert_eq!(assessed.tx_data, expected.tx_data);
+        assert_eq!(
+            assessed.db_after.values(entity, COUNT).unwrap(),
+            expected
+                .db_after
+                .values(entity, COUNT)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(assessed.db_after.basis_t(), expected.db_after.basis_t());
+        assert_eq!(
+            assessed.db_after.last_tx_instant().unwrap(),
+            expected.db_after.last_tx_instant()
+        );
+        assessed.validate_exact(None).unwrap();
         assert!(assessed.read_work.prefixes > 0);
         assert!(assessed.read_work.datoms > 0);
     }
@@ -1298,7 +2027,132 @@ mod tests {
         let ops = vec![TxOp::RetractEntity(EntityRef::Id(parent))];
         let expected = seeded.with(&ops, 11).unwrap();
         let value = DatabaseValue::eager(Arc::new(seeded));
-        let assessed = assess_tiered_ordinary(&value, &ops, 11).unwrap();
+        let assessed = assess_tiered(&value, &ops, 11).unwrap();
         assert_eq!(assessed.tx_data, expected.tx_data);
+    }
+
+    #[test]
+    fn schema_install_and_alter_match_eager_metadata_information() {
+        let initial = Database::new(schema()).unwrap();
+        let installed_id = u32::try_from(initial.eidx_frontier()).unwrap();
+        let installed = Attribute::new(
+            installed_id,
+            Keyword::new("item", "status"),
+            ValueType::Keyword,
+            Cardinality::One,
+        );
+        let install_ops = vec![TxOp::InstallAttribute(installed.clone())];
+        let expected_install = initial.with(&install_ops, 10).unwrap();
+        let assessed_install = assess_tiered(
+            &DatabaseValue::eager(Arc::new(initial.clone())),
+            &install_ops,
+            10,
+        )
+        .unwrap();
+        assert_eq!(assessed_install.tx_data, expected_install.tx_data);
+        assert_eq!(
+            assessed_install.successor_schema.as_ref(),
+            expected_install.db_after.schema()
+        );
+        assert_eq!(
+            assessed_install.eidx_frontier,
+            expected_install.db_after.eidx_frontier()
+        );
+
+        let mut altered = installed;
+        altered.indexed = true;
+        altered.no_history = true;
+        altered.ident = Keyword::new("item", "state");
+        let alter_ops = vec![TxOp::AlterAttribute(altered)];
+        let expected_alter = expected_install.db_after.with(&alter_ops, 11).unwrap();
+        let assessed_alter = assess_tiered(
+            &DatabaseValue::eager(Arc::new(expected_install.db_after)),
+            &alter_ops,
+            11,
+        )
+        .unwrap();
+        assert_eq!(assessed_alter.tx_data, expected_alter.tx_data);
+        assert_eq!(
+            assessed_alter.successor_schema.as_ref(),
+            expected_alter.db_after.schema()
+        );
+        assert_eq!(
+            assessed_alter.db_after.schema(),
+            expected_alter.db_after.schema()
+        );
+    }
+
+    #[test]
+    fn rejection_codes_match_eager_for_local_conflicts_and_invalid_inputs() {
+        let initial = Database::new(schema()).unwrap();
+        let seeded = initial
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("one".into()),
+                        attribute: NAME,
+                        value: TxValue::Scalar(Value::String("one".into())),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("one".into()),
+                        attribute: COUNT,
+                        value: TxValue::Scalar(Value::Long(1)),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("two".into()),
+                        attribute: NAME,
+                        value: TxValue::Scalar(Value::String("two".into())),
+                    },
+                ],
+                10,
+            )
+            .unwrap()
+            .db_after;
+        let one = seeded
+            .lookup(NAME, &Value::String("one".into()))
+            .unwrap()
+            .unwrap();
+        let two = seeded
+            .lookup(NAME, &Value::String("two".into()))
+            .unwrap()
+            .unwrap();
+        let cases = vec![
+            vec![TxOp::Cas {
+                entity: EntityRef::Id(one),
+                attribute: COUNT,
+                old: Some(TxValue::Scalar(Value::Long(99))),
+                new: TxValue::Scalar(Value::Long(2)),
+            }],
+            vec![
+                TxOp::Add {
+                    entity: EntityRef::Id(one),
+                    attribute: COUNT,
+                    value: TxValue::Scalar(Value::Long(2)),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Id(one),
+                    attribute: COUNT,
+                    value: TxValue::Scalar(Value::Long(3)),
+                },
+            ],
+            vec![TxOp::Add {
+                entity: EntityRef::Id(two),
+                attribute: NAME,
+                value: TxValue::Scalar(Value::String("one".into())),
+            }],
+            vec![TxOp::Add {
+                entity: EntityRef::Id(one),
+                attribute: COUNT,
+                value: TxValue::Scalar(Value::String("wrong-type".into())),
+            }],
+        ];
+
+        for ops in cases {
+            let eager = seeded.with(&ops, 11).unwrap_err();
+            let tiered = assess_tiered(&DatabaseValue::eager(Arc::new(seeded.clone())), &ops, 11)
+                .unwrap_err();
+            assert_eq!(tiered.category, eager.category, "ops: {ops:?}");
+            assert_eq!(tiered.code, eager.code, "ops: {ops:?}");
+        }
     }
 }
