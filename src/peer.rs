@@ -33,6 +33,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 const DEFAULT_SEGMENT_DATOMS: usize = 4_096;
+const MANIFEST_SELECTION_PAGE_SIZE: i64 = 32;
+const MAX_MANIFEST_CANDIDATE_PROBES: u64 = 256;
 type LoadedBase = (Database, Digest, u64);
 type BaseSelection = (Option<LoadedBase>, u64);
 
@@ -53,6 +55,14 @@ pub struct IndexBuildReceipt {
     pub publication_revision: u64,
     pub basis_t: u64,
     pub manifest_hash: Digest,
+    /// Candidates actually fetched and authenticated newest-first. A healthy
+    /// newest publication makes this one regardless of retained revisions.
+    pub manifest_candidates_examined: u64,
+    /// Examined candidates rejected as corrupt, incomplete, or unauthoritative.
+    pub manifest_candidates_rejected: u64,
+    /// Selection exhausted its operational corruption-probe budget. An
+    /// administrative build may still recover and publish a replacement.
+    pub manifest_probe_limit_reached: bool,
     /// Compatibility name for the number of unique immutable tree nodes.
     pub segment_count: usize,
     pub reused: bool,
@@ -136,12 +146,10 @@ impl ExactEndpoint {
 }
 
 /// Auditable work performed while choosing one authenticated native base.
-/// `published_candidates` includes older candidates not inspected after a
-/// valid newer base wins; `examined_candidates` and `rejected_candidates`
-/// describe the actual newest-to-oldest authentication scan.
+/// Counts describe only actual newest-to-oldest authentication work; opening
+/// a healthy newest publication does not count retained publication history.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ExactOpenStats {
-    pub(crate) published_candidates: u64,
     pub(crate) examined_candidates: u64,
     pub(crate) rejected_candidates: u64,
     pub(crate) selected_publication_revision: u64,
@@ -742,6 +750,9 @@ impl PostgresIndexer {
                 publication_revision: previous.publication_revision,
                 basis_t,
                 manifest_hash,
+                manifest_candidates_examined: selection.manifest_candidates_examined,
+                manifest_candidates_rejected: selection.manifest_candidates_rejected,
+                manifest_probe_limit_reached: selection.manifest_probe_limit_reached,
                 segment_count: 0,
                 reused: true,
                 input_datoms: 0,
@@ -840,9 +851,23 @@ impl PostgresIndexer {
                 old_cache,
             )?
         } else if scope == IndexBuildScope::Background {
-            return Err(background_rebuild_required(
-                "automatic indexing found no authenticated incremental base",
-            ));
+            return Err(if selection.manifest_probe_limit_reached {
+                background_rebuild_required(
+                    "automatic indexing reached the bounded corrupt-manifest probe limit; run explicit administrative consolidation",
+                )
+                .detail(
+                    "examined_candidates",
+                    selection.manifest_candidates_examined.to_string(),
+                )
+                .detail(
+                    "maximum_candidate_probes",
+                    MAX_MANIFEST_CANDIDATE_PROBES.to_string(),
+                )
+            } else {
+                background_rebuild_required(
+                    "automatic indexing found no authenticated incremental base",
+                )
+            });
         } else {
             // The first native root is the one intentional full pass. Legacy
             // flat manifests are a read-only migration fallback; they are not
@@ -955,6 +980,9 @@ impl PostgresIndexer {
             publication_revision,
             basis_t,
             manifest_hash: tree_manifest_hash,
+            manifest_candidates_examined: selection.manifest_candidates_examined,
+            manifest_candidates_rejected: selection.manifest_candidates_rejected,
+            manifest_probe_limit_reached: selection.manifest_probe_limit_reached,
             segment_count: build.nodes.len(),
             reused: publication == TreePublishOutcome::AlreadyPublished,
             input_datoms: build.input_datoms,
@@ -1157,7 +1185,140 @@ struct NativeManifestSelection {
     newest_observed_generation: Option<u64>,
     newest_live_complete: bool,
     newest_live_work_pending: bool,
+    manifest_candidates_examined: u64,
+    manifest_candidates_rejected: u64,
+    manifest_probe_limit_reached: bool,
     usable: Option<(PersistentTreeManifest, MetadataProjection, TreeNodeSet)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TreePublicationWindow {
+    newest_revision: Option<u64>,
+}
+
+#[derive(Debug)]
+struct TreePublicationLocator {
+    publication_revision: u64,
+    manifest_hash: Vec<u8>,
+    collecting: bool,
+}
+
+/// Capture a stable upper revision with one indexed newest-row lookup. Later
+/// keyset pages ignore publications committed after this statement, so load
+/// work describes one finite selection window even when an indexer publishes
+/// concurrently. Deliberately do not count retained publications: COUNT(*)
+/// would make a healthy newest-valid open do work proportional to history.
+fn tree_publication_window<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    through: u64,
+    excision_generation: u64,
+    required_manifest: Option<Digest>,
+) -> Result<TreePublicationWindow, SemanticError> {
+    let through = sql_basis(through)?;
+    let generation = sql_basis(excision_generation)?;
+    let row = if let Some(required_manifest) = required_manifest {
+        // Manifest hashes are globally unique. Keep historical idempotency
+        // receipt opens on that direct index rather than walking newer roots.
+        client
+            .query_opt(
+                "SELECT publication_revision FROM atomic_tree_publications \
+                  WHERE manifest_hash = $1 AND database_id = $2 \
+                    AND basis_t <= $3 AND log_generation = $4",
+                &[&&required_manifest[..], &database_id, &through, &generation],
+            )
+            .map_err(|error| postgres_error("tree/required-publication-window", error))?
+    } else {
+        client
+            .query_opt(
+                "SELECT publication_revision FROM atomic_tree_publications \
+                  WHERE database_id = $1 AND basis_t <= $2 AND log_generation = $3 \
+                  ORDER BY publication_revision DESC LIMIT 1",
+                &[&database_id, &through, &generation],
+            )
+            .map_err(|error| postgres_error("tree/publication-window", error))?
+    };
+    Ok(TreePublicationWindow {
+        newest_revision: row
+            .map(|row| pg_basis(row.get(0), "newest eligible tree publication revision"))
+            .transpose()?,
+    })
+}
+
+/// Read only fixed-width publication locators. Manifest/root payloads are
+/// fetched for one selected locator at a time, so corrupt retained history can
+/// require more pages but can never make selection materialize every payload.
+fn tree_publication_locator_page<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    through: u64,
+    excision_generation: u64,
+    required_manifest: Option<Digest>,
+    window: TreePublicationWindow,
+    before_revision: Option<u64>,
+) -> Result<Vec<TreePublicationLocator>, SemanticError> {
+    let Some(newest_revision) = window.newest_revision else {
+        return Ok(Vec::new());
+    };
+    let before_revision = before_revision.map(sql_basis).transpose()?;
+    let rows = if let Some(required_manifest) = required_manifest {
+        if before_revision.is_some() {
+            return Ok(Vec::new());
+        }
+        client
+            .query(
+                "SELECT p.publication_revision, p.manifest_hash, \
+                        EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
+                                 WHERE progress.database_id = p.database_id \
+                                   AND progress.publication_revision = p.publication_revision \
+                                   AND progress.manifest_hash = p.manifest_hash) \
+                   FROM atomic_tree_publications p \
+                  WHERE p.manifest_hash = $1 AND p.database_id = $2 \
+                    AND p.basis_t <= $3 AND p.log_generation = $4 \
+                    AND p.publication_revision <= $5",
+                &[
+                    &&required_manifest[..],
+                    &database_id,
+                    &sql_basis(through)?,
+                    &sql_basis(excision_generation)?,
+                    &sql_basis(newest_revision)?,
+                ],
+            )
+            .map_err(|error| postgres_error("tree/required-publication-locator", error))?
+    } else {
+        client
+            .query(
+                "SELECT p.publication_revision, p.manifest_hash, \
+                    EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
+                             WHERE progress.database_id = p.database_id \
+                               AND progress.publication_revision = p.publication_revision \
+                               AND progress.manifest_hash = p.manifest_hash) \
+               FROM atomic_tree_publications p \
+              WHERE p.database_id = $1 AND p.basis_t <= $2 \
+                AND p.log_generation = $3 \
+                AND p.publication_revision <= $4 \
+                AND ($5::bigint IS NULL OR p.publication_revision < $5) \
+              ORDER BY p.publication_revision DESC LIMIT $6",
+                &[
+                    &database_id,
+                    &sql_basis(through)?,
+                    &sql_basis(excision_generation)?,
+                    &sql_basis(newest_revision)?,
+                    &before_revision,
+                    &MANIFEST_SELECTION_PAGE_SIZE,
+                ],
+            )
+            .map_err(|error| postgres_error("tree/publication-locator-page", error))?
+    };
+    rows.into_iter()
+        .map(|row| {
+            Ok(TreePublicationLocator {
+                publication_revision: pg_basis(row.get(0), "tree publication locator revision")?,
+                manifest_hash: row.get(1),
+                collecting: row.get(2),
+            })
+        })
+        .collect()
 }
 
 fn load_latest_native_manifest<C: GenericClient>(
@@ -1203,10 +1364,98 @@ fn load_latest_native_manifest<C: GenericClient>(
     } else {
         (0, None, None, false, false)
     };
-    let rows = client
-        .query(
-            "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
-                    m.eidx_frontier, m.manifest_hash, m.payload \
+    let window = tree_publication_window(client, database_id, through, excision_generation, None)?;
+    let mut before_revision = None;
+    let mut examined = 0_u64;
+    let mut rejected = 0_u64;
+    let mut probe_limit_reached = false;
+    'candidate_pages: loop {
+        let locators = tree_publication_locator_page(
+            client,
+            database_id,
+            through,
+            excision_generation,
+            None,
+            window,
+            before_revision,
+        )?;
+        let Some(last_revision) = locators.last().map(|locator| locator.publication_revision)
+        else {
+            break;
+        };
+        for locator in locators {
+            if examined == MAX_MANIFEST_CANDIDATE_PROBES {
+                probe_limit_reached = true;
+                break 'candidate_pages;
+            }
+            examined = examined.saturating_add(1);
+            if locator.collecting {
+                rejected = rejected.saturating_add(1);
+                continue;
+            }
+            let manifest_hash = match digest(locator.manifest_hash, "tree manifest locator hash") {
+                Ok(hash) => hash,
+                Err(_) => {
+                    rejected = rejected.saturating_add(1);
+                    continue;
+                }
+            };
+            match load_indexer_tree_manifest_candidate(
+                client,
+                tree_store,
+                database_id,
+                through,
+                excision_generation,
+                locator.publication_revision,
+                manifest_hash,
+            ) {
+                Ok(base) => {
+                    return Ok(NativeManifestSelection {
+                        newest_observed_revision,
+                        newest_observed_manifest_hash,
+                        newest_observed_generation,
+                        newest_live_complete,
+                        newest_live_work_pending,
+                        manifest_candidates_examined: examined,
+                        manifest_candidates_rejected: rejected,
+                        manifest_probe_limit_reached: false,
+                        usable: Some(base),
+                    });
+                }
+                Err(error) if is_postgres_connection_error(&error) => return Err(error),
+                Err(_) => {
+                    rejected = rejected.saturating_add(1);
+                }
+            }
+        }
+        before_revision = Some(last_revision);
+    }
+    Ok(NativeManifestSelection {
+        newest_observed_revision,
+        newest_observed_manifest_hash,
+        newest_observed_generation,
+        newest_live_complete,
+        newest_live_work_pending,
+        manifest_candidates_examined: examined,
+        manifest_candidates_rejected: rejected,
+        manifest_probe_limit_reached: probe_limit_reached,
+        usable: None,
+    })
+}
+
+fn load_indexer_tree_manifest_candidate<C: GenericClient>(
+    client: &mut C,
+    tree_store: &mut PostgresTreeStore,
+    database_id: &str,
+    through: u64,
+    excision_generation: u64,
+    publication_revision: u64,
+    manifest_hash: Digest,
+) -> Result<(PersistentTreeManifest, MetadataProjection, TreeNodeSet), SemanticError> {
+    let row = client
+        .query_opt(
+            "SELECT m.basis_t, m.tx_hash, m.state_hash, m.eidx_frontier, \
+                    m.manifest_hash, m.payload \
                FROM atomic_tree_publications p \
                JOIN atomic_tree_manifests m \
                  ON m.database_id = p.database_id \
@@ -1239,114 +1488,99 @@ fn load_latest_native_manifest<C: GenericClient>(
                 AND semantic.state_hash = m.state_hash \
                 AND semantic.eidx_frontier = m.eidx_frontier \
                 AND semantic.commitment_version = 2 \
-              WHERE m.database_id = $1 AND m.basis_t <= $2 \
-                AND m.log_generation = $3 \
+              WHERE p.database_id = $1 AND p.publication_revision = $2 \
+                AND p.manifest_hash = $3 AND p.basis_t <= $4 \
+                AND p.log_generation = $5 \
                 AND semantic.tx_hash IS NOT NULL \
                 AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
                   OR (m.log_generation > 0 AND m.basis_t = 0 \
                       AND bootstrap.tx_hash IS NOT NULL) \
                   OR (m.log_generation > 0 AND m.basis_t > 0 \
-                      AND native.tx_hash IS NOT NULL)) \
-              ORDER BY p.publication_revision DESC",
+                      AND native.tx_hash IS NOT NULL))",
             &[
                 &database_id,
+                &sql_basis(publication_revision)?,
+                &&manifest_hash[..],
                 &sql_basis(through)?,
                 &sql_basis(excision_generation)?,
             ],
         )
-        .map_err(|error| postgres_error("index/tree-manifests", error))?;
-    for row in rows {
-        let publication_revision = pg_basis(row.get(0), "tree publication revision")?;
-        let basis_t = pg_basis(row.get(1), "tree manifest basis")?;
-        let tx_hash = digest(row.get(2), "tree manifest transaction hash")?;
-        let state_hash = digest(row.get(3), "tree manifest state hash")?;
-        let eidx_frontier = pg_basis(row.get(4), "tree manifest entity frontier")?;
-        let manifest_hash = digest(row.get(5), "tree manifest hash")?;
-        let payload: Vec<u8> = row.get(6);
-        let candidate = (|| {
-            if sha256(&payload) != manifest_hash {
-                return Err(fault(
-                    "index/tree-manifest-hash",
-                    "tree manifest bytes do not match their publication",
-                ));
-            }
-            let manifest = PersistentTreeManifest::decode(&payload)?;
-            if manifest.database_id != database_id
-                || manifest.publication_revision != publication_revision
-                || manifest.basis_t != basis_t
-                || manifest.tx_hash != tx_hash
-                || manifest.state_hash != state_hash
-                || manifest.excision_generation != excision_generation
-                || manifest.eidx_frontier != eidx_frontier
-            {
-                return Err(fault(
-                    "index/tree-manifest-metadata",
-                    "canonical tree manifest disagrees with its authoritative SQL row",
-                ));
-            }
-            let roots = client
-                .query(
-                    "SELECT index_order, history, root_hash, datom_count, encoded_bytes \
-                       FROM atomic_tree_manifest_roots WHERE manifest_hash = $1 \
-                       ORDER BY history, index_order",
-                    &[&&manifest_hash[..]],
-                )
-                .map_err(|error| postgres_error("index/tree-roots", error))?;
-            if roots.len() != 8 {
-                return Err(fault(
-                    "index/tree-root-count",
-                    "published tree manifest does not have eight root bindings",
-                ));
-            }
-            for root in roots {
-                let tag = u8::try_from(root.get::<_, i16>(0))
-                    .map_err(|_| fault("index/tree-root-order", "tree root order is outside u8"))?;
-                if tag > 3 {
-                    return Err(fault(
-                        "index/tree-root-order",
-                        "tree root order is outside the four native indexes",
-                    ));
-                }
-                let order = order_from_tag(tag);
-                let history: bool = root.get(1);
-                let expected = manifest.tree(order, history).ok_or_else(|| {
-                    fault(
-                        "index/tree-root-coordinate",
-                        "manifest omits a root binding",
-                    )
-                })?;
-                if digest(root.get(2), "tree root hash")? != expected.descriptor.root_hash
-                    || pg_basis(root.get(3), "tree root count")? != expected.descriptor.count
-                    || pg_basis(root.get(4), "tree root bytes")? != expected.root_bytes
-                {
-                    return Err(fault(
-                        "index/tree-root-binding",
-                        "canonical and relational root bindings disagree",
-                    ));
-                }
-            }
-            let (metadata, cache) = derive_metadata_from_store(tree_store, &manifest)?;
-            Ok((manifest, metadata, cache))
-        })();
-        if let Ok(base) = candidate {
-            return Ok(NativeManifestSelection {
-                newest_observed_revision,
-                newest_observed_manifest_hash,
-                newest_observed_generation,
-                newest_live_complete,
-                newest_live_work_pending,
-                usable: Some(base),
-            });
+        .map_err(|error| postgres_error("index/tree-manifest-candidate", error))?
+        .ok_or_else(|| {
+            fault(
+                "index/tree-manifest-authority",
+                "tree publication does not resolve to an authoritative manifest",
+            )
+        })?;
+    let basis_t = pg_basis(row.get(0), "tree manifest basis")?;
+    let tx_hash = digest(row.get(1), "tree manifest transaction hash")?;
+    let state_hash = digest(row.get(2), "tree manifest state hash")?;
+    let eidx_frontier = pg_basis(row.get(3), "tree manifest entity frontier")?;
+    let stored_manifest_hash = digest(row.get(4), "tree manifest hash")?;
+    let payload: Vec<u8> = row.get(5);
+    if stored_manifest_hash != manifest_hash || sha256(&payload) != manifest_hash {
+        return Err(fault(
+            "index/tree-manifest-hash",
+            "tree manifest bytes do not match their publication",
+        ));
+    }
+    let manifest = PersistentTreeManifest::decode(&payload)?;
+    if manifest.database_id != database_id
+        || manifest.publication_revision != publication_revision
+        || manifest.basis_t != basis_t
+        || manifest.tx_hash != tx_hash
+        || manifest.state_hash != state_hash
+        || manifest.excision_generation != excision_generation
+        || manifest.eidx_frontier != eidx_frontier
+    {
+        return Err(fault(
+            "index/tree-manifest-metadata",
+            "canonical tree manifest disagrees with its authoritative SQL row",
+        ));
+    }
+    let roots = client
+        .query(
+            "SELECT index_order, history, root_hash, datom_count, encoded_bytes \
+               FROM atomic_tree_manifest_roots WHERE manifest_hash = $1 \
+               ORDER BY history, index_order",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("index/tree-roots", error))?;
+    if roots.len() != 8 {
+        return Err(fault(
+            "index/tree-root-count",
+            "published tree manifest does not have eight root bindings",
+        ));
+    }
+    for root in roots {
+        let tag = u8::try_from(root.get::<_, i16>(0))
+            .map_err(|_| fault("index/tree-root-order", "tree root order is outside u8"))?;
+        if tag > 3 {
+            return Err(fault(
+                "index/tree-root-order",
+                "tree root order is outside the four native indexes",
+            ));
+        }
+        let order = order_from_tag(tag);
+        let history: bool = root.get(1);
+        let expected = manifest.tree(order, history).ok_or_else(|| {
+            fault(
+                "index/tree-root-coordinate",
+                "manifest omits a root binding",
+            )
+        })?;
+        if digest(root.get(2), "tree root hash")? != expected.descriptor.root_hash
+            || pg_basis(root.get(3), "tree root count")? != expected.descriptor.count
+            || pg_basis(root.get(4), "tree root bytes")? != expected.root_bytes
+        {
+            return Err(fault(
+                "index/tree-root-binding",
+                "canonical and relational root bindings disagree",
+            ));
         }
     }
-    Ok(NativeManifestSelection {
-        newest_observed_revision,
-        newest_observed_manifest_hash,
-        newest_observed_generation,
-        newest_live_complete,
-        newest_live_work_pending,
-        usable: None,
-    })
+    let (metadata, cache) = derive_metadata_from_store(tree_store, &manifest)?;
+    Ok((manifest, metadata, cache))
 }
 
 fn manifest_root_hashes(manifest: &PersistentTreeManifest) -> BTreeMap<(bool, u8), Digest> {
@@ -5636,7 +5870,6 @@ fn derive_metadata_from_client<C: GenericClient>(
 /// information rather than duplicated inside the durable root envelope.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct TreeBaseScanStats {
-    published_candidates: u64,
     examined_candidates: u64,
     rejected_candidates: u64,
 }
@@ -5659,19 +5892,19 @@ fn scan_latest_tree_base<C: GenericClient>(
 ) -> Result<TreeBaseScan, SemanticError> {
     let through_sql = sql_basis(through)?;
     let generation_sql = sql_basis(excision_generation)?;
+    let window = tree_publication_window(
+        client,
+        database_id,
+        through,
+        excision_generation,
+        required_manifest,
+    )?;
     if let Some(required_hash) = required_manifest {
-        let variants = client
+        let archive_exists: bool = client
             .query_one(
-                "SELECT (SELECT count(*) FROM atomic_tree_publications publication \
-                          WHERE publication.database_id = $1 \
-                            AND publication.log_generation = $2 \
-                            AND publication.basis_t <= $3 \
-                            AND publication.manifest_hash = $4), \
-                        (SELECT count(*) FROM atomic_request_base_archives archive \
-                          WHERE archive.database_id = $1 \
-                            AND archive.generation = $2 \
-                            AND archive.basis_t <= $3 \
-                            AND archive.manifest_hash = $4)",
+                "SELECT EXISTS (SELECT 1 FROM atomic_request_base_archives archive \
+                  WHERE archive.database_id = $1 AND archive.generation = $2 \
+                    AND archive.basis_t <= $3 AND archive.manifest_hash = $4)",
                 &[
                     &database_id,
                     &generation_sql,
@@ -5679,17 +5912,15 @@ fn scan_latest_tree_base<C: GenericClient>(
                     &&required_hash[..],
                 ],
             )
-            .map_err(|error| postgres_error("peer/exact-tree-variants", error))?;
-        let normal_count = pg_basis(variants.get(0), "exact normal tree variants")?;
-        let archive_count = pg_basis(variants.get(1), "exact archive tree variants")?;
-        if archive_count > 0 {
+            .map_err(|error| postgres_error("peer/exact-tree-archive-exists", error))?
+            .get(0);
+        if archive_exists {
             let mut stats = TreeBaseScanStats {
-                published_candidates: normal_count.saturating_add(archive_count),
                 examined_candidates: 1,
                 ..TreeBaseScanStats::default()
             };
             counters.manifest_candidates.fetch_add(1, Ordering::Relaxed);
-            if normal_count != 0 || archive_count != 1 {
+            if window.newest_revision.is_some() {
                 stats.rejected_candidates = 1;
                 return Ok(TreeBaseScan::AllInvalid(stats));
             }
@@ -5711,44 +5942,129 @@ fn scan_latest_tree_base<C: GenericClient>(
             };
         }
     }
-    let required_manifest = required_manifest.map(|hash| hash.to_vec());
-    // Count from the publication authority itself. Broken/missing manifest or
-    // semantic-root joins are invalid candidates, never evidence that no
-    // publication exists.
-    let published = client
-        .query(
-            "SELECT EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
-                            WHERE progress.database_id = p.database_id \
-                              AND progress.publication_revision = p.publication_revision \
-                              AND progress.manifest_hash = p.manifest_hash) \
-               FROM atomic_tree_publications p \
-              WHERE p.database_id = $1 AND p.basis_t <= $2 \
-                AND p.log_generation = $3 \
-                AND ($4::bytea IS NULL OR p.manifest_hash = $4)",
-            &[
-                &database_id,
-                &through_sql,
-                &generation_sql,
-                &required_manifest,
-            ],
-        )
-        .map_err(|error| postgres_error("peer/tree-publication-scan", error))?;
-    let mut stats = TreeBaseScanStats {
-        published_candidates: published.len() as u64,
-        ..TreeBaseScanStats::default()
-    };
-    if published.is_empty() {
+    let mut stats = TreeBaseScanStats::default();
+    if window.newest_revision.is_none() {
         return Ok(TreeBaseScan::NoPublication(stats));
     }
-    if required_manifest.is_some() && published.iter().any(|row| row.get::<_, bool>(0)) {
-        stats.examined_candidates = 1;
-        stats.rejected_candidates = 1;
-        return Ok(TreeBaseScan::RequiredCollecting(stats));
+    if let (Some(required_hash), Some(newest_revision)) =
+        (required_manifest, window.newest_revision)
+    {
+        let collecting: bool = client
+            .query_one(
+                "SELECT EXISTS ( \
+                    SELECT 1 FROM atomic_tree_publications publication \
+                    JOIN atomic_tree_retirement_progress progress \
+                      ON progress.database_id = publication.database_id \
+                     AND progress.publication_revision = publication.publication_revision \
+                     AND progress.manifest_hash = publication.manifest_hash \
+                    WHERE publication.database_id = $1 \
+                      AND publication.log_generation = $2 \
+                      AND publication.basis_t <= $3 \
+                      AND publication.manifest_hash = $4 \
+                      AND publication.publication_revision <= $5)",
+                &[
+                    &database_id,
+                    &generation_sql,
+                    &through_sql,
+                    &&required_hash[..],
+                    &sql_basis(newest_revision)?,
+                ],
+            )
+            .map_err(|error| postgres_error("peer/exact-tree-collecting", error))?
+            .get(0);
+        if collecting {
+            stats.examined_candidates = 1;
+            stats.rejected_candidates = 1;
+            return Ok(TreeBaseScan::RequiredCollecting(stats));
+        }
     }
-    let rows = client
-        .query(
-            "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
-                    m.eidx_frontier, m.manifest_hash, m.payload, \
+    let mut before_revision = None;
+    loop {
+        let locators = tree_publication_locator_page(
+            client,
+            database_id,
+            through,
+            excision_generation,
+            required_manifest,
+            window,
+            before_revision,
+        )?;
+        let Some(last_revision) = locators.last().map(|locator| locator.publication_revision)
+        else {
+            break;
+        };
+        for locator in locators {
+            if stats.examined_candidates == MAX_MANIFEST_CANDIDATE_PROBES {
+                return Err(SemanticError::new(
+                    ErrorCategory::Unavailable,
+                    "peer/native-index-repair-required",
+                    "native manifest selection reached the bounded corruption probe limit; publish an explicit administrative repair root",
+                )
+                .detail("examined_candidates", stats.examined_candidates.to_string())
+                .detail(
+                    "maximum_candidate_probes",
+                    MAX_MANIFEST_CANDIDATE_PROBES.to_string(),
+                ));
+            }
+            stats.examined_candidates = stats.examined_candidates.saturating_add(1);
+            counters.manifest_candidates.fetch_add(1, Ordering::Relaxed);
+            if locator.collecting {
+                stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
+                if required_manifest.is_some() {
+                    return Ok(TreeBaseScan::RequiredCollecting(stats));
+                }
+                continue;
+            }
+            let manifest_hash = match digest(locator.manifest_hash, "tree manifest locator hash") {
+                Ok(hash) => hash,
+                Err(_) => {
+                    stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
+                    continue;
+                }
+            };
+            match load_peer_tree_manifest_candidate(
+                client,
+                database_id,
+                through,
+                excision_generation,
+                locator.publication_revision,
+                manifest_hash,
+                counters,
+                cache,
+            ) {
+                Ok(base) => return Ok(TreeBaseScan::Selected(Box::new(base), stats)),
+                Err(error) if is_postgres_connection_error(&error) => return Err(error),
+                Err(error) if error.code == "peer/tree-publication-collecting" => {
+                    stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
+                    if required_manifest.is_some() {
+                        return Ok(TreeBaseScan::RequiredCollecting(stats));
+                    }
+                }
+                Err(_) => {
+                    stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
+                }
+            }
+        }
+        before_revision = Some(last_revision);
+    }
+    Ok(TreeBaseScan::AllInvalid(stats))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_peer_tree_manifest_candidate<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    through: u64,
+    excision_generation: u64,
+    publication_revision: u64,
+    manifest_hash: Digest,
+    counters: &PeerLoadCounters,
+    cache: &mut TreeNodeCache,
+) -> Result<TreeBase, SemanticError> {
+    let row = client
+        .query_opt(
+            "SELECT m.basis_t, m.tx_hash, m.state_hash, m.eidx_frontier, \
+                    m.manifest_hash, m.payload, \
                     ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
                       OR (m.log_generation > 0 AND m.basis_t = 0 \
                           AND bootstrap.tx_hash IS NOT NULL) \
@@ -5791,164 +6107,157 @@ fn scan_latest_tree_base<C: GenericClient>(
                 AND semantic.state_hash = m.state_hash \
                 AND semantic.eidx_frontier = m.eidx_frontier \
                 AND semantic.commitment_version = 2 \
-              WHERE m.database_id = $1 AND m.basis_t <= $2 \
-                AND m.log_generation = $3 \
-                AND ($4::bytea IS NULL OR p.manifest_hash = $4) \
-              ORDER BY p.publication_revision DESC",
+              WHERE p.database_id = $1 AND p.publication_revision = $2 \
+                AND p.manifest_hash = $3 AND p.basis_t <= $4 \
+                AND p.log_generation = $5",
             &[
                 &database_id,
-                &through_sql,
-                &generation_sql,
-                &required_manifest,
+                &sql_basis(publication_revision)?,
+                &&manifest_hash[..],
+                &sql_basis(through)?,
+                &sql_basis(excision_generation)?,
             ],
         )
-        .map_err(|error| postgres_error("peer/tree-manifests", error))?;
-    for row in rows {
-        stats.examined_candidates = stats.examined_candidates.saturating_add(1);
-        counters.manifest_candidates.fetch_add(1, Ordering::Relaxed);
-        let publication_revision = pg_basis(row.get(0), "tree publication revision")?;
-        let basis_t = pg_basis(row.get(1), "tree manifest basis")?;
-        let tx_hash = digest(row.get(2), "tree manifest transaction hash")?;
-        let state_hash = digest(row.get(3), "tree manifest state hash")?;
-        let eidx_frontier = pg_basis(row.get(4), "tree manifest entity frontier")?;
-        let manifest_hash = digest(row.get(5), "tree manifest hash")?;
-        let payload: Vec<u8> = row.get(6);
-        let authoritative: bool = row.get(7);
-        let collecting: bool = row.get(8);
-        if collecting {
-            stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
-            if required_manifest.is_some() {
-                return Ok(TreeBaseScan::RequiredCollecting(stats));
-            }
-            continue;
-        }
-        let candidate = (|| {
-            if !authoritative {
-                return Err(fault(
-                    "peer/tree-manifest-authority",
-                    "tree publication is not bound to an authoritative generation endpoint",
-                ));
-            }
-            if sha256(&payload) != manifest_hash {
-                return Err(fault(
-                    "peer/tree-manifest-hash",
-                    "tree manifest bytes do not match their publication",
-                ));
-            }
-            let manifest = PersistentTreeManifest::decode(&payload)?;
-            if manifest.database_id != database_id
-                || manifest.publication_revision != publication_revision
-                || manifest.basis_t != basis_t
-                || manifest.tx_hash != tx_hash
-                || manifest.state_hash != state_hash
-                || manifest.excision_generation != excision_generation
-                || manifest.eidx_frontier != eidx_frontier
-            {
-                return Err(fault(
-                    "peer/tree-manifest-metadata",
-                    "canonical tree manifest disagrees with its authenticated SQL row",
-                ));
-            }
-            let root_rows = client
-                .query(
-                    "SELECT r.index_order, r.history, r.root_hash, r.datom_count, \
-                            r.encoded_bytes, n.payload \
-                       FROM atomic_tree_manifest_roots r \
-                       JOIN atomic_tree_nodes n ON n.node_hash = r.root_hash \
-                      WHERE r.manifest_hash = $1 \
-                      ORDER BY r.history, r.index_order",
-                    &[&&manifest_hash[..]],
-                )
-                .map_err(|error| postgres_error("peer/tree-roots", error))?;
-            if root_rows.len() != 8 {
-                return Err(fault(
-                    "peer/tree-root-count",
-                    "published tree manifest does not resolve to eight roots",
-                ));
-            }
-            let mut roots = BTreeMap::new();
-            for root_row in root_rows {
-                let tag: i16 = root_row.get(0);
-                let tag = u8::try_from(tag)
-                    .map_err(|_| fault("peer/tree-root-order", "tree root order is outside u8"))?;
-                if tag > 3 {
-                    return Err(fault(
-                        "peer/tree-root-order",
-                        "tree root order is outside the four native indexes",
-                    ));
-                }
-                let order = order_from_tag(tag);
-                let history: bool = root_row.get(1);
-                let root_hash = digest(root_row.get(2), "tree root hash")?;
-                let count = pg_basis(root_row.get(3), "tree root datom count")?;
-                let encoded_bytes = pg_basis(root_row.get(4), "tree root encoded bytes")?;
-                let root_payload: Vec<u8> = root_row.get(5);
-                let described = manifest.tree(order, history).ok_or_else(|| {
-                    fault("peer/tree-root-coordinate", "manifest omitted a tree root")
-                })?;
-                if described.descriptor.root_hash != root_hash
-                    || described.descriptor.count != count
-                    || described.root_bytes != encoded_bytes
-                    || root_payload.len() as u64 != encoded_bytes
-                {
-                    return Err(fault(
-                        "peer/tree-root-binding",
-                        "canonical and relational tree root bindings disagree",
-                    ));
-                }
-                let TreeNode::Root(root) = decode_tree_node(&root_hash, &root_payload)? else {
-                    return Err(fault(
-                        "peer/tree-root-kind",
-                        "tree manifest references a non-root node",
-                    ));
-                };
-                counters.root_reads.fetch_add(1, Ordering::Relaxed);
-                if root.order != order
-                    || root.history != history
-                    || root.count != count
-                    || (count == 0) != root.directories.is_empty()
-                    || (count > 0
-                        && !root.directories.first().is_some_and(|first| {
-                            described.descriptor.first_hash.is_some_and(|expected| {
-                                crate::persistent_tree::routing_key_hash(&first.key)
-                                    .is_ok_and(|actual| actual == expected)
-                            })
-                        }))
-                {
-                    return Err(fault(
-                        "peer/tree-root-content",
-                        "decoded tree root disagrees with its manifest descriptor",
-                    ));
-                }
-                if roots
-                    .insert((history, order_tag(order)), Arc::new(root))
-                    .is_some()
-                {
-                    return Err(fault(
-                        "peer/tree-root-duplicate",
-                        "tree manifest repeats a root coordinate",
-                    ));
-                }
-            }
-            // Metadata is part of candidate validity. Missing or corrupt
-            // required descendants reject this publication and let the outer
-            // loop consider the preceding immutable publication.
-            let metadata = Arc::new(derive_metadata_from_client(
-                client, &roots, counters, cache,
-            )?);
-            Ok(TreeBase {
-                manifest,
-                manifest_hash,
-                roots,
-                metadata,
-            })
-        })();
-        if let Ok(base) = candidate {
-            return Ok(TreeBaseScan::Selected(Box::new(base), stats));
-        }
-        stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
+        .map_err(|error| postgres_error("peer/tree-manifest-candidate", error))?
+        .ok_or_else(|| {
+            fault(
+                "peer/tree-manifest-authority",
+                "tree publication does not resolve to its canonical manifest",
+            )
+        })?;
+    let basis_t = pg_basis(row.get(0), "tree manifest basis")?;
+    let tx_hash = digest(row.get(1), "tree manifest transaction hash")?;
+    let state_hash = digest(row.get(2), "tree manifest state hash")?;
+    let eidx_frontier = pg_basis(row.get(3), "tree manifest entity frontier")?;
+    let stored_manifest_hash = digest(row.get(4), "tree manifest hash")?;
+    let payload: Vec<u8> = row.get(5);
+    let authoritative: bool = row.get(6);
+    let collecting: bool = row.get(7);
+    if collecting {
+        return Err(fault(
+            "peer/tree-publication-collecting",
+            "tree publication began collection during candidate loading",
+        ));
     }
-    Ok(TreeBaseScan::AllInvalid(stats))
+    if !authoritative {
+        return Err(fault(
+            "peer/tree-manifest-authority",
+            "tree publication is not bound to an authoritative generation endpoint",
+        ));
+    }
+    if stored_manifest_hash != manifest_hash || sha256(&payload) != manifest_hash {
+        return Err(fault(
+            "peer/tree-manifest-hash",
+            "tree manifest bytes do not match their publication",
+        ));
+    }
+    let manifest = PersistentTreeManifest::decode(&payload)?;
+    if manifest.database_id != database_id
+        || manifest.publication_revision != publication_revision
+        || manifest.basis_t != basis_t
+        || manifest.tx_hash != tx_hash
+        || manifest.state_hash != state_hash
+        || manifest.excision_generation != excision_generation
+        || manifest.eidx_frontier != eidx_frontier
+    {
+        return Err(fault(
+            "peer/tree-manifest-metadata",
+            "canonical tree manifest disagrees with its authenticated SQL row",
+        ));
+    }
+    let root_rows = client
+        .query(
+            "SELECT r.index_order, r.history, r.root_hash, r.datom_count, \
+                    r.encoded_bytes, n.payload \
+               FROM atomic_tree_manifest_roots r \
+               JOIN atomic_tree_nodes n ON n.node_hash = r.root_hash \
+              WHERE r.manifest_hash = $1 \
+              ORDER BY r.history, r.index_order",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("peer/tree-roots", error))?;
+    if root_rows.len() != 8 {
+        return Err(fault(
+            "peer/tree-root-count",
+            "published tree manifest does not resolve to eight roots",
+        ));
+    }
+    let mut roots = BTreeMap::new();
+    for root_row in root_rows {
+        let tag: i16 = root_row.get(0);
+        let tag = u8::try_from(tag)
+            .map_err(|_| fault("peer/tree-root-order", "tree root order is outside u8"))?;
+        if tag > 3 {
+            return Err(fault(
+                "peer/tree-root-order",
+                "tree root order is outside the four native indexes",
+            ));
+        }
+        let order = order_from_tag(tag);
+        let history: bool = root_row.get(1);
+        let root_hash = digest(root_row.get(2), "tree root hash")?;
+        let count = pg_basis(root_row.get(3), "tree root datom count")?;
+        let encoded_bytes = pg_basis(root_row.get(4), "tree root encoded bytes")?;
+        let root_payload: Vec<u8> = root_row.get(5);
+        let described = manifest
+            .tree(order, history)
+            .ok_or_else(|| fault("peer/tree-root-coordinate", "manifest omitted a tree root"))?;
+        if described.descriptor.root_hash != root_hash
+            || described.descriptor.count != count
+            || described.root_bytes != encoded_bytes
+            || root_payload.len() as u64 != encoded_bytes
+        {
+            return Err(fault(
+                "peer/tree-root-binding",
+                "canonical and relational tree root bindings disagree",
+            ));
+        }
+        let TreeNode::Root(root) = decode_tree_node(&root_hash, &root_payload)? else {
+            return Err(fault(
+                "peer/tree-root-kind",
+                "tree manifest references a non-root node",
+            ));
+        };
+        counters.root_reads.fetch_add(1, Ordering::Relaxed);
+        if root.order != order
+            || root.history != history
+            || root.count != count
+            || (count == 0) != root.directories.is_empty()
+            || (count > 0
+                && !root.directories.first().is_some_and(|first| {
+                    described.descriptor.first_hash.is_some_and(|expected| {
+                        crate::persistent_tree::routing_key_hash(&first.key)
+                            .is_ok_and(|actual| actual == expected)
+                    })
+                }))
+        {
+            return Err(fault(
+                "peer/tree-root-content",
+                "decoded tree root disagrees with its manifest descriptor",
+            ));
+        }
+        if roots
+            .insert((history, order_tag(order)), Arc::new(root))
+            .is_some()
+        {
+            return Err(fault(
+                "peer/tree-root-duplicate",
+                "tree manifest repeats a root coordinate",
+            ));
+        }
+    }
+    // Metadata is part of candidate validity. Missing or corrupt required
+    // descendants reject this publication and let selection try the preceding
+    // immutable publication.
+    let metadata = Arc::new(derive_metadata_from_client(
+        client, &roots, counters, cache,
+    )?);
+    Ok(TreeBase {
+        manifest,
+        manifest_hash,
+        roots,
+        metadata,
+    })
 }
 
 /// Load an exact retry-only archive. Archives never enter the ordinary
@@ -6182,8 +6491,8 @@ fn load_latest_tree_base<C: GenericClient>(
         TreeBaseScan::AllInvalid(stats) => Err(fault(
             "peer/all-native-publications-invalid",
             format!(
-                "the generation has published native roots, but every candidate failed authenticated loading (published={}, examined={}, rejected={})",
-                stats.published_candidates, stats.examined_candidates, stats.rejected_candidates
+                "the generation has published native roots, but every examined candidate failed authenticated loading (examined={}, rejected={})",
+                stats.examined_candidates, stats.rejected_candidates
             ),
         )),
         TreeBaseScan::RequiredCollecting(_) => Err(fault(
@@ -6215,10 +6524,8 @@ fn exact_tree_selection(
                 ErrorCategory::Unavailable,
                 code,
                 format!(
-                    "{message} (published={}, examined={}, rejected={})",
-                    stats.published_candidates,
-                    stats.examined_candidates,
-                    stats.rejected_candidates
+                    "{message} (examined={}, rejected={})",
+                    stats.examined_candidates, stats.rejected_candidates
                 ),
             ))
         }
@@ -6237,10 +6544,8 @@ fn exact_tree_selection(
             Err(fault(
                 code,
                 format!(
-                    "{message} (published={}, examined={}, rejected={})",
-                    stats.published_candidates,
-                    stats.examined_candidates,
-                    stats.rejected_candidates
+                    "{message} (examined={}, rejected={})",
+                    stats.examined_candidates, stats.rejected_candidates
                 ),
             ))
         }
@@ -6248,8 +6553,8 @@ fn exact_tree_selection(
             ErrorCategory::Unavailable,
             "peer/exact-manifest-collecting",
             format!(
-                "the required native manifest is already being collected (published={}, examined={}, rejected={})",
-                stats.published_candidates, stats.examined_candidates, stats.rejected_candidates
+                "the required native manifest is already being collected (examined={}, rejected={})",
+                stats.examined_candidates, stats.rejected_candidates
             ),
         )),
     }
@@ -6379,7 +6684,6 @@ fn exact_open_stats(
         )
     })?;
     Ok(ExactOpenStats {
-        published_candidates: scan.published_candidates,
         examined_candidates: scan.examined_candidates,
         rejected_candidates: scan.rejected_candidates,
         selected_publication_revision: base.manifest.publication_revision,
@@ -6999,7 +7303,6 @@ mod tests {
     #[test]
     fn exact_native_scan_states_and_endpoint_validation_are_distinct() {
         let stats = TreeBaseScanStats {
-            published_candidates: 2,
             examined_candidates: 2,
             rejected_candidates: 2,
         };
@@ -7226,6 +7529,172 @@ mod tests {
         .err()
         .expect("a corrupt required manifest must not be reported absent");
         assert_eq!(error.code, "peer/exact-manifest-corrupt");
+    }
+
+    #[test]
+    fn manifest_selection_pages_past_corrupt_history_and_stops_at_a_valid_newest() {
+        let Some(connection) = std::env::var("ATOMIC_POSTGRES_URL").ok() else {
+            return;
+        };
+        let mut migrator = crate::PostgresMigrator::connect(&connection).unwrap();
+        migrator.migrate().unwrap();
+
+        let database_id = unique_database("manifest_selection_pages");
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("page", "value"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        let mut store = crate::PostgresStore::connect(&connection).unwrap();
+        let created = store.create_database(&database_id, schema).unwrap();
+        drop(store);
+
+        let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+        let first = indexer.consolidate().unwrap();
+        assert_eq!(first.publication_revision, 1);
+        let endpoint = Peer::connect(&connection, &database_id, 64)
+            .unwrap()
+            .tiered_snapshot()
+            .endpoint();
+        let build = build_initial_native(&created, &TreeConfig::default()).unwrap();
+        let mut tree_store = PostgresTreeStore::connect(&connection).unwrap();
+        for (hash, payload) in build.nodes.iter() {
+            tree_store.insert_node(*hash, payload).unwrap();
+        }
+        let retained_publications = u64::try_from(MANIFEST_SELECTION_PAGE_SIZE).unwrap() + 2;
+        let mut newest_manifest_hash = [0; 32];
+        for publication_revision in 2..=retained_publications {
+            let manifest = PersistentTreeManifest {
+                database_id: database_id.clone(),
+                publication_revision,
+                basis_t: endpoint.basis_t,
+                tx_hash: endpoint.tx_hash,
+                state_hash: endpoint.state_hash,
+                excision_generation: endpoint.generation,
+                eidx_frontier: endpoint.eidx_frontier,
+                trees: build.trees.clone(),
+            };
+            let payload = manifest.encode().unwrap();
+            let manifest_hash = sha256(&payload);
+            newest_manifest_hash = manifest_hash;
+            let record = TreeManifestRecord {
+                database_id: database_id.clone(),
+                publication_revision,
+                basis_t: manifest.basis_t,
+                tx_hash: manifest.tx_hash,
+                state_hash: manifest.state_hash,
+                excision_generation: manifest.excision_generation,
+                eidx_frontier: manifest.eidx_frontier,
+                manifest_hash,
+                payload,
+                roots: manifest
+                    .trees
+                    .iter()
+                    .map(|tree| TreeRootBinding {
+                        order: tree.descriptor.order,
+                        history: tree.descriptor.history,
+                        root_hash: tree.descriptor.root_hash,
+                        datom_count: tree.descriptor.count,
+                        encoded_bytes: tree.root_bytes,
+                    })
+                    .collect(),
+            };
+            assert_eq!(
+                tree_store
+                    .publish_manifest(&record, publication_revision - 1)
+                    .unwrap(),
+                TreePublishOutcome::Published
+            );
+        }
+        drop(tree_store);
+
+        // Leave only revision one valid. Selection must continue through more
+        // than one fixed locator page instead of imposing a semantic fallback
+        // cap or materializing all manifest payloads at once.
+        let mut client = Client::connect(&connection, NoTls).unwrap();
+        // Compatibility publications intentionally carry unknown membership.
+        // These synthetic roots all have the exact same node closure as the
+        // already-complete first root, so bind that truthful closure to the
+        // final revision before asking the administrative indexer to repair it.
+        assert_eq!(
+            client
+                .execute(
+                    "UPDATE atomic_tree_live_sets \
+                        SET manifest_hash = $1, complete = true, problem_code = NULL \
+                      WHERE database_id = $2",
+                    &[&&newest_manifest_hash[..], &database_id],
+                )
+                .unwrap(),
+            1
+        );
+        let mut fault = client.transaction().unwrap();
+        fault
+            .batch_execute("ALTER TABLE atomic_tree_manifests DISABLE TRIGGER USER")
+            .unwrap();
+        assert_eq!(
+            fault
+                .execute(
+                    "UPDATE atomic_tree_manifests \
+                        SET payload = set_byte(payload, 16, get_byte(payload, 16) # 1) \
+                      WHERE database_id = $1 AND publication_revision > 1",
+                    &[&database_id],
+                )
+                .unwrap(),
+            retained_publications - 1
+        );
+        fault
+            .batch_execute("ALTER TABLE atomic_tree_manifests ENABLE TRIGGER USER")
+            .unwrap();
+        fault.commit().unwrap();
+
+        let (oldest, paged) = TieredSnapshot::open_exact_configured(
+            &PostgresConnectionConfig::plaintext(&connection),
+            &database_id,
+            endpoint,
+            None,
+            64,
+            8 * 1024 * 1024,
+            RecentLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(paged.examined_candidates, retained_publications);
+        assert_eq!(paged.rejected_candidates, retained_publications - 1);
+        assert_eq!(paged.selected_manifest_hash, first.manifest_hash);
+        drop(oldest);
+
+        let repaired = indexer.consolidate().unwrap();
+        assert_eq!(repaired.publication_revision, retained_publications + 1);
+        assert_eq!(repaired.manifest_candidates_examined, retained_publications);
+        assert_eq!(
+            repaired.manifest_candidates_rejected,
+            retained_publications - 1
+        );
+        assert!(!repaired.manifest_probe_limit_reached);
+
+        let (newest, fast) = TieredSnapshot::open_exact_configured(
+            &PostgresConnectionConfig::plaintext(&connection),
+            &database_id,
+            endpoint,
+            None,
+            64,
+            8 * 1024 * 1024,
+            RecentLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(fast.examined_candidates, 1);
+        assert_eq!(fast.rejected_candidates, 0);
+        assert_eq!(fast.selected_manifest_hash, repaired.manifest_hash);
+        drop(newest);
+
+        let no_op = indexer.consolidate().unwrap();
+        assert!(no_op.reused);
+        assert_eq!(no_op.manifest_candidates_examined, 1);
+        assert_eq!(no_op.manifest_candidates_rejected, 0);
+        assert!(!no_op.manifest_probe_limit_reached);
     }
 
     #[test]
