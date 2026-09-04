@@ -1,7 +1,11 @@
 #[allow(dead_code)]
 mod common;
 
-use atomic_core::{ErrorCategory, Instruction, PostgresStore, Program, ProgramKind, Value};
+use atomic_core::{
+    Attribute, Cardinality, DB_ATTR_PREDS, DB_ENTITY_PREDS, DB_FN, DB_IDENT, EntityRef,
+    ErrorCategory, Instruction, Keyword, PostgresStore, Program, ProgramKind, Schema, Symbol, TxOp,
+    TxValue, USER_PARTITION, Value, ValueType, make_eid,
+};
 use postgres::{Client, NoTls};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +19,59 @@ fn constant(value: i64) -> Program {
         arity: 0,
         instructions: vec![
             Instruction::PushConstant(Value::Long(value)),
+            Instruction::Return,
+        ],
+    }
+}
+
+fn unique(prefix: &str) -> String {
+    format!(
+        "{prefix}_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
+
+fn user(eidx: u64) -> u64 {
+    make_eid(USER_PARTITION, eidx).unwrap()
+}
+
+const BALANCE: u32 = 1_000;
+
+fn predicate_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema
+        .install(Attribute::new(
+            BALANCE,
+            Keyword::new("account", "balance"),
+            ValueType::Long,
+            Cardinality::One,
+        ))
+        .unwrap();
+    schema
+}
+
+fn shared_predicate() -> Program {
+    Program {
+        kind: ProgramKind::DualPredicate,
+        arity: 1,
+        instructions: vec![
+            Instruction::PredicateDispatch {
+                attribute: vec![
+                    Instruction::PushArgument(0),
+                    Instruction::PushConstant(Value::Long(0)),
+                    Instruction::GreaterThan,
+                ],
+                entity: vec![
+                    Instruction::PushArgument(0),
+                    Instruction::LoadOne(BALANCE),
+                    Instruction::PushConstant(Value::Long(7)),
+                    Instruction::Equal,
+                ],
+            },
             Instruction::Return,
         ],
     }
@@ -140,4 +197,168 @@ fn corrupt_persisted_program_fails_closed() {
         )
     })
     .unwrap();
+}
+
+#[test]
+fn persisted_symbol_serves_both_predicate_roles_after_install_and_restart() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("dual_predicate");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store
+        .create_database(&database_id, predicate_schema())
+        .unwrap();
+
+    // The dual representation is not permission widening: a database read in
+    // its attribute body is rejected before content can be deployed.
+    let illegal = Program {
+        kind: ProgramKind::DualPredicate,
+        arity: 1,
+        instructions: vec![
+            Instruction::PredicateDispatch {
+                attribute: vec![Instruction::PushArgument(0), Instruction::LoadOne(BALANCE)],
+                entity: vec![Instruction::PushConstant(Value::Bool(true))],
+            },
+            Instruction::Return,
+        ],
+    };
+    assert_eq!(
+        store.deploy_program_blob(&illegal).unwrap_err().code,
+        "program/predicate-database-read"
+    );
+    let hash = store.deploy_program_blob(&shared_predicate()).unwrap();
+    drop(store);
+
+    let service = common::start_service(&connection, &database_id);
+    let symbol = Symbol::new("test.predicates", "shared");
+    let guard_ident = Keyword::new("test", "guard");
+    let installed = common::transact(
+        &service,
+        "install-dual-predicate",
+        created.basis_t(),
+        &[
+            TxOp::Add {
+                entity: EntityRef::Temp("function".into()),
+                attribute: DB_IDENT as u32,
+                value: Value::Keyword(Keyword::new("test.predicates", "shared")).into(),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp("function".into()),
+                attribute: DB_FN as u32,
+                value: Value::Function(hash).into(),
+            },
+            TxOp::Add {
+                entity: EntityRef::Id(u64::from(BALANCE)),
+                attribute: DB_ATTR_PREDS as u32,
+                value: Value::Symbol(symbol.clone()).into(),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp("guard".into()),
+                attribute: DB_IDENT as u32,
+                value: Value::Keyword(guard_ident).into(),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp("guard".into()),
+                attribute: DB_ENTITY_PREDS as u32,
+                value: Value::Symbol(symbol).into(),
+            },
+            // Both new declarations are deliberately false for this data.
+            // They start with the next transaction, as in recovered db.clj.
+            TxOp::Add {
+                entity: EntityRef::Id(user(42)),
+                attribute: BALANCE,
+                value: Value::Long(-1).into(),
+            },
+            TxOp::Ensure {
+                entity: EntityRef::Id(user(42)),
+                spec: EntityRef::Temp("guard".into()),
+            },
+        ],
+        1_000,
+    );
+    let guard = installed.tempids["guard"];
+
+    let accepted = common::transact(
+        &service,
+        "dual-both-pass",
+        installed.basis_t,
+        &[
+            TxOp::Add {
+                entity: EntityRef::Id(user(42)),
+                attribute: BALANCE,
+                value: Value::Long(7).into(),
+            },
+            TxOp::Ensure {
+                entity: EntityRef::Id(user(42)),
+                spec: EntityRef::Id(guard),
+            },
+        ],
+        2_000,
+    );
+    assert_eq!(
+        accepted.db_after.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(7)]
+    );
+
+    let attribute_error = common::try_transact(
+        &service,
+        "dual-attribute-fails",
+        accepted.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Id(user(42)),
+            attribute: BALANCE,
+            value: Value::Long(-2).into(),
+        }],
+        3_000,
+    )
+    .unwrap_err();
+    assert_eq!(attribute_error.code, "transaction/attribute-predicate");
+
+    let entity_error = common::try_transact(
+        &service,
+        "dual-entity-fails",
+        accepted.basis_t,
+        &[
+            TxOp::Add {
+                entity: EntityRef::Id(user(42)),
+                attribute: BALANCE,
+                value: Value::Long(8).into(),
+            },
+            TxOp::Ensure {
+                entity: EntityRef::Id(user(42)),
+                spec: EntityRef::Id(guard),
+            },
+        ],
+        4_000,
+    )
+    .unwrap_err();
+    assert_eq!(entity_error.code, "transaction/entity-predicate");
+    service.shutdown();
+
+    let restarted = common::start_service(&connection, &database_id);
+    let after_restart = common::transact(
+        &restarted,
+        "dual-after-restart",
+        accepted.basis_t,
+        &[
+            TxOp::Add {
+                entity: EntityRef::Id(user(43)),
+                attribute: BALANCE,
+                value: TxValue::Scalar(Value::Long(7)),
+            },
+            TxOp::Ensure {
+                entity: EntityRef::Id(user(43)),
+                spec: EntityRef::Id(guard),
+            },
+        ],
+        5_000,
+    );
+    assert_eq!(
+        after_restart.db_after.values(user(43), BALANCE).unwrap(),
+        vec![Value::Long(7)]
+    );
+    restarted.shutdown();
 }
