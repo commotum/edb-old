@@ -194,12 +194,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0013_lineage_and_tree_gc.sql"),
     ),
     (14, include_str!("../migrations/0014_log_generations.sql")),
+    (
+        15,
+        include_str!("../migrations/0015_persistent_semantic_commitments.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 14;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 15;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -240,6 +244,8 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_tree_retirements",
     "atomic_tree_retired_nodes",
     "atomic_tree_retirement_progress",
+    "atomic_semantic_commitment_nodes",
+    "atomic_semantic_commitment_roots",
 ];
 
 const WRITER_RUNTIME_TABLES: &[&str] = &[
@@ -253,6 +259,8 @@ const WRITER_RUNTIME_TABLES: &[&str] = &[
     "atomic_tree_delta_nodes",
     "atomic_generation_request_tempids",
     "atomic_program_generation_refs",
+    "atomic_semantic_commitment_nodes",
+    "atomic_semantic_commitment_roots",
 ];
 
 const WRITER_INSERT_TABLES: &[&str] = &[
@@ -272,6 +280,8 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_generation_requests",
     "atomic_generation_request_tempids",
     "atomic_program_generation_refs",
+    "atomic_semantic_commitment_nodes",
+    "atomic_semantic_commitment_roots",
 ];
 
 const WRITER_UPDATE_TABLES: &[&str] = &[
@@ -391,6 +401,11 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
         }
         if *version == 9 {
             backfill_state_commitments(&mut transaction).map_err(upgrade_rebuild_required)?;
+        }
+        if *version == 15 {
+            crate::persistent_commitment::backfill_terminal_persistent_commitments(
+                &mut transaction,
+            )?;
         }
         let checksum = sha256(sql.as_bytes());
         transaction

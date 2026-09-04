@@ -409,10 +409,7 @@ pub(crate) fn semantic_node_hash(
     right: Digest,
 ) -> Digest {
     let leaf = semantic_leaf_hash(key);
-    hash_parts(
-        NODE_DOMAIN,
-        &[&count.to_be_bytes(), &left, &leaf, &right],
-    )
+    hash_parts(NODE_DOMAIN, &[&count.to_be_bytes(), &left, &leaf, &right])
 }
 
 /// Bind one v2 semantic-set root to the immutable database coordinate.

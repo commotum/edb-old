@@ -18,6 +18,7 @@ mod index;
 mod log_generation;
 mod operations;
 mod peer;
+mod persistent_commitment;
 pub mod persistent_tree;
 mod postgres;
 mod postgres_connection;
