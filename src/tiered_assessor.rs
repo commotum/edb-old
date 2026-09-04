@@ -1818,18 +1818,17 @@ fn validate_delta_successor(
     successor_schema: &Schema,
     logical: &[LogicalDatom],
 ) -> Result<(), SemanticError> {
-    let mut touched_ea = BTreeSet::new();
-    let mut touched_av = Vec::<(u32, Value)>::new();
+    let mut touched_ea = BTreeMap::<(u64, u32), Vec<&LogicalDatom>>::new();
+    let mut unique_indices = Vec::new();
     let mut excision_entities = BTreeSet::new();
-    for datom in logical {
-        touched_ea.insert((datom.entity, datom.attribute));
+    for (index, datom) in logical.iter().enumerate() {
+        touched_ea
+            .entry((datom.entity, datom.attribute))
+            .or_default()
+            .push(datom);
         let descriptor = successor_schema.attribute(datom.attribute)?;
-        if descriptor.unique.is_some()
-            && !touched_av.iter().any(|(attribute, value)| {
-                *attribute == datom.attribute && value.stored_eq(&datom.value)
-            })
-        {
-            touched_av.push((datom.attribute, datom.value.clone()));
+        if descriptor.unique.is_some() {
+            unique_indices.push(index);
         }
         if matches!(
             u64::from(datom.attribute),
@@ -1838,9 +1837,9 @@ fn validate_delta_successor(
             excision_entities.insert(datom.entity);
         }
     }
-    for (entity, attribute) in touched_ea {
+    for (&(entity, attribute), deltas) in &touched_ea {
         let descriptor = successor_schema.attribute(attribute)?;
-        let values = successor_values(reader, logical, entity, attribute)?;
+        let values = successor_values_from_deltas(reader, entity, attribute, deltas)?;
         if descriptor.cardinality == Cardinality::One && values.len() > 1 {
             return Err(SemanticError::conflict(
                 "transaction/cardinality-one-conflict",
@@ -1848,15 +1847,21 @@ fn validate_delta_successor(
             ));
         }
     }
-    for (attribute, value) in touched_av {
-        if value.is_nan() {
+    let (unique_groups, _) = group_unique_deltas(logical, unique_indices);
+    for group in unique_groups {
+        if group.value.is_nan() {
             return Err(SemanticError::incorrect(
                 "transaction/nan-cannot-identify",
                 "NaN cannot participate in uniqueness",
             ));
         }
-        let owners = successor_owners(reader, logical, attribute, &value)?;
-        if owners.len() > 1 {
+        if successor_owner_count(
+            reader,
+            group.attribute,
+            group.value,
+            group.deltas.as_slice(),
+        )? > 1
+        {
             return Err(SemanticError::conflict(
                 "transaction/unique-conflict",
                 "resulting database has multiple holders of a unique value",
@@ -1868,11 +1873,37 @@ fn validate_delta_successor(
         // actually retains an A=15 excision request in the successor. This
         // matches eager `validate_excision_requests` and avoids rejecting an
         // entity which merely edits or retracts request metadata.
-        if successor_values(reader, logical, entity, DB_EXCISE as u32)?.is_empty() {
+        if successor_values_from_deltas(
+            reader,
+            entity,
+            DB_EXCISE as u32,
+            touched_ea
+                .get(&(entity, DB_EXCISE as u32))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?
+        .is_empty()
+        {
             continue;
         }
-        let before_t = successor_values(reader, logical, entity, DB_EXCISE_BEFORE_T as u32)?;
-        let before = successor_values(reader, logical, entity, DB_EXCISE_BEFORE as u32)?;
+        let before_t = successor_values_from_deltas(
+            reader,
+            entity,
+            DB_EXCISE_BEFORE_T as u32,
+            touched_ea
+                .get(&(entity, DB_EXCISE_BEFORE_T as u32))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+        let before = successor_values_from_deltas(
+            reader,
+            entity,
+            DB_EXCISE_BEFORE as u32,
+            touched_ea
+                .get(&(entity, DB_EXCISE_BEFORE as u32))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
         if !before_t.is_empty() && !before.is_empty() {
             return Err(SemanticError::incorrect(
                 "transaction/excision-cutoff-conflict",
@@ -1891,6 +1922,49 @@ fn validate_delta_successor(
         }
     }
     Ok(())
+}
+
+struct UniqueDeltaGroup<'a> {
+    attribute: u32,
+    value: &'a Value,
+    first_index: usize,
+    deltas: Vec<&'a LogicalDatom>,
+}
+
+fn group_unique_deltas(
+    logical: &[LogicalDatom],
+    mut indices: Vec<usize>,
+) -> (Vec<UniqueDeltaGroup<'_>>, usize) {
+    let mut comparisons = 0;
+    indices.sort_by(|left, right| {
+        count_comparison(&mut comparisons);
+        logical[*left]
+            .attribute
+            .cmp(&logical[*right].attribute)
+            .then_with(|| logical[*left].value.index_cmp(&logical[*right].value))
+            .then(left.cmp(right))
+    });
+    let mut groups = Vec::new();
+    for indices in equal_groups(&indices, |left, right| {
+        count_comparison(&mut comparisons);
+        logical[*left].attribute == logical[*right].attribute
+            && logical[*left]
+                .value
+                .index_cmp(&logical[*right].value)
+                .is_eq()
+    }) {
+        groups.push(UniqueDeltaGroup {
+            attribute: logical[indices[0]].attribute,
+            value: &logical[indices[0]].value,
+            first_index: indices[0],
+            deltas: indices.iter().map(|index| &logical[*index]).collect(),
+        });
+    }
+    // The former touched-A/V vector validated keys at their first occurrence
+    // in canonical logical order. Preserve that failure precedence even
+    // though grouping itself uses the source-shaped A/V key order.
+    groups.sort_by_key(|group| group.first_index);
+    (groups, comparisons)
 }
 
 fn validate_ensure_attributes(
@@ -1924,53 +1998,100 @@ fn successor_values(
     entity: u64,
     attribute: u32,
 ) -> Result<Vec<Value>, SemanticError> {
-    let mut values = reader.values(entity, attribute)?;
-    for datom in logical
+    let deltas = logical
         .iter()
         .filter(|datom| datom.entity == entity && datom.attribute == attribute)
-    {
-        if datom.added {
-            if !values.iter().any(|value| value.stored_eq(&datom.value)) {
-                values.push(datom.value.clone());
-            }
-        } else {
-            values.retain(|value| !value.stored_eq(&datom.value));
-        }
-    }
-    values.sort_by(Value::stored_cmp);
-    Ok(values)
+        .collect::<Vec<_>>();
+    successor_values_from_deltas(reader, entity, attribute, &deltas)
 }
 
-fn successor_owners(
+fn successor_values_from_deltas(
     reader: &mut Reader<'_>,
-    logical: &[LogicalDatom],
+    entity: u64,
     attribute: u32,
-    value: &Value,
-) -> Result<Vec<u64>, SemanticError> {
-    let mut owners = reader
-        .prefix(&IndexPrefix::Avet {
-            attribute,
-            value: Some(value.clone()),
-            entity: None,
-        })?
-        .into_iter()
-        .map(|datom| datom.entity)
-        .collect::<Vec<_>>();
-    for datom in logical
-        .iter()
-        .filter(|datom| datom.attribute == attribute && datom.value.stored_eq(value))
-    {
-        if datom.added {
-            if !owners.contains(&datom.entity) {
-                owners.push(datom.entity);
+    deltas: &[&LogicalDatom],
+) -> Result<Vec<Value>, SemanticError> {
+    let values = reader.values(entity, attribute)?;
+    let mut deltas = deltas.to_vec();
+    deltas.sort_by(|left, right| left.value.stored_cmp(&right.value));
+    let mut result = Vec::with_capacity(values.len().saturating_add(deltas.len()));
+    let (mut value_index, mut delta_index) = (0, 0);
+    while value_index < values.len() || delta_index < deltas.len() {
+        match (values.get(value_index), deltas.get(delta_index)) {
+            (Some(value), Some(delta)) => match value.stored_cmp(&delta.value) {
+                Ordering::Less => {
+                    result.push(value.clone());
+                    value_index += 1;
+                }
+                Ordering::Equal => {
+                    if delta.added {
+                        result.push(value.clone());
+                    }
+                    value_index += 1;
+                    delta_index += 1;
+                }
+                Ordering::Greater => {
+                    if delta.added {
+                        result.push(delta.value.clone());
+                    }
+                    delta_index += 1;
+                }
+            },
+            (Some(value), None) => {
+                result.push(value.clone());
+                value_index += 1;
             }
-        } else {
-            owners.retain(|entity| *entity != datom.entity);
+            (None, Some(delta)) => {
+                if delta.added {
+                    result.push(delta.value.clone());
+                }
+                delta_index += 1;
+            }
+            (None, None) => break,
         }
     }
-    owners.sort_unstable();
-    owners.dedup();
-    Ok(owners)
+    Ok(result)
+}
+
+fn successor_owner_count(
+    reader: &mut Reader<'_>,
+    attribute: u32,
+    value: &Value,
+    deltas: &[&LogicalDatom],
+) -> Result<usize, SemanticError> {
+    let mut facts = reader.prefix(&IndexPrefix::Avet {
+        attribute,
+        value: Some(value.clone()),
+        entity: None,
+    })?;
+    facts.sort_by(|left, right| {
+        left.entity
+            .cmp(&right.entity)
+            .then_with(|| left.value.stored_cmp(&right.value))
+    });
+    let mut counts = BTreeMap::<u64, usize>::new();
+    for fact in &facts {
+        *counts.entry(fact.entity).or_default() += 1;
+    }
+    for delta in deltas {
+        let present = facts
+            .binary_search_by(|fact| {
+                fact.entity
+                    .cmp(&delta.entity)
+                    .then_with(|| fact.value.stored_cmp(&delta.value))
+            })
+            .is_ok();
+        match (delta.added, present) {
+            (true, false) => *counts.entry(delta.entity).or_default() += 1,
+            (false, true) => {
+                if let Some(count) = counts.get_mut(&delta.entity) {
+                    *count -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(counts.values().filter(|count| **count != 0).count())
 }
 
 fn material_changes(
@@ -2072,60 +2193,225 @@ fn is_derived_composite(schema: &Schema, attribute: u32) -> Result<bool, Semanti
 }
 
 fn dedupe(datoms: &mut Vec<LogicalDatom>) {
-    let mut result = Vec::new();
-    for datom in datoms.drain(..) {
-        if !result.iter().any(|existing| same_logical(existing, &datom)) {
-            result.push(datom);
-        }
-    }
-    result.sort_by(compare_logical);
-    *datoms = result;
+    let _ = dedupe_with_work(datoms);
+}
+
+fn dedupe_with_work(datoms: &mut Vec<LogicalDatom>) -> usize {
+    // Recovered `create-deduper` is a transaction-local HashSet. Values need
+    // the native port's stricter stored identity here so legal BigDecimal
+    // scale variants do not collapse. Sorting by that same canonical identity
+    // gives deterministic O(n log n) behavior without a second value wrapper.
+    let mut comparisons = 0;
+    datoms.sort_by(|left, right| {
+        count_comparison(&mut comparisons);
+        compare_logical(left, right)
+    });
+    datoms.dedup_by(|right, left| {
+        count_comparison(&mut comparisons);
+        same_logical(left, right)
+    });
+    comparisons
 }
 
 fn validate_same_transaction(
     schema: &Schema,
     datoms: &[LogicalDatom],
 ) -> Result<(), SemanticError> {
-    for (index, left) in datoms.iter().enumerate() {
-        let attribute = schema.attribute(left.attribute)?;
-        for right in &datoms[index + 1..] {
-            if left.entity == right.entity
-                && left.attribute == right.attribute
-                && left.value.stored_eq(&right.value)
-                && left.added != right.added
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/datoms-conflict",
-                    "addition and retraction of the same E/A/V conflict",
-                ));
-            }
-            if left.entity == right.entity
-                && left.attribute == right.attribute
-                && left.added
-                && right.added
-                && attribute.cardinality == Cardinality::One
-                && left.value.index_cmp(&right.value).is_ne()
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/cardinality-one-conflict",
-                    "two values for one cardinality-one E/A conflict",
-                ));
-            }
-            if left.attribute == right.attribute
-                && left.added
-                && right.added
-                && attribute.unique.is_some()
-                && left.value.index_cmp(&right.value).is_eq()
-                && left.entity != right.entity
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/unique-conflict",
-                    "two entities assert the same unique A/V",
-                ));
+    validate_same_transaction_with_work(schema, datoms).map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SameTransactionConflict {
+    Datoms,
+    CardinalityOne,
+    Unique,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ConflictCandidate {
+    left: usize,
+    right: usize,
+    kind: SameTransactionConflict,
+}
+
+fn validate_same_transaction_with_work(
+    schema: &Schema,
+    datoms: &[LogicalDatom],
+) -> Result<usize, SemanticError> {
+    // 1.0.7705 uses transaction-local EAV, EA/op and AV keyed maps here
+    // (`create-op-validator`, `create-card-one-validator`, and
+    // `create-unique-value-validator`). Three deterministic sorted key views
+    // are the closest Rust equivalent without requiring Value to implement a
+    // single equality relation at both stored and logical-index boundaries.
+    let mut descriptor = Vec::with_capacity(datoms.len());
+    let mut first_schema_error = None;
+    for (index, datom) in datoms.iter().enumerate() {
+        match schema.attribute(datom.attribute) {
+            Ok(attribute) => descriptor.push(Some(attribute)),
+            Err(error) => {
+                if first_schema_error.is_none() {
+                    first_schema_error = Some((index, error));
+                }
+                descriptor.push(None);
             }
         }
     }
-    Ok(())
+
+    let mut comparisons = 0;
+    let mut conflict = None;
+
+    let mut exact = (0..datoms.len()).collect::<Vec<_>>();
+    exact.sort_by(|left_index, right_index| {
+        count_comparison(&mut comparisons);
+        let left = &datoms[*left_index];
+        let right = &datoms[*right_index];
+        left.entity
+            .cmp(&right.entity)
+            .then(left.attribute.cmp(&right.attribute))
+            .then_with(|| left.value.stored_cmp(&right.value))
+            .then(left_index.cmp(right_index))
+    });
+    for group in equal_groups(&exact, |left, right| {
+        count_comparison(&mut comparisons);
+        let left = &datoms[*left];
+        let right = &datoms[*right];
+        left.entity == right.entity
+            && left.attribute == right.attribute
+            && left.value.stored_eq(&right.value)
+    }) {
+        let first = group[0];
+        if let Some(right) = group
+            .iter()
+            .copied()
+            .find(|right| datoms[*right].added != datoms[first].added)
+        {
+            record_conflict(
+                &mut conflict,
+                ConflictCandidate {
+                    left: first.min(right),
+                    right: first.max(right),
+                    kind: SameTransactionConflict::Datoms,
+                },
+            );
+        }
+    }
+
+    let mut cardinality_one = (0..datoms.len())
+        .filter(|index| {
+            datoms[*index].added
+                && descriptor[*index]
+                    .is_some_and(|attribute| attribute.cardinality == Cardinality::One)
+        })
+        .collect::<Vec<_>>();
+    cardinality_one.sort_by_key(|index| {
+        let datom = &datoms[*index];
+        (datom.entity, datom.attribute, *index)
+    });
+    for group in equal_groups(&cardinality_one, |left, right| {
+        count_comparison(&mut comparisons);
+        datoms[*left].entity == datoms[*right].entity
+            && datoms[*left].attribute == datoms[*right].attribute
+    }) {
+        let first = group[0];
+        if let Some(right) = group
+            .iter()
+            .copied()
+            .find(|right| datoms[first].value.index_cmp(&datoms[*right].value).is_ne())
+        {
+            record_conflict(
+                &mut conflict,
+                ConflictCandidate {
+                    left: first,
+                    right,
+                    kind: SameTransactionConflict::CardinalityOne,
+                },
+            );
+        }
+    }
+
+    let mut unique = (0..datoms.len())
+        .filter(|index| {
+            datoms[*index].added
+                && descriptor[*index].is_some_and(|attribute| attribute.unique.is_some())
+        })
+        .collect::<Vec<_>>();
+    unique.sort_by(|left, right| {
+        count_comparison(&mut comparisons);
+        let left_datom = &datoms[*left];
+        let right_datom = &datoms[*right];
+        left_datom
+            .attribute
+            .cmp(&right_datom.attribute)
+            .then_with(|| left_datom.value.index_cmp(&right_datom.value))
+            .then(left.cmp(right))
+    });
+    for group in equal_groups(&unique, |left, right| {
+        count_comparison(&mut comparisons);
+        datoms[*left].attribute == datoms[*right].attribute
+            && datoms[*left].value.index_cmp(&datoms[*right].value).is_eq()
+    }) {
+        let first = group[0];
+        if let Some(right) = group
+            .iter()
+            .copied()
+            .find(|right| datoms[first].entity != datoms[*right].entity)
+        {
+            record_conflict(
+                &mut conflict,
+                ConflictCandidate {
+                    left: first,
+                    right,
+                    kind: SameTransactionConflict::Unique,
+                },
+            );
+        }
+    }
+
+    if let Some((index, error)) = first_schema_error
+        && conflict.is_none_or(|conflict| index <= conflict.left)
+    {
+        return Err(error);
+    }
+    match conflict.map(|conflict| conflict.kind) {
+        Some(SameTransactionConflict::Datoms) => Err(SemanticError::conflict(
+            "transaction/datoms-conflict",
+            "addition and retraction of the same E/A/V conflict",
+        )),
+        Some(SameTransactionConflict::CardinalityOne) => Err(SemanticError::conflict(
+            "transaction/cardinality-one-conflict",
+            "two values for one cardinality-one E/A conflict",
+        )),
+        Some(SameTransactionConflict::Unique) => Err(SemanticError::conflict(
+            "transaction/unique-conflict",
+            "two entities assert the same unique A/V",
+        )),
+        None => Ok(comparisons),
+    }
+}
+
+fn equal_groups<T>(
+    sorted: &[T],
+    mut equivalent: impl FnMut(&T, &T) -> bool,
+) -> impl Iterator<Item = &[T]> {
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        if start == sorted.len() {
+            return None;
+        }
+        let mut end = start + 1;
+        while end < sorted.len() && equivalent(&sorted[start], &sorted[end]) {
+            end += 1;
+        }
+        let group = &sorted[start..end];
+        start = end;
+        Some(group)
+    })
+}
+
+fn record_conflict(current: &mut Option<ConflictCandidate>, candidate: ConflictCandidate) {
+    if current.is_none_or(|current| candidate < current) {
+        *current = Some(candidate);
+    }
 }
 
 fn same_logical(left: &LogicalDatom, right: &LogicalDatom) -> bool {

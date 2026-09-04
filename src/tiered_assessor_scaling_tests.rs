@@ -290,3 +290,321 @@ fn sorted_identity_union_matches_eager_transitive_upsert_resolution() {
     assert_eq!(assessed.tempids["a"], assessed.tempids["b"]);
     assert_eq!(assessed.tempids["b"], assessed.tempids["c"]);
 }
+
+fn quadratic_dedupe(datoms: &mut Vec<LogicalDatom>) {
+    let mut result = Vec::new();
+    for datom in datoms.drain(..) {
+        if !result.iter().any(|existing| same_logical(existing, &datom)) {
+            result.push(datom);
+        }
+    }
+    result.sort_by(compare_logical);
+    *datoms = result;
+}
+
+fn quadratic_same_transaction(
+    schema: &Schema,
+    datoms: &[LogicalDatom],
+) -> Result<(), SemanticError> {
+    for (index, left) in datoms.iter().enumerate() {
+        let attribute = schema.attribute(left.attribute)?;
+        for right in &datoms[index + 1..] {
+            if left.entity == right.entity
+                && left.attribute == right.attribute
+                && left.value.stored_eq(&right.value)
+                && left.added != right.added
+            {
+                return Err(SemanticError::conflict(
+                    "transaction/datoms-conflict",
+                    "addition and retraction of the same E/A/V conflict",
+                ));
+            }
+            if left.entity == right.entity
+                && left.attribute == right.attribute
+                && left.added
+                && right.added
+                && attribute.cardinality == Cardinality::One
+                && left.value.index_cmp(&right.value).is_ne()
+            {
+                return Err(SemanticError::conflict(
+                    "transaction/cardinality-one-conflict",
+                    "two values for one cardinality-one E/A conflict",
+                ));
+            }
+            if left.attribute == right.attribute
+                && left.added
+                && right.added
+                && attribute.unique.is_some()
+                && left.value.index_cmp(&right.value).is_eq()
+                && left.entity != right.entity
+            {
+                return Err(SemanticError::conflict(
+                    "transaction/unique-conflict",
+                    "two entities assert the same unique A/V",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_logical_slice(left: &[LogicalDatom], right: &[LogicalDatom]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| same_logical(left, right))
+}
+
+#[test]
+fn dedupe_is_n_log_n_and_retains_stored_numeric_representations() {
+    const DISTINCT: usize = 8_192;
+    let mut datoms = Vec::with_capacity(DISTINCT * 2 + 2);
+    for ordinal in (0..DISTINCT).rev() {
+        let datom = LogicalDatom {
+            entity: u64::try_from(ordinal % 257).unwrap(),
+            attribute: 1_000 + u32::try_from(ordinal % 5).unwrap(),
+            value: Value::Long(i64::try_from(ordinal).unwrap()),
+            added: ordinal % 3 != 0,
+        };
+        datoms.push(datom.clone());
+        datoms.push(datom);
+    }
+    datoms.push(LogicalDatom {
+        entity: 99_999,
+        attribute: 1_000,
+        value: Value::BigDec(BigDecimal::from_str("1.0").unwrap()),
+        added: true,
+    });
+    datoms.push(LogicalDatom {
+        entity: 99_999,
+        attribute: 1_000,
+        value: Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+        added: true,
+    });
+    let mut expected = datoms.clone();
+    quadratic_dedupe(&mut expected);
+    let input_len = datoms.len();
+    let comparisons = dedupe_with_work(&mut datoms);
+    assert!(same_logical_slice(&datoms, &expected));
+    assert_eq!(datoms.len(), DISTINCT + 2);
+    assert!(
+        comparisons < input_len * 40,
+        "dedupe used {comparisons} comparisons"
+    );
+    assert!(
+        datoms
+            .windows(2)
+            .all(|pair| compare_logical(&pair[0], &pair[1]).is_lt())
+    );
+}
+
+fn validation_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema
+        .install(Attribute::new(
+            1_000,
+            Keyword::new("validation", "many"),
+            ValueType::Long,
+            Cardinality::Many,
+        ))
+        .unwrap();
+    schema
+        .install(Attribute::new(
+            1_001,
+            Keyword::new("validation", "one"),
+            ValueType::Long,
+            Cardinality::One,
+        ))
+        .unwrap();
+    schema
+        .install(
+            Attribute::new(
+                1_002,
+                Keyword::new("validation", "identity"),
+                ValueType::BigDec,
+                Cardinality::One,
+            )
+            .unique(Unique::Identity),
+        )
+        .unwrap();
+    schema
+}
+
+#[test]
+fn keyed_same_transaction_validation_scales_and_matches_quadratic_precedence() {
+    const DATOMS: usize = 8_192;
+    let schema = validation_schema();
+    let valid = (0..DATOMS)
+        .rev()
+        .map(|ordinal| LogicalDatom {
+            entity: u64::try_from(ordinal + 1).unwrap(),
+            attribute: 1_002,
+            value: Value::BigDec(
+                BigDecimal::from_str(&format!("{ordinal}.{:02}", ordinal % 97)).unwrap(),
+            ),
+            added: true,
+        })
+        .collect::<Vec<_>>();
+    let comparisons = validate_same_transaction_with_work(&schema, &valid).unwrap();
+    assert!(
+        comparisons < DATOMS * 80,
+        "same-transaction validation used {comparisons} comparisons"
+    );
+
+    // Compare the replacement to its exact former implementation over a
+    // deterministic mix of operation, cardinality, uniqueness, unknown-attr,
+    // and logical-equal/stored-distinct numeric cases. This also protects the
+    // former left-index/right-index failure precedence.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    for _case in 0..256 {
+        let mut datoms = Vec::new();
+        for index in 0..32 {
+            state ^= state << 7;
+            state ^= state >> 9;
+            state ^= state << 8;
+            let attribute = match state % 11 {
+                0 => 9_999,
+                1..=3 => 1_001,
+                4..=7 => 1_002,
+                _ => 1_000,
+            };
+            let value = if attribute == 1_002 {
+                let whole = state % 5;
+                let scale = if state & 1 == 0 { "0" } else { "00" };
+                Value::BigDec(BigDecimal::from_str(&format!("{whole}.{scale}")).unwrap())
+            } else {
+                Value::Long(i64::try_from(state % 7).unwrap())
+            };
+            datoms.push(LogicalDatom {
+                entity: 1 + state % 6,
+                attribute,
+                value,
+                added: (state ^ u64::try_from(index).unwrap()) & 1 == 0,
+            });
+        }
+        let old = quadratic_same_transaction(&schema, &datoms);
+        let new = validate_same_transaction(&schema, &datoms);
+        match (old, new) {
+            (Ok(()), Ok(())) => {}
+            (Err(old), Err(new)) => {
+                assert_eq!(new.category, old.category);
+                assert_eq!(new.code, old.code);
+            }
+            outcomes => panic!("same-transaction validator divergence: {outcomes:?}"),
+        }
+    }
+}
+
+#[test]
+fn unique_delta_grouping_scales_by_logical_av_key() {
+    const DATOMS: usize = 8_192;
+    let logical = (0..DATOMS)
+        .rev()
+        .map(|ordinal| LogicalDatom {
+            entity: u64::try_from(ordinal + 1).unwrap(),
+            attribute: 1_002,
+            value: Value::BigDec(
+                BigDecimal::from_str(&format!("{ordinal}.{:02}", ordinal % 97)).unwrap(),
+            ),
+            added: true,
+        })
+        .collect::<Vec<_>>();
+    let (groups, comparisons) = group_unique_deltas(&logical, (0..logical.len()).collect());
+    assert_eq!(groups.len(), DATOMS);
+    assert!(
+        comparisons < DATOMS * 40,
+        "A/V grouping used {comparisons} comparisons"
+    );
+
+    let scales = vec![
+        LogicalDatom {
+            entity: 1,
+            attribute: 1_002,
+            value: Value::BigDec(BigDecimal::from_str("1.0").unwrap()),
+            added: false,
+        },
+        LogicalDatom {
+            entity: 2,
+            attribute: 1_002,
+            value: Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+            added: true,
+        },
+    ];
+    let (groups, _) = group_unique_deltas(&scales, vec![0, 1]);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].deltas.len(), 2);
+}
+
+#[test]
+fn logical_equal_stored_distinct_unique_ownership_transfers_match_eager() {
+    const DECIMAL: u32 = 1_000;
+    const LABEL: u32 = 1_001;
+    let mut schema = Schema::new();
+    schema
+        .install(
+            Attribute::new(
+                DECIMAL,
+                Keyword::new("item", "decimal"),
+                ValueType::BigDec,
+                Cardinality::One,
+            )
+            .unique(Unique::Value),
+        )
+        .unwrap();
+    schema
+        .install(Attribute::new(
+            LABEL,
+            Keyword::new("item", "label"),
+            ValueType::String,
+            Cardinality::One,
+        ))
+        .unwrap();
+    let initial = Database::new(schema).unwrap();
+    let decimal =
+        |spelling: &str| TxValue::Scalar(Value::BigDec(BigDecimal::from_str(spelling).unwrap()));
+    let seeded = initial
+        .with(
+            &[
+                TxOp::Add {
+                    entity: EntityRef::Temp("holder".into()),
+                    attribute: DECIMAL,
+                    value: decimal("1.0"),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("recipient".into()),
+                    attribute: LABEL,
+                    value: Value::String("recipient".into()).into(),
+                },
+            ],
+            10,
+        )
+        .unwrap();
+    let holder = seeded.tempids["holder"];
+    let recipient = seeded.tempids["recipient"];
+    let ops = vec![
+        TxOp::Retract {
+            entity: EntityRef::Id(holder),
+            attribute: DECIMAL,
+            value: Some(decimal("1.0")),
+        },
+        TxOp::Add {
+            entity: EntityRef::Id(recipient),
+            attribute: DECIMAL,
+            value: decimal("1.00"),
+        },
+    ];
+    let eager = seeded.db_after.with(&ops, 11).unwrap();
+    let assessed =
+        assess_tiered(&DatabaseValue::eager(Arc::new(seeded.db_after)), &ops, 11).unwrap();
+    assert_eq!(assessed.tx_data, eager.tx_data);
+    assert_eq!(
+        assessed.db_after.values(recipient, DECIMAL).unwrap(),
+        eager
+            .db_after
+            .values(recipient, DECIMAL)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+}
