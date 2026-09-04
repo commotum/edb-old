@@ -95,6 +95,10 @@ impl EndpointProjection {
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
+
+    pub(crate) fn shares_schema(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.schema, &other.schema)
+    }
 }
 
 /// One immutable authenticated log entry retained by the recent value.
@@ -153,6 +157,10 @@ pub struct RecentWork {
     pub nodes_copied: u64,
     pub node_splits: u64,
     pub bulk_rebuild_datoms: u64,
+    /// Attributes inspected for an actual endpoint schema transition. An
+    /// unchanged shared schema takes the pointer-identity fast path and keeps
+    /// this at zero for ordinary transactions.
+    pub schema_attributes_examined: u64,
     pub schema_backfill_datoms: u64,
     pub log_entries_copied: u64,
 }
@@ -180,6 +188,9 @@ impl RecentWork {
             bulk_rebuild_datoms: self
                 .bulk_rebuild_datoms
                 .saturating_add(other.bulk_rebuild_datoms),
+            schema_attributes_examined: self
+                .schema_attributes_examined
+                .saturating_add(other.schema_attributes_examined),
             schema_backfill_datoms: self
                 .schema_backfill_datoms
                 .saturating_add(other.schema_backfill_datoms),
@@ -597,12 +608,14 @@ impl RecentTier {
         let mut log = self.log.clone();
         let mut indexes = self.indexes.clone();
         let mut last_work = RecentWork::default();
-        backfill_schema_transitions(
-            self.projection.schema(),
-            endpoint_projection.schema(),
-            &mut indexes,
-            &mut last_work,
-        )?;
+        if !self.projection.shares_schema(&endpoint_projection) {
+            backfill_schema_transitions(
+                self.projection.schema(),
+                endpoint_projection.schema(),
+                &mut indexes,
+                &mut last_work,
+            )?;
+        }
         for (authenticated_hash, transaction) in transactions {
             expected_t = expected_t.checked_add(1).ok_or_else(|| {
                 fault("recent/basis-overflow", "recent transaction basis overflow")
@@ -1278,6 +1291,7 @@ fn backfill_schema_transitions(
     work: &mut RecentWork,
 ) -> Result<(), SemanticError> {
     for attribute in endpoint.attributes() {
+        work.schema_attributes_examined = work.schema_attributes_examined.saturating_add(1);
         let previous_attribute = previous.attribute(attribute.id).ok();
         let previous_avet = previous_attribute
             .is_some_and(|attribute| attribute.indexed || attribute.unique.is_some());
@@ -2367,13 +2381,14 @@ mod tests {
     #[test]
     fn sequential_successors_do_bounded_path_work_and_share_old_structure() {
         let schema = application_schema(false);
+        let projection = EndpointProjection::new(schema);
         let base_hash = [0xa1; 32];
         let mut tier = RecentTier::new(
             DATABASE_ID,
             10,
             base_hash,
             [],
-            EndpointProjection::new(schema.clone()),
+            projection.clone(),
             RecentLimits::default(),
         )
         .unwrap();
@@ -2384,12 +2399,14 @@ mod tests {
             let transaction = unique_transaction(11 + offset, previous_hash, offset);
             previous_hash = transaction_hash(&encode_transaction(&transaction).unwrap());
             let predecessor = tier.clone();
-            tier = tier
-                .append(transaction, EndpointProjection::new(schema.clone()))
-                .unwrap();
+            tier = tier.append(transaction, projection.clone()).unwrap();
             let work = tier.last_work();
             assert_eq!(work.authenticated_datoms, 1);
             assert_eq!(work.bulk_rebuild_datoms, 0);
+            assert_eq!(
+                work.schema_attributes_examined, 0,
+                "an unchanged shared endpoint schema must bypass transition scans"
+            );
             assert_eq!(work.index_insert_attempts, 3);
             assert!(work.log_entries_copied < LOG_CHUNK_SIZE as u64);
             assert!(work.node_visits <= 3 * u64::from(tier.stats().max_index_height.max(1)));
@@ -2468,6 +2485,10 @@ mod tests {
             .unwrap();
         assert_eq!(enabled.last_work().authenticated_datoms, 0);
         assert_eq!(enabled.last_work().bulk_rebuild_datoms, 0);
+        assert_eq!(
+            enabled.last_work().schema_attributes_examined,
+            indexed.attributes().count() as u64
+        );
         assert_eq!(enabled.last_work().schema_backfill_datoms, 96);
         assert_eq!(enabled.datoms(IndexOrder::Avet).len(), 96);
         assert_eq!(enabled.indexes.eavt.node_ids(), eavt_ids);

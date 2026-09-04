@@ -30,6 +30,10 @@ pub(crate) struct AssessmentReadWork {
     pub(crate) prefix_hits: u64,
     pub(crate) datoms: u64,
     pub(crate) retained_bytes: u64,
+    /// Active composites selected through the schema's recovered
+    /// constituent reverse index. This must follow touched attributes rather
+    /// than total installed schema width.
+    pub(crate) composite_candidates: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1772,17 +1776,20 @@ fn derive_composites(
     logical: &mut Vec<LogicalDatom>,
     touched: &BTreeSet<(u64, u32)>,
 ) -> Result<(), SemanticError> {
-    let composites = reader
-        .base
-        .schema()
-        .attributes()
-        .filter(|attribute| {
-            matches!(attribute.tuple, Some(TupleSpec::Composite(_)))
-                && !attribute.tuple_discontinued
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    for composite in composites {
+    // Recovered `Db` maintains a constituent -> composite reverse map and its
+    // transaction prefetcher consults that map for each touched attribute
+    // (`composites-prefetcher` / `create-composite`). Preserve that shape:
+    // schema size must not become ordinary transaction work.
+    let composite_ids = touched
+        .iter()
+        .flat_map(|(_, attribute)| reader.base.schema().composites_for_constituent(*attribute))
+        .collect::<BTreeSet<_>>();
+    reader.work.composite_candidates = reader
+        .work
+        .composite_candidates
+        .saturating_add(composite_ids.len() as u64);
+    for composite_id in composite_ids {
+        let composite = reader.base.schema().attribute(composite_id)?.clone();
         let TupleSpec::Composite(constituents) = composite.tuple.as_ref().unwrap() else {
             unreachable!()
         };

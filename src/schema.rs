@@ -117,6 +117,21 @@ pub struct Schema {
     attributes: BTreeMap<AttrId, Attribute>,
     current_idents: BTreeMap<Keyword, AttrId>,
     ident_aliases: BTreeMap<Keyword, AttrId>,
+    /// Active composite attributes keyed by each constituent. Recovered
+    /// `Db.constituents` uses this exact reverse projection so ordinary
+    /// transaction expansion touches only composites affected by an E/A
+    /// change rather than scanning the complete schema.
+    constituents: BTreeMap<AttrId, BTreeSet<AttrId>>,
+}
+
+fn active_composite_constituents(attribute: &Attribute) -> Vec<AttrId> {
+    if attribute.tuple_discontinued {
+        return Vec::new();
+    }
+    match &attribute.tuple {
+        Some(TupleSpec::Composite(constituents)) => constituents.clone(),
+        _ => Vec::new(),
+    }
 }
 
 impl Schema {
@@ -143,7 +158,15 @@ impl Schema {
         }
         self.current_idents
             .insert(attribute.ident.clone(), attribute.id);
-        self.attributes.insert(attribute.id, attribute);
+        let attribute_id = attribute.id;
+        let constituent_ids = active_composite_constituents(&attribute);
+        self.attributes.insert(attribute_id, attribute);
+        for constituent in constituent_ids {
+            self.constituents
+                .entry(constituent)
+                .or_default()
+                .insert(attribute_id);
+        }
         Ok(())
     }
 
@@ -223,7 +246,24 @@ impl Schema {
             self.current_idents
                 .insert(proposed.ident.clone(), proposed.id);
         }
-        self.attributes.insert(proposed.id, proposed);
+        let previous_constituents = active_composite_constituents(current);
+        let proposed_id = proposed.id;
+        let proposed_constituents = active_composite_constituents(&proposed);
+        self.attributes.insert(proposed_id, proposed);
+        for constituent in previous_constituents {
+            if let Some(composites) = self.constituents.get_mut(&constituent) {
+                composites.remove(&proposed_id);
+                if composites.is_empty() {
+                    self.constituents.remove(&constituent);
+                }
+            }
+        }
+        for constituent in proposed_constituents {
+            self.constituents
+                .entry(constituent)
+                .or_default()
+                .insert(proposed_id);
+        }
         Ok(())
     }
 
@@ -245,6 +285,21 @@ impl Schema {
 
     pub fn attributes(&self) -> impl Iterator<Item = &Attribute> {
         self.attributes.values()
+    }
+
+    /// Active composite attributes that depend on `constituent`.
+    ///
+    /// Discontinued composites are absent, matching recovered
+    /// `discontinue-composite`, which removes their reverse links while
+    /// retaining the immutable tuple definition as schema information.
+    pub(crate) fn composites_for_constituent(
+        &self,
+        constituent: AttrId,
+    ) -> impl Iterator<Item = AttrId> + '_ {
+        self.constituents
+            .get(&constituent)
+            .into_iter()
+            .flat_map(|composites| composites.iter().copied())
     }
 
     pub(crate) fn ident_aliases(&self) -> impl Iterator<Item = (&Keyword, AttrId)> {

@@ -57,6 +57,70 @@ fn ordinary_assessment_shares_schema_and_real_schema_edits_replace_it() {
 }
 
 #[test]
+fn composite_work_uses_constituent_reverse_links_not_schema_width() {
+    const ATTRIBUTE_COUNT: u32 = 512;
+    const COMPOSITE: u32 = 1_000 + ATTRIBUTE_COUNT;
+    let mut schema = wide_schema(ATTRIBUTE_COUNT);
+    schema
+        .install(
+            Attribute::new(
+                COMPOSITE,
+                Keyword::new("wide", "pair"),
+                ValueType::Tuple,
+                Cardinality::One,
+            )
+            .tuple(TupleSpec::Composite(vec![1_000, 1_001])),
+        )
+        .unwrap();
+    schema.validate_tuple_definitions().unwrap();
+    assert_eq!(
+        schema.composites_for_constituent(1_000).collect::<Vec<_>>(),
+        vec![COMPOSITE]
+    );
+    assert!(schema.composites_for_constituent(1_002).next().is_none());
+
+    let database = Database::new(schema.clone()).unwrap();
+    let value = DatabaseValue::eager(Arc::new(database));
+    let unrelated = assess_tiered(
+        &value,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("unrelated".into()),
+            attribute: 1_000 + ATTRIBUTE_COUNT - 1,
+            value: Value::Long(7).into(),
+        }],
+        10,
+    )
+    .unwrap();
+    assert_eq!(unrelated.read_work.composite_candidates, 0);
+
+    let constituent = assess_tiered(
+        &value,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("constituent".into()),
+            attribute: 1_000,
+            value: Value::Long(8).into(),
+        }],
+        10,
+    )
+    .unwrap();
+    assert_eq!(constituent.read_work.composite_candidates, 1);
+    assert!(
+        constituent
+            .tx_data
+            .iter()
+            .any(|datom| datom.attribute == COMPOSITE && datom.added)
+    );
+
+    let mut discontinued = schema.attribute(COMPOSITE).unwrap().clone();
+    discontinued.tuple_discontinued = true;
+    schema.alter(discontinued).unwrap();
+    assert!(
+        schema.composites_for_constituent(1_000).next().is_none(),
+        "discontinuation must remove recovered constituent reverse links"
+    );
+}
+
+#[test]
 fn localized_schema_alter_reads_only_local_information() {
     const ATTRIBUTE_COUNT: u32 = 512;
     const TARGET: u32 = 1_000 + ATTRIBUTE_COUNT - 1;
