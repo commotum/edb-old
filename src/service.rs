@@ -1,17 +1,18 @@
 use crate::log_generation::request_key_hash;
 use crate::postgres::{
-    is_postgres_connection_error, postgres_error, read_authenticated_log_range,
-    shared_program_cache_stats, CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache,
-    TransactorLease, WriterResidencyStats,
+    CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
+    WriterResidencyStats, is_postgres_connection_error, postgres_error,
+    read_authenticated_log_range, shared_program_cache_stats,
 };
 use crate::{
-    DatabaseValue, Datom, Digest, ErrorCategory, IndexBuildFault, PostgresConnectionConfig,
-    PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
+    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, IndexBuildFault,
+    PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
+    SemanticError, TxForm, TxOp,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -351,34 +352,23 @@ impl BackgroundIndexing {
         }
     }
 
-    fn note_commit(&self, basis_t: u64, tx_data: &[Datom]) {
-        let changes_avet_membership = tx_data.iter().any(|datom| {
-            matches!(
-                u64::from(datom.attribute),
-                crate::DB_INDEX | crate::DB_UNIQUE
-            )
-        });
-        let novelty = Novelty {
-            basis_t,
-            datoms: tx_data.len() as u64,
-            bytes: accounted_novelty_bytes(tx_data),
-        };
+    fn note_commit(&self, novelty: Novelty, changes_avet_membership: bool) {
         let should_wake = {
             let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
-            if basis_t <= backlog.published_basis_t {
+            if novelty.basis_t <= backlog.published_basis_t {
                 return;
             }
             if backlog
                 .pending
                 .back()
-                .is_some_and(|previous| previous.basis_t >= basis_t)
+                .is_some_and(|previous| previous.basis_t >= novelty.basis_t)
             {
                 // Fresh authoritative commits are ordered by the one writer.
                 // A duplicate basis can only be a replay/race already covered
                 // by a publication and must not be charged twice.
                 return;
             }
-            backlog.target_basis_t = backlog.target_basis_t.max(basis_t);
+            backlog.target_basis_t = backlog.target_basis_t.max(novelty.basis_t);
             backlog.pending.push_back(novelty);
             backlog.total_datoms = backlog.total_datoms.saturating_add(novelty.datoms);
             backlog.total_bytes = backlog.total_bytes.saturating_add(novelty.bytes);
@@ -393,6 +383,26 @@ impl BackgroundIndexing {
         if should_wake {
             self.wake();
         }
+    }
+
+    /// Demand a publication independently of the ordinary novelty threshold.
+    /// This is the liveness escape hatch when `RecentTier` refuses a
+    /// not-yet-assessed append at its own exact hard-cap boundary. The request
+    /// remains parked and is retried only after the covering publication.
+    fn force_publication(&self) -> bool {
+        let can_advance = {
+            let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
+            if backlog.target_basis_t <= backlog.published_basis_t {
+                false
+            } else {
+                backlog.needs_publication = true;
+                true
+            }
+        };
+        if can_advance {
+            self.wake();
+        }
+        can_advance
     }
 
     fn wake(&self) {
@@ -585,6 +595,12 @@ fn should_index(backlog: &IndexingBacklog, config: BackgroundIndexingConfig) -> 
             && backlog.total_bytes > config.memory_index_threshold_bytes)
 }
 
+#[derive(Debug)]
+struct ReportSubscriber {
+    sender: mpsc::Sender<ServiceTransactionReport>,
+    pending: Arc<AtomicUsize>,
+}
+
 struct Shared {
     accepting: AtomicBool,
     admission: Mutex<()>,
@@ -593,7 +609,9 @@ struct Shared {
     processed: AtomicU64,
     rejected_full: AtomicU64,
     next_subscriber: AtomicU64,
-    subscribers: Mutex<BTreeMap<u64, mpsc::Sender<ServiceTransactionReport>>>,
+    subscribers: Mutex<BTreeMap<u64, ReportSubscriber>>,
+    queued_reports: AtomicUsize,
+    max_queued_reports: AtomicUsize,
     writer_residency: Mutex<WriterResidencyStats>,
     max_request_bytes: usize,
     indexing: Arc<BackgroundIndexing>,
@@ -620,6 +638,8 @@ impl Shared {
             rejected_full: AtomicU64::new(0),
             next_subscriber: AtomicU64::new(1),
             subscribers: Mutex::new(BTreeMap::new()),
+            queued_reports: AtomicUsize::new(0),
+            max_queued_reports: AtomicUsize::new(0),
             writer_residency: Mutex::new(writer_residency),
             max_request_bytes,
             indexing,
@@ -639,7 +659,18 @@ impl Shared {
 
     fn publish(&self, report: &ServiceTransactionReport) {
         let mut subscribers = self.subscribers.lock().expect("subscriber mutex poisoned");
-        subscribers.retain(|_, sender| sender.send(report.clone()).is_ok());
+        subscribers.retain(|_, subscriber| {
+            subscriber.pending.fetch_add(1, Ordering::AcqRel);
+            let queued = self.queued_reports.fetch_add(1, Ordering::AcqRel) + 1;
+            self.max_queued_reports.fetch_max(queued, Ordering::Relaxed);
+            if subscriber.sender.send(report.clone()).is_ok() {
+                true
+            } else {
+                subscriber.pending.fetch_sub(1, Ordering::AcqRel);
+                self.queued_reports.fetch_sub(1, Ordering::AcqRel);
+                false
+            }
+        });
     }
 
     /// At the pressure gate, already-committed idempotent requests remain
@@ -798,14 +829,22 @@ impl TransactionClient {
     pub fn subscribe_reports(&self) -> ReportSubscription {
         let id = self.shared.next_subscriber.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
+        let pending = Arc::new(AtomicUsize::new(0));
         self.shared
             .subscribers
             .lock()
             .expect("subscriber mutex poisoned")
-            .insert(id, sender);
+            .insert(
+                id,
+                ReportSubscriber {
+                    sender,
+                    pending: Arc::clone(&pending),
+                },
+            );
         ReportSubscription {
             id,
             receiver,
+            pending,
             shared: Arc::downgrade(&self.shared),
         }
     }
@@ -822,6 +861,8 @@ impl TransactionClient {
                 .lock()
                 .expect("subscriber mutex poisoned")
                 .len(),
+            queued_reports: self.shared.queued_reports.load(Ordering::Acquire),
+            max_queued_reports: self.shared.max_queued_reports.load(Ordering::Relaxed),
         }
     }
 
@@ -876,6 +917,7 @@ impl TransactionTicket {
 pub struct ReportSubscription {
     id: u64,
     receiver: mpsc::Receiver<ServiceTransactionReport>,
+    pending: Arc<AtomicUsize>,
     shared: Weak<Shared>,
 }
 
@@ -884,11 +926,35 @@ impl ReportSubscription {
         &self,
         timeout: Duration,
     ) -> Result<ServiceTransactionReport, mpsc::RecvTimeoutError> {
-        self.receiver.recv_timeout(timeout)
+        let result = self.receiver.recv_timeout(timeout);
+        if result.is_ok() {
+            self.note_received();
+        }
+        result
     }
 
     pub fn try_recv(&self) -> Result<ServiceTransactionReport, mpsc::TryRecvError> {
-        self.receiver.try_recv()
+        let result = self.receiver.try_recv();
+        if result.is_ok() {
+            self.note_received();
+        }
+        result
+    }
+
+    /// Reports currently retained for this lossless subscriber. Every queued
+    /// report owns its immutable db-before/db-after snapshots and their
+    /// native root pins until it is received or the subscription is dropped.
+    pub fn pending_reports(&self) -> usize {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    fn note_received(&self) {
+        let pending = self.pending.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(pending > 0, "received report was not accounted as pending");
+        if let Some(shared) = self.shared.upgrade() {
+            let queued = shared.queued_reports.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(queued > 0, "received report was not globally accounted");
+        }
     }
 }
 
@@ -900,6 +966,11 @@ impl Drop for ReportSubscription {
                 .lock()
                 .expect("subscriber mutex poisoned")
                 .remove(&self.id);
+            let abandoned = self.pending.swap(0, Ordering::AcqRel);
+            if abandoned > 0 {
+                let queued = shared.queued_reports.fetch_sub(abandoned, Ordering::AcqRel);
+                debug_assert!(queued >= abandoned, "report queue accounting underflow");
+            }
         }
     }
 }
@@ -911,6 +982,11 @@ pub struct ServiceStats {
     pub processed: u64,
     pub rejected_full: u64,
     pub subscribers: usize,
+    /// Lossless reports currently retaining two immutable database values
+    /// across all subscribers.
+    pub queued_reports: usize,
+    /// High-water mark for `queued_reports` during this service lifetime.
+    pub max_queued_reports: usize,
 }
 
 pub struct TransactionService {
@@ -1315,7 +1391,10 @@ fn run_worker(
                         // first and only live notification for the original
                         // durable transaction.
                         report.replayed = false;
-                        shared.indexing.note_commit(report.basis_t, &report.tx_data);
+                        if let Err(error) = note_report_commit(shared, database_id, &report) {
+                            shared.indexing.fail_job(error);
+                            shared.accepting.store(false, Ordering::Release);
+                        }
                         shared.publish(&report);
                     }
                     *shared
@@ -1375,11 +1454,11 @@ fn run_worker(
             let _ = work.response.send(Err(shared.unavailable()));
             continue;
         }
-        if pending_was_stalled && shared.indexing.at_hard_limit() {
+        if pending_was_stalled && shared.indexing.should_continue() {
             // `check_index_gate` performs the one durable idempotency lookup
             // that classified this work as novel. Do not reconnect and repeat
-            // that query on every throttle tick while the same request is
-            // parked; no competing writer can commit it under this lease.
+            // that query or reassess a hard-cap retry on every throttle tick
+            // while the covering publication is still pending.
             shared.indexing.wake();
             pending = Some(work);
             thread::park_timeout(wait.min(Duration::from_millis(100)));
@@ -1412,7 +1491,7 @@ fn run_worker(
                 let published_revision = shared.indexing.stats().published_revision;
                 match store.adopt_published_tree(database_id, published_revision) {
                     Ok(()) => {
-                        process_work(store, lease, database_id, work.request, work.request_hash)
+                        process_work(store, lease, database_id, &work.request, work.request_hash)
                     }
                     // An ambiguous commit deliberately invalidates the cached
                     // writer value. The authoritative transaction path locks
@@ -1420,13 +1499,31 @@ fn run_worker(
                     // opens that exact head before doing new work, so absence
                     // of a process-local value is not an adoption failure.
                     Err(error) if error.code == "postgres/writer-not-activated" => {
-                        process_work(store, lease, database_id, work.request, work.request_hash)
+                        process_work(store, lease, database_id, &work.request, work.request_hash)
                     }
                     Err(error) => Err(error),
                 }
             }
             Err(error) => Err(error),
         };
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == "recent/hard-capacity")
+            && shared.indexing.force_publication()
+        {
+            // The exact recent representation found pressure that admission
+            // could not predict (or raced a still-unadopted publication).
+            // Nothing was committed. Park this same request, force an index
+            // through the known durable tail, and reassess only afterward.
+            if !pending_was_stalled {
+                shared.indexing.record_backpressure_stall();
+                pending_was_stalled = true;
+            }
+            increment_queued(shared);
+            pending = Some(work);
+            thread::park_timeout(wait.min(Duration::from_millis(100)));
+            continue;
+        }
         let publish = result
             .as_ref()
             .ok()
@@ -1457,7 +1554,10 @@ fn run_worker(
                     .is_some_and(|kind| kind == "publication"),
             });
         if let Some(report) = &publish {
-            shared.indexing.note_commit(report.basis_t, &report.tx_data);
+            if let Err(error) = note_report_commit(shared, database_id, report) {
+                shared.indexing.fail_job(error);
+                shared.accepting.store(false, Ordering::Release);
+            }
         }
         *shared
             .writer_residency
@@ -1568,7 +1668,7 @@ fn process_work(
     store: &mut PostgresStore,
     lease: &TransactorLease,
     database_id: &str,
-    request: TransactionRequest,
+    request: &TransactionRequest,
     request_hash: Digest,
 ) -> Result<ServiceTransactionReport, SemanticError> {
     #[cfg(not(test))]
@@ -1627,6 +1727,12 @@ fn drain_unavailable(receiver: &mpsc::Receiver<Work>, shared: &Shared) {
 fn decrement_queued(shared: &Shared) {
     let _admission = shared.admission.lock().expect("admission mutex poisoned");
     shared.queued.fetch_sub(1, Ordering::AcqRel);
+}
+
+fn increment_queued(shared: &Shared) {
+    let _admission = shared.admission.lock().expect("admission mutex poisoned");
+    let queued = shared.queued.fetch_add(1, Ordering::AcqRel) + 1;
+    shared.max_queued.fetch_max(queued, Ordering::Relaxed);
 }
 
 fn load_indexing_seed(
@@ -1713,7 +1819,7 @@ fn load_indexing_seed(
         )
     })?;
     let published_revision = activated_publication_revision;
-    let needs_publication = published_revision < newest_observed_revision;
+    let mut needs_publication = published_revision < newest_observed_revision;
 
     let rows = read_authenticated_log_range(
         &mut client,
@@ -1727,10 +1833,17 @@ fn load_indexing_seed(
     let mut pending = VecDeque::with_capacity(rows.len());
     for row in rows {
         let transaction = row.transaction;
+        needs_publication |= transaction.tx_data.iter().any(|datom| {
+            matches!(
+                u64::from(datom.attribute),
+                crate::DB_INDEX | crate::DB_UNIQUE
+            )
+        });
+        let retained = crate::recent::retained_entry_stats(&transaction)?;
         pending.push_back(Novelty {
             basis_t: transaction.basis_t,
-            datoms: transaction.tx_data.len() as u64,
-            bytes: accounted_novelty_bytes(&transaction.tx_data),
+            datoms: retained.datoms,
+            bytes: retained.accounted_bytes,
         });
     }
     if observed_tail_hash != target_hash {
@@ -1764,17 +1877,38 @@ fn sql_basis(value: u64, label: &str) -> Result<i64, SemanticError> {
     })
 }
 
-fn accounted_novelty_bytes(datoms: &[Datom]) -> u64 {
-    let locator_bytes = (size_of::<crate::recent::RecentLocator>() as u64)
-        .saturating_mul(MAX_RECENT_REFERENCES_PER_DATOM);
-    datoms.iter().fold(0_u64, |total, datom| {
-        let value_bytes = crate::encoding::encode_canonical_value(&datom.value)
-            .map_or(u64::MAX, |encoded| encoded.len() as u64);
-        total
-            .saturating_add(datom.retained_bytes())
-            .saturating_add(value_bytes)
-            .saturating_add(locator_bytes)
-    })
+fn note_report_commit(
+    shared: &Shared,
+    database_id: &str,
+    report: &ServiceTransactionReport,
+) -> Result<(), SemanticError> {
+    let transaction = DurableTransaction {
+        database_id: database_id.to_owned(),
+        basis_t: report.basis_t,
+        // The hash bytes have fixed width in the canonical envelope and do
+        // not affect retained size. The exact predecessor is authenticated
+        // by the writer before this accounting-only reconstruction.
+        previous_hash: [0; 32],
+        eidx_frontier: report.db_after.eidx_frontier(),
+        tempids: report.tempids.clone(),
+        tx_data: report.tx_data.clone(),
+    };
+    let retained = crate::recent::retained_entry_stats(&transaction)?;
+    let changes_avet_membership = report.tx_data.iter().any(|datom| {
+        matches!(
+            u64::from(datom.attribute),
+            crate::DB_INDEX | crate::DB_UNIQUE
+        )
+    });
+    shared.indexing.note_commit(
+        Novelty {
+            basis_t: report.basis_t,
+            datoms: retained.datoms,
+            bytes: retained.accounted_bytes,
+        },
+        changes_avet_membership,
+    );
+    Ok(())
 }
 
 /// Conservative upper bound for one already-admitted transaction's recent
@@ -1832,8 +1966,8 @@ fn hex_digest(digest: &Digest) -> String {
 mod tests {
     use super::*;
     use crate::{
-        make_eid, Attribute, Cardinality, EntityRef, Keyword, PostgresMigrator, Schema, TxValue,
-        Value, ValueType, USER_PARTITION,
+        Attribute, Cardinality, EntityRef, Keyword, PostgresMigrator, Schema, TxValue,
+        USER_PARTITION, Value, ValueType, make_eid,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1921,14 +2055,14 @@ mod tests {
         assert!(indexing.begin_job());
         indexing.complete_job(1, 0);
         assert!(!indexing.should_continue());
-        let novelty = Datom {
-            entity: 1,
-            attribute: 2,
-            value: Value::Tuple(vec![None; 1_024]),
-            tx: 3,
-            added: true,
-        };
-        indexing.note_commit(1, &[novelty]);
+        indexing.note_commit(
+            Novelty {
+                basis_t: 1,
+                datoms: 1,
+                bytes: 2_048,
+            },
+            false,
+        );
         assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
         assert!(indexing.should_continue());
         assert!(indexing.begin_job());
@@ -2025,6 +2159,42 @@ mod tests {
     }
 
     #[test]
+    fn exact_recent_hard_cap_can_force_a_below_threshold_publication() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let indexing = BackgroundIndexing::new(
+            test_config(),
+            IndexingSeed {
+                lineage_id: "lineage".to_owned(),
+                published_revision: 1,
+                published_basis_t: 1,
+                newest_observed_revision: 1,
+                target_basis_t: 2,
+                pending: VecDeque::from([Novelty {
+                    basis_t: 2,
+                    datoms: 1,
+                    bytes: 1,
+                }]),
+                needs_publication: false,
+            },
+            sender,
+        );
+
+        assert!(!indexing.should_continue());
+        assert!(indexing.force_publication());
+        assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
+        assert!(indexing.should_continue());
+        assert!(indexing.begin_job());
+        indexing.complete_job(2, 2);
+        assert_eq!(indexing.stats().total_bytes, 0);
+        assert!(!indexing.should_continue());
+
+        // With no durable tail to consolidate, repeating an intrinsically
+        // oversized transaction must return its capacity error rather than
+        // park forever on a publication that cannot make room.
+        assert!(!indexing.force_publication());
+    }
+
+    #[test]
     fn whole_index_retry_budget_is_exact_and_finite() {
         let mut attempts = 0_usize;
         let exhausted = retry_index_job(
@@ -2089,8 +2259,16 @@ mod tests {
             entity: 1,
             attribute: 2,
             value: Value::Tuple(vec![None; 1_024]),
-            tx: 3,
+            tx: crate::t_to_tx(2).unwrap(),
             added: true,
+        };
+        let transaction = DurableTransaction {
+            database_id: "accounting-test".to_owned(),
+            basis_t: 2,
+            previous_hash: [0; 32],
+            eidx_frontier: crate::INITIAL_EIDX_FRONTIER,
+            tempids: BTreeMap::from([("large-envelope-tempid".repeat(32), 1)]),
+            tx_data: vec![datom.clone()],
         };
         let canonical_value_bytes = crate::encoding::encode_canonical_value(&datom.value)
             .unwrap()
@@ -2100,7 +2278,8 @@ mod tests {
         let canonical_only_account = (size_of::<Datom>() as u64)
             .saturating_add(canonical_value_bytes)
             .saturating_add(locator_bytes);
-        let retained_account = accounted_novelty_bytes(std::slice::from_ref(&datom));
+        let retained = crate::recent::retained_entry_stats(&transaction).unwrap();
+        let retained_account = retained.accounted_bytes;
         assert!(retained_account > canonical_only_account);
 
         let (sender, _receiver) = mpsc::sync_channel(1);
@@ -2120,7 +2299,14 @@ mod tests {
             },
             sender,
         );
-        indexing.note_commit(2, &[datom]);
+        indexing.note_commit(
+            Novelty {
+                basis_t: 2,
+                datoms: retained.datoms,
+                bytes: retained.accounted_bytes,
+            },
+            false,
+        );
         let limit = indexing
             .limiting_error()
             .expect("retained tuple slots must cross the hard byte limit");
@@ -2319,17 +2505,23 @@ mod tests {
             verifier.recover(&database_id).unwrap().basis_t(),
             initial_basis + 2
         );
-        assert!(verifier
-            .resolve_request_outcome(&database_id, "committed-unknown")
-            .unwrap()
-            .is_some());
-        assert!(verifier
-            .resolve_request_outcome(&database_id, "absent-unknown")
-            .unwrap()
-            .is_none());
-        assert!(verifier
-            .resolve_request_outcome(&database_id, "rolled-back")
-            .unwrap()
-            .is_none());
+        assert!(
+            verifier
+                .resolve_request_outcome(&database_id, "committed-unknown")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            verifier
+                .resolve_request_outcome(&database_id, "absent-unknown")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            verifier
+                .resolve_request_outcome(&database_id, "rolled-back")
+                .unwrap()
+                .is_none()
+        );
     }
 }

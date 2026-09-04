@@ -127,6 +127,21 @@ pub struct RecentStats {
     pub log_chunks: u64,
 }
 
+/// Exact deterministic account for the representation retained by one
+/// authenticated recent-log entry.
+///
+/// The transaction service uses this same authority for scheduling and
+/// backpressure. Keeping it here prevents its backlog counter from drifting
+/// below the hard limit enforced by `RecentTier` when a transaction has a
+/// large envelope, tempid map, spare datom capacity, or compactly encoded
+/// resident value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RecentEntryStats {
+    pub datoms: u64,
+    pub encoded_bytes: u64,
+    pub accounted_bytes: u64,
+}
+
 /// Deterministic work evidence for construction of an immutable recent value.
 /// These counters make algorithmic regressions testable without wall clocks.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1141,8 +1156,31 @@ fn authenticate_entry(
             "recent transaction predecessor does not match the authenticated chain",
         ));
     }
-    let encoded = encode_transaction(&transaction)?;
+    let (encoded, retained) = encode_and_account_transaction(&transaction)?;
     let hash = authenticated_hash.unwrap_or_else(|| transaction_hash(&encoded));
+
+    Ok(RecentEntry {
+        transaction: Arc::new(transaction),
+        hash,
+        encoded_bytes: retained.encoded_bytes,
+        accounted_bytes: retained.accounted_bytes,
+    })
+}
+
+/// Measure one canonical durable transaction exactly as `RecentTier` will
+/// retain it. This is deliberately crate-private: it is an accounting seam,
+/// not a second public storage representation.
+pub(crate) fn retained_entry_stats(
+    transaction: &DurableTransaction,
+) -> Result<RecentEntryStats, SemanticError> {
+    encode_and_account_transaction(transaction).map(|(_, stats)| stats)
+}
+
+fn encode_and_account_transaction(
+    transaction: &DurableTransaction,
+) -> Result<(Vec<u8>, RecentEntryStats), SemanticError> {
+    let encoded = encode_transaction(transaction)?;
+    let encoded_bytes = encoded.len() as u64;
     let locator_bytes = (transaction.tx_data.len() as u64)
         .saturating_mul(size_of::<RecentDatomRef>() as u64)
         .saturating_mul(MAX_BTSET_REFERENCES_PER_DATOM);
@@ -1173,12 +1211,14 @@ fn authenticate_entry(
         .saturating_add(transaction.database_id.capacity() as u64)
         .saturating_add(tempid_bytes)
         .saturating_add(locator_bytes);
-    Ok(RecentEntry {
-        transaction: Arc::new(transaction),
-        hash,
-        encoded_bytes: encoded.len() as u64,
-        accounted_bytes,
-    })
+    Ok((
+        encoded,
+        RecentEntryStats {
+            datoms: transaction.tx_data.len() as u64,
+            encoded_bytes,
+            accounted_bytes,
+        },
+    ))
 }
 
 fn insert_reference(

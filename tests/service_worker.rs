@@ -258,6 +258,11 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
         assert_eq!(report.basis_t, initial_basis + ordinal + 1);
     }
 
+    let retained = client.stats();
+    assert_eq!(reports.pending_reports(), REPORTS as usize);
+    assert_eq!(retained.queued_reports, REPORTS as usize);
+    assert_eq!(retained.max_queued_reports, REPORTS as usize);
+
     for ordinal in 0..REPORTS {
         assert_eq!(
             reports
@@ -268,6 +273,22 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
         );
     }
     assert!(reports.try_recv().is_err());
+    assert_eq!(reports.pending_reports(), 0);
+    assert_eq!(client.stats().queued_reports, 0);
+    assert_eq!(client.stats().max_queued_reports, REPORTS as usize);
+
+    drop(reports);
+    let abandoned = client.subscribe_reports();
+    client
+        .transact(
+            request("report-abandoned", REPORTS as i64),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(abandoned.pending_reports(), 1);
+    assert_eq!(client.stats().queued_reports, 1);
+    drop(abandoned);
+    assert_eq!(client.stats().queued_reports, 0);
     service.shutdown();
 }
 
@@ -384,6 +405,9 @@ fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
         .unwrap();
     assert_eq!(direct.basis_t, initial_basis + 1);
     drop(direct);
+    assert_eq!(reports.pending_reports(), 1);
+    assert_eq!(client.stats().queued_reports, 1);
+    assert_eq!(client.stats().max_queued_reports, 1);
 
     // Once the service and client are gone, only the unread report owns its
     // immutable db-before/db-after values and therefore their shared native
@@ -394,6 +418,7 @@ fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
     assert_eq!(pin_backend_count(&mut observer, &database_id), 1);
 
     let queued = reports.recv_timeout(Duration::ZERO).unwrap();
+    assert_eq!(reports.pending_reports(), 0);
     assert_eq!(queued.db_before.basis_t(), initial_basis);
     assert_eq!(queued.db_after.basis_t(), initial_basis + 1);
     assert_eq!(
