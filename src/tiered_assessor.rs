@@ -714,37 +714,105 @@ fn derive_successor_schema(
         return Ok(reader.base.schema().clone());
     }
 
-    let mut current = reader
-        .prefix(&IndexPrefix::Eavt {
-            entity: DB_PART_DB,
-            attribute: None,
-            value: None,
-        })?
-        .into_iter()
-        .filter(|datom| {
-            matches!(
+    // The authenticated Schema is the resident cache recovered `Db` keeps for
+    // exactly this purpose. Reconstruct unchanged information from that cache;
+    // issuing one EAVT seek for every installed attribute made a one-attribute
+    // alter proportional to the whole schema and allowed an unrelated schema
+    // size to exhaust the transaction read budget.
+    //
+    // For an entity whose raw schema-as-data facts are actually being edited,
+    // retain the physical spelling of its current information. This matters
+    // for details intentionally absent from the typed projection, notably a
+    // composite's historical constituent ident after an ident rename. An
+    // ident repurpose can also affect an active composite without touching the
+    // composite entity, so include only composites that depend on the ident's
+    // previous target. Discontinued composites deliberately keep their frozen
+    // resolved constituents, matching the recovered reverse-link removal.
+    let mut physical_entities = BTreeSet::new();
+    for datom in logical.iter().filter(|datom| {
+        schema_information_attribute(datom.attribute)
+            && datom.entity != DB_PART_DB
+            && reader
+                .base
+                .schema()
+                .attribute(u32::try_from(datom.entity).unwrap_or(u32::MAX))
+                .is_ok()
+    }) {
+        physical_entities.insert(u32::try_from(datom.entity).map_err(|_| {
+            SemanticError::incorrect(
+                "schema/attribute-id-range",
+                "schema entity does not fit the native attribute-id domain",
+            )
+        })?);
+    }
+    for target in logical.iter().filter_map(|datom| {
+        (datom.entity == DB_PART_DB
+            && matches!(
                 u64::from(datom.attribute),
                 DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
-            )
+            ))
+        .then_some(&datom.value)
+    }) {
+        if let Value::Ref(target) = target
+            && let Ok(attribute) = crate::schema_eid_to_attr_id(*target)
+            && reader.base.schema().attribute(attribute).is_ok()
+        {
+            physical_entities.insert(attribute);
+        }
+    }
+    let retargeted_attributes = logical
+        .iter()
+        .filter_map(|datom| {
+            if !datom.added || u64::from(datom.attribute) != DB_IDENT {
+                return None;
+            }
+            let Value::Keyword(ident) = &datom.value else {
+                return None;
+            };
+            let previous = reader.base.schema().resolve_ident(ident)?;
+            (u64::from(previous) != datom.entity).then_some(previous)
         })
-        .collect::<Vec<_>>();
-    let attributes = reader
-        .base
-        .schema()
-        .attributes()
-        .map(|attribute| attribute.id)
-        .collect::<Vec<_>>();
-    for attribute in attributes {
-        current.extend(
-            reader
-                .prefix(&IndexPrefix::Eavt {
-                    entity: u64::from(attribute),
-                    attribute: None,
-                    value: None,
-                })?
-                .into_iter()
-                .filter(|datom| schema_information_attribute(datom.attribute)),
-        );
+        .collect::<BTreeSet<_>>();
+    if !retargeted_attributes.is_empty() {
+        physical_entities.extend(reader.base.schema().attributes().filter_map(|attribute| {
+            let Some(TupleSpec::Composite(constituents)) = &attribute.tuple else {
+                return None;
+            };
+            (!attribute.tuple_discontinued
+                && constituents
+                    .iter()
+                    .any(|constituent| retargeted_attributes.contains(constituent)))
+            .then_some(attribute.id)
+        }));
+    }
+
+    let mut current = Vec::new();
+    for attribute in reader.base.schema().attributes() {
+        current.push(Datom {
+            entity: DB_PART_DB,
+            attribute: DB_INSTALL_ATTRIBUTE as u32,
+            value: Value::Ref(u64::from(attribute.id)),
+            tx: 0,
+            added: true,
+        });
+        if physical_entities.contains(&attribute.id) {
+            current.extend(
+                reader
+                    .prefix(&IndexPrefix::Eavt {
+                        entity: u64::from(attribute.id),
+                        attribute: None,
+                        value: None,
+                    })?
+                    .into_iter()
+                    .filter(|datom| schema_information_attribute(datom.attribute)),
+            );
+        } else {
+            current.extend(crate::schema::attribute_information_datoms(
+                attribute,
+                reader.base.schema(),
+                0,
+            )?);
+        }
     }
     for datom in logical.iter().filter(|datom| {
         schema_information_attribute(datom.attribute)
@@ -978,24 +1046,75 @@ fn successor_attribute_datoms(
 }
 
 fn validate_attribute_uniqueness(facts: &[Datom]) -> Result<(), SemanticError> {
-    for (index, left) in facts.iter().enumerate() {
-        if left.value.is_nan() {
-            return Err(SemanticError::incorrect(
-                "transaction/nan-cannot-identify",
-                "NaN cannot participate in uniqueness",
-            ));
+    validate_attribute_uniqueness_with_work(facts).map(|_| ())
+}
+
+/// Validate one newly unique attribute with the same logical comparator used
+/// by AVET, while retaining physically distinct representations such as
+/// BigDecimals with different scales as separate facts. Sorting makes the
+/// work O(n log n), instead of comparing every fact with every later fact.
+/// The returned count is a direct scaling witness for unit tests; optimized
+/// builds compile the counter increments away.
+fn validate_attribute_uniqueness_with_work(facts: &[Datom]) -> Result<usize, SemanticError> {
+    let earliest_nan = facts.iter().position(|fact| fact.value.is_nan());
+    let mut ordered = facts
+        .iter()
+        .enumerate()
+        .filter(|(_, fact)| !fact.value.is_nan())
+        .collect::<Vec<_>>();
+    let mut comparisons = 0_usize;
+    ordered.sort_by(|left, right| {
+        count_comparison(&mut comparisons);
+        left.1
+            .value
+            .index_cmp(&right.1.value)
+            .then(left.1.entity.cmp(&right.1.entity))
+            .then_with(|| left.1.value.stored_cmp(&right.1.value))
+    });
+    let mut group_start = 0;
+    let mut earliest_conflict = None;
+    while group_start < ordered.len() {
+        let mut group_end = group_start + 1;
+        while group_end < ordered.len() {
+            count_comparison(&mut comparisons);
+            if ordered[group_start]
+                .1
+                .value
+                .index_cmp(&ordered[group_end].1.value)
+                .is_ne()
+            {
+                break;
+            }
+            group_end += 1;
         }
-        if facts[index + 1..]
-            .iter()
-            .any(|right| left.entity != right.entity && left.value.index_cmp(&right.value).is_eq())
+        let group = &ordered[group_start..group_end];
+        if group
+            .windows(2)
+            .any(|pair| pair[0].1.entity != pair[1].1.entity)
         {
-            return Err(SemanticError::conflict(
-                "schema/unique-change-conflict",
-                "current values must be unique before adding uniqueness",
-            ));
+            let first = group
+                .iter()
+                .map(|(original, _)| *original)
+                .min()
+                .expect("a uniqueness group is nonempty");
+            earliest_conflict =
+                Some(earliest_conflict.map_or(first, |prior: usize| prior.min(first)));
         }
+        group_start = group_end;
     }
-    Ok(())
+    if earliest_nan.is_some_and(|nan| earliest_conflict.is_none_or(|conflict| nan <= conflict)) {
+        return Err(SemanticError::incorrect(
+            "transaction/nan-cannot-identify",
+            "NaN cannot participate in uniqueness",
+        ));
+    }
+    if earliest_conflict.is_some() {
+        return Err(SemanticError::conflict(
+            "schema/unique-change-conflict",
+            "current values must be unique before adding uniqueness",
+        ));
+    }
+    Ok(comparisons)
 }
 
 fn schema_information_attribute(attribute: u32) -> bool {
@@ -1098,19 +1217,7 @@ fn resolve_tempids(
         }
         identities.push((positions[name], *attribute, value, unique));
     }
-    for left in 0..identities.len() {
-        for right in left + 1..identities.len() {
-            let (left_temp, left_attr, left_value, left_unique) = &identities[left];
-            let (right_temp, right_attr, right_value, right_unique) = &identities[right];
-            if *left_unique == Unique::Identity
-                && *right_unique == Unique::Identity
-                && left_attr == right_attr
-                && left_value.same_key(right_value)
-            {
-                union.join(*left_temp, *right_temp);
-            }
-        }
-    }
+    union_identity_assertions(&mut union, &identities);
 
     let mut existing_by_root = BTreeMap::new();
     for (temp, attribute, value, unique) in &identities {
@@ -1160,6 +1267,62 @@ fn resolve_tempids(
     }
     validate_frontier(next)?;
     Ok((result, next))
+}
+
+/// Group equivalent identity assertions in index-key order. Recovered
+/// `get-ids` first builds keyed identity groups and only then joins tempids;
+/// this sorted Rust form preserves that shape and deterministic lowest-index
+/// union roots without the former all-pairs walk.
+fn union_identity_assertions(
+    union: &mut UnionFind,
+    identities: &[(usize, u32, UpsertIdentityValue, Unique)],
+) -> usize {
+    let mut ordered = identities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, _, unique))| (*unique == Unique::Identity).then_some(index))
+        .collect::<Vec<_>>();
+    let mut comparisons = 0_usize;
+    ordered.sort_by(|left, right| {
+        count_comparison(&mut comparisons);
+        let (_, left_attribute, left_value, _) = &identities[*left];
+        let (_, right_attribute, right_value, _) = &identities[*right];
+        left_attribute
+            .cmp(right_attribute)
+            .then_with(|| compare_upsert_identity_values(left_value, right_value))
+    });
+    for pair in ordered.windows(2) {
+        count_comparison(&mut comparisons);
+        let (left_temp, left_attribute, left_value, _) = &identities[pair[0]];
+        let (right_temp, right_attribute, right_value, _) = &identities[pair[1]];
+        if left_attribute == right_attribute && left_value.same_key(right_value) {
+            union.join(*left_temp, *right_temp);
+        }
+    }
+    comparisons
+}
+
+fn compare_upsert_identity_values(
+    left: &UpsertIdentityValue,
+    right: &UpsertIdentityValue,
+) -> Ordering {
+    match (left, right) {
+        (UpsertIdentityValue::Resolved(left), UpsertIdentityValue::Resolved(right)) => {
+            left.index_cmp(right)
+        }
+        (UpsertIdentityValue::TempRef(left), UpsertIdentityValue::TempRef(right)) => {
+            left.cmp(right)
+        }
+        (UpsertIdentityValue::Resolved(_), UpsertIdentityValue::TempRef(_)) => Ordering::Less,
+        (UpsertIdentityValue::TempRef(_), UpsertIdentityValue::Resolved(_)) => Ordering::Greater,
+    }
+}
+
+#[inline]
+fn count_comparison(comparisons: &mut usize) {
+    if cfg!(test) {
+        *comparisons = comparisons.saturating_add(1);
+    }
 }
 
 fn resolve_upsert_identity_value(
@@ -1999,6 +2162,10 @@ impl UnionFind {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tiered_assessor_scaling_tests.rs"]
+mod scaling_tests;
 
 #[cfg(test)]
 mod tests {
