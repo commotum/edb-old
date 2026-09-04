@@ -540,6 +540,76 @@ fn background_publication_bounds_novelty_without_hiding_committed_replays() {
 }
 
 #[test]
+fn lease_loss_settles_hard_limit_parked_and_queued_work_as_definitely_unavailable() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("background_index_lease_loss");
+    setup(&connection, &database_id);
+    let service = TransactionService::start_with_indexing(
+        service_config(&connection, &database_id, "background-lease-loss"),
+        indexing_config(1),
+    )
+    .unwrap();
+    let client = service.client();
+
+    // Freeze publication so one committed transaction crosses the strict hard
+    // limit and the next request is retained locally without assessment.
+    let mut blocker = Client::connect(&connection, NoTls).unwrap();
+    let mut publication_lock = blocker.transaction().unwrap();
+    publication_lock
+        .batch_execute("LOCK TABLE atomic_tree_publications IN SHARE MODE")
+        .unwrap();
+    let committed = client
+        .transact(request("lease-loss-committed", 1), Duration::from_secs(2))
+        .unwrap();
+    wait_for_stats(&service, |stats| {
+        stats.job_in_flight && stats.total_bytes > 1
+    });
+    let parked = client.submit(request("lease-loss-parked", 2)).unwrap();
+    wait_for_stats(&service, |stats| stats.backpressure_stalls == 1);
+    let queued = client.submit(request("lease-loss-queued", 3)).unwrap();
+
+    // Fence the active epoch before its next renewal. Neither retained request
+    // has reached Database::with or the log, so UnknownOutcome would be false.
+    let mut fence = Client::connect(&connection, NoTls).unwrap();
+    assert_eq!(
+        fence
+            .execute(
+                "UPDATE atomic_transactor_leases \
+                    SET holder_id = 'fenced-by-test', epoch = epoch + 1, \
+                        expires_at = clock_timestamp() \
+                  WHERE lease_scope = $1 AND holder_id = 'background-lease-loss'",
+                &[&database_id],
+            )
+            .unwrap(),
+        1
+    );
+
+    for ticket in [parked, queued] {
+        let error = ticket.wait(Duration::from_secs(2)).unwrap_err();
+        assert_eq!(
+            (error.category, error.code),
+            (ErrorCategory::Unavailable, "service/unavailable")
+        );
+    }
+    assert!(!client.is_available());
+    assert_eq!(client.stats().queued, 0);
+
+    publication_lock.commit().unwrap();
+    service.shutdown();
+    assert_eq!(
+        PostgresStore::connect(&connection)
+            .unwrap()
+            .recover(&database_id)
+            .unwrap()
+            .basis_t(),
+        committed.basis_t,
+        "parked work must remain absent from the authoritative log"
+    );
+}
+
+#[test]
 fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     let Some(connection) = connection() else {
         return;
@@ -679,7 +749,7 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     poison.commit().unwrap();
 
     let repaired = wait_for_stats(&service, |stats| {
-            stats.published_basis_t == committed.basis_t
+        stats.published_basis_t == committed.basis_t
             && stats.published_revision > u64::try_from(poison_revision).unwrap()
             && stats.published_revision == stats.newest_observed_revision
             && stats.jobs_completed == 1
@@ -696,6 +766,11 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     let after_race = client
         .transact(request("race-after", 8), Duration::from_secs(2))
         .unwrap();
+    assert_eq!(
+        client.writer_residency_stats().publication_revision,
+        repaired.published_revision,
+        "the writer did not adopt the authenticated repaired root before assessing new work"
+    );
     wait_for_stats(&service, |stats| {
         stats.published_basis_t == after_race.basis_t && stats.total_bytes == 0
     });

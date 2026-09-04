@@ -5,8 +5,8 @@ use crate::postgres::{
     read_authenticated_log_range, shared_program_cache_stats,
 };
 use crate::{
-    DatabaseValue, Datom, Digest, ErrorCategory, PostgresConnectionConfig, PostgresIndexer,
-    ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
+    DatabaseValue, Datom, Digest, ErrorCategory, IndexBuildFault, PostgresConnectionConfig,
+    PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::mem::size_of;
@@ -19,7 +19,7 @@ const DEFAULT_MEMORY_INDEX_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_MEMORY_INDEX_MAX_BYTES: u64 = 512 * 1024 * 1024;
 // Recovered `process-request-index` permits the initial publication attempt
 // plus two retries before failing the transactor process.
-const MAX_INDEX_PUBLICATION_RACE_RETRIES: usize = 2;
+const MAX_INDEX_JOB_RETRIES: usize = 2;
 // RecentTier retains at most four raw BTSet entries per datom. Its
 // allocator-independent conservative account reserves a fifth reference for
 // persistent-log/tree overhead; keep admission on that same bound.
@@ -1253,6 +1253,15 @@ fn run_worker(
         if last_renewal.elapsed() >= renew_interval {
             if store.renew_lease(lease, lease_millis).is_err() {
                 shared.accepting.store(false, Ordering::Release);
+                // A hard-limit parked request has not been assessed and
+                // cannot have reached the log. Settle it as definitely
+                // unavailable before releasing ownership; dropping its
+                // response channel would manufacture an UnknownOutcome and
+                // leave the admission count permanently inflated.
+                if let Some(work) = pending.take() {
+                    decrement_queued(shared);
+                    let _ = work.response.send(Err(shared.unavailable()));
+                }
                 drain_unavailable(&receiver, shared);
                 break;
             }
@@ -1367,7 +1376,19 @@ fn run_index_worker(
         if requested && shared.accepting.load(Ordering::Acquire) {
             let began = shared.indexing.begin_job();
             if began {
-                match retry_publication_races(|| indexer.consolidate()) {
+                let mut reconnect_before_attempt = false;
+                match retry_index_job(
+                    || {
+                        if reconnect_before_attempt {
+                            indexer.reconnect()?;
+                        }
+                        let result = indexer.consolidate_with_fault(IndexBuildFault::None);
+                        reconnect_before_attempt =
+                            result.as_ref().is_err_and(is_postgres_connection_error);
+                        result
+                    },
+                    || shared.accepting.load(Ordering::Acquire),
+                ) {
                     Ok(receipt) => {
                         shared
                             .indexing
@@ -1396,23 +1417,26 @@ fn run_index_worker(
     }
 }
 
-/// Retry a complete immutable index selection/build/publication attempt. A
-/// CAS loss is normal contention, but an unbounded hot loop is not: recovered
-/// Datomic retries an indexing job twice after its initial attempt and then
-/// fails the process so ownership can move to a healthy transactor.
-fn retry_publication_races<T>(
-    mut publish: impl FnMut() -> Result<T, SemanticError>,
+/// Retry a complete immutable index selection/build/publication attempt.
+/// Recovered `process-request-index` retries the whole job twice after its
+/// initial attempt, regardless of the failure, and stops retrying during
+/// shutdown. The caller supplies the raw one-attempt indexer entry point so an
+/// internal publication retry cannot silently multiply this budget.
+fn retry_index_job<T>(
+    mut attempt: impl FnMut() -> Result<T, SemanticError>,
+    keep_running: impl Fn() -> bool,
 ) -> Result<T, SemanticError> {
     let mut retries = 0_usize;
     loop {
-        match publish() {
-            Err(error)
-                if matches!(
-                    error.code,
-                    "tree/publication-cas-lost" | "tree/publication-revision-conflict"
-                ) =>
-            {
-                if retries == MAX_INDEX_PUBLICATION_RACE_RETRIES {
+        match attempt() {
+            Err(error) if keep_running() => {
+                if retries == MAX_INDEX_JOB_RETRIES {
+                    if !matches!(
+                        error.code,
+                        "tree/publication-cas-lost" | "tree/publication-revision-conflict"
+                    ) {
+                        return Err(error);
+                    }
                     return Err(SemanticError::new(
                         ErrorCategory::Unavailable,
                         "service/index-publication-race-exhausted",
@@ -1797,15 +1821,18 @@ mod tests {
     }
 
     #[test]
-    fn publication_cas_retry_budget_is_finite() {
+    fn whole_index_retry_budget_is_exact_and_finite() {
         let mut attempts = 0_usize;
-        let exhausted = retry_publication_races(|| {
-            attempts += 1;
-            Err::<(), _>(SemanticError::conflict(
-                "tree/publication-cas-lost",
-                "test contender won",
-            ))
-        })
+        let exhausted = retry_index_job(
+            || {
+                attempts += 1;
+                Err::<(), _>(SemanticError::conflict(
+                    "tree/publication-cas-lost",
+                    "test contender won",
+                ))
+            },
+            || true,
+        )
         .unwrap_err();
         assert_eq!(attempts, 3);
         assert_eq!(
@@ -1818,19 +1845,38 @@ mod tests {
         assert_eq!(exhausted.details.get("attempts"), Some(&"3".to_owned()));
 
         let mut attempts = 0_usize;
-        let receipt = retry_publication_races(|| {
-            attempts += 1;
-            if attempts < 3 {
-                Err(SemanticError::conflict(
-                    "tree/publication-revision-conflict",
-                    "test contender won",
-                ))
-            } else {
-                Ok(42_u64)
-            }
-        })
+        let receipt = retry_index_job(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(SemanticError::conflict(
+                        "tree/publication-revision-conflict",
+                        "test contender won",
+                    ))
+                } else {
+                    Ok(42_u64)
+                }
+            },
+            || true,
+        )
         .unwrap();
         assert_eq!((attempts, receipt), (3, 42));
+
+        let mut attempts = 0_usize;
+        let original = retry_index_job(
+            || {
+                attempts += 1;
+                Err::<(), _>(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "index/test-failure",
+                    "test whole-index failure",
+                ))
+            },
+            || true,
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 3, "non-CAS job failures use the same budget");
+        assert_eq!(original.code, "index/test-failure");
     }
 
     #[test]

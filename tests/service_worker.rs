@@ -1,7 +1,7 @@
 use atomic_core::{
     Attribute, AttributeRef, Cardinality, EntityMap, EntityRef, ErrorCategory, Keyword, MapValue,
     PostgresStore, Schema, TransactionRequest, TransactionService, TransactionServiceConfig,
-    TxForm, TxOp, TxValue, USER_PARTITION, Value, ValueType, make_eid,
+    TxForm, TxOp, TxValue, USER_PARTITION, Value, ValueType, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::sync::{Arc, Barrier};
@@ -26,6 +26,25 @@ fn unique(prefix: &str) -> String {
             .unwrap()
             .as_nanos()
     )
+}
+
+fn pin_application_name(database_id: &str) -> String {
+    let digest = sha256(database_id.as_bytes());
+    let suffix: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("atomic-pin-{suffix}")
+}
+
+fn pin_backend_count(client: &mut Client, database_id: &str) -> i64 {
+    client
+        .query_one(
+            "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
+            &[&pin_application_name(database_id)],
+        )
+        .unwrap()
+        .get(0)
 }
 
 fn schema() -> Schema {
@@ -346,6 +365,53 @@ fn originating_result_is_enqueued_before_the_subscription_report() {
         vec![Value::Long(7)]
     );
     service.shutdown();
+}
+
+#[test]
+fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("service_report_pin");
+    let initial_basis = setup(&connection, &database_id);
+    let service =
+        TransactionService::start(config(&connection, database_id.clone(), "report-pin", 2))
+            .unwrap();
+    let client = service.client();
+    let reports = client.subscribe_reports();
+    let direct = client
+        .transact(request("report-pin", 17), Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(direct.basis_t, initial_basis + 1);
+    drop(direct);
+
+    // Once the service and client are gone, only the unread report owns its
+    // immutable db-before/db-after values and therefore their shared native
+    // root/generation pin manager.
+    service.shutdown();
+    drop(client);
+    let mut observer = Client::connect(&connection, NoTls).unwrap();
+    assert_eq!(pin_backend_count(&mut observer, &database_id), 1);
+
+    let queued = reports.recv_timeout(Duration::ZERO).unwrap();
+    assert_eq!(queued.db_before.basis_t(), initial_basis);
+    assert_eq!(queued.db_after.basis_t(), initial_basis + 1);
+    assert_eq!(
+        queued.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        vec![Value::Long(17)]
+    );
+    assert_eq!(pin_backend_count(&mut observer, &database_id), 1);
+
+    drop(queued);
+    drop(reports);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while pin_backend_count(&mut observer, &database_id) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dropping the last queued report did not release its pin session"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
