@@ -614,6 +614,27 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
     assert_eq!(residency.eager_current_facts, 0);
     assert_eq!(residency.eager_history_datoms, 0);
 
+    let fresh = store
+        .transact_with_fault(
+            &database_id,
+            "request-after-replay",
+            2,
+            &add_item("second", 2),
+            2_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert_eq!(fresh.basis_t, 3);
+    let residency = store.writer_residency_stats(&database_id);
+    assert_eq!(residency.eager_database_values, 0);
+    assert!(residency.publication_revision > 0);
+    assert!(residency.recent_datoms > 0);
+    assert!(residency.last_transaction_read_datoms > 0);
+    assert!(residency.last_transaction_read_bytes > 0);
+    assert!(residency.last_commitment_node_visits > 0);
+    assert!(residency.last_commitment_node_hashes > 0);
+    assert!(residency.last_commitment_leaf_changes > 0);
+
     let mut verifier = Client::connect(&connection, NoTls).unwrap();
     let bound: (i64, i64) = verifier
         .query_one(
@@ -625,7 +646,7 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
         )
         .map(|row| (row.get(0), row.get(1)))
         .unwrap();
-    assert_eq!(bound, (1, 1));
+    assert_eq!(bound, (2, 2));
 }
 
 #[test]
@@ -656,12 +677,13 @@ fn process_death_at_private_precommit_kill_point_is_invisible() {
     let mut client = Client::connect(&connection, NoTls).unwrap();
     let count: i64 = client
         .query_one(
-            "SELECT count(*) FROM atomic_transactions WHERE database_id = $1",
+            "SELECT count(*) FROM atomic_generation_transactions \
+              WHERE database_id = $1 AND basis_t = 2",
             &[&database_id],
         )
         .unwrap()
         .get(0);
-    assert_eq!(count, 1);
+    assert_eq!(count, 0);
 }
 
 #[test]

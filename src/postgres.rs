@@ -2235,13 +2235,11 @@ impl PostgresStore {
             || limits.max_history_transactions == 0
             || limits.max_transaction_read_datoms == 0
             || limits.max_transaction_read_bytes == 0
-            || limits.writer_tree_cache_entries == 0
-            || limits.writer_tree_cache_bytes == 0
             || !limits.program.is_valid()
         {
             return Err(SemanticError::incorrect(
                 "postgres/invalid-capacity-limits",
-                "transaction and persisted-program capacity limits must be positive",
+                "transaction read/write and persisted-program capacity limits must be positive",
             ));
         }
         self.capacity_limits = limits;
@@ -3268,6 +3266,17 @@ impl PostgresStore {
                 self.current.insert(database_id.to_owned(), replay_state);
             }
             return Ok(receipt);
+        }
+
+        // Generation zero is readable for migration and old idempotent
+        // outcomes, but it has no request-base binding relation. Do not create
+        // new receipts whose exact db-before could later be retired.
+        if log_generation == 0 {
+            return Err(SemanticError::new(
+                ErrorCategory::Unsupported,
+                "postgres/native-writer-requires-generation",
+                "new native writer transactions require a positive log generation",
+            ));
         }
 
         if let Some(expected_basis_t) = compare_basis_t {
