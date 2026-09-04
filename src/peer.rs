@@ -3501,6 +3501,7 @@ struct DurableTreeCursor {
     order: IndexOrder,
     start: Option<Datom>,
     end: Option<Datom>,
+    prefix: Option<IndexPrefix>,
     directory_index: usize,
     leaf_index: usize,
     directory: Option<LoadedDirectory>,
@@ -3530,6 +3531,34 @@ impl DurableTreeCursor {
             order,
             start,
             end,
+            prefix: None,
+            directory_index,
+            leaf_index: 0,
+            directory: None,
+            leaf: None,
+            datom_index: 0,
+            stats: TreeReadStats::default(),
+            exhausted,
+        }
+    }
+
+    fn new_prefix(
+        snapshot: PeerSnapshot,
+        root: Arc<RootNode>,
+        history: bool,
+        prefix: IndexPrefix,
+    ) -> Self {
+        let order = prefix.order();
+        let exhausted = root.directories.is_empty();
+        let directory_index = prefix_start_child(&root.directories, &prefix);
+        Self {
+            snapshot,
+            root,
+            history,
+            order,
+            start: None,
+            end: None,
+            prefix: Some(prefix),
             directory_index,
             leaf_index: 0,
             directory: None,
@@ -3548,6 +3577,16 @@ impl DurableTreeCursor {
             if let Some(leaf) = &self.leaf {
                 while let Some(datom) = leaf.datom(self.datom_index) {
                     self.datom_index += 1;
+                    if let Some(prefix) = &self.prefix {
+                        match crate::index::compare_prefix(&datom, prefix) {
+                            std::cmp::Ordering::Less => continue,
+                            std::cmp::Ordering::Equal => {}
+                            std::cmp::Ordering::Greater => {
+                                self.exhausted = true;
+                                return Ok(None);
+                            }
+                        }
+                    }
                     if self
                         .start
                         .as_ref()
@@ -3572,6 +3611,14 @@ impl DurableTreeCursor {
             if let Some(directory) = &self.directory {
                 if let Some(reference) = directory.leaves.get(self.leaf_index).cloned() {
                     if self
+                        .prefix
+                        .as_ref()
+                        .is_some_and(|prefix| reference.key.cmp_prefix(prefix).is_gt())
+                    {
+                        self.exhausted = true;
+                        return Ok(None);
+                    }
+                    if self
                         .end
                         .as_ref()
                         .is_some_and(|end| !reference.key.cmp_datom(end, self.order).is_lt())
@@ -3585,10 +3632,14 @@ impl DurableTreeCursor {
                         self.history,
                         &mut self.stats,
                     )?;
-                    self.datom_index = self
-                        .start
-                        .as_ref()
-                        .map_or(0, |start| leaf_lower_bound(&leaf, start, self.order));
+                    self.datom_index = self.start.as_ref().map_or_else(
+                        || {
+                            self.prefix
+                                .as_ref()
+                                .map_or(0, |prefix| leaf_prefix_lower_bound(&leaf, prefix))
+                        },
+                        |start| leaf_lower_bound(&leaf, start, self.order),
+                    );
                     self.leaf = Some(leaf);
                     continue;
                 }
@@ -3600,6 +3651,14 @@ impl DurableTreeCursor {
                 self.exhausted = true;
                 return Ok(None);
             };
+            if self
+                .prefix
+                .as_ref()
+                .is_some_and(|prefix| reference.key.cmp_prefix(prefix).is_gt())
+            {
+                self.exhausted = true;
+                return Ok(None);
+            }
             if self
                 .end
                 .as_ref()
@@ -3614,9 +3673,14 @@ impl DurableTreeCursor {
                 self.history,
                 &mut self.stats,
             )?;
-            self.leaf_index = self.start.as_ref().map_or(0, |key| {
-                floor_tree_child(&directory.leaves, key, self.order)
-            });
+            self.leaf_index = self.start.as_ref().map_or_else(
+                || {
+                    self.prefix
+                        .as_ref()
+                        .map_or(0, |prefix| prefix_start_child(&directory.leaves, prefix))
+                },
+                |key| floor_tree_child(&directory.leaves, key, self.order),
+            );
             self.directory = Some(directory);
         }
     }
@@ -3694,6 +3758,44 @@ impl Iterator for PeerIndexCursor {
 impl PeerSnapshot {
     pub fn basis_t(&self) -> u64 {
         self.state.basis_t
+    }
+
+    /// Exclusive entity-index issuance frontier at this exact immutable basis.
+    pub fn eidx_frontier(&self) -> u64 {
+        self.state.eidx_frontier
+    }
+
+    /// Transaction instant at this exact basis, read through the native index
+    /// rather than by materializing the compatibility `Database`.
+    pub fn last_tx_instant(&self) -> Result<Option<i64>, SemanticError> {
+        if self.state.basis_t == 0 {
+            return Ok(None);
+        }
+        let transaction = crate::t_to_tx(self.state.basis_t)?;
+        let mut datoms = self.prefix_cursor(
+            false,
+            &IndexPrefix::Eavt {
+                entity: transaction,
+                attribute: Some(crate::DB_TX_INSTANT as u32),
+                value: None,
+            },
+        )?;
+        let first = datoms.next().transpose()?;
+        let second = datoms.next().transpose()?;
+        match (first, second) {
+            (
+                Some(Datom {
+                    value: crate::Value::Instant(instant),
+                    added: true,
+                    ..
+                }),
+                None,
+            ) => Ok(Some(instant)),
+            _ => Err(fault(
+                "peer/invalid-last-tx-instant",
+                "native snapshot does not contain exactly one current transaction instant at its basis",
+            )),
+        }
     }
 
     /// Discardable schema projection derived from authenticated information
@@ -3833,6 +3935,36 @@ impl PeerSnapshot {
             start.cloned(),
             end.cloned(),
         );
+        Ok(PeerIndexCursor {
+            durable,
+            recent,
+            history,
+            order,
+            durable_next: None,
+            recent_next: None,
+            failed: false,
+        })
+    }
+
+    /// Open a lazy cursor over one left-contiguous prefix of this exact
+    /// immutable native value. Both the durable tree and bounded recent tier
+    /// lower-bound seek to the virtual prefix; iteration stops at its end.
+    pub fn prefix_cursor(
+        &self,
+        history: bool,
+        prefix: &IndexPrefix,
+    ) -> Result<PeerIndexCursor, SemanticError> {
+        prefix.validate()?;
+        self.core.root_pins.ensure()?;
+        let requested_attribute = match prefix {
+            IndexPrefix::Avet { attribute, .. } => Some(*attribute),
+            _ => None,
+        };
+        self.ensure_avet_ready(prefix.order(), requested_attribute)?;
+        let order = prefix.order();
+        let (_, root) = self.exact_tree(history, order)?;
+        let recent = self.state.recent.prefix_cursor(history, prefix)?;
+        let durable = DurableTreeCursor::new_prefix(self.clone(), root, history, prefix.clone());
         Ok(PeerIndexCursor {
             durable,
             recent,
@@ -4222,6 +4354,21 @@ fn leaf_lower_bound(leaf: &LeafSegment, key: &Datom, order: IndexOrder) -> usize
         let middle = low + (high - low) / 2;
         let datom = leaf.datom(middle).expect("validated parallel leaf columns");
         if datom.cmp_in(key, order).is_lt() {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+fn leaf_prefix_lower_bound(leaf: &LeafSegment, prefix: &IndexPrefix) -> usize {
+    let mut low = 0;
+    let mut high = leaf.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let datom = leaf.datom(middle).expect("validated parallel leaf columns");
+        if crate::index::compare_prefix(&datom, prefix).is_lt() {
             low = middle + 1;
         } else {
             high = middle;

@@ -39,7 +39,7 @@ mod vocabulary;
 
 pub use backup::{BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault};
 pub use database::{Database, EntityRef, TxOp, TxReport, TxValue, View};
-pub use database_value::DatabaseValue;
+pub use database_value::{DatabaseValue, DatabaseValuePrefixCursor};
 pub use datom::{Datom, IndexOrder};
 pub use encoding::{
     Digest, DurableTransaction, IndexManifest, IndexSegment, SegmentRef, decode_genesis,

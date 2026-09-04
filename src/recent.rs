@@ -9,8 +9,8 @@
 use crate::encoding::validate_persistent_index_datoms;
 use crate::recent_btset::{BtCursor, BtWork, RecentBtSet, RecentDatomRef};
 use crate::{
-    Datom, Digest, DurableTransaction, ErrorCategory, IndexOrder, Schema, SemanticError, ValueType,
-    encode_transaction, t_to_tx, transaction_hash, tx_to_t,
+    Datom, Digest, DurableTransaction, ErrorCategory, IndexOrder, IndexPrefix, Schema,
+    SemanticError, ValueType, encode_transaction, t_to_tx, transaction_hash, tx_to_t,
 };
 use std::cmp::Ordering;
 use std::mem::size_of;
@@ -666,6 +666,25 @@ impl RecentTier {
         ))
     }
 
+    /// Open a lower-bound cursor over one left-contiguous index prefix.
+    ///
+    /// Unlike `datoms_with_prefix` compatibility helpers, this does not first
+    /// collect the recent tier. The persistent memory index seeks directly to
+    /// the virtual prefix and stops as soon as the ordered stream leaves it.
+    pub(crate) fn prefix_cursor(
+        &self,
+        history: bool,
+        prefix: &IndexPrefix,
+    ) -> Result<RecentCursor, SemanticError> {
+        prefix.validate()?;
+        Ok(RecentCursor::new_prefix(
+            self.indexes.get(prefix.order()),
+            Arc::clone(&self.projection),
+            history,
+            prefix.clone(),
+        ))
+    }
+
     pub fn stats(&self) -> RecentStats {
         self.stats
     }
@@ -872,6 +891,7 @@ pub struct RecentCursor {
     history: bool,
     order: IndexOrder,
     range: RecentRange,
+    prefix: Option<IndexPrefix>,
     pending: Option<RecentDatomRef>,
     exhausted: bool,
     examined: u64,
@@ -899,10 +919,50 @@ impl RecentCursor {
             history,
             order,
             range,
+            prefix: None,
             pending: None,
             exhausted: false,
             examined: 0,
             yielded: 0,
+        }
+    }
+
+    fn new_prefix(
+        tree: &RecentBtSet,
+        projection: Arc<EndpointProjection>,
+        history: bool,
+        prefix: IndexPrefix,
+    ) -> Self {
+        let order = prefix.order();
+        let seek_prefix = prefix.clone();
+        let inner =
+            tree.seek_by(move |candidate| crate::index::compare_prefix(candidate, &seek_prefix));
+        Self {
+            inner,
+            projection,
+            history,
+            order,
+            range: RecentRange::unbounded(),
+            prefix: Some(prefix),
+            pending: None,
+            exhausted: false,
+            examined: 0,
+            yielded: 0,
+        }
+    }
+
+    fn prefix_member(&mut self, datom: &Datom) -> bool {
+        match self
+            .prefix
+            .as_ref()
+            .map(|prefix| crate::index::compare_prefix(datom, prefix))
+        {
+            Some(Ordering::Greater) => {
+                self.exhausted = true;
+                false
+            }
+            Some(Ordering::Less) => false,
+            Some(Ordering::Equal) | None => true,
         }
     }
 
@@ -943,6 +1003,12 @@ impl Iterator for RecentCursor {
             loop {
                 let candidate = self.next_member()?;
                 let datom = candidate.datom();
+                if !self.prefix_member(datom) {
+                    if self.exhausted {
+                        return None;
+                    }
+                    continue;
+                }
                 if self
                     .range
                     .end
@@ -969,6 +1035,12 @@ impl Iterator for RecentCursor {
                 break;
             }
             let datom = winner.datom();
+            if !self.prefix_member(datom) {
+                if self.exhausted {
+                    return None;
+                }
+                continue;
+            }
             if self
                 .range
                 .end
@@ -1460,6 +1532,36 @@ mod tests {
                 .any(|datom| datom.value == Value::String("new".into()))
         );
         assert!(tier.datoms(IndexOrder::Eavt).len() > recent_current.len());
+
+        let entity_prefix = IndexPrefix::Eavt {
+            entity,
+            attribute: None,
+            value: None,
+        };
+        let prefix_current = tier
+            .prefix_cursor(false, &entity_prefix)
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prefix_current,
+            recent_current
+                .iter()
+                .filter(|datom| crate::index::compare_prefix(datom, &entity_prefix).is_eq())
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        let prefix_history = tier
+            .prefix_cursor(true, &entity_prefix)
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prefix_history,
+            tier.datoms(IndexOrder::Eavt)
+                .iter()
+                .filter(|datom| crate::index::compare_prefix(datom, &entity_prefix).is_eq())
+                .cloned()
+                .collect::<Vec<_>>()
+        );
 
         for order in [
             IndexOrder::Eavt,

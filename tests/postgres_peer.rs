@@ -185,6 +185,71 @@ fn populated(
 }
 
 #[test]
+fn native_database_value_prefix_cursor_matches_eager_with_bounded_tree_reads() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("database_value_prefix");
+    let (mut store, entity) = populated(&connection, &database_id, false, 32);
+    let eager = store.recover(&database_id).unwrap().database_value();
+
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .with_segment_datoms(1)
+        .unwrap();
+    let publication = indexer.consolidate().unwrap();
+    assert_eq!(publication.basis_t, eager.basis_t());
+
+    // A zero-sized decoded-node cache makes the delta below actual durable
+    // path work. It cannot be an accidental hit left by resident metadata.
+    let peer = Peer::connect_with_cache_limits(&connection, &database_id, 0, 0).unwrap();
+    let native = peer.database_value();
+    assert_eq!(native.basis_t(), eager.basis_t());
+    assert_eq!(native.eidx_frontier(), eager.eidx_frontier());
+    assert_eq!(
+        native.last_tx_instant().unwrap(),
+        eager.last_tx_instant().unwrap()
+    );
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
+
+    let prefix = IndexPrefix::Eavt {
+        entity,
+        attribute: Some(ITEM_COUNT),
+        value: None,
+    };
+    let expected = eager
+        .current_prefix_cursor(&prefix)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let before = peer.load_stats();
+    let actual = native
+        .current_prefix_cursor(&prefix)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let after = peer.load_stats();
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 1);
+    assert_eq!(after.compatibility_materializations, 0);
+    let path_reads = after
+        .directory_reads
+        .saturating_sub(before.directory_reads)
+        .saturating_add(after.leaf_reads.saturating_sub(before.leaf_reads));
+    assert!(path_reads > 0);
+    assert!(
+        path_reads <= 4,
+        "one exact EAVT prefix used {path_reads} durable tree nodes"
+    );
+    assert!(
+        path_reads < publication.segment_count as u64,
+        "one exact prefix read the whole {}-segment publication",
+        publication.segment_count
+    );
+}
+
+#[test]
 fn peers_use_verified_base_tail_and_keep_old_snapshots() {
     let Some(connection) = connection() else {
         return;

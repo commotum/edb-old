@@ -1,9 +1,11 @@
 use crate::{
     AttributeName, DB_IDENT, Database, Datom, EntityIdentifier, ErrorCategory, IndexOrder,
-    IndexPrefix, Keyword, PeerSnapshot, Schema, SemanticError, Value, eid_to_eidx,
+    IndexPrefix, Keyword, PeerIndexCursor, PeerSnapshot, Schema, SemanticError, Value, eid_to_eidx,
     schema_eid_to_attr_id, tx_to_t,
 };
 use std::fmt;
+use std::iter::Cloned;
+use std::slice::Iter;
 use std::sync::Arc;
 
 type ReadFilter = dyn Fn(&DatabaseValue, &Datom) -> bool + Send + Sync;
@@ -28,6 +30,32 @@ pub struct DatabaseValue {
 enum ReadBasis {
     Eager(Arc<Database>),
     Native(PeerSnapshot),
+}
+
+/// Lazy current-index cursor over one exact point-in-time database value.
+///
+/// Eager values borrow their immutable index slice. Native values own a
+/// root-pinned peer cursor which lower-bound seeks both the durable tree and
+/// its recent tier. Every yielded item is owned so callers cannot retain a
+/// cache or tree-node borrow across cursor advancement.
+pub struct DatabaseValuePrefixCursor<'a> {
+    inner: DatabaseValuePrefixCursorInner<'a>,
+}
+
+enum DatabaseValuePrefixCursorInner<'a> {
+    Eager(Cloned<Iter<'a, Datom>>),
+    Native(Box<PeerIndexCursor>),
+}
+
+impl Iterator for DatabaseValuePrefixCursor<'_> {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            DatabaseValuePrefixCursorInner::Eager(cursor) => cursor.next().map(Ok),
+            DatabaseValuePrefixCursorInner::Native(cursor) => cursor.next(),
+        }
+    }
 }
 
 impl fmt::Debug for DatabaseValue {
@@ -77,6 +105,25 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.basis_t(),
             ReadBasis::Native(snapshot) => snapshot.basis_t(),
+        }
+    }
+
+    /// Exclusive entity-index issuance frontier at this immutable basis.
+    pub fn eidx_frontier(&self) -> u64 {
+        match &self.basis {
+            ReadBasis::Eager(database) => database.eidx_frontier(),
+            ReadBasis::Native(snapshot) => snapshot.eidx_frontier(),
+        }
+    }
+
+    /// The most recent transaction instant at this immutable basis.
+    ///
+    /// A native value resolves the single transaction entity through its lazy
+    /// index. It never invokes the eager compatibility materializer.
+    pub fn last_tx_instant(&self) -> Result<Option<i64>, SemanticError> {
+        match &self.basis {
+            ReadBasis::Eager(database) => Ok(database.last_tx_instant()),
+            ReadBasis::Native(snapshot) => snapshot.last_tx_instant(),
         }
     }
 
@@ -193,6 +240,34 @@ impl DatabaseValue {
         }
         let datoms = self.basis_prefix(true, prefix)?;
         self.window(datoms)
+    }
+
+    /// Lazily read one left-contiguous prefix of an unfiltered current value.
+    ///
+    /// Transaction processing requires exactly this point-current capability.
+    /// Temporal, history, and custom-filter values intentionally use the
+    /// existing materializing APIs until their retraction-window semantics can
+    /// be represented by a dedicated streaming cursor.
+    pub fn current_prefix_cursor(
+        &self,
+        prefix: &IndexPrefix,
+    ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
+        prefix.validate()?;
+        if !self.direct_current() {
+            return Err(SemanticError::incorrect(
+                "database/prefix-cursor-requires-current",
+                "lazy transaction prefix access requires an unfiltered current database value",
+            ));
+        }
+        let inner = match &self.basis {
+            ReadBasis::Eager(database) => DatabaseValuePrefixCursorInner::Eager(
+                database.datoms_with_prefix(prefix)?.iter().cloned(),
+            ),
+            ReadBasis::Native(snapshot) => DatabaseValuePrefixCursorInner::Native(Box::new(
+                snapshot.prefix_cursor(false, prefix)?,
+            )),
+        };
+        Ok(DatabaseValuePrefixCursor { inner })
     }
 
     pub fn values(&self, entity: u64, attribute: u32) -> Result<Vec<Value>, SemanticError> {
@@ -443,4 +518,63 @@ fn collapse_retractions(datoms: Vec<Datom>) -> Vec<Datom> {
         .filter(|(_, visible)| *visible)
         .map(|(datom, _)| datom)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DB_IDENT, EntityRef, TxOp, TxValue, USER_PARTITION, make_eid};
+
+    #[test]
+    fn point_current_metadata_and_prefix_cursor_match_the_eager_oracle() {
+        let database = Database::bootstrap().unwrap();
+        let genesis = database.database_value();
+        assert_eq!(genesis.eidx_frontier(), database.eidx_frontier());
+        assert_eq!(genesis.last_tx_instant().unwrap(), None);
+
+        let entity = make_eid(USER_PARTITION, 42).unwrap();
+        let report = database
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(entity),
+                    attribute: DB_IDENT as u32,
+                    value: TxValue::Scalar(Value::Keyword(Keyword::new("cursor", "entity"))),
+                }],
+                1_234,
+            )
+            .unwrap();
+        let value = report.db_after.database_value();
+        assert_eq!(value.eidx_frontier(), report.db_after.eidx_frontier());
+        assert_eq!(value.last_tx_instant().unwrap(), Some(1_234));
+
+        let prefix = IndexPrefix::Eavt {
+            entity,
+            attribute: None,
+            value: None,
+        };
+        let lazy = value
+            .current_prefix_cursor(&prefix)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(lazy, value.datoms_with_prefix(&prefix).unwrap());
+        assert!(lazy.iter().all(|datom| datom.entity == entity));
+    }
+
+    #[test]
+    fn prefix_cursor_rejects_non_current_database_values() {
+        let value = Database::bootstrap().unwrap().database_value().history();
+        assert_eq!(
+            value
+                .current_prefix_cursor(&IndexPrefix::Aevt {
+                    attribute: DB_IDENT as u32,
+                    entity: None,
+                    value: None,
+                })
+                .err()
+                .expect("history values must reject the point-current cursor")
+                .code,
+            "database/prefix-cursor-requires-current"
+        );
+    }
 }
