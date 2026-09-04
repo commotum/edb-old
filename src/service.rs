@@ -1,15 +1,13 @@
 use crate::log_generation::request_key_hash;
 use crate::postgres::{
     CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
-    is_postgres_connection_error, postgres_error, read_authenticated_log_range,
-    shared_program_cache_stats,
+    WriterResidencyStats, is_postgres_connection_error, postgres_error,
+    read_authenticated_log_range, shared_program_cache_stats,
 };
 use crate::{
-    Database, Datom, Digest, ErrorCategory, IndexOrder, PersistentTreeManifest,
-    PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
-    SemanticError, TxForm, TxOp, sha256,
+    DatabaseValue, Datom, Digest, ErrorCategory, PostgresConnectionConfig, PostgresIndexer,
+    ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
 };
-use postgres::Client;
 use std::collections::{BTreeMap, VecDeque};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -19,6 +17,9 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_MEMORY_INDEX_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_MEMORY_INDEX_MAX_BYTES: u64 = 512 * 1024 * 1024;
+// Recovered `process-request-index` permits the initial publication attempt
+// plus two retries before failing the transactor process.
+const MAX_INDEX_PUBLICATION_RACE_RETRIES: usize = 2;
 // RecentTier retains at most four raw BTSet entries per datom. Its
 // allocator-independent conservative account reserves a fifth reference for
 // persistent-log/tree overhead; keep admission on that same bound.
@@ -33,10 +34,12 @@ const MAX_RECENT_REFERENCES_PER_DATOM: u64 = 5;
 /// Datomic Pro's documented 32 MiB scheduling point and 512 MiB back-pressure
 /// point while tests and small deployments can use explicit lower values
 /// without changing `TransactionServiceConfig` literals.
-/// At the maximum, this native API returns `Busy` for new submissions instead
-/// of parking Datomic's ordinary update queue. The bounded request queue still
-/// prevents novelty from growing without limit, and committed idempotency
-/// retries bypass this gate so callers can always reconcile an outcome.
+/// At the maximum, the writer parks ordinary dequeue while continuing lease
+/// renewal and prioritizing indexing. The bounded admission queue may then
+/// return `Busy` when it is genuinely full; committed idempotency retries that
+/// have already reached the worker remain reconcilable without extending the
+/// log. This preserves Datomic's index-first hard-limit behavior without an
+/// unbounded native submission queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackgroundIndexingConfig {
     pub memory_index_threshold_bytes: u64,
@@ -99,6 +102,11 @@ pub struct BackgroundIndexingStats {
     pub jobs_started: u64,
     pub jobs_completed: u64,
     pub jobs_failed: u64,
+    /// Times the worker deliberately stopped dequeuing ordinary work while
+    /// the frozen/recent tiers were at the configured hard bound.
+    pub backpressure_stalls: u64,
+    /// Requests rejected only because the bounded admission queue filled
+    /// while indexing pressure had the writer parked.
     pub backpressure_rejections: u64,
     pub job_in_flight: bool,
     pub last_failure: Option<BackgroundIndexingFailure>,
@@ -174,8 +182,12 @@ impl TransactionRequest {
 
 #[derive(Clone, Debug)]
 pub struct ServiceTransactionReport {
-    pub db_before: Database,
-    pub db_after: Database,
+    /// The exact immutable value assessed by the transactor. Native values
+    /// retain their authenticated root and recent tier without materializing
+    /// the complete database in either the writer or this report.
+    pub db_before: DatabaseValue,
+    /// The exact immutable successor installed after durable publication.
+    pub db_after: DatabaseValue,
     pub basis_t: u64,
     pub tx_hash: Digest,
     pub tx_data: Vec<crate::Datom>,
@@ -224,8 +236,8 @@ struct IndexingSeed {
     newest_observed_revision: u64,
     target_basis_t: u64,
     pending: VecDeque<Novelty>,
-    /// No usable native publication covers the newest observed revision. This
-    /// remains true at basis zero, but basis zero itself is not publishable.
+    /// No usable native publication covers the newest observed revision. A
+    /// positive generation's canonical basis-zero value is publishable too.
     needs_publication: bool,
 }
 
@@ -256,6 +268,7 @@ struct BackgroundIndexing {
     jobs_started: AtomicU64,
     jobs_completed: AtomicU64,
     jobs_failed: AtomicU64,
+    backpressure_stalls: AtomicU64,
     backpressure_rejections: AtomicU64,
     last_failure: Mutex<Option<SemanticError>>,
 }
@@ -291,12 +304,19 @@ impl BackgroundIndexing {
             jobs_started: AtomicU64::new(0),
             jobs_completed: AtomicU64::new(0),
             jobs_failed: AtomicU64::new(0),
+            backpressure_stalls: AtomicU64::new(0),
             backpressure_rejections: AtomicU64::new(0),
             last_failure: Mutex::new(None),
         }
     }
 
     fn note_commit(&self, basis_t: u64, tx_data: &[Datom]) {
+        let changes_avet_membership = tx_data.iter().any(|datom| {
+            matches!(
+                u64::from(datom.attribute),
+                crate::DB_INDEX | crate::DB_UNIQUE
+            )
+        });
         let novelty = Novelty {
             basis_t,
             datoms: tx_data.len() as u64,
@@ -321,6 +341,12 @@ impl BackgroundIndexing {
             backlog.pending.push_back(novelty);
             backlog.total_datoms = backlog.total_datoms.saturating_add(novelty.datoms);
             backlog.total_bytes = backlog.total_bytes.saturating_add(novelty.bytes);
+            // AVET membership is information-derived from :db/index and
+            // :db/unique. Enabling either requires a broad durable rebuild of
+            // prior values even when ordinary novelty is below the byte
+            // threshold; disabling it should publish the matching physical
+            // projection as well.
+            backlog.needs_publication |= changes_avet_membership;
             should_index(&backlog, self.config)
         };
         if should_wake {
@@ -333,6 +359,18 @@ impl BackgroundIndexing {
             Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
+    }
+
+    /// A lost COMMIT acknowledgement may or may not have advanced the log.
+    /// Do not guess or replay transaction data; force the indexer to read the
+    /// authoritative head and publish/adopt whatever endpoint PostgreSQL made
+    /// visible.
+    fn note_unknown_outcome(&self) {
+        self.backlog
+            .lock()
+            .expect("index backlog mutex poisoned")
+            .needs_publication = true;
+        self.wake();
     }
 
     fn shutdown(&self) {
@@ -371,16 +409,6 @@ impl BackgroundIndexing {
         backlog.indexing_through = None;
         backlog.needs_publication = backlog.published_revision < backlog.newest_observed_revision;
         self.jobs_completed.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A conditional root race is normal background work. Keep the backlog
-    /// intact and let the indexer reselect/adopt instead of closing writes as
-    /// though the authoritative transaction path had failed.
-    fn retry_publication_race(&self) {
-        self.backlog
-            .lock()
-            .expect("index backlog mutex poisoned")
-            .indexing_through = None;
     }
 
     fn fail_job(&self, error: SemanticError) {
@@ -422,7 +450,7 @@ impl BackgroundIndexing {
             .lock()
             .expect("index backlog mutex poisoned")
             .total_bytes;
-        if total_bytes >= self.config.memory_index_max_bytes {
+        if total_bytes > self.config.memory_index_max_bytes {
             return Some(
                 SemanticError::new(
                     ErrorCategory::Busy,
@@ -437,6 +465,25 @@ impl BackgroundIndexing {
             );
         }
         None
+    }
+
+    fn has_failure(&self) -> bool {
+        self.last_failure
+            .lock()
+            .expect("index failure mutex poisoned")
+            .is_some()
+    }
+
+    fn at_hard_limit(&self) -> bool {
+        self.backlog
+            .lock()
+            .expect("index backlog mutex poisoned")
+            .total_bytes
+            > self.config.memory_index_max_bytes
+    }
+
+    fn record_backpressure_stall(&self) {
+        self.backpressure_stalls.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_backpressure_rejection(&self) {
@@ -492,6 +539,7 @@ impl BackgroundIndexing {
             jobs_started: self.jobs_started.load(Ordering::Relaxed),
             jobs_completed: self.jobs_completed.load(Ordering::Relaxed),
             jobs_failed: self.jobs_failed.load(Ordering::Relaxed),
+            backpressure_stalls: self.backpressure_stalls.load(Ordering::Relaxed),
             backpressure_rejections: self.backpressure_rejections.load(Ordering::Relaxed),
             job_in_flight: backlog.indexing_through.is_some(),
             last_failure,
@@ -500,11 +548,12 @@ impl BackgroundIndexing {
 }
 
 fn should_index(backlog: &IndexingBacklog, config: BackgroundIndexingConfig) -> bool {
-    // Native manifests intentionally have no basis-zero representation.
-    // Physical revision is independent of logical basis, so a corrupt newest
-    // root is immediately repairable even when the database is otherwise idle.
-    backlog.target_basis_t > 0
-        && (backlog.needs_publication || backlog.total_bytes >= config.memory_index_threshold_bytes)
+    // Positive log generations have a canonical native basis-zero value.
+    // `needs_publication` therefore drives fresh-database bootstrap and
+    // same-basis repair even before the first ordinary transaction.
+    backlog.needs_publication
+        || (backlog.target_basis_t > backlog.published_basis_t
+            && backlog.total_bytes > config.memory_index_threshold_bytes)
 }
 
 struct Shared {
@@ -516,6 +565,7 @@ struct Shared {
     rejected_full: AtomicU64,
     next_subscriber: AtomicU64,
     subscribers: Mutex<BTreeMap<u64, mpsc::Sender<ServiceTransactionReport>>>,
+    writer_residency: Mutex<WriterResidencyStats>,
     max_request_bytes: usize,
     indexing: Arc<BackgroundIndexing>,
     connection: PostgresConnectionConfig,
@@ -526,6 +576,7 @@ struct Shared {
 impl Shared {
     fn new(
         max_request_bytes: usize,
+        writer_residency: WriterResidencyStats,
         indexing: Arc<BackgroundIndexing>,
         connection: PostgresConnectionConfig,
         database_id: String,
@@ -540,6 +591,7 @@ impl Shared {
             rejected_full: AtomicU64::new(0),
             next_subscriber: AtomicU64::new(1),
             subscribers: Mutex::new(BTreeMap::new()),
+            writer_residency: Mutex::new(writer_residency),
             max_request_bytes,
             indexing,
             connection,
@@ -561,8 +613,9 @@ impl Shared {
         subscribers.retain(|_, sender| sender.send(report.clone()).is_ok());
     }
 
-    /// At the pressure/failure gate, already-committed idempotent requests
-    /// remain resolvable. New work is rejected before it can extend the log.
+    /// At the pressure gate, already-committed idempotent requests remain
+    /// resolvable. A new request receives the hard-limit marker so the worker
+    /// can park it without evaluating or extending the log.
     fn check_index_gate(
         &self,
         request_key: &str,
@@ -612,9 +665,6 @@ impl Shared {
         }
         .map_err(|error| postgres_error("service/index-gate-read", error))?;
         let Some(row) = row else {
-            if limit.category == ErrorCategory::Busy {
-                self.indexing.record_backpressure_rejection();
-            }
             return Err(limit);
         };
         if row.get::<_, i16>(1) == 0 {
@@ -673,7 +723,6 @@ impl TransactionClient {
         )?;
         let request_key = request.request_key.clone();
         let request_key_hash = request_key_hash(&self.shared.lineage_id, &request_key)?;
-        self.shared.check_index_gate(&request_key, request_hash)?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let _admission = self
             .shared
@@ -696,6 +745,9 @@ impl TransactionClient {
             }
             Err(mpsc::TrySendError::Full(_)) => {
                 self.shared.rejected_full.fetch_add(1, Ordering::Relaxed);
+                if self.shared.indexing.at_hard_limit() {
+                    self.shared.indexing.record_backpressure_rejection();
+                }
                 Err(SemanticError::new(
                     ErrorCategory::Busy,
                     "service/queue-full",
@@ -746,6 +798,17 @@ impl TransactionClient {
 
     pub fn background_indexing_stats(&self) -> BackgroundIndexingStats {
         self.shared.indexing.stats()
+    }
+
+    /// Deterministic representation-level residency of the live writer.
+    /// Unlike allocator RSS, these counters distinguish the recent tier and
+    /// immutable cache from a forbidden eager database value.
+    pub fn writer_residency_stats(&self) -> WriterResidencyStats {
+        *self
+            .shared
+            .writer_residency
+            .lock()
+            .expect("writer residency mutex poisoned")
     }
 
     pub fn is_available(&self) -> bool {
@@ -975,28 +1038,78 @@ impl TransactionService {
         let lease_millis = duration_millis(config.lease_duration)?;
         let mut store = PostgresStore::connect_configured(&connection)?;
         store.set_capacity_limits(config.capacity_limits)?;
+        store.set_writer_recent_limits(crate::recent::RecentLimits {
+            soft_datoms: u64::MAX,
+            soft_bytes: indexing_config.memory_index_threshold_bytes,
+            hard_datoms: u64::MAX,
+            // The recovered processor checks the memory-index maximum before
+            // dequeuing the next ordinary request, so the transaction that
+            // crosses the line is accepted and then causes indexing-first
+            // backpressure. Preserve that bounded overshoot here: rejecting
+            // the crossing transaction inside RecentTier would invent an
+            // atomic transaction size limit stricter than the configured one.
+            hard_bytes: indexing_config
+                .memory_index_max_bytes
+                .saturating_add(max_transaction_novelty_bytes(config.capacity_limits)),
+        })?;
         let lease = store.acquire_lease(&config.database_id, &config.holder_id, lease_millis)?;
+        let mut indexer =
+            match PostgresIndexer::connect_configured(&connection, &config.database_id) {
+                Ok(indexer) => indexer,
+                Err(error) => {
+                    let _ = store.release_lease(&lease);
+                    return Err(error);
+                }
+            };
+        // Probe with the strict native opener before deciding that a root must
+        // be built. Only genuine absence or a valid root with an over-hard
+        // tail authorizes this synchronous bootstrap/catch-up. A present but
+        // corrupt native authority fails closed for explicit repair.
         let recovery_stats = match store.activate_transactor_state(&lease, lease_millis) {
             Ok(stats) => stats,
+            Err(error)
+                if matches!(
+                    error.code,
+                    "peer/exact-no-native-publication" | "recent/hard-capacity"
+                ) =>
+            {
+                if let Err(index_error) = indexer.consolidate() {
+                    let _ = store.release_lease(&lease);
+                    return Err(index_error);
+                }
+                match store.activate_transactor_state(&lease, lease_millis) {
+                    Ok(stats) => stats,
+                    Err(error) => {
+                        let _ = store.release_lease(&lease);
+                        return Err(error);
+                    }
+                }
+            }
             Err(error) => {
                 let _ = store.release_lease(&lease);
                 return Err(error);
             }
         };
-        let seed = match load_indexing_seed(&connection, &config.database_id) {
+        let initial_writer_residency = store.writer_residency_stats(&config.database_id);
+        let seed = match load_indexing_seed(
+            &connection,
+            &config.database_id,
+            initial_writer_residency.publication_revision,
+            recovery_stats.base_t,
+        ) {
             Ok(seed) => seed,
             Err(error) => {
                 let _ = store.release_lease(&lease);
                 return Err(error);
             }
         };
-        let indexer = match PostgresIndexer::connect_configured(&connection, &config.database_id) {
-            Ok(indexer) => indexer,
-            Err(error) => {
-                let _ = store.release_lease(&lease);
-                return Err(error);
-            }
-        };
+        // The seed walk can be materially longer than a heartbeat on a large
+        // tail. Keep the already-authenticated, pinned writer value and extend
+        // that same epoch immediately before any accepting worker is exposed.
+        if let Err(error) = store.renew_lease(&lease, lease_millis) {
+            let _ = store.release_lease(&lease);
+            return Err(error);
+        }
         let program_cache = store.program_cache_handle();
         let (index_sender, index_receiver) = mpsc::sync_channel(1);
         let lineage_id = seed.lineage_id.clone();
@@ -1004,6 +1117,7 @@ impl TransactionService {
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
         let shared = Arc::new(Shared::new(
             config.capacity_limits.max_transaction_bytes,
+            initial_writer_residency,
             Arc::clone(&indexing),
             connection.clone(),
             config.database_id.clone(),
@@ -1085,6 +1199,10 @@ impl TransactionService {
         self.client.background_indexing_stats()
     }
 
+    pub fn writer_residency_stats(&self) -> WriterResidencyStats {
+        self.client.writer_residency_stats()
+    }
+
     pub fn shutdown(mut self) {
         self.stop_and_join();
     }
@@ -1117,10 +1235,20 @@ fn run_worker(
     shared: &Shared,
 ) {
     let mut last_renewal = Instant::now();
+    let mut pending: Option<Work> = None;
+    let mut pending_was_stalled = false;
     loop {
         if !shared.accepting.load(Ordering::Acquire) {
+            if let Some(work) = pending.take() {
+                decrement_queued(shared);
+                let _ = work.response.send(Err(shared.unavailable()));
+            }
             drain_unavailable(&receiver, shared);
             break;
+        }
+        if shared.indexing.has_failure() {
+            shared.accepting.store(false, Ordering::Release);
+            continue;
         }
         if last_renewal.elapsed() >= renew_interval {
             if store.renew_lease(lease, lease_millis).is_err() {
@@ -1131,18 +1259,68 @@ fn run_worker(
             last_renewal = Instant::now();
         }
         let wait = renew_interval.saturating_sub(last_renewal.elapsed());
-        let work = match receiver.recv_timeout(wait) {
-            Ok(work) => work,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        let work = match pending.take() {
+            Some(work) => work,
+            None => match receiver.recv_timeout(wait) {
+                Ok(work) => work,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
         };
-        decrement_queued(shared);
         if !shared.accepting.load(Ordering::Acquire) {
+            decrement_queued(shared);
             let _ = work.response.send(Err(shared.unavailable()));
             continue;
         }
-        let result = match shared.check_index_gate(&work.request.request_key, work.request_hash) {
-            Ok(()) => process_work(store, lease, database_id, work.request, work.request_hash),
+        if pending_was_stalled && shared.indexing.at_hard_limit() {
+            // `check_index_gate` performs the one durable idempotency lookup
+            // that classified this work as novel. Do not reconnect and repeat
+            // that query on every throttle tick while the same request is
+            // parked; no competing writer can commit it under this lease.
+            shared.indexing.wake();
+            pending = Some(work);
+            thread::park_timeout(wait.min(Duration::from_millis(100)));
+            continue;
+        }
+        let gate = shared.check_index_gate(&work.request.request_key, work.request_hash);
+        if gate
+            .as_ref()
+            .is_err_and(|error| error.code == "service/index-backpressure")
+        {
+            // Match the recovered transactor's hard-limit behavior: retain
+            // this ordinary request without evaluating it, keep renewing the
+            // lease, and let the index worker run. Bounded admission—not a new
+            // transaction semantic—decides whether additional callers see
+            // Busy while this slot is parked.
+            if !pending_was_stalled {
+                shared.indexing.record_backpressure_stall();
+                pending_was_stalled = true;
+            }
+            shared.indexing.wake();
+            pending = Some(work);
+            thread::park_timeout(wait.min(Duration::from_millis(100)));
+            continue;
+        }
+        decrement_queued(shared);
+        pending_was_stalled = false;
+        let result = match gate {
+            Ok(()) => {
+                let published_revision = shared.indexing.stats().published_revision;
+                match store.adopt_published_tree(database_id, published_revision) {
+                    Ok(()) => {
+                        process_work(store, lease, database_id, work.request, work.request_hash)
+                    }
+                    // An ambiguous commit deliberately invalidates the cached
+                    // writer value. The authoritative transaction path locks
+                    // the head and either reconstructs the durable receipt or
+                    // opens that exact head before doing new work, so absence
+                    // of a process-local value is not an adoption failure.
+                    Err(error) if error.code == "postgres/writer-not-activated" => {
+                        process_work(store, lease, database_id, work.request, work.request_hash)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             Err(error) => Err(error),
         };
         let publish = result
@@ -1160,7 +1338,16 @@ fn run_worker(
         }
         if let Some(report) = &publish {
             shared.indexing.note_commit(report.basis_t, &report.tx_data);
+        } else if result
+            .as_ref()
+            .is_err_and(|error| error.category == ErrorCategory::UnknownOutcome)
+        {
+            shared.indexing.note_unknown_outcome();
         }
+        *shared
+            .writer_residency
+            .lock()
+            .expect("writer residency mutex poisoned") = store.writer_residency_stats(database_id);
         let _ = work.response.send(result);
         if let Some(report) = publish {
             shared.publish(&report);
@@ -1180,7 +1367,7 @@ fn run_index_worker(
         if requested && shared.accepting.load(Ordering::Acquire) {
             let began = shared.indexing.begin_job();
             if began {
-                match indexer.consolidate() {
+                match retry_publication_races(|| indexer.consolidate()) {
                     Ok(receipt) => {
                         shared
                             .indexing
@@ -1189,22 +1376,14 @@ fn run_index_worker(
                             continue;
                         }
                     }
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            "tree/publication-cas-lost" | "tree/publication-revision-conflict"
-                        ) =>
-                    {
-                        // `PostgresIndexer::consolidate` already reselected
-                        // once. Repeated contenders still do not make the
-                        // authoritative writer unhealthy: release the local
-                        // job marker and adopt/retry from the new root.
-                        shared.indexing.retry_publication_race();
-                        thread::yield_now();
-                        continue;
-                    }
                     Err(error) => {
                         shared.indexing.fail_job(error);
+                        // A writer that can no longer consolidate its bounded
+                        // recent tier must relinquish service ownership so a
+                        // repaired standby can fence and recover. Retaining
+                        // the lease while rejecting forever creates a zombie
+                        // leader and contradicts the failover contract.
+                        shared.accepting.store(false, Ordering::Release);
                         return;
                     }
                 }
@@ -1213,6 +1392,40 @@ fn run_index_worker(
         match receiver.recv() {
             Ok(IndexCommand::Wake) => requested = true,
             Ok(IndexCommand::Shutdown) | Err(_) => return,
+        }
+    }
+}
+
+/// Retry a complete immutable index selection/build/publication attempt. A
+/// CAS loss is normal contention, but an unbounded hot loop is not: recovered
+/// Datomic retries an indexing job twice after its initial attempt and then
+/// fails the process so ownership can move to a healthy transactor.
+fn retry_publication_races<T>(
+    mut publish: impl FnMut() -> Result<T, SemanticError>,
+) -> Result<T, SemanticError> {
+    let mut retries = 0_usize;
+    loop {
+        match publish() {
+            Err(error)
+                if matches!(
+                    error.code,
+                    "tree/publication-cas-lost" | "tree/publication-revision-conflict"
+                ) =>
+            {
+                if retries == MAX_INDEX_PUBLICATION_RACE_RETRIES {
+                    return Err(SemanticError::new(
+                        ErrorCategory::Unavailable,
+                        "service/index-publication-race-exhausted",
+                        "background index publication exhausted its bounded CAS retry budget",
+                    )
+                    .detail("attempts", (retries + 1).to_string())
+                    .detail("cause_code", error.code)
+                    .detail("cause", error.message));
+                }
+                retries += 1;
+                thread::yield_now();
+            }
+            result => return result,
         }
     }
 }
@@ -1251,11 +1464,13 @@ fn decrement_queued(shared: &Shared) {
 fn load_indexing_seed(
     connection: &PostgresConnectionConfig,
     database_id: &str,
+    activated_publication_revision: u64,
+    activated_basis_t: u64,
 ) -> Result<IndexingSeed, SemanticError> {
     let mut client = connection.connect_for("service/index-seed-connect")?;
     let row = client
         .query_opt(
-            "SELECT h.basis_t, h.log_generation, h.tx_hash, d.genesis_hash, d.lineage_id \
+            "SELECT h.basis_t, h.log_generation, h.tx_hash, d.lineage_id \
                FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
               WHERE h.database_id = $1",
             &[&database_id],
@@ -1277,14 +1492,7 @@ fn load_indexing_seed(
             "index target head has an invalid transaction hash",
         )
     })?;
-    let genesis_hash = candidate_digest(row.get(3)).ok_or_else(|| {
-        SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-seed-genesis-hash",
-            "database genesis has an invalid hash",
-        )
-    })?;
-    let lineage_id: String = row.get(4);
+    let lineage_id: String = row.get(3);
     let newest_observed_revision = client
         .query_opt(
             "SELECT publication_revision FROM atomic_tree_publications \
@@ -1296,72 +1504,48 @@ fn load_indexing_seed(
         .transpose()?
         .unwrap_or(0);
 
-    // A publication row is only a candidate. As in the recovered adopter, walk
-    // newest to oldest and accept the first canonical manifest whose normalized
-    // root bindings are structurally usable. The log remains authority; a
-    // corrupt derived value is skipped rather than allowed to erase backlog.
-    let candidate_rows = client
-        .query(
-            "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
-                    m.eidx_frontier, m.manifest_version, m.manifest_hash, m.payload \
-               FROM atomic_tree_publications p \
-               JOIN atomic_tree_manifests m \
-                 ON m.database_id = p.database_id \
-                AND m.publication_revision = p.publication_revision \
-                AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
-                AND m.manifest_hash = p.manifest_hash \
-                AND m.log_generation = p.log_generation \
-               LEFT JOIN atomic_transactions legacy \
-                 ON m.log_generation = 0 AND legacy.database_id = m.database_id \
-                AND legacy.basis_t = m.basis_t AND legacy.tx_hash = m.tx_hash \
-                AND legacy.state_hash = m.state_hash \
-               LEFT JOIN atomic_generation_transactions native \
-                 ON m.log_generation > 0 AND native.database_id = m.database_id \
-                AND native.generation = m.log_generation AND native.basis_t = m.basis_t \
-                AND native.tx_hash = m.tx_hash AND native.state_hash = m.state_hash \
-              WHERE m.database_id = $1 AND m.basis_t <= $2 \
-                AND m.log_generation = $3 \
-                AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
-                  OR (m.log_generation > 0 AND native.tx_hash IS NOT NULL)) \
-              ORDER BY p.publication_revision DESC",
+    // Activation already authenticated and pinned one immutable tree value.
+    // Seed backlog accounting from exactly that publication instead of
+    // implementing a second, potentially divergent candidate selector here.
+    let publication = client
+        .query_opt(
+            "SELECT basis_t, tx_hash FROM atomic_tree_publications \
+              WHERE database_id = $1 AND publication_revision = $2 \
+                AND log_generation = $3",
             &[
                 &database_id,
-                &sql_basis(target_basis_t, "index target basis")?,
+                &sql_basis(
+                    activated_publication_revision,
+                    "activated publication revision",
+                )?,
                 &sql_basis(excision_generation, "index excision generation")?,
             ],
         )
-        .map_err(|error| postgres_error("service/index-seed-manifests", error))?;
-    let mut published_revision = 0;
-    let mut published_basis_t = 0;
-    let mut published_hash = genesis_hash;
-    for row in candidate_rows {
-        let publication_revision = nonnegative_basis(row.get(0), "usable publication revision")?;
-        let basis_t = nonnegative_basis(row.get(1), "published index basis")?;
-        let tx_hash_bytes: Vec<u8> = row.get(2);
-        if usable_native_publication(
-            &mut client,
-            database_id,
-            excision_generation,
-            publication_revision,
-            basis_t,
-            tx_hash_bytes.clone(),
-            row.get(3),
-            row.get(4),
-            row.get(5),
-            row.get(6),
-            row.get(7),
-        )? {
-            published_revision = publication_revision;
-            published_basis_t = basis_t;
-            published_hash = candidate_digest(tx_hash_bytes)
-                .expect("a usable native publication has an authenticated transaction hash");
-            break;
-        }
+        .map_err(|error| postgres_error("service/index-seed-publication", error))?
+        .ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "service/index-seed-publication-missing",
+                "the activated and pinned native publication disappeared",
+            )
+        })?;
+    let published_basis_t = nonnegative_basis(publication.get(0), "published index basis")?;
+    if published_basis_t != activated_basis_t || published_basis_t > target_basis_t {
+        return Err(SemanticError::new(
+            ErrorCategory::Fault,
+            "service/index-seed-publication-mismatch",
+            "the activated publication disagrees with its recovered durable basis",
+        ));
     }
-    // Keep the obligation latent at basis zero; `should_index` gates the job
-    // until the first positive commit arrives.
-    let needs_publication =
-        published_revision == 0 || published_revision < newest_observed_revision;
+    let published_hash = candidate_digest(publication.get(1)).ok_or_else(|| {
+        SemanticError::new(
+            ErrorCategory::Fault,
+            "service/index-seed-publication-hash",
+            "the activated publication has an invalid transaction hash",
+        )
+    })?;
+    let published_revision = activated_publication_revision;
+    let needs_publication = published_revision < newest_observed_revision;
 
     let rows = read_authenticated_log_range(
         &mut client,
@@ -1399,113 +1583,8 @@ fn load_indexing_seed(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn usable_native_publication(
-    client: &mut Client,
-    database_id: &str,
-    excision_generation: u64,
-    publication_revision: u64,
-    basis_t: u64,
-    tx_hash_bytes: Vec<u8>,
-    state_hash_bytes: Vec<u8>,
-    eidx_frontier: i64,
-    manifest_version: i16,
-    manifest_hash_bytes: Vec<u8>,
-    payload: Vec<u8>,
-) -> Result<bool, SemanticError> {
-    // Migration 0012 identifies the relational format as v4. The canonical
-    // decoder remains the stronger version/canonicality authority.
-    if manifest_version != 4 {
-        return Ok(false);
-    }
-    let Some(tx_hash) = candidate_digest(tx_hash_bytes) else {
-        return Ok(false);
-    };
-    let Some(state_hash) = candidate_digest(state_hash_bytes) else {
-        return Ok(false);
-    };
-    let Some(manifest_hash) = candidate_digest(manifest_hash_bytes) else {
-        return Ok(false);
-    };
-    let Ok(eidx_frontier) = u64::try_from(eidx_frontier) else {
-        return Ok(false);
-    };
-    if sha256(&payload) != manifest_hash {
-        return Ok(false);
-    }
-    let Ok(manifest) = PersistentTreeManifest::decode(&payload) else {
-        return Ok(false);
-    };
-    if manifest.database_id != database_id
-        || manifest.publication_revision != publication_revision
-        || manifest.basis_t != basis_t
-        || manifest.tx_hash != tx_hash
-        || manifest.state_hash != state_hash
-        || manifest.excision_generation != excision_generation
-        || manifest.eidx_frontier != eidx_frontier
-    {
-        return Ok(false);
-    }
-
-    // Match the indexer's normalized publication boundary. Metadata validity
-    // comes from the authenticated tree projection in the indexer/peer; the
-    // service only screens the immutable envelope and its normalized bindings.
-    let roots = client
-        .query(
-            "SELECT r.index_order, r.history, r.root_hash, r.datom_count, \
-                    r.encoded_bytes, n.payload \
-               FROM atomic_tree_manifest_roots r \
-               JOIN atomic_tree_nodes n ON n.node_hash = r.root_hash \
-              WHERE r.manifest_hash = $1 \
-              ORDER BY history, index_order",
-            &[&&manifest_hash[..]],
-        )
-        .map_err(|error| postgres_error("service/index-seed-roots", error))?;
-    if roots.len() != 8 {
-        return Ok(false);
-    }
-    for root in roots {
-        let Some(order) = candidate_index_order(root.get(0)) else {
-            return Ok(false);
-        };
-        let history: bool = root.get(1);
-        let Some(root_hash) = candidate_digest(root.get(2)) else {
-            return Ok(false);
-        };
-        let Ok(datom_count) = u64::try_from(root.get::<_, i64>(3)) else {
-            return Ok(false);
-        };
-        let Ok(encoded_bytes) = u64::try_from(root.get::<_, i64>(4)) else {
-            return Ok(false);
-        };
-        let node_payload: Vec<u8> = root.get(5);
-        let Some(expected) = manifest.tree(order, history) else {
-            return Ok(false);
-        };
-        if expected.descriptor.root_hash != root_hash
-            || expected.descriptor.count != datom_count
-            || expected.root_bytes != encoded_bytes
-            || node_payload.len() as u64 != encoded_bytes
-            || sha256(&node_payload) != root_hash
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 fn candidate_digest(bytes: Vec<u8>) -> Option<Digest> {
     bytes.try_into().ok()
-}
-
-fn candidate_index_order(tag: i16) -> Option<IndexOrder> {
-    match tag {
-        0 => Some(IndexOrder::Eavt),
-        1 => Some(IndexOrder::Aevt),
-        2 => Some(IndexOrder::Avet),
-        3 => Some(IndexOrder::Vaet),
-        _ => None,
-    }
 }
 
 fn sql_basis(value: u64, label: &str) -> Result<i64, SemanticError> {
@@ -1528,6 +1607,21 @@ fn accounted_novelty_bytes(datoms: &[Datom]) -> u64 {
             .saturating_add(value_bytes)
             .saturating_add(locator_bytes)
     })
+}
+
+/// Conservative upper bound for one already-admitted transaction's recent
+/// representation. Canonical transaction bytes cover every value once;
+/// resident values plus the four raw indexes/log reference can account for a
+/// second value copy and fixed metadata per operation. Saturation is safer
+/// than wrapping a configured capacity boundary.
+fn max_transaction_novelty_bytes(limits: CapacityLimits) -> u64 {
+    let transaction_bytes = u64::try_from(limits.max_transaction_bytes).unwrap_or(u64::MAX);
+    let operation_count = u64::try_from(limits.max_transaction_ops).unwrap_or(u64::MAX);
+    let locator_bytes = (size_of::<crate::recent::RecentLocator>() as u64)
+        .saturating_mul(MAX_RECENT_REFERENCES_PER_DATOM);
+    transaction_bytes.saturating_mul(2).saturating_add(
+        operation_count.saturating_mul((size_of::<Datom>() as u64).saturating_add(locator_bytes)),
+    )
 }
 
 fn nonnegative_basis(value: i64, label: &str) -> Result<u64, SemanticError> {
@@ -1579,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn basis_zero_waits_and_first_positive_commit_forces_publication() {
+    fn basis_zero_bootstrap_is_publishable_and_first_threshold_crossing_advances_it() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let indexing = BackgroundIndexing::new(
             test_config(),
@@ -1595,16 +1689,25 @@ mod tests {
             sender,
         );
 
+        assert!(indexing.should_continue());
+        assert!(indexing.begin_job());
+        indexing.complete_job(1, 0);
         assert!(!indexing.should_continue());
-        assert!(!indexing.begin_job());
-        indexing.note_commit(1, &[]);
+        let novelty = Datom {
+            entity: 1,
+            attribute: 2,
+            value: Value::Tuple(vec![None; 1_024]),
+            tx: 3,
+            added: true,
+        };
+        indexing.note_commit(1, &[novelty]);
         assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
         assert!(indexing.should_continue());
         assert!(indexing.begin_job());
-        indexing.complete_job(1, 1);
+        indexing.complete_job(2, 1);
         assert!(!indexing.should_continue());
         assert_eq!(indexing.stats().published_basis_t, 1);
-        assert_eq!(indexing.stats().published_revision, 1);
+        assert_eq!(indexing.stats().published_revision, 2);
     }
 
     #[test]
@@ -1638,6 +1741,96 @@ mod tests {
         assert_eq!(repaired.target_basis_t, 1);
         assert_eq!(repaired.total_bytes, 0);
         assert!(!indexing.should_continue());
+    }
+
+    #[test]
+    fn index_thresholds_are_strict_crossings() {
+        let config = test_config();
+        let mut backlog = IndexingBacklog {
+            published_revision: 1,
+            published_basis_t: 1,
+            newest_observed_revision: 1,
+            target_basis_t: 2,
+            pending: VecDeque::new(),
+            total_datoms: 1,
+            total_bytes: config.memory_index_threshold_bytes,
+            indexing_through: None,
+            needs_publication: false,
+        };
+        assert!(!should_index(&backlog, config));
+        backlog.total_bytes += 1;
+        assert!(should_index(&backlog, config));
+
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let indexing = BackgroundIndexing::new(
+            config,
+            IndexingSeed {
+                lineage_id: "lineage".to_owned(),
+                published_revision: 1,
+                published_basis_t: 1,
+                newest_observed_revision: 1,
+                target_basis_t: 2,
+                pending: VecDeque::from([Novelty {
+                    basis_t: 2,
+                    datoms: 1,
+                    bytes: config.memory_index_max_bytes,
+                }]),
+                needs_publication: false,
+            },
+            sender,
+        );
+        assert!(!indexing.at_hard_limit());
+        assert!(indexing.limiting_error().is_none());
+        {
+            let mut backlog = indexing
+                .backlog
+                .lock()
+                .expect("index backlog mutex poisoned");
+            backlog.total_bytes += 1;
+            backlog.pending.front_mut().unwrap().bytes += 1;
+        }
+        assert!(indexing.at_hard_limit());
+        assert_eq!(
+            indexing.limiting_error().unwrap().code,
+            "service/index-backpressure"
+        );
+    }
+
+    #[test]
+    fn publication_cas_retry_budget_is_finite() {
+        let mut attempts = 0_usize;
+        let exhausted = retry_publication_races(|| {
+            attempts += 1;
+            Err::<(), _>(SemanticError::conflict(
+                "tree/publication-cas-lost",
+                "test contender won",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            (exhausted.category, exhausted.code),
+            (
+                ErrorCategory::Unavailable,
+                "service/index-publication-race-exhausted"
+            )
+        );
+        assert_eq!(exhausted.details.get("attempts"), Some(&"3".to_owned()));
+
+        let mut attempts = 0_usize;
+        let receipt = retry_publication_races(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(SemanticError::conflict(
+                    "tree/publication-revision-conflict",
+                    "test contender won",
+                ))
+            } else {
+                Ok(42_u64)
+            }
+        })
+        .unwrap();
+        assert_eq!((attempts, receipt), (3, 42));
     }
 
     #[test]

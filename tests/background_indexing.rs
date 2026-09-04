@@ -1,8 +1,7 @@
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, BackgroundIndexingStats, Cardinality, EntityRef,
     ErrorCategory, Keyword, PostgresStore, Schema, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TxOp, TxValue, USER_PARTITION, Value, ValueType, decode_transaction,
-    make_eid, sha256,
+    TransactionServiceConfig, TxOp, TxValue, USER_PARTITION, Value, ValueType, make_eid, sha256,
 };
 use postgres::{Client, GenericClient, NoTls};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -85,12 +84,67 @@ fn corrupt_latest_v4_manifest_payload(
     payload
 }
 
+fn stage_zero_delta_publication_work(
+    client: &mut impl GenericClient,
+    database_id: &str,
+    manifest_hash: &[u8; 32],
+    predecessor_manifest_hash: &[u8],
+    log_generation: i64,
+    expected_revision: i64,
+) {
+    let empty_set_hash = [0_u8; 32];
+    client
+        .execute(
+            "INSERT INTO atomic_tree_build_intents \
+               (manifest_hash, database_id, log_generation, expected_revision, \
+                expected_node_count, node_set_hash, intent_state) \
+             VALUES ($1, $2, $3, $4, 0, $5, 1)",
+            &[
+                &&manifest_hash[..],
+                &database_id,
+                &log_generation,
+                &expected_revision,
+                &&empty_set_hash[..],
+            ],
+        )
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO atomic_tree_delta_headers \
+               (manifest_hash, predecessor_manifest_hash, delta_mode, \
+                expected_node_count, staged_node_count, delta_set_hash, \
+                added_node_count, added_set_hash, delta_state) \
+             VALUES ($1, $2, 2, 0, 0, $3, 0, $3, 1)",
+            &[
+                &&manifest_hash[..],
+                &predecessor_manifest_hash,
+                &&empty_set_hash[..],
+            ],
+        )
+        .unwrap();
+}
+
+fn finish_zero_delta_publication_work(client: &mut impl GenericClient, manifest_hash: &[u8; 32]) {
+    let complete: bool = client
+        .query_one(
+            "SELECT atomic_apply_tree_publication_work($1, 4096)",
+            &[&&manifest_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        complete,
+        "zero-delta publication work must seal in one batch"
+    );
+}
+
 fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, u64) {
     let mut transaction = client.transaction().unwrap();
     let authoritative = transaction
         .query_one(
             "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
-                    m.excision_generation, m.eidx_frontier, m.manifest_hash \
+                    m.excision_generation, m.eidx_frontier, m.manifest_hash, \
+                    m.log_generation, m.lineage_id \
                FROM atomic_tree_publications p \
                JOIN atomic_tree_manifests m \
                  ON m.database_id = p.database_id \
@@ -110,14 +164,17 @@ fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, 
     let generation: i64 = authoritative.get(4);
     let eidx_frontier: i64 = authoritative.get(5);
     let source_manifest_hash: Vec<u8> = authoritative.get(6);
+    let log_generation: i64 = authoritative.get(7);
+    let lineage_id: Option<String> = authoritative.get(8);
     let poison_payload = corrupt_latest_v4_manifest_payload(&mut transaction, database_id);
     let poison_hash = sha256(&poison_payload);
     transaction
         .execute(
             "INSERT INTO atomic_tree_manifests \
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
-                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9)",
+                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
+                log_generation, lineage_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11)",
             &[
                 &database_id,
                 &poison_revision,
@@ -128,6 +185,8 @@ fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, 
                 &eidx_frontier,
                 &&poison_hash[..],
                 &poison_payload,
+                &log_generation,
+                &lineage_id,
             ],
         )
         .unwrap();
@@ -141,31 +200,31 @@ fn publish_corrupt_v4_manifest(client: &mut Client, database_id: &str) -> (u64, 
         )
         .unwrap();
     assert_eq!(copied, 8);
-    transaction
-        .execute(
-            "INSERT INTO atomic_tree_delta_headers \
-                   (manifest_hash, predecessor_manifest_hash, delta_mode, \
-                    expected_node_count, staged_node_count, delta_set_hash, \
-                    added_node_count, added_set_hash, delta_state) \
-             VALUES ($1, $2, 0, 0, 0, decode(repeat('00', 32), 'hex'), \
-                     0, decode(repeat('00', 32), 'hex'), 1)",
-            &[&&poison_hash[..], &source_manifest_hash],
-        )
-        .unwrap();
+    stage_zero_delta_publication_work(
+        &mut transaction,
+        database_id,
+        &poison_hash,
+        &source_manifest_hash,
+        log_generation,
+        current_revision,
+    );
     transaction
         .execute(
             "INSERT INTO atomic_tree_publications \
-               (database_id, publication_revision, basis_t, tx_hash, manifest_hash) \
-             VALUES ($1, $2, $3, $4, $5)",
+               (database_id, publication_revision, basis_t, tx_hash, manifest_hash, \
+                log_generation) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
             &[
                 &database_id,
                 &poison_revision,
                 &basis_t,
                 &tx_hash,
                 &&poison_hash[..],
+                &log_generation,
             ],
         )
         .unwrap();
+    finish_zero_delta_publication_work(&mut transaction, &poison_hash);
     transaction.commit().unwrap();
     (
         u64::try_from(basis_t).unwrap(),
@@ -222,7 +281,7 @@ fn wait_for_stats(
 }
 
 #[test]
-fn default_service_start_creates_the_initial_native_publication() {
+fn default_service_adopts_the_creation_publication_without_rebuilding_it() {
     let Some(connection) = connection() else {
         return;
     };
@@ -235,7 +294,7 @@ fn default_service_start_creates_the_initial_native_publication() {
     ))
     .unwrap();
     let indexed = wait_for_stats(&service, |stats| {
-        stats.published_basis_t == initial_basis && stats.jobs_completed == 1
+        stats.published_basis_t == initial_basis && stats.jobs_completed == 0
     });
     assert_eq!(indexed.total_bytes, 0);
     assert_eq!(indexed.jobs_failed, 0);
@@ -243,21 +302,21 @@ fn default_service_start_creates_the_initial_native_publication() {
 }
 
 #[test]
-fn empty_database_waits_for_first_commit_before_initial_publication() {
+fn basis_zero_is_published_at_creation_and_first_novelty_advances_it() {
     let Some(connection) = connection() else {
         return;
     };
     let database_id = unique("background_index_empty");
     setup_empty(&connection, &database_id);
-    let service = TransactionService::start(service_config(
-        &connection,
-        &database_id,
-        "background-empty",
-    ))
+    let service = TransactionService::start_with_indexing(
+        service_config(&connection, &database_id, "background-empty"),
+        indexing_config(1024 * 1024),
+    )
     .unwrap();
 
-    // Give the worker enough time to expose the old failure mode: attempting
-    // to consolidate basis zero used to terminate indexing and close writes.
+    // Creation publishes the canonical basis-zero value directly. Starting a
+    // writer adopts that exact authority and must not manufacture another
+    // physical revision merely because no positive transaction exists yet.
     let deadline = Instant::now() + Duration::from_millis(250);
     while Instant::now() < deadline {
         let stats = service.background_indexing_stats();
@@ -287,7 +346,7 @@ fn empty_database_waits_for_first_commit_before_initial_publication() {
 }
 
 #[test]
-fn restart_repairs_corrupt_latest_manifest_at_the_same_idle_basis() {
+fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
     let Some(connection) = connection() else {
         return;
     };
@@ -301,7 +360,7 @@ fn restart_repairs_corrupt_latest_manifest_at_the_same_idle_basis() {
     ))
     .unwrap();
     let first = wait_for_stats(&first_service, |stats| {
-        stats.published_basis_t == initial_basis && stats.jobs_completed == 1
+        stats.published_basis_t == initial_basis && stats.jobs_completed == 0
     });
     assert_eq!(first.published_revision, first.newest_observed_revision);
     first_service.shutdown();
@@ -318,14 +377,31 @@ fn restart_repairs_corrupt_latest_manifest_at_the_same_idle_basis() {
         .unwrap()
         .get(0);
 
-    // No transaction or novelty is required to obtain a fresh physical root
-    // coordinate. A one-byte hard limit would have deadlocked the old design;
-    // the revision-aware service repairs immediately at the same basis.
+    // Hold only publication writes. Plain reads (including exact activation
+    // and request-base validation) continue, while the background repair
+    // cannot race past the seed observation below.
+    let mut blocker = Client::connect(&connection, NoTls).unwrap();
+    let mut publication_lock = blocker.transaction().unwrap();
+    publication_lock
+        .batch_execute("LOCK TABLE atomic_tree_publications IN SHARE MODE")
+        .unwrap();
+
+    // A corrupt derived revision is not treated as authoritative data and is
+    // not mistaken for absence. The older authenticated immutable base plus
+    // authoritative log endpoint remains sufficient to rebuild a newer valid
+    // revision at the same logical basis. If every candidate were corrupt,
+    // strict activation would fail instead.
     let service = TransactionService::start_with_indexing(
         service_config(&connection, &database_id, "background-corrupt-seed-two"),
         indexing_config(1),
     )
     .unwrap();
+    let pinned_seed = wait_for_stats(&service, |stats| stats.job_in_flight);
+    assert_eq!(pinned_seed.published_revision, first.published_revision);
+    assert_eq!(pinned_seed.newest_observed_revision, poison_revision);
+    assert_eq!(pinned_seed.published_basis_t, initial_basis);
+    assert_eq!(pinned_seed.target_basis_t, initial_basis);
+    publication_lock.commit().unwrap();
     let repaired = wait_for_stats(&service, |stats| {
         stats.published_basis_t == initial_basis
             && stats.published_revision > poison_revision
@@ -382,17 +458,17 @@ fn background_publication_bounds_novelty_without_hiding_committed_replays() {
 
     let initial = wait_for_stats(&service, |stats| {
         stats.published_basis_t == initial_basis
-            && stats.jobs_completed == 1
+            && stats.jobs_completed == 0
             && stats.total_bytes == 0
     });
-    assert_eq!(initial.jobs_started, 1);
+    assert_eq!(initial.jobs_started, 0);
 
     // Hold publication, not transaction processing. The index worker must be
     // independently blocked while the fenced writer can commit one bounded
     // transaction and then expose pressure.
     let mut blocker = Client::connect(&connection, NoTls).unwrap();
     let mut lock = blocker.transaction().unwrap();
-    lock.batch_execute("LOCK TABLE atomic_tree_manifests IN ACCESS EXCLUSIVE MODE")
+    lock.batch_execute("LOCK TABLE atomic_tree_publications IN SHARE MODE")
         .unwrap();
     let committed = client
         .transact(request("pressure-commit", 1), Duration::from_secs(2))
@@ -413,10 +489,16 @@ fn background_publication_bounds_novelty_without_hiding_committed_replays() {
         .unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.basis_t, committed.basis_t);
-    let busy = client.submit(request("pressure-new", 2)).unwrap_err();
+    let parked = client.submit(request("pressure-new", 2)).unwrap();
+    wait_for_stats(&service, |stats| stats.backpressure_stalls == 1);
+    let queued_one = client.submit(request("pressure-queued-one", 3)).unwrap();
+    let queued_two = client.submit(request("pressure-queued-two", 4)).unwrap();
+    let busy = client
+        .submit(request("pressure-over-capacity", 5))
+        .unwrap_err();
     assert_eq!(
         (busy.category, busy.code),
-        (ErrorCategory::Busy, "service/index-backpressure")
+        (ErrorCategory::Busy, "service/queue-full")
     );
     assert_eq!(
         client.background_indexing_stats().backpressure_rejections,
@@ -424,8 +506,14 @@ fn background_publication_bounds_novelty_without_hiding_committed_replays() {
     );
 
     lock.commit().unwrap();
+    let parked = parked.wait(Duration::from_secs(5)).unwrap();
+    let queued_one = queued_one.wait(Duration::from_secs(5)).unwrap();
+    let queued_two = queued_two.wait(Duration::from_secs(5)).unwrap();
+    assert_eq!(parked.basis_t, committed.basis_t + 1);
+    assert_eq!(queued_one.basis_t, parked.basis_t + 1);
+    assert_eq!(queued_two.basis_t, queued_one.basis_t + 1);
     let caught_up = wait_for_stats(&service, |stats| {
-        stats.published_basis_t >= committed.basis_t
+        stats.published_basis_t >= queued_two.basis_t
             && stats.jobs_completed >= 2
             && stats.total_bytes == 0
             && !stats.job_in_flight
@@ -433,7 +521,7 @@ fn background_publication_bounds_novelty_without_hiding_committed_replays() {
     assert_eq!(caught_up.jobs_failed, 0);
 
     let resumed = client
-        .transact(request("pressure-resumed", 2), Duration::from_secs(2))
+        .transact(request("pressure-resumed", 6), Duration::from_secs(2))
         .unwrap();
     wait_for_stats(&service, |stats| {
         stats.published_basis_t >= resumed.basis_t && stats.total_bytes == 0
@@ -465,7 +553,7 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     .unwrap();
     let client = service.client();
     let initial = wait_for_stats(&service, |stats| {
-        stats.published_basis_t == initial_basis && stats.jobs_completed == 1
+        stats.published_basis_t == initial_basis && stats.jobs_completed == 0
     });
 
     // Hold node access so the worker selects the old revision but cannot reach
@@ -483,26 +571,37 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
     wait_for_stats(&service, |stats| stats.job_in_flight);
     let row = poison
         .query_one(
-            "SELECT tx_hash, state_hash, payload FROM atomic_transactions \
-              WHERE database_id = $1 AND basis_t = $2",
+            "SELECT tx_hash, state_hash, eidx_frontier \
+               FROM atomic_generation_transactions \
+              WHERE database_id = $1 AND basis_t = $2 \
+                AND generation = (SELECT log_generation FROM atomic_heads \
+                                   WHERE database_id = $1)",
             &[&database_id, &(committed.basis_t as i64)],
         )
         .unwrap();
     let tx_hash: Vec<u8> = row.get(0);
     let state_hash: Vec<u8> = row.get(1);
-    let payload: Vec<u8> = row.get(2);
-    let durable = decode_transaction(&payload).unwrap();
+    let eidx_frontier: i64 = row.get(2);
     let source = poison
         .query_one(
-            "SELECT publication_revision, manifest_hash \
-               FROM atomic_tree_publications WHERE database_id = $1 \
-               ORDER BY publication_revision DESC LIMIT 1",
+            "SELECT p.publication_revision, p.manifest_hash, \
+                    m.log_generation, m.lineage_id \
+               FROM atomic_tree_publications p \
+               JOIN atomic_tree_manifests m \
+                 ON m.database_id = p.database_id \
+                AND m.publication_revision = p.publication_revision \
+                AND m.basis_t = p.basis_t AND m.tx_hash = p.tx_hash \
+                AND m.manifest_hash = p.manifest_hash \
+              WHERE p.database_id = $1 \
+               ORDER BY p.publication_revision DESC LIMIT 1",
             &[&database_id],
         )
         .unwrap();
     let current_revision: i64 = source.get(0);
     let poison_revision = current_revision.checked_add(1).unwrap();
     let source_manifest_hash: Vec<u8> = source.get(1);
+    let log_generation: i64 = source.get(2);
+    let lineage_id: Option<String> = source.get(3);
     assert_eq!(
         u64::try_from(current_revision).unwrap(),
         initial.published_revision
@@ -524,8 +623,9 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
         .execute(
             "INSERT INTO atomic_tree_manifests \
                (database_id, publication_revision, basis_t, tx_hash, state_hash, \
-                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9)",
+                excision_generation, eidx_frontier, manifest_version, manifest_hash, payload, \
+                log_generation, lineage_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11)",
             &[
                 &database_id,
                 &poison_revision,
@@ -533,9 +633,11 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
                 &tx_hash,
                 &state_hash,
                 &generation,
-                &(durable.eidx_frontier as i64),
+                &eidx_frontier,
                 &&poison_hash[..],
                 &poison_payload,
+                &log_generation,
+                &lineage_id,
             ],
         )
         .unwrap();
@@ -549,38 +651,38 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
         )
         .unwrap();
     assert_eq!(copied, 8);
-    poison
-        .execute(
-            "INSERT INTO atomic_tree_delta_headers \
-                   (manifest_hash, predecessor_manifest_hash, delta_mode, \
-                    expected_node_count, staged_node_count, delta_set_hash, \
-                    added_node_count, added_set_hash, delta_state) \
-             VALUES ($1, $2, 0, 0, 0, decode(repeat('00', 32), 'hex'), \
-                     0, decode(repeat('00', 32), 'hex'), 1)",
-            &[&&poison_hash[..], &source_manifest_hash],
-        )
-        .unwrap();
+    stage_zero_delta_publication_work(
+        &mut poison,
+        &database_id,
+        &poison_hash,
+        &source_manifest_hash,
+        log_generation,
+        current_revision,
+    );
     poison
         .execute(
             "INSERT INTO atomic_tree_publications \
-               (database_id, publication_revision, basis_t, tx_hash, manifest_hash) \
-             VALUES ($1, $2, $3, $4, $5)",
+               (database_id, publication_revision, basis_t, tx_hash, manifest_hash, \
+                log_generation) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
             &[
                 &database_id,
                 &poison_revision,
                 &(committed.basis_t as i64),
                 &tx_hash,
                 &&poison_hash[..],
+                &log_generation,
             ],
         )
         .unwrap();
+    finish_zero_delta_publication_work(&mut poison, &poison_hash);
     poison.commit().unwrap();
 
     let repaired = wait_for_stats(&service, |stats| {
-        stats.published_basis_t == committed.basis_t
+            stats.published_basis_t == committed.basis_t
             && stats.published_revision > u64::try_from(poison_revision).unwrap()
             && stats.published_revision == stats.newest_observed_revision
-            && stats.jobs_completed == 2
+            && stats.jobs_completed == 1
             && stats.total_bytes == 0
     });
     assert_eq!(
