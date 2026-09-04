@@ -370,6 +370,18 @@ impl MetadataProjection {
     }
 
     fn apply(&self, transactions: &[DurableTransaction]) -> Result<Self, SemanticError> {
+        if !transactions.iter().any(|transaction| {
+            transaction
+                .tx_data
+                .iter()
+                .any(|datom| schema_information_attribute(datom.attribute))
+        }) {
+            return Ok(self.clone());
+        }
+
+        // Schema/ident edits are rare. Only those edits copy the small
+        // authenticated working set and derive a replacement projection;
+        // ordinary transaction successors retain all three resident Arcs.
         let mut current = self.schema_current.to_vec();
         let mut idents = (*self.idents).clone();
         for transaction in transactions {
@@ -4150,6 +4162,13 @@ impl TieredSnapshot {
     /// datoms for this exact immutable snapshot.
     pub fn schema(&self) -> &crate::Schema {
         &self.state.metadata.schema
+    }
+
+    /// Share this exact value's authenticated resident schema projection.
+    /// The projection is immutable and already owned by the tiered state, so
+    /// an ordinary transaction need not copy every installed attribute.
+    pub(crate) fn schema_arc(&self) -> Arc<crate::Schema> {
+        Arc::clone(&self.state.metadata.schema)
     }
 
     /// Physical AVET availability is an immutable property of this native

@@ -151,6 +151,71 @@ fn positive_item_count_predicate() -> Program {
 }
 
 #[test]
+fn native_data_commits_share_the_schema_projection_until_a_schema_edit() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("native_schema_arc_sharing");
+    let mut store = migrated_store(&connection);
+    let eager = store.create_database(&database_id, schema()).unwrap();
+    publish_native_base(&connection, &database_id);
+
+    let ops = add_item("shared-schema", 1);
+    let expected_data = eager.with(&ops, 2_000).unwrap();
+    let ordinary = store
+        .transact_with_fault(
+            &database_id,
+            "native-schema-sharing-data",
+            eager.basis_t(),
+            &ops,
+            2_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert_eq!(ordinary.tx_data, expected_data.tx_data);
+    assert_eq!(ordinary.database.schema(), expected_data.db_after.schema());
+    assert!(
+        std::sync::Arc::ptr_eq(
+            &ordinary.db_before.schema_arc(),
+            &ordinary.database.schema_arc(),
+        ),
+        "an ordinary native successor must retain its resident schema Arc"
+    );
+
+    let mut altered = ordinary
+        .database
+        .schema()
+        .attribute(ITEM_COUNT)
+        .unwrap()
+        .clone();
+    altered.no_history = true;
+    let schema_ops = [TxOp::AlterAttribute(altered)];
+    let expected_schema = expected_data.db_after.with(&schema_ops, 3_000).unwrap();
+    let schema_edit = store
+        .transact_with_fault(
+            &database_id,
+            "native-schema-sharing-edit",
+            ordinary.basis_t,
+            &schema_ops,
+            3_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert_eq!(schema_edit.tx_data, expected_schema.tx_data);
+    assert_eq!(
+        schema_edit.database.schema(),
+        expected_schema.db_after.schema()
+    );
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            &schema_edit.db_before.schema_arc(),
+            &schema_edit.database.schema_arc(),
+        ),
+        "a native schema edit must install a replacement projection"
+    );
+}
+
+#[test]
 fn transaction_read_work_includes_predicate_and_commitment_reads() {
     let Some(connection) = connection() else {
         return;

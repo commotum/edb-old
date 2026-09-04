@@ -543,6 +543,17 @@ impl DatabaseValue {
         }
     }
 
+    /// Share the immutable schema projection carried by this database value.
+    /// This is the ownership counterpart of [`Self::schema`]: assessment can
+    /// retain an unchanged projection without a whole-schema clone.
+    pub(crate) fn schema_arc(&self) -> Arc<Schema> {
+        match &self.basis {
+            ReadBasis::Eager(database) => database.schema_arc(),
+            ReadBasis::Native(snapshot) => snapshot.schema_arc(),
+            ReadBasis::TransactionOverlay(overlay) => Arc::clone(&overlay.schema),
+        }
+    }
+
     /// Resolve an ident from the immutable basis' derived ident cache.
     /// Datomic's temporal predicates window index data, not this dictionary.
     pub fn entid(&self, ident: &Keyword) -> Option<u64> {

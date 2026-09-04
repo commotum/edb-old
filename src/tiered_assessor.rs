@@ -455,7 +455,7 @@ pub(crate) fn assess_tiered_with_remaining_limits(
     dedupe(&mut logical);
     validate_same_transaction(base.schema(), &logical)?;
 
-    let successor_schema = Arc::new(derive_successor_schema(&mut reader, &logical, tx)?);
+    let successor_schema = derive_successor_schema(&mut reader, &logical, tx)?;
     validate_schema_transition(&mut reader, &successor_schema, &logical)?;
     validate_delta_successor(&mut reader, &successor_schema, &logical)?;
     validate_ensure_attributes(&mut reader, &logical, &ensures)?;
@@ -490,8 +490,18 @@ fn prepare_schema_information(
     tx: u64,
     mut allocation_frontier: u64,
 ) -> Result<(Vec<LogicalDatom>, u64), SemanticError> {
+    if !ops
+        .iter()
+        .any(|op| matches!(op, TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_)))
+    {
+        return Ok((Vec::new(), allocation_frontier));
+    }
+
     let mut seen = BTreeSet::new();
     let mut installed = Vec::new();
+    // A real schema edit needs one mutable candidate for cross-attribute
+    // validation. Ordinary data transactions return above and never copy the
+    // resident schema merely to discover that it did not change.
     let mut candidate = reader.base.schema().clone();
     let mut changes = Vec::<(crate::Attribute, bool)>::new();
     let exact_upgrade = is_exact_excision_bootstrap_ops(reader.base.schema(), ops);
@@ -712,7 +722,7 @@ fn derive_successor_schema(
     reader: &mut Reader<'_>,
     logical: &[LogicalDatom],
     tx: u64,
-) -> Result<Schema, SemanticError> {
+) -> Result<Arc<Schema>, SemanticError> {
     // Schema and ident projections are resident authenticated metadata. Most
     // transactions do not touch either; preserve the immutable projection
     // directly instead of issuing one durable EAVT seek per attribute merely
@@ -724,7 +734,7 @@ fn derive_successor_schema(
                 DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
             )
     }) {
-        return Ok(reader.base.schema().clone());
+        return Ok(reader.base.schema_arc());
     }
 
     // The authenticated Schema is the resident cache recovered `Db` keeps for
@@ -887,7 +897,7 @@ fn derive_successor_schema(
             }),
     );
     let idents = IdentIndex::derive(ident_assertions.iter(), DB_IDENT as u32)?;
-    Schema::derive_from_information(&current, &idents)
+    Schema::derive_from_information(&current, &idents).map(Arc::new)
 }
 
 fn ident_datom(entity: u64, ident: crate::Keyword, tx: u64) -> Datom {

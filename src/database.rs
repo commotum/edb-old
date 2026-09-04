@@ -404,6 +404,13 @@ impl Database {
         &self.schema
     }
 
+    /// Share the immutable resident schema projection without rebuilding it.
+    /// Transaction assessment uses this at the unchanged-schema fast path;
+    /// the eager kernel already stores the projection behind an `Arc`.
+    pub(crate) fn schema_arc(&self) -> Arc<Schema> {
+        Arc::clone(&self.schema)
+    }
+
     /// Resolve any entity ident, including enum values and historical aliases.
     pub fn entid(&self, ident: &crate::Keyword) -> Option<u64> {
         self.idents.resolve(ident)

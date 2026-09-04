@@ -20,6 +20,43 @@ fn wide_schema(attribute_count: u32) -> Schema {
 }
 
 #[test]
+fn ordinary_assessment_shares_schema_and_real_schema_edits_replace_it() {
+    let database = Database::new(wide_schema(64)).unwrap();
+    let value = DatabaseValue::eager(Arc::new(database));
+    let resident = value.schema_arc();
+    let ops = [TxOp::Add {
+        entity: EntityRef::Temp("ordinary".into()),
+        attribute: 1_063,
+        value: Value::Long(7).into(),
+    }];
+
+    let ordinary = assess_tiered(&value, &ops, 10).unwrap();
+    assert!(
+        Arc::ptr_eq(&resident, &ordinary.successor_schema),
+        "a data transaction must retain the resident schema allocation"
+    );
+    assert!(
+        Arc::ptr_eq(&resident, &ordinary.db_after.schema_arc()),
+        "the transaction overlay must carry the same immutable projection"
+    );
+
+    let mut altered = value.schema().attribute(1_063).unwrap().clone();
+    altered.no_history = true;
+    let schema_edit = assess_tiered(&value, &[TxOp::AlterAttribute(altered)], 10).unwrap();
+    assert!(
+        !Arc::ptr_eq(&resident, &schema_edit.successor_schema),
+        "a material schema edit must publish a new immutable projection"
+    );
+    assert!(
+        schema_edit
+            .successor_schema
+            .attribute(1_063)
+            .unwrap()
+            .no_history
+    );
+}
+
+#[test]
 fn localized_schema_alter_reads_only_local_information() {
     const ATTRIBUTE_COUNT: u32 = 512;
     const TARGET: u32 = 1_000 + ATTRIBUTE_COUNT - 1;
