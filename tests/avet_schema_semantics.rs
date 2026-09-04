@@ -283,7 +283,13 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
         .get(0);
     assert!(released);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while service.background_indexing_stats().published_basis_t < index_enabled.basis_t {
+    loop {
+        let stats = service.background_indexing_stats();
+        if stats.published_basis_t >= index_enabled.basis_t
+            && stats.pending_avet_projections == 0
+        {
+            break;
+        }
         assert!(
             Instant::now() < deadline,
             "schema-triggered AVET publication did not complete"

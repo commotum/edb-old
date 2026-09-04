@@ -226,7 +226,8 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
             );
             let mut changed = false;
             for datom in &mut datoms {
-                if datom.entity == user(42)
+                if order == IndexOrder::Aevt
+                    && datom.entity == user(42)
                     && datom.attribute == ITEM_VALUE
                     && datom.value.stored_eq(&Value::String("authentic".into()))
                 {
@@ -247,7 +248,10 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
             all_nodes.extend(build.nodes.into_nodes());
         }
     }
-    assert_eq!(changed_roots.len(), 6);
+    assert_eq!(
+        changed_roots,
+        vec![(false, IndexOrder::Aevt), (true, IndexOrder::Aevt)]
+    );
 
     let mut raw = Client::connect(&connection, NoTls).unwrap();
     let coordinate = raw
@@ -358,12 +362,13 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
     assert!(shallow.healthy(), "{:?}", shallow.problems);
 
     // The explicit broad operation also reconstructs the authoritative log
-    // value and compares its semantic information with the physical EAVT.
+    // value. EAVT remains authentic in this forgery; only cross-checking each
+    // independently hashed sibling projection can detect the changed AEVT.
     let deep = operator.inspect_database(&database_id, true).unwrap();
     assert!(!deep.healthy());
     assert!(deep.problems.iter().any(|problem| {
-        problem.code == "integrity/tree-semantic-mismatch"
-            && problem.message.contains("current/history information")
+        problem.code == "integrity/tree-derived-index-mismatch"
+            && problem.message.contains("Aevt")
     }));
 }
 

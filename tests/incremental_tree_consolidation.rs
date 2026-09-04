@@ -10,6 +10,7 @@ mod common;
 use common::InformationSource;
 
 const ITEM_COUNT: u32 = 1_000;
+const AVET_BACKFILL_DATOMS: u32 = 1_200;
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
@@ -30,7 +31,7 @@ fn await_background_publication(
     service: &atomic_core::TransactionService,
     basis_t: u64,
 ) -> atomic_core::BackgroundIndexingStats {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let stats = service.background_indexing_stats();
         if stats.published_basis_t >= basis_t && stats.pending_avet_projections == 0 {
@@ -349,11 +350,16 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         .create_database(&database_id, schema(false, false))
         .unwrap();
     let service = common::start_service(&connection, &database_id);
-    let operations = (0..256)
+    // AEVT entity order deliberately opposes value order. More than two
+    // fixed 512-datom source chunks forces multiple spill runs and a real
+    // four-way external merge before bounded same-basis projection copies.
+    let operations = (0..AVET_BACKFILL_DATOMS)
         .map(|index| TxOp::Add {
             entity: EntityRef::Temp(format!("item-{index}")),
             attribute: ITEM_COUNT,
-            value: TxValue::Scalar(Value::Long(salt + index)),
+            value: TxValue::Scalar(Value::Long(
+                salt + i64::from(AVET_BACKFILL_DATOMS - index),
+            )),
         })
         .collect::<Vec<_>>();
     let populated = common::transact(
@@ -404,8 +410,14 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
     assert!(enabled_build.reused);
     assert!(enabled.tx_data.len() < 10);
     let enabled_physical_avet = latest_avet_counts(&connection, &database_id);
-    assert!(enabled_physical_avet.0 - baseline_physical_avet.0 >= 256);
-    assert!(enabled_physical_avet.1 - baseline_physical_avet.1 >= 256);
+    assert!(
+        enabled_physical_avet.0 - baseline_physical_avet.0
+            >= i64::from(AVET_BACKFILL_DATOMS)
+    );
+    assert!(
+        enabled_physical_avet.1 - baseline_physical_avet.1
+            >= i64::from(AVET_BACKFILL_DATOMS)
+    );
     assert!(
         enabled_physical_avet.0 + enabled_physical_avet.1 > enabled.tx_data.len() as i64,
         "physical AVET roots did not expose the historical attribute-range backfill"
@@ -427,7 +439,7 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         .into_iter()
         .filter(|datom| datom.attribute == ITEM_COUNT)
         .count();
-    assert_eq!(enabled_avet, 256);
+    assert_eq!(enabled_avet, AVET_BACKFILL_DATOMS as usize);
 
     let mut unindexed = enabled
         .db_after
@@ -463,8 +475,14 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
     assert!(disabled.tx_data.len() < 10);
     let disabled_physical_avet = latest_avet_counts(&connection, &database_id);
     let schema_tail_noise = disabled.tx_data.len() as i64;
-    assert!(enabled_physical_avet.0 - disabled_physical_avet.0 >= 256 - schema_tail_noise);
-    assert!(enabled_physical_avet.1 - disabled_physical_avet.1 >= 256 - schema_tail_noise);
+    assert!(
+        enabled_physical_avet.0 - disabled_physical_avet.0
+            >= i64::from(AVET_BACKFILL_DATOMS) - schema_tail_noise
+    );
+    assert!(
+        enabled_physical_avet.1 - disabled_physical_avet.1
+            >= i64::from(AVET_BACKFILL_DATOMS) - schema_tail_noise
+    );
     let final_snapshot = Peer::connect(&connection, &database_id, 64)
         .unwrap()
         .snapshot();
