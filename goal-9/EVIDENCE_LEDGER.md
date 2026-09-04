@@ -527,6 +527,152 @@ requirements are labeled rather than misrepresented as Datomic behavior.
   physical encoding identity; republishing a pointer cannot bless corrupt
   content.
 
+### C32 — Make the ordinary peer API return the native immutable value
+
+- **Docs:** a connection returns a recent immutable database value and `sync`
+  returns a database value at or beyond the requested t
+  (`04_transactions/06_client_synchronization.md:12-35`). Databases may exceed
+  application memory because immutable index segments are fetched and cached
+  on demand (`00_start_here/00_introduction.md:69-100`).
+- **1.0.7705:** `Connection.db` dereferences the shared immutable `Db`, and
+  `sync` delivers that same tiered value (`peer/src-clj/datomic/peer.clj:650-715,
+  792-793`). The recovered `Db` itself owns memory/indexing/durable tiers
+  (`peer/src-clj/datomic/db.clj:4719-4744`); there is no separate eager public
+  database representation.
+- **Observed native gap:** `Peer::db`, `try_db`, `sync`, and `sync_to` select
+  the compatibility `Database` and can materialize all current and historical
+  information. The bounded methods have secondary names such as
+  `database_value`, `sync_snapshot`, and `sync_to_snapshot`.
+- **Repair:** make the normal `db`/`sync` surface return `DatabaseValue` (or its
+  native snapshot) and rename eager reconstruction as an explicit oracle or
+  administrative operation. Add one cloneable connection facade that combines
+  this advancing peer state with transaction submission; keeping unrelated
+  read and write handles as the only application API does not match the
+  recovered connection boundary.
+
+### C33 — Preserve complete transaction reports at the connection boundary
+
+- **Docs:** every report contains `db-before`, `db-after`, and `tx-data`; a
+  direct transaction result also contains tempid resolutions
+  (`04_transactions/03_processing_transactions.md:25-59` and
+  `09_optional/00_pro_client/04_client_api_sync.md:459-472`). The observation
+  queue is opt-in and must be drained by the application.
+- **1.0.7705:** `notify-data` captures the old `Db`, atomically installs the
+  successor, and constructs `{:db-before old-db :db-after new-db :tx-data data
+  :tempids tempids}` only for a pending submitter or installed report queue;
+  the submitter future is delivered before queue insertion
+  (`peer/src-clj/datomic/peer.clj:633-715`).
+- **Observed native gap:** the peer queue stores only `DurableTransaction`, so
+  it discards both immutable database values and tempids even though the
+  generation log retains the information needed to reconstruct them.
+- **Repair:** queue a native `PeerTransactionReport` with exact shared/pinned
+  database values, datoms, and tempids. Construct each intermediate successor
+  while adopting a tail, enqueue only after atomic peer publication, retain
+  nothing while disabled, and preserve submitter-before-observer ordering in
+  the combined connection facade.
+
+### C34 — Keep raw index APIs lazy in both directions
+
+- **Docs:** `datoms`, `seek-datoms`, and `rseek-datoms` return index traversal
+  values; forward and reverse seeks start on opposite sides of the virtual
+  component key and continue lazily as consumed
+  (`06_indexes/04_index_apis.md` and `06_indexes/05_rseek_datoms.md:8-48`).
+- **1.0.7705:** `Database` returns `Iterable<Datom>` for all three operations
+  (`peer/src-java/datomic/Database.java:207-244`); `rseek-index` merges reverse
+  iterators from memory, indexing, mid, durable, and history tiers
+  (`peer/src-clj/datomic/db.clj:1966-2000`), backed by persistent BTSet reverse
+  seek (`peer/src-clj/datomic/btset.clj:157-416`).
+- **Observed native gap:** forward native cursors exist internally, but the
+  public `datoms`/range helpers collect into `Vec`; the native value has no
+  reverse cursor and tests reach the eager oracle to exercise reverse seek.
+- **Repair:** expose fallible lazy current/history/temporal cursors as the
+  ordinary API, retain explicit collection conveniences under honest names,
+  and implement reverse durable-tree/recent-tier merge with the documented
+  virtual seek positioning. A forward collect followed by `reverse` is not a
+  bounded implementation.
+
+### C35 — Accept all documented database time points on native values
+
+- **Docs:** `as-of` and `since` accept a transaction id, basis t, or instant;
+  instant selection is less precise when several events share wall-clock time
+  (`02_core_concepts/02_database_filters.md:39-81`).
+- **1.0.7705:** `as-of-t` strips the partition from numeric t/tx values and
+  seeks AVET on `:db/txInstant` for dates; `Db.since` and `Db.asOf` store the
+  resolved t on the same immutable tiered value
+  (`peer/src-clj/datomic/db.clj:3995-4048,5139-5140`). `entid-at` uses the same
+  resolution to construct an EAVT boundary (`:4049-4095`).
+- **Observed native gap:** `DatabaseValue::as_of`/`since` accept only an
+  already-decoded t. Passing a transaction entity is interpreted as an
+  enormous t, and instant APIs exist only on the eager oracle.
+- **Repair:** add an explicit Rust time-point type (t, tx entity, instant),
+  bounded native AVET resolution, `as_of`/`since` conveniences, and `entid_at`.
+  Keep current-basis schema/ident interpretation and exact temporal filtering.
+
+### C36 — Preserve reference-shaped values throughout transaction input
+
+- **Docs:** refs can be specified by entity id, ident, lookup ref, or tempid in
+  transaction value position; tuples may contain ref slots, and tuple slots
+  may be nil (`04_transactions/02_transaction_data.md:57-71,248-341` and
+  `03_schema/00_schema_data_reference.md:302-324`). Tempids name new entities,
+  not free-standing values.
+- **1.0.7705:** `require-tuple-ids` resolves identifiers in homogeneous and
+  heterogeneous ref slots (`peer/src-clj/datomic/db.clj:1261-1294`),
+  `local-tuple` preserves symbolic tempids until id allocation (`:6940-6961`),
+  and `replace-tempids` resolves ref and tuple-ref positions while raising
+  `:db.error/tempid-not-an-entity` for a tempid used only as V
+  (`:7366-7455`). Identity upsert examines these unresolved values before
+  replacement (`:6640-6819`).
+- **Observed native gap:** `TxValue` can represent one scalar or one entity
+  reference, but `Value::Tuple` can contain only already-stored `Value`s.
+  Tuple ref slots therefore cannot carry idents, lookup refs, or tempids; ref
+  lookup values have the same restriction. The first native allocator also
+  incorrectly issued an entity for a tempid appearing only in V.
+- **Repair:** retain the Goal 16 ref-identity/value-only-tempid correction and
+  add a recursive transaction-only tuple/reference representation. Resolve it
+  against db-before in the same source order, preserve symbolic tempids through
+  upsert, validate final stored tuple shape, and version the persisted request
+  encoding without changing the stored `Value` domain.
+
+### C37 — Do not turn implementation safeguards into default query semantics
+
+- **Docs:** query result cardinality follows the find specification; timeouts
+  are explicit request options (`05_query_and_pull/01_executing_queries.md:52-117`).
+  Pull's cardinality-many default limit of 1000 is documented, while unlimited
+  recursive pull is a legal selector (`05_query_and_pull/03_pull.md:309-369,
+  543-559`).
+- **1.0.7705:** rule evaluation reaches a fixed point, pull carries selector
+  recursion state, and operational cancellation/timeout is separate from the
+  language result (`peer/src-clj/datomic/datalog.clj:1766-1895,2974-3041,
+  3245-3265`; `pull.clj:651-747`).
+- **Observed native gap:** default `QueryControl` silently caps results at
+  100,000, intermediate rows at 1,000,000, and work at 10,000,000;
+  `PullControl` silently caps traversal at 100,000 entities and depth 512.
+  Those defaults can reject a valid documented query/pull even when the caller
+  requested no limit.
+- **Repair:** make finite resource controls explicit rather than default
+  language behavior, use overflow-safe accounting, and implement unlimited
+  recursion without relying on an unsafe Rust call stack. Keep the documented
+  per-cardinality pull limit.
+
+### C38 — Reuse and prefetch immutable transaction reads
+
+- **Docs:** db-before reads bound transaction latency, Datomic prefetches as
+  soon as dependencies are known, and optional peer hints can make that
+  prefetch exhaustive without changing semantics
+  (`04_transactions/08_transaction_hints.md:9-38`).
+- **1.0.7705:** `ProcessExpander` dispatches identity, composite constituent,
+  redundancy, and uniqueness probes (`peer/src-clj/datomic/db.clj:7051-7354,
+  7451-7473`); the transactor owns bounded prefetch workers and immutable
+  segment cache warming (`transactor/src-clj/datomic/update.clj:163-223,
+  346-546`).
+- **Observed native gap:** Goal 16's assessor can issue and charge the identical
+  prefix read repeatedly within one transaction. Its shared node cache reduces
+  decoding but does not remove repeated cursor traversal or SQL/cache probes.
+- **Repair:** at minimum memoize exact transaction-local prefixes and report
+  hit/miss work accurately. Defer a concurrent client-hint protocol only as an
+  explicit performance extension; do not claim recovered prefetch parity from
+  the cache alone.
+
 ## Internal correctness/evidence requirements
 
 These do not pretend to be Datomic API semantics, but follow from Goal 0's own

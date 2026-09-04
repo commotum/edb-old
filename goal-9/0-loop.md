@@ -5,7 +5,7 @@
    execution.
 2. Select the first unfinished Goal 9 stage. Keep exactly one corrective child
    active. Stage 1 maps to `goal-10/`, Stage 2 to `goal-11/`, and so on through
-   Stage 8 at `goal-17/`.
+   Stage 11 at `goal-20/`.
 3. If that child folder is absent, use `$scaffold-goal` to create exactly its
    `0-plan.md`, `0-loop.md`, and `0-prompt.md`. If it exists, preserve and resume
    it. Creating a scaffold is never stage completion.
@@ -23,7 +23,7 @@
 7. Record only material decisions, evidence, deviations, and truthful status in
    the child plan. When its full exit condition is met, update this plan and the
    owning reopened Goal 0 stages, then immediately start the next child.
-8. After all children appear complete, run the integrated Goal 17 gate and
+8. After all children appear complete, run the integrated Goal 20 gate and
    audit the original Goal 0 objective rather than child labels. Reopen the
    owning child for any gap.
 9. Stop only for a concrete blocker requiring user authority or an external

@@ -49,14 +49,21 @@ success condition is genuinely established.
 - `EVIDENCE_LEDGER.md` is the verified repair baseline. It also records prior
   audit claims that were narrowed or refuted during the source cross-check.
 - Goals 10 through 15 now close identity/successor validity, schema authority,
-  fragmented writes and acknowledgement, persistent/lazy peer values, exact
-  query-source propagation, and PostgreSQL lifecycle safety. Goal 16 is the
-  first unfinished child.
+  fragmented writes and acknowledgement, persistent/lazy peer internals,
+  exact query-source propagation, and PostgreSQL lifecycle safety. Goal 16 is
+  the first unfinished child.
 - Rechecking Goal 13 against the recovered tiered `Db` exposed a distinct
   production-writer gap: `PostgresStore.current` still retains the complete
   eager oracle even if peers and background publication become lazy. Goal 16
   owns removing that shortcut after Goal 14 supplies the common semantic
-  access seam; Goal 17 is now the integrated gate.
+  access seam.
+- Goal 16 implementation exposed additional public-boundary gaps that the old
+  “integrated Goal 17” bucket would have hidden: ordinary `Peer::db`/`sync`
+  still materialize the eager oracle, peer reports discard database values and
+  tempids, native reverse/temporal index cursors are absent, transaction tuple
+  refs are not representable, and default query controls impose undocumented
+  semantic ceilings. Source-backed ledger entries C32–C38 now split those
+  repairs into Goals 17–19; Goal 20 is the integrated gate.
 - The current PostgreSQL log/head/idempotency transaction is a strong base and
   should be retained while its APIs and surrounding service are corrected.
 
@@ -255,7 +262,66 @@ database history; localized transactions load bounded index ranges, preserve
 all Goal 12 acknowledgement/fencing semantics, and produce exactly the eager
 oracle result across restart and failover.
 
-### 8. Integrated production evidence (`goal-17/`)
+### 8. Native connection and immutable database API (`goal-17/`)
+
+**Status:** Pending.
+
+**Outcome:** The ordinary application boundary is one cloneable connection
+whose `db`, synchronization, transaction, report, entity, query, pull, and raw
+index operations all use exact native immutable values; the eager database is
+an explicitly named oracle only.
+
+**Focus:** C32–C35; combine the advancing peer and transaction client; make
+native values the default `db`/`sync` result; complete peer reports; expose
+lazy forward/reverse cursors over current/history/time views; t/tx/instant time
+points and `entid-at`; preserve explicit eager-oracle/admin escape hatches.
+
+**Completion signal:** A source-witness API suite proves no ordinary peer call
+materializes the eager oracle; one connection transacts and observes complete
+reports in source order; raw index iteration is lazy in both directions across
+durable/recent and temporal/history values; all time-point forms agree.
+
+### 9. Transaction input and speculative-value closure (`goal-18/`)
+
+**Status:** Pending.
+
+**Outcome:** Every documented entity-reference shape can cross the native
+transaction boundary, and speculative native database successors remain real,
+chainable immutable values rather than one-shot validation overlays.
+
+**Focus:** C36 and the remaining part of C38; recursive transaction-only tuple
+elements; ref-valued lookup keys; db-before identifier resolution; V-only
+tempid rejection; unique/upsert ordering; versioned request/program encoding;
+public pure `DatabaseValue::with`; chainable bounded overlays; transaction-local
+read memoization and truthful I/O accounting.
+
+**Completion signal:** Eager/native/generated differentials cover scalar and
+tuple refs by id, ident, lookup ref, and tempid, including invalid V-only use;
+multiple speculative successors can be chained without full materialization;
+durable/retry/restart encoding remains exact and old supported payloads decode.
+
+### 10. Query/pull limits and surface truth (`goal-19/`)
+
+**Status:** Pending.
+
+**Outcome:** The implemented local query and pull model has no accidental
+finite semantics, and every documented but unimplemented API is either supplied
+idiomatically in Rust or classified as a genuine non-core omission against the
+original objective with no misleading parity claim.
+
+**Focus:** C37; remove default result/work/entity/depth ceilings; stack-safe
+unlimited pull recursion; audit fulltext, nested `q`, log query helpers, random
+aggregates, return maps, pull transforms, `qseq`, index-pull, and transaction
+hints against docs and recovered source; implement the central/low-machinery
+pieces and record why JVM/classpath or specialized secondary features remain
+out of the core port.
+
+**Completion signal:** Large-result and deep-recursion witnesses succeed by
+default and fail only under explicit controls; the supported surface has direct
+semantic fixtures; the deviation ledger names every remaining documented API
+gap and demonstrates that none weakens Goal 0's central benefits.
+
+### 11. Integrated production evidence (`goal-20/`)
 
 **Status:** Pending.
 
@@ -264,8 +330,8 @@ and Goal 0 can be closed without exceptions hidden as “native boundaries.”
 
 **Focus:** Explicit integration harness; same-database contention; long
 histories and data larger than cache; abrupt process/server failure; recovery
-latency; mixed-version rejection; observability; class/namespace-to-Rust and
-deviation ledger reconciliation.
+latency; mixed-version rejection; observability; public connection workflow;
+class/namespace-to-Rust and deviation ledger reconciliation.
 
 **Completion signal:** A reproducible gate provisions PostgreSQL, proves every
 integration/restart/fault test actually ran, meets stated scale/boundedness
