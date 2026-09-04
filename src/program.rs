@@ -737,11 +737,12 @@ pub struct ProgramRuntime;
 
 /// The two concrete read capabilities needed by persisted programs.
 ///
-/// Transaction programs retain the eager db-before path used by the
-/// transactor. Query programs may instead receive an exact `DatabaseValue`,
-/// whose eager/native representation and temporal/filter state remain hidden
-/// behind the same small set of reads. This is deliberately not a storage
-/// trait: PostgreSQL peer snapshots are already one concrete database value.
+/// The eager variant preserves the semantic oracle and public convenience
+/// APIs. Authoritative persisted transactions, predicates, and queries use an
+/// exact `DatabaseValue`, whose eager/native representation and
+/// temporal/filter state remain hidden behind the same small set of reads.
+/// This is deliberately not a storage trait: PostgreSQL peer snapshots are
+/// already one concrete database value.
 #[derive(Clone, Copy)]
 enum ProgramRead<'a> {
     Eager(&'a Database),
@@ -1093,6 +1094,7 @@ impl ProgramRuntime {
         })
     }
 
+    #[allow(dead_code)] // retained as the eager semantic-oracle adapter
     pub(crate) fn execute_prevalidated_with_budget(
         &self,
         program: &ValidatedProgram,
@@ -1108,6 +1110,28 @@ impl ProgramRuntime {
         self.execute_prevalidated_runtime_with_budget(program, database, &arguments, budget)
     }
 
+    /// Execute already validated persisted code against one exact immutable
+    /// database value. Unlike [`Self::execute_query`], this internal entry
+    /// point accepts every program role: transaction functions and entity
+    /// predicates need the same lazy db-before/db-after read boundary as
+    /// queries do. The eager entry above remains a compatibility adapter for
+    /// the semantic reference kernel.
+    pub(crate) fn execute_prevalidated_exact_with_budget(
+        &self,
+        program: &ValidatedProgram,
+        database: &DatabaseValue,
+        arguments: &[Value],
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<ProgramOutput, SemanticError> {
+        let arguments = arguments
+            .iter()
+            .cloned()
+            .map(RuntimeValue::Scalar)
+            .collect::<Vec<_>>();
+        self.execute_prevalidated_runtime_exact_with_budget(program, database, &arguments, budget)
+    }
+
+    #[allow(dead_code)] // retained as the eager semantic-oracle adapter
     pub(crate) fn execute_prevalidated_runtime_with_budget(
         &self,
         program: &ValidatedProgram,
@@ -1119,6 +1143,23 @@ impl ProgramRuntime {
             self.execute_validated_runtime_with_budget_inner(
                 program.program(),
                 ProgramRead::Eager(database),
+                arguments,
+                budget,
+            )
+        })
+    }
+
+    pub(crate) fn execute_prevalidated_runtime_exact_with_budget(
+        &self,
+        program: &ValidatedProgram,
+        database: &DatabaseValue,
+        arguments: &[RuntimeValue],
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<ProgramOutput, SemanticError> {
+        contain_runtime_panic(|| {
+            self.execute_validated_runtime_with_budget_inner(
+                program.program(),
+                ProgramRead::Exact(database),
                 arguments,
                 budget,
             )
@@ -2999,6 +3040,126 @@ mod tests {
                 .execute(&transaction, &database, &[], ProgramControl::default())
                 .unwrap(),
             ProgramOutput::Transaction(forms) if forms.is_empty()
+        ));
+    }
+
+    #[test]
+    fn prevalidated_transaction_and_predicates_share_the_exact_read_boundary() {
+        let (database, entity) = query_database();
+        let exact_database = database.database_value();
+
+        let transaction = ValidatedProgram::from_canonical(Program {
+            kind: ProgramKind::Transaction,
+            arity: 0,
+            instructions: vec![
+                Instruction::PushEntity(EntityRef::Id(entity)),
+                Instruction::Duplicate,
+                Instruction::LoadOne(NAME),
+                Instruction::EmitAdd(NAME),
+                Instruction::Return,
+            ],
+        });
+        transaction.program().validate().unwrap();
+        let mut eager_budget = ProgramBudget::new(ProgramControl::default()).unwrap();
+        let mut exact_budget = ProgramBudget::new(ProgramControl::default()).unwrap();
+        let eager = ProgramRuntime
+            .execute_prevalidated_with_budget(&transaction, &database, &[], &mut eager_budget)
+            .unwrap();
+        let exact = ProgramRuntime
+            .execute_prevalidated_exact_with_budget(
+                &transaction,
+                &exact_database,
+                &[],
+                &mut exact_budget,
+            )
+            .unwrap();
+        let ProgramOutput::Transaction(eager) = eager else {
+            panic!("expected eager transaction output");
+        };
+        let ProgramOutput::Transaction(exact) = exact else {
+            panic!("expected exact transaction output");
+        };
+        assert_eq!(eager.len(), exact.len());
+        for (eager, exact) in eager.iter().zip(&exact) {
+            assert_eq!(
+                crate::encoding::persistent_tx_form_bytes(eager).unwrap(),
+                crate::encoding::persistent_tx_form_bytes(exact).unwrap()
+            );
+        }
+
+        let entity_predicate = ValidatedProgram::from_canonical(Program {
+            kind: ProgramKind::EntityPredicate,
+            arity: 1,
+            instructions: vec![
+                Instruction::PushArgument(0),
+                Instruction::LoadOne(NAME),
+                Instruction::PushConstant(Value::String("new".into())),
+                Instruction::Equal,
+                Instruction::Return,
+            ],
+        });
+        entity_predicate.program().validate().unwrap();
+        let mut eager_budget = ProgramBudget::new(ProgramControl::default()).unwrap();
+        let mut exact_budget = ProgramBudget::new(ProgramControl::default()).unwrap();
+        let eager = ProgramRuntime
+            .execute_prevalidated_with_budget(
+                &entity_predicate,
+                &database,
+                &[Value::Ref(entity)],
+                &mut eager_budget,
+            )
+            .unwrap();
+        let exact = ProgramRuntime
+            .execute_prevalidated_exact_with_budget(
+                &entity_predicate,
+                &exact_database,
+                &[Value::Ref(entity)],
+                &mut exact_budget,
+            )
+            .unwrap();
+        assert!(matches!(
+            (eager, exact),
+            (
+                ProgramOutput::EntityPredicate(left),
+                ProgramOutput::EntityPredicate(right)
+            ) if left == right && left == RuntimeValue::Scalar(Value::Bool(true))
+        ));
+
+        let attribute_predicate = ValidatedProgram::from_canonical(Program {
+            kind: ProgramKind::AttributePredicate,
+            arity: 1,
+            instructions: vec![
+                Instruction::PushArgument(0),
+                Instruction::PushConstant(Value::Long(0)),
+                Instruction::GreaterThan,
+                Instruction::Return,
+            ],
+        });
+        attribute_predicate.program().validate().unwrap();
+        let mut eager_budget = ProgramBudget::new(ProgramControl::default()).unwrap();
+        let mut exact_budget = ProgramBudget::new(ProgramControl::default()).unwrap();
+        let eager = ProgramRuntime
+            .execute_prevalidated_with_budget(
+                &attribute_predicate,
+                &database,
+                &[Value::Long(7)],
+                &mut eager_budget,
+            )
+            .unwrap();
+        let exact = ProgramRuntime
+            .execute_prevalidated_exact_with_budget(
+                &attribute_predicate,
+                &exact_database,
+                &[Value::Long(7)],
+                &mut exact_budget,
+            )
+            .unwrap();
+        assert!(matches!(
+            (eager, exact),
+            (
+                ProgramOutput::AttributePredicate(left),
+                ProgramOutput::AttributePredicate(right)
+            ) if left == right && left == RuntimeValue::Scalar(Value::Bool(true))
         ));
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
-    Attribute, CallableRef, Cardinality, Database, EntityRef, Keyword, ProgramCall, RuntimeValue,
-    SemanticError, TupleSpec, TxOp, TxReport, TxValue, Unique, Value, ValueType,
+    Attribute, CallableRef, Cardinality, Database, DatabaseValue, EntityRef, Keyword, ProgramCall,
+    RuntimeValue, SemanticError, TupleSpec, TxOp, TxReport, TxValue, Unique, Value, ValueType,
 };
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -526,6 +526,14 @@ type NativeFunction =
 type NativePredicate = dyn Fn(&crate::Value) -> Result<RuntimeValue, SemanticError> + Send + Sync;
 type NativeEntityPredicate =
     dyn Fn(&Database, u64) -> Result<RuntimeValue, SemanticError> + Send + Sync;
+type ExactEntityPredicate =
+    dyn Fn(&DatabaseValue, u64) -> Result<RuntimeValue, SemanticError> + Send + Sync;
+
+#[derive(Clone)]
+enum RegisteredEntityPredicate {
+    Eager(Arc<NativeEntityPredicate>),
+    Exact(Arc<ExactEntityPredicate>),
+}
 
 /// Process-local deterministic transaction functions.
 ///
@@ -536,7 +544,7 @@ type NativeEntityPredicate =
 pub struct TxFunctions {
     functions: BTreeMap<String, Arc<NativeFunction>>,
     predicates: BTreeMap<String, Arc<NativePredicate>>,
-    entity_predicates: BTreeMap<String, Arc<NativeEntityPredicate>>,
+    entity_predicates: BTreeMap<String, RegisteredEntityPredicate>,
 }
 
 impl fmt::Debug for TxFunctions {
@@ -599,9 +607,9 @@ impl TxFunctions {
     {
         self.entity_predicates.insert(
             name.into(),
-            Arc::new(move |database, entity| {
+            RegisteredEntityPredicate::Eager(Arc::new(move |database, entity| {
                 predicate(database, entity).map(|value| RuntimeValue::Scalar(Value::Bool(value)))
-            }),
+            })),
         );
     }
 
@@ -610,10 +618,12 @@ impl TxFunctions {
         name: impl Into<String>,
         predicate: F,
     ) where
-        F: Fn(&Database, u64) -> Result<RuntimeValue, SemanticError> + Send + Sync + 'static,
+        F: Fn(&DatabaseValue, u64) -> Result<RuntimeValue, SemanticError> + Send + Sync + 'static,
     {
-        self.entity_predicates
-            .insert(name.into(), Arc::new(predicate));
+        self.entity_predicates.insert(
+            name.into(),
+            RegisteredEntityPredicate::Exact(Arc::new(predicate)),
+        );
     }
 
     pub(crate) fn validate_attribute_predicate(
@@ -648,13 +658,40 @@ impl TxFunctions {
                 format!("unknown entity predicate {name}"),
             )
         })?;
-        catch_unwind(AssertUnwindSafe(|| predicate(db_after, entity))).map_err(|_| {
-            SemanticError::new(
-                crate::ErrorCategory::Fault,
-                "transaction/predicate-panic",
-                format!("entity predicate {name} panicked"),
+        catch_unwind(AssertUnwindSafe(|| match predicate {
+            RegisteredEntityPredicate::Eager(predicate) => predicate(db_after, entity),
+            RegisteredEntityPredicate::Exact(predicate) => {
+                predicate(&db_after.database_value(), entity)
+            }
+        }))
+        .map_err(|_| entity_predicate_panic(name))?
+    }
+
+    /// Validate a persisted entity predicate against the exact proposed
+    /// db-after without materializing it. Process-local Rust callbacks retain
+    /// their historical `&Database` API and therefore remain intentionally
+    /// confined to the eager speculative kernel.
+    #[allow(dead_code)] // consumed by the bounded assessor introduced in the next Goal 16 step
+    pub(crate) fn validate_entity_predicate_exact(
+        &self,
+        name: &str,
+        db_after: &DatabaseValue,
+        entity: u64,
+    ) -> Result<RuntimeValue, SemanticError> {
+        let predicate = self.entity_predicates.get(name).ok_or_else(|| {
+            SemanticError::incorrect(
+                "transaction/unknown-entity-predicate",
+                format!("unknown entity predicate {name}"),
             )
-        })?
+        })?;
+        let RegisteredEntityPredicate::Exact(predicate) = predicate else {
+            return Err(SemanticError::incorrect(
+                "transaction/eager-entity-predicate",
+                "process-local entity predicates require the eager speculative Database API",
+            ));
+        };
+        catch_unwind(AssertUnwindSafe(|| predicate(db_after, entity)))
+            .map_err(|_| entity_predicate_panic(name))?
     }
 
     fn invoke(&self, db_before: &Database, call: &TxCall) -> Result<Vec<TxForm>, SemanticError> {
@@ -672,6 +709,14 @@ impl TxFunctions {
             )
         })?
     }
+}
+
+fn entity_predicate_panic(name: &str) -> SemanticError {
+    SemanticError::new(
+        crate::ErrorCategory::Fault,
+        "transaction/predicate-panic",
+        format!("entity predicate {name} panicked"),
+    )
 }
 
 impl Database {
@@ -692,20 +737,12 @@ impl Database {
         functions: &TxFunctions,
         max_primitive_ops: usize,
     ) -> Result<Vec<TxOp>, SemanticError> {
-        let mut normalizer = Normalizer {
-            db_before: self,
-            functions,
-            next_anonymous: 0,
-            primitive_count: 0,
+        normalize_forms_against(
+            NormalizerRead::Eager(self),
+            forms,
+            Some(functions),
             max_primitive_ops,
-        };
-        let mut forms = forms.to_vec();
-        forms.sort_by(compare_tx_form);
-        let mut ops = Vec::new();
-        for form in &forms {
-            normalizer.expand_form(form, 0, &mut ops)?;
-        }
-        Ok(ops)
+        )
     }
 
     /// Normalize map and function forms against one db-before, then apply the
@@ -721,9 +758,74 @@ impl Database {
     }
 }
 
+impl DatabaseValue {
+    /// Normalize already expanded persistent transaction forms against one
+    /// exact db-before. Entity-map attribute resolution consults only the
+    /// immutable schema/ident caches; primitive forms pass through unchanged.
+    /// Process-local callbacks deliberately remain on `Database::with_forms`.
+    pub(crate) fn normalize_persisted_forms_with_limit(
+        &self,
+        forms: &[TxForm],
+        max_primitive_ops: usize,
+    ) -> Result<Vec<TxOp>, SemanticError> {
+        normalize_forms_against(NormalizerRead::Exact(self), forms, None, max_primitive_ops)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NormalizerRead<'a> {
+    Eager(&'a Database),
+    Exact(&'a DatabaseValue),
+}
+
+impl<'a> NormalizerRead<'a> {
+    fn schema(self) -> &'a crate::Schema {
+        match self {
+            Self::Eager(database) => database.schema(),
+            Self::Exact(database) => database.schema(),
+        }
+    }
+
+    fn entid(self, ident: &Keyword) -> Option<u64> {
+        match self {
+            Self::Eager(database) => database.entid(ident),
+            Self::Exact(database) => database.entid(ident),
+        }
+    }
+
+    fn eager(self) -> Option<&'a Database> {
+        match self {
+            Self::Eager(database) => Some(database),
+            Self::Exact(_) => None,
+        }
+    }
+}
+
+fn normalize_forms_against(
+    db_before: NormalizerRead<'_>,
+    forms: &[TxForm],
+    functions: Option<&TxFunctions>,
+    max_primitive_ops: usize,
+) -> Result<Vec<TxOp>, SemanticError> {
+    let mut normalizer = Normalizer {
+        db_before,
+        functions,
+        next_anonymous: 0,
+        primitive_count: 0,
+        max_primitive_ops,
+    };
+    let mut forms = forms.to_vec();
+    forms.sort_by(compare_tx_form);
+    let mut ops = Vec::new();
+    for form in &forms {
+        normalizer.expand_form(form, 0, &mut ops)?;
+    }
+    Ok(ops)
+}
+
 struct Normalizer<'a> {
-    db_before: &'a Database,
-    functions: &'a TxFunctions,
+    db_before: NormalizerRead<'a>,
+    functions: Option<&'a TxFunctions>,
     next_anonymous: u64,
     primitive_count: usize,
     max_primitive_ops: usize,
@@ -755,7 +857,14 @@ impl Normalizer<'_> {
             TxForm::Call(call) => {
                 // Every call receives the original database value. Generated
                 // calls recurse with that same value, never an intermediate DB.
-                let mut generated = self.functions.invoke(self.db_before, call)?;
+                let (Some(database), Some(functions)) = (self.db_before.eager(), self.functions)
+                else {
+                    return Err(SemanticError::incorrect(
+                        "transaction/process-local-function-requires-eager-db",
+                        "process-local Rust transaction callbacks require the eager speculative Database API",
+                    ));
+                };
+                let mut generated = functions.invoke(database, call)?;
                 generated.sort_by(compare_tx_form);
                 for generated in &generated {
                     self.expand_form(generated, depth + 1, output)?;
@@ -985,6 +1094,9 @@ mod tests {
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
 
+    const KEY: u32 = 1_000;
+    const CHILD: u32 = 1_001;
+
     fn scalar(value: Value) -> MapValue {
         MapValue::Value(TxValue::Scalar(value))
     }
@@ -1061,6 +1173,106 @@ mod tests {
         assert_ne!(
             compare_value(&negative_zero, &positive_zero),
             Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn exact_database_value_normalizes_entity_maps_like_the_eager_oracle() {
+        let mut schema = crate::Schema::new();
+        schema
+            .install(
+                Attribute::new(
+                    KEY,
+                    Keyword::new("person", "key"),
+                    ValueType::String,
+                    Cardinality::One,
+                )
+                .unique(Unique::Identity),
+            )
+            .unwrap();
+        schema
+            .install(Attribute::new(
+                CHILD,
+                Keyword::new("person", "child"),
+                ValueType::Ref,
+                Cardinality::One,
+            ))
+            .unwrap();
+        let database = Database::new(schema).unwrap();
+        let forms = vec![TxForm::EntityMap(EntityMap {
+            id: Some(EntityRef::Temp("parent".into())),
+            attributes: vec![(
+                AttributeRef::Ident(Keyword::new("person", "child")),
+                MapValue::Nested(Box::new(EntityMap {
+                    id: None,
+                    attributes: vec![(
+                        AttributeRef::Ident(Keyword::new("person", "key")),
+                        scalar(Value::String("child-key".into())),
+                    )],
+                })),
+            )],
+        })];
+
+        let eager = database
+            .normalize_forms_with_limit(&forms, &TxFunctions::new(), 16)
+            .unwrap();
+        let exact = database
+            .database_value()
+            .normalize_persisted_forms_with_limit(&forms, 16)
+            .unwrap();
+        assert_eq!(eager.len(), exact.len());
+        assert!(
+            eager
+                .iter()
+                .zip(&exact)
+                .all(|(eager, exact)| compare_tx_op(eager, exact) == Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn exact_normalizer_rejects_process_local_callbacks() {
+        let database = Database::bootstrap().unwrap().database_value();
+        let error = database
+            .normalize_persisted_forms_with_limit(
+                &[TxForm::Call(TxCall {
+                    function: "local/only".into(),
+                    arguments: Vec::new(),
+                })],
+                16,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            "transaction/process-local-function-requires-eager-db"
+        );
+    }
+
+    #[test]
+    fn persisted_entity_predicate_accepts_eager_and_exact_database_values() {
+        let database = Database::bootstrap().unwrap();
+        let mut functions = TxFunctions::new();
+        functions.register_entity_value_predicate("test/exists", |database, entity| {
+            Ok(RuntimeValue::Scalar(Value::Bool(
+                !database.values(entity, crate::DB_IDENT as u32)?.is_empty(),
+            )))
+        });
+        let system_entity = crate::DB_IDENT;
+
+        assert_eq!(
+            functions
+                .validate_entity_predicate("test/exists", &database, system_entity)
+                .unwrap(),
+            RuntimeValue::Scalar(Value::Bool(true))
+        );
+        assert_eq!(
+            functions
+                .validate_entity_predicate_exact(
+                    "test/exists",
+                    &database.database_value(),
+                    system_entity,
+                )
+                .unwrap(),
+            RuntimeValue::Scalar(Value::Bool(true))
         );
     }
 }
