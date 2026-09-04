@@ -219,12 +219,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0018_semantic_commitment_gc.sql"),
     ),
     (19, include_str!("../migrations/0019_dual_predicates.sql")),
+    (
+        20,
+        include_str!("../migrations/0020_request_base_archives.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 19;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 20;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -251,6 +255,9 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_generation_transactions",
     "atomic_generation_requests",
     "atomic_generation_request_bases",
+    "atomic_request_base_archives",
+    "atomic_request_base_archive_roots",
+    "atomic_request_base_archive_completions",
     "atomic_log_generation_activations",
     "atomic_completed_excision_requests",
     "atomic_log_generation_completions",
@@ -1397,6 +1404,7 @@ fn grant_runtime_privileges(
              GRANT UPDATE ON TABLE {} TO {writer_ident}; \
              GRANT INSERT ON TABLE {} TO {writer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_publish_tree(text, bigint, bigint, bytea, bytea), \
+                                       {schema_ident}.atomic_request_base_archive_build_live(text, bigint), \
                                        {schema_ident}.atomic_heartbeat_tree_build(bytea), \
                                        {schema_ident}.atomic_finish_tree_build(bytea), \
                                        {schema_ident}.atomic_apply_tree_publication_work(bytea, bigint), \
@@ -2141,6 +2149,10 @@ pub struct WriterResidencyStats {
     pub recent_accounted_bytes: u64,
     pub tree_cache_entries: usize,
     pub tree_cache_bytes: usize,
+    pub native_manifest_candidates: u64,
+    pub native_root_reads: u64,
+    pub native_directory_reads: u64,
+    pub native_leaf_reads: u64,
     pub publication_revision: u64,
     pub last_transaction_read_datoms: u64,
     pub last_transaction_read_bytes: u64,
@@ -2294,6 +2306,7 @@ impl PostgresStore {
         };
         let recent = state.database.recent_stats();
         let cache = state.database.tree_cache_stats();
+        let load = state.database.load_stats();
         WriterResidencyStats {
             eager_database_values: 0,
             eager_current_facts: 0,
@@ -2302,6 +2315,10 @@ impl PostgresStore {
             recent_accounted_bytes: recent.accounted_bytes,
             tree_cache_entries: cache.current_entries,
             tree_cache_bytes: cache.current_bytes,
+            native_manifest_candidates: load.manifest_candidates,
+            native_root_reads: load.root_reads,
+            native_directory_reads: load.directory_reads,
+            native_leaf_reads: load.leaf_reads,
             publication_revision: state.publication_revision,
             last_transaction_read_datoms: state.last_read_work.datoms,
             last_transaction_read_bytes: state.last_read_work.retained_bytes,

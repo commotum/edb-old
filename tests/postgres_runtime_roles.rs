@@ -98,7 +98,6 @@ const WRITER_FUNCTIONS: &[&str] = &[
     "atomic_log_generation_pin_key(text,bigint)",
     "atomic_publish_tree(text,bigint,bigint,bytea,bytea)",
     "atomic_request_base_archive_build_live(text,bigint)",
-    "atomic_semantic_commitment_gc_pin_key()",
     "atomic_tree_database_build_pin_key(text)",
 ];
 const PEER_FUNCTIONS: &[&str] = &["atomic_log_generation_pin_key(text,bigint)"];

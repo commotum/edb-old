@@ -2470,10 +2470,16 @@ fn acquire_root_pin(client: &mut Client, manifest_hash: Digest) -> Result<(), Se
     // publication has just been retired.
     let key = tree_manifest_advisory_key(&manifest_hash);
     let published: bool = match client.query_one(
-        "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications \
-                            WHERE manifest_hash = $1) \
-                    AND NOT EXISTS (SELECT 1 FROM atomic_tree_retirement_progress \
-                                    WHERE manifest_hash = $1)",
+        "SELECT (EXISTS (SELECT 1 FROM atomic_tree_publications \
+                             WHERE manifest_hash = $1) \
+                     AND NOT EXISTS (SELECT 1 FROM atomic_tree_retirement_progress \
+                                     WHERE manifest_hash = $1)) \
+                    OR EXISTS ( \
+                         SELECT 1 FROM atomic_request_base_archives archive \
+                         JOIN atomic_request_base_archive_completions complete \
+                           ON complete.manifest_hash = archive.manifest_hash \
+                        WHERE archive.manifest_hash = $1 \
+                    )",
         &[&&manifest_hash[..]],
     ) {
         Ok(row) => row.get(0),
@@ -4093,6 +4099,10 @@ impl TieredSnapshot {
         lock(&self.core.io).tree_cache.stats
     }
 
+    pub(crate) fn load_stats(&self) -> PeerLoadStats {
+        self.core.load_counters.snapshot()
+    }
+
     pub(crate) fn database_value(&self) -> crate::DatabaseValue {
         crate::DatabaseValue::tiered(self.clone())
     }
@@ -5044,6 +5054,58 @@ fn scan_latest_tree_base<C: GenericClient>(
 ) -> Result<TreeBaseScan, SemanticError> {
     let through_sql = sql_basis(through)?;
     let generation_sql = sql_basis(excision_generation)?;
+    if let Some(required_hash) = required_manifest {
+        let variants = client
+            .query_one(
+                "SELECT (SELECT count(*) FROM atomic_tree_publications publication \
+                          WHERE publication.database_id = $1 \
+                            AND publication.log_generation = $2 \
+                            AND publication.basis_t <= $3 \
+                            AND publication.manifest_hash = $4), \
+                        (SELECT count(*) FROM atomic_request_base_archives archive \
+                          WHERE archive.database_id = $1 \
+                            AND archive.generation = $2 \
+                            AND archive.basis_t <= $3 \
+                            AND archive.manifest_hash = $4)",
+                &[
+                    &database_id,
+                    &generation_sql,
+                    &through_sql,
+                    &&required_hash[..],
+                ],
+            )
+            .map_err(|error| postgres_error("peer/exact-tree-variants", error))?;
+        let normal_count = pg_basis(variants.get(0), "exact normal tree variants")?;
+        let archive_count = pg_basis(variants.get(1), "exact archive tree variants")?;
+        if archive_count > 0 {
+            let mut stats = TreeBaseScanStats {
+                published_candidates: normal_count.saturating_add(archive_count),
+                examined_candidates: 1,
+                ..TreeBaseScanStats::default()
+            };
+            counters.manifest_candidates.fetch_add(1, Ordering::Relaxed);
+            if normal_count != 0 || archive_count != 1 {
+                stats.rejected_candidates = 1;
+                return Ok(TreeBaseScan::AllInvalid(stats));
+            }
+            return match load_required_request_base_archive(
+                client,
+                database_id,
+                through,
+                excision_generation,
+                required_hash,
+                counters,
+                cache,
+            ) {
+                Ok(base) => Ok(TreeBaseScan::Selected(base, stats)),
+                Err(error) if is_postgres_connection_error(&error) => Err(error),
+                Err(_) => {
+                    stats.rejected_candidates = 1;
+                    Ok(TreeBaseScan::AllInvalid(stats))
+                }
+            };
+        }
+    }
     let required_manifest = required_manifest.map(|hash| hash.to_vec());
     // Count from the publication authority itself. Broken/missing manifest or
     // semantic-root joins are invalid candidates, never evidence that no
@@ -5282,6 +5344,215 @@ fn scan_latest_tree_base<C: GenericClient>(
         stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
     }
     Ok(TreeBaseScan::AllInvalid(stats))
+}
+
+/// Load an exact retry-only archive. Archives never enter the ordinary
+/// publication scan above: their sole purpose is to preserve the physical
+/// db-before named by an immutable request receipt across portable restore.
+fn load_required_request_base_archive<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    through: u64,
+    generation: u64,
+    required_hash: Digest,
+    counters: &PeerLoadCounters,
+    cache: &mut TreeNodeCache,
+) -> Result<TreeBase, SemanticError> {
+    let row = client
+        .query_opt(
+            "SELECT archive.archive_revision, archive.basis_t, archive.tx_hash, \
+                    archive.state_hash, archive.eidx_frontier, archive.manifest_hash, \
+                    archive.payload, complete.manifest_hash IS NOT NULL, \
+                    (((archive.basis_t = 0 AND bootstrap.tx_hash IS NOT NULL) \
+                       OR (archive.basis_t > 0 AND native.tx_hash IS NOT NULL)) \
+                      AND semantic.tx_hash IS NOT NULL) \
+               FROM atomic_request_base_archives archive \
+               JOIN atomic_databases catalog \
+                 ON catalog.database_id = archive.database_id \
+               LEFT JOIN atomic_request_base_archive_completions complete \
+                 ON complete.manifest_hash = archive.manifest_hash \
+               LEFT JOIN atomic_generation_transactions native \
+                 ON archive.basis_t > 0 \
+                AND native.database_id = archive.database_id \
+                AND native.generation = archive.generation \
+                AND native.basis_t = archive.basis_t \
+                AND native.tx_hash = archive.tx_hash \
+                AND native.state_hash = archive.state_hash \
+                AND native.eidx_frontier = archive.eidx_frontier \
+               LEFT JOIN atomic_semantic_commitment_roots bootstrap \
+                 ON archive.basis_t = 0 \
+                AND bootstrap.database_id = archive.database_id \
+                AND bootstrap.generation = archive.generation \
+                AND bootstrap.basis_t = 0 \
+                AND bootstrap.tx_hash = archive.tx_hash \
+                AND bootstrap.tx_hash = catalog.genesis_hash \
+                AND bootstrap.state_hash = archive.state_hash \
+                AND bootstrap.eidx_frontier = archive.eidx_frontier \
+                AND bootstrap.commitment_version = 2 \
+               LEFT JOIN atomic_semantic_commitment_roots semantic \
+                 ON semantic.database_id = archive.database_id \
+                AND semantic.generation = archive.generation \
+                AND semantic.basis_t = archive.basis_t \
+                AND semantic.tx_hash = archive.tx_hash \
+                AND semantic.state_hash = archive.state_hash \
+                AND semantic.eidx_frontier = archive.eidx_frontier \
+                AND semantic.commitment_version = 2 \
+              WHERE archive.database_id = $1 AND archive.generation = $2 \
+                AND archive.basis_t <= $3 AND archive.manifest_hash = $4",
+            &[
+                &database_id,
+                &sql_basis(generation)?,
+                &sql_basis(through)?,
+                &&required_hash[..],
+            ],
+        )
+        .map_err(|error| postgres_error("peer/request-base-archive", error))?
+        .ok_or_else(|| {
+            fault(
+                "peer/request-base-archive-absent",
+                "required request-base archive disappeared during exact loading",
+            )
+        })?;
+    let archive_revision = pg_basis(row.get(0), "request-base archive revision")?;
+    let basis_t = pg_basis(row.get(1), "request-base archive basis")?;
+    let tx_hash = digest(row.get(2), "request-base archive transaction hash")?;
+    let state_hash = digest(row.get(3), "request-base archive state hash")?;
+    let eidx_frontier = pg_basis(row.get(4), "request-base archive entity frontier")?;
+    let manifest_hash = digest(row.get(5), "request-base archive manifest hash")?;
+    let payload: Vec<u8> = row.get(6);
+    let complete: bool = row.get(7);
+    let authoritative: bool = row.get(8);
+    if !complete || !authoritative || manifest_hash != required_hash {
+        return Err(fault(
+            "peer/request-base-archive-authority",
+            "required request-base archive is incomplete or has no authoritative semantic coordinate",
+        ));
+    }
+    if sha256(&payload) != manifest_hash {
+        return Err(fault(
+            "peer/request-base-archive-hash",
+            "request-base archive bytes do not match their immutable hash",
+        ));
+    }
+    let manifest = PersistentTreeManifest::decode(&payload)?;
+    if manifest.database_id != database_id
+        || manifest.publication_revision != archive_revision
+        || manifest.basis_t != basis_t
+        || manifest.tx_hash != tx_hash
+        || manifest.state_hash != state_hash
+        || manifest.excision_generation != generation
+        || manifest.eidx_frontier != eidx_frontier
+    {
+        return Err(fault(
+            "peer/request-base-archive-metadata",
+            "canonical request-base archive disagrees with its authenticated SQL row",
+        ));
+    }
+
+    let root_rows = client
+        .query(
+            "SELECT root.index_order, root.history, root.root_hash, root.datom_count, \
+                    root.encoded_bytes, node.payload \
+               FROM atomic_request_base_archive_roots root \
+               JOIN atomic_tree_nodes node ON node.node_hash = root.root_hash \
+              WHERE root.manifest_hash = $1 \
+              ORDER BY root.history, root.index_order",
+            &[&&manifest_hash[..]],
+        )
+        .map_err(|error| postgres_error("peer/request-base-archive-roots", error))?;
+    if root_rows.len() != 8 {
+        return Err(fault(
+            "peer/request-base-archive-root-count",
+            "request-base archive does not resolve to eight roots",
+        ));
+    }
+    let mut roots = BTreeMap::new();
+    for root_row in root_rows {
+        let tag = u8::try_from(root_row.get::<_, i16>(0)).map_err(|_| {
+            fault(
+                "peer/request-base-archive-root-order",
+                "request-base archive root order is outside u8",
+            )
+        })?;
+        if tag > 3 {
+            return Err(fault(
+                "peer/request-base-archive-root-order",
+                "request-base archive root order is outside the four native indexes",
+            ));
+        }
+        let order = order_from_tag(tag);
+        let history: bool = root_row.get(1);
+        let root_hash = digest(root_row.get(2), "request-base archive root hash")?;
+        let count = pg_basis(root_row.get(3), "request-base archive root datom count")?;
+        let encoded_bytes = pg_basis(root_row.get(4), "request-base archive root bytes")?;
+        let root_payload: Vec<u8> = root_row.get(5);
+        let described = manifest.tree(order, history).ok_or_else(|| {
+            fault(
+                "peer/request-base-archive-root-coordinate",
+                "request-base archive manifest omitted a tree root",
+            )
+        })?;
+        if described.descriptor.root_hash != root_hash
+            || described.descriptor.count != count
+            || described.root_bytes != encoded_bytes
+            || root_payload.len() as u64 != encoded_bytes
+        {
+            return Err(fault(
+                "peer/request-base-archive-root-binding",
+                "canonical and relational request-base archive roots disagree",
+            ));
+        }
+        let TreeNode::Root(root) = decode_tree_node(&root_hash, &root_payload)? else {
+            return Err(fault(
+                "peer/request-base-archive-root-kind",
+                "request-base archive references a non-root node",
+            ));
+        };
+        counters.root_reads.fetch_add(1, Ordering::Relaxed);
+        if root.order != order
+            || root.history != history
+            || root.count != count
+            || (count == 0) != root.directories.is_empty()
+            || (count > 0
+                && !root.directories.first().is_some_and(|first| {
+                    described.descriptor.first_hash.is_some_and(|expected| {
+                        crate::persistent_tree::routing_key_hash(&first.key)
+                            .is_ok_and(|actual| actual == expected)
+                    })
+                }))
+        {
+            return Err(fault(
+                "peer/request-base-archive-root-content",
+                "decoded request-base archive root disagrees with its descriptor",
+            ));
+        }
+        if roots
+            .insert((history, order_tag(order)), Arc::new(root))
+            .is_some()
+        {
+            return Err(fault(
+                "peer/request-base-archive-root-duplicate",
+                "request-base archive repeats a root coordinate",
+            ));
+        }
+    }
+
+    // Restore completion already authenticated the immutable planned closure,
+    // and archive-aware GC keeps every planned node alive until the binding is
+    // retired. Opening an exact value therefore follows the same root-plus-
+    // metadata-path boundary as an ordinary native publication. Descendants
+    // are content-hash checked by the shared tree reader only when a query
+    // reaches them; walking all eight trees here would make an old idempotent
+    // retry O(total database) and eagerly fill the writer cache.
+    let metadata = Arc::new(derive_metadata_from_client(
+        client, &roots, counters, cache,
+    )?);
+    Ok(TreeBase {
+        manifest,
+        manifest_hash,
+        roots,
+        metadata,
+    })
 }
 
 fn load_latest_tree_base<C: GenericClient>(

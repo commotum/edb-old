@@ -124,6 +124,146 @@ fn assert_same_information(left: &atomic_core::Database, right: &atomic_core::Da
 }
 
 #[test]
+fn restored_native_receipts_survive_backup_restore_backup_and_exact_retry() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let source = unique("backup_request_base_source");
+    let first_target = unique("backup_request_base_first_target");
+    let second_target = unique("backup_request_base_second_target");
+    let first_directory = backup_directory();
+    let second_directory = backup_directory();
+    let request_key = "portable-exact-request-base";
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&source, schema()).unwrap();
+    let service = common::start_service(&connection, &source);
+    let seed_ops = (0..128)
+        .map(|ordinal| TxOp::Add {
+            entity: EntityRef::Temp(format!("seed-{ordinal}")),
+            attribute: ITEM_VALUE,
+            value: TxValue::Scalar(Value::String(format!("seed-{ordinal}"))),
+        })
+        .collect::<Vec<_>>();
+    let seed = common::transact(
+        &service,
+        "portable-seed",
+        created.basis_t(),
+        &seed_ops,
+        500,
+    );
+    service.shutdown();
+    let mut indexer = PostgresIndexer::connect(&connection, &source)
+        .unwrap()
+        .with_segment_datoms(1)
+        .unwrap();
+    indexer.consolidate().unwrap();
+    let service = common::start_service(&connection, &source);
+    let committed = common::transact(
+        &service,
+        request_key,
+        seed.basis_t,
+        &[add("portable")],
+        1_000,
+    );
+    service.shutdown();
+
+    let mut source_backup = PortableBackup::connect(&connection).unwrap();
+    source_backup
+        .backup_database(&source, &first_directory)
+        .unwrap();
+    PortableBackup::verify_backup(&first_directory, committed.basis_t, true).unwrap();
+
+    let first_connection = isolated_catalog(&connection, "request_base_first_catalog");
+    let mut first_restore = PortableBackup::connect(&first_connection).unwrap();
+    let first_restored = first_restore
+        .restore_backup(&first_directory, committed.basis_t, &first_target)
+        .unwrap();
+    common::assert_same_information(&first_restored, &committed.db_after);
+    let mut first_catalog = Client::connect(&first_connection, NoTls).unwrap();
+    let first_archive_count: i64 = first_catalog
+        .query_one(
+            "SELECT count(*) FROM atomic_request_base_archives archive \
+              JOIN atomic_heads head ON head.database_id = archive.database_id \
+                                    AND head.log_generation = archive.generation \
+              JOIN atomic_request_base_archive_completions complete \
+                ON complete.manifest_hash = archive.manifest_hash \
+             WHERE archive.database_id = $1",
+            &[&first_target],
+        )
+        .unwrap()
+        .get(0);
+    assert!(first_archive_count > 0);
+
+    // A fresh directory prevents the logical-point reuse fast path from
+    // hiding whether capture can resolve an archive-backed request base.
+    let mut second_backup = PortableBackup::connect(&first_connection).unwrap();
+    let rebound_point = second_backup
+        .backup_database(&first_target, &second_directory)
+        .unwrap();
+    PortableBackup::verify_backup(&second_directory, rebound_point.basis_t, true).unwrap();
+
+    let second_connection = isolated_catalog(&connection, "request_base_second_catalog");
+    let mut second_restore = PortableBackup::connect(&second_connection).unwrap();
+    let second_restored = second_restore
+        .restore_backup(&second_directory, rebound_point.basis_t, &second_target)
+        .unwrap();
+    common::assert_same_information(&second_restored, &committed.db_after);
+    let mut second_catalog = Client::connect(&second_connection, NoTls).unwrap();
+    let archive_node_count: i64 = second_catalog
+        .query_one(
+            "SELECT max(expected_node_count) \
+               FROM atomic_request_base_archives archive \
+               JOIN atomic_request_base_archive_completions complete \
+                 ON complete.manifest_hash = archive.manifest_hash \
+              WHERE archive.database_id = $1",
+            &[&second_target],
+        )
+        .unwrap()
+        .get::<_, Option<i64>>(0)
+        .expect("restored request receipts retained a completed archive");
+    assert!(archive_node_count > 8);
+    let second_service = common::start_service(&second_connection, &second_target);
+    let before_retry = second_service.writer_residency_stats();
+    let replay = second_service
+        .client()
+        .transact(
+            TransactionRequest::new(request_key, vec![add("portable")])
+                .comparing_basis(seed.basis_t)
+                .with_tx_instant(1_000),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    let after_retry = second_service.writer_residency_stats();
+    let retry_node_reads = after_retry
+        .native_root_reads
+        .saturating_sub(before_retry.native_root_reads)
+        .saturating_add(
+            after_retry
+                .native_directory_reads
+                .saturating_sub(before_retry.native_directory_reads),
+        )
+        .saturating_add(
+            after_retry
+                .native_leaf_reads
+                .saturating_sub(before_retry.native_leaf_reads),
+        );
+    assert!(
+        retry_node_reads < archive_node_count as u64,
+        "exact retry eagerly read {retry_node_reads} nodes from a {archive_node_count}-node archive"
+    );
+    assert!(replay.replayed);
+    assert_eq!(replay.basis_t, committed.basis_t);
+    common::assert_same_information(&replay.db_before, &seed.db_after);
+    common::assert_same_information(&replay.db_after, &committed.db_after);
+    second_service.shutdown();
+
+    fs::remove_dir_all(first_directory).unwrap();
+    fs::remove_dir_all(second_directory).unwrap();
+}
+
+#[test]
 fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     let Some(connection) = connection() else {
         return;
