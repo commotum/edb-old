@@ -1,7 +1,7 @@
 use atomic_core::{
-    Attribute, Cardinality, DB_ALTER_ATTRIBUTE, EntityRef, IndexBuildFault, IndexOrder, Keyword,
-    Peer, PersistentTreeManifest, PostgresIndexer, PostgresStore, Schema, TxOp, TxValue, Value,
-    ValueType, View, t_to_tx,
+    Attribute, Cardinality, DB_ALTER_ATTRIBUTE, Digest, EntityRef, IndexBuildFault, IndexOrder,
+    Keyword, Peer, PersistentTreeManifest, PostgresIndexer, PostgresStore, PostgresTreeStore,
+    Schema, TxOp, TxValue, Value, ValueType, View, t_to_tx,
 };
 use postgres::{Client, NoTls};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -61,6 +61,16 @@ fn latest_avet_counts(connection: &str, database_id: &str) -> (i64, i64) {
         )
         .unwrap();
     (row.get(0), row.get(1))
+}
+
+fn finish_publication_work(connection: &str, manifest_hash: Digest) {
+    let mut tree_store = PostgresTreeStore::connect(connection).unwrap();
+    for _ in 0..10_000 {
+        if tree_store.advance_publication_work(manifest_hash).unwrap() {
+            return;
+        }
+    }
+    panic!("native publication work did not finish within its bounded test fence");
 }
 
 fn schema(no_history: bool, indexed: bool) -> Schema {
@@ -167,6 +177,10 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
         initial.segment_count > 500,
         "initial witness is not large: {initial:?}"
     );
+    // Publication is atomic before derived live-set bookkeeping is complete.
+    // This witness drives the indexer manually, so finish those bounded batches
+    // before measuring whether the next build chose the incremental path.
+    finish_publication_work(&connection, initial.manifest_hash);
 
     let service = common::start_service(&connection, &database_id);
     let updated = common::transact(
@@ -188,6 +202,7 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
     assert!(successor.node_reads * 10 < initial.segment_count as u64);
     assert!(successor.segment_count * 10 < initial.segment_count);
     assert!(successor.reused_subtrees > 100);
+    finish_publication_work(&connection, successor.manifest_hash);
 
     let mut client = Client::connect(&connection, NoTls).unwrap();
     let initial_manifest = manifest(&mut client, &database_id, populated.basis_t);
