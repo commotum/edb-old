@@ -16,10 +16,12 @@
 //! accumulator: removal rebuilds and re-authenticates the affected path.
 //!
 //! A semantic root copied into a physical-tree manifest remains only a claim.
-//! An untrusted physical tree cannot establish global equivalence to that root
-//! without reading its leaves or supplying authenticated range/subtree proofs.
-//! Recovery therefore continues to derive this accumulator from loaded facts;
-//! manifest metadata alone does not close coherent-forgery attacks.
+//! Ordinary recovery authenticates and trusts the conditionally published
+//! native indexer root, as it trusts the transactor/indexer boundary itself.
+//! Explicit deep integrity inspection reconstructs the authoritative log value
+//! and compares its exact current and retained-history information with the
+//! physical tree. Manifest metadata alone cannot prove that cross-structure
+//! equivalence against a privileged publisher capable of forging both values.
 
 use crate::encoding::canonical_datom_hash;
 use crate::{
