@@ -1311,7 +1311,7 @@ fn select_datoms<'a>(
                 value: attribute.and(value).cloned(),
             };
             return Ok((
-                Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                Box::new(database.query_prefix_cursor(&prefix)?),
                 "EAVT seek".into(),
             ));
         }
@@ -1328,7 +1328,7 @@ fn select_datoms<'a>(
                     entity: None,
                 };
                 return Ok((
-                    Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                    Box::new(database.query_prefix_cursor(&prefix)?),
                     "AVET seek".into(),
                 ));
             }
@@ -1338,7 +1338,7 @@ fn select_datoms<'a>(
                 value: None,
             };
             return Ok((
-                Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                Box::new(database.query_prefix_cursor(&prefix)?),
                 "AEVT seek".into(),
             ));
         }
@@ -1349,7 +1349,7 @@ fn select_datoms<'a>(
                 entity: None,
             };
             return Ok((
-                Box::new(database.datoms_with_prefix(&prefix)?.into_iter().map(Ok)),
+                Box::new(database.query_prefix_cursor(&prefix)?),
                 "VAET seek".into(),
             ));
         }

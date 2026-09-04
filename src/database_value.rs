@@ -252,15 +252,43 @@ impl Iterator for DatabaseValueScanCursor<'_> {
 }
 
 struct TransactionOverlayScanCursor<'a> {
-    base: DatabaseValueScanCursor<'a>,
-    delta: IntoIter<Datom>,
+    base: TransactionOverlayBaseCursor<'a>,
+    delta: IntoIter<OverlayCursorDatom>,
     removals: Arc<[Datom]>,
     schema: Arc<Schema>,
     history: bool,
     order: IndexOrder,
-    base_next: Option<Datom>,
-    delta_next: Option<Datom>,
+    observer: Option<Arc<LogicalReadObserver>>,
+    base_next: Option<OverlayCursorDatom>,
+    delta_next: Option<OverlayCursorDatom>,
     failed: bool,
+}
+
+enum TransactionOverlayBaseCursor<'a> {
+    Scan(DatabaseValueScanCursor<'a>),
+    Prefix(DatabaseValuePrefixCursor<'a>),
+    Empty,
+}
+
+impl Iterator for TransactionOverlayBaseCursor<'_> {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Scan(cursor) => cursor.next(),
+            Self::Prefix(cursor) => cursor.next(),
+            Self::Empty => None,
+        }
+    }
+}
+
+struct OverlayCursorDatom {
+    datom: Datom,
+    /// An AVET-enablement fallback must read an AEVT range and reorder it
+    /// before it can be merged. Those source datoms are charged while that
+    /// explicit broad operation is collected, so the merged cursor must not
+    /// charge them a second time.
+    precharged: bool,
 }
 
 /// Lazy current-index cursor over one exact point-in-time database value.
@@ -278,6 +306,7 @@ pub struct DatabaseValuePrefixCursor<'a> {
 enum DatabaseValuePrefixCursorInner<'a> {
     Eager(Cloned<Iter<'a, Datom>>),
     Native(Box<PeerIndexCursor>),
+    Overlay(Box<TransactionOverlayScanCursor<'a>>),
     Owned(IntoIter<Datom>),
 }
 
@@ -291,6 +320,7 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
         let item = match &mut self.inner {
             DatabaseValuePrefixCursorInner::Eager(cursor) => cursor.next().map(Ok),
             DatabaseValuePrefixCursorInner::Native(cursor) => cursor.next(),
+            DatabaseValuePrefixCursorInner::Overlay(cursor) => cursor.next(),
             DatabaseValuePrefixCursorInner::Owned(cursor) => cursor.next().map(Ok),
         }?;
         match item {
@@ -647,11 +677,17 @@ impl DatabaseValue {
     /// Return datoms in one logical index after applying this value's complete
     /// temporal/custom window.
     pub fn datoms(&self, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-        let datoms = if self.direct_current() {
-            self.basis_datoms(false, order)?
-        } else if self.direct_history() {
-            self.basis_datoms(true, order)?
-        } else {
+        if self.direct_current() {
+            return self
+                .basis_scan_cursor(false, order, self.read_observer.clone())?
+                .collect();
+        }
+        if self.direct_history() {
+            return self
+                .basis_scan_cursor(true, order, self.read_observer.clone())?
+                .collect();
+        }
+        let datoms = {
             let datoms = self.basis_datoms(true, order)?;
             self.window(datoms)?
         };
@@ -670,13 +706,9 @@ impl DatabaseValue {
         order: IndexOrder,
     ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
         if self.direct_current() {
-            let mut cursor = self.basis_scan_cursor(false, order)?;
-            cursor.observer = self.read_observer.clone();
-            Ok(cursor)
+            self.basis_scan_cursor(false, order, self.read_observer.clone())
         } else if self.direct_history() {
-            let mut cursor = self.basis_scan_cursor(true, order)?;
-            cursor.observer = self.read_observer.clone();
-            Ok(cursor)
+            self.basis_scan_cursor(true, order, self.read_observer.clone())
         } else {
             // `datoms` already charges the materialized, windowed result.
             Ok(DatabaseValueScanCursor {
@@ -692,16 +724,46 @@ impl DatabaseValue {
     /// historical point reads do not first materialize an entire index.
     pub fn datoms_with_prefix(&self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
         prefix.validate()?;
-        let datoms = if self.direct_current() {
-            self.basis_prefix(false, prefix)?
-        } else if self.direct_history() {
-            self.basis_prefix(true, prefix)?
-        } else {
-            let datoms = self.basis_prefix(true, prefix)?;
-            self.window(datoms)?
-        };
+        if self.direct_current() {
+            return self
+                .basis_prefix_cursor(false, prefix, self.read_observer.clone())?
+                .collect();
+        }
+        if self.direct_history() {
+            return self
+                .basis_prefix_cursor(true, prefix, self.read_observer.clone())?
+                .collect();
+        }
+        let datoms = self.window(self.basis_prefix(true, prefix)?)?;
         self.charge_datoms(&datoms)?;
         Ok(datoms)
+    }
+
+    /// Fallible prefix stream used by query and persisted-program execution.
+    /// Direct current/history values charge the transaction observer as each
+    /// datom is yielded. Temporal/custom values retain the established
+    /// materialized window because visibility requires cross-event state.
+    pub(crate) fn query_prefix_cursor(
+        &self,
+        prefix: &IndexPrefix,
+    ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
+        prefix.validate()?;
+        if self.direct_current() {
+            self.basis_prefix_cursor(false, prefix, self.read_observer.clone())
+        } else if self.direct_history() {
+            self.basis_prefix_cursor(true, prefix, self.read_observer.clone())
+        } else {
+            // `datoms_with_prefix` charges the completed temporal/custom
+            // result. Keep the collection convenience outside transaction
+            // processing until retraction windows have a streaming form.
+            Ok(DatabaseValuePrefixCursor {
+                inner: DatabaseValuePrefixCursorInner::Owned(
+                    self.datoms_with_prefix(prefix)?.into_iter(),
+                ),
+                observer: None,
+                failed: false,
+            })
+        }
     }
 
     /// Lazily read one left-contiguous prefix of an unfiltered current value.
@@ -721,22 +783,7 @@ impl DatabaseValue {
                 "lazy transaction prefix access requires an unfiltered current database value",
             ));
         }
-        let inner = match &self.basis {
-            ReadBasis::Eager(database) => DatabaseValuePrefixCursorInner::Eager(
-                database.datoms_with_prefix(prefix)?.iter().cloned(),
-            ),
-            ReadBasis::Native(snapshot) => DatabaseValuePrefixCursorInner::Native(Box::new(
-                snapshot.prefix_cursor(false, prefix)?,
-            )),
-            ReadBasis::TransactionOverlay(overlay) => {
-                DatabaseValuePrefixCursorInner::Owned(overlay.prefix(false, prefix)?.into_iter())
-            }
-        };
-        Ok(DatabaseValuePrefixCursor {
-            inner,
-            observer: self.read_observer.clone(),
-            failed: false,
-        })
+        self.basis_prefix_cursor(false, prefix, self.read_observer.clone())
     }
 
     /// Return the first historical datom in a prefix without reading the
@@ -748,19 +795,9 @@ impl DatabaseValue {
         prefix: &IndexPrefix,
     ) -> Result<Option<Datom>, SemanticError> {
         prefix.validate()?;
-        let datom = match &self.basis {
-            ReadBasis::Eager(database) => {
-                Ok(database.history_with_prefix(prefix)?.first().cloned())
-            }
-            ReadBasis::Native(snapshot) => snapshot.prefix_cursor(true, prefix)?.next().transpose(),
-            ReadBasis::TransactionOverlay(overlay) => {
-                Ok(overlay.prefix(true, prefix)?.into_iter().next())
-            }
-        }?;
-        if let Some(datom) = &datom {
-            self.charge_datom(datom)?;
-        }
-        Ok(datom)
+        self.basis_prefix_cursor(true, prefix, self.read_observer.clone())?
+            .next()
+            .transpose()
     }
 
     /// Whether the physical AVET projection for one logically indexed
@@ -873,40 +910,85 @@ impl DatabaseValue {
     }
 
     fn basis_datoms(&self, history: bool, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-        self.basis_scan_cursor(history, order)?.collect()
+        self.basis_scan_cursor(history, order, None)?.collect()
     }
 
     fn basis_scan_cursor(
         &self,
         history: bool,
         order: IndexOrder,
+        observer: Option<Arc<LogicalReadObserver>>,
     ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
-        let inner: Box<dyn Iterator<Item = Result<Datom, SemanticError>> + '_> = match &self.basis {
-            ReadBasis::Eager(database) => Box::new(
-                database
-                    .datoms(
-                        if history {
-                            crate::View::History
-                        } else {
-                            crate::View::Current
-                        },
-                        order,
-                    )
-                    .into_iter()
-                    .map(Ok),
-            ),
-            ReadBasis::Native(snapshot) => {
-                Box::new(snapshot.range_cursor(history, order, None, None)?)
+        match &self.basis {
+            ReadBasis::Eager(database) => Ok(DatabaseValueScanCursor {
+                inner: Box::new(
+                    database
+                        .datoms(
+                            if history {
+                                crate::View::History
+                            } else {
+                                crate::View::Current
+                            },
+                            order,
+                        )
+                        .into_iter()
+                        .map(Ok),
+                ),
+                observer,
+                failed: false,
+            }),
+            ReadBasis::Native(snapshot) => Ok(DatabaseValueScanCursor {
+                inner: Box::new(snapshot.range_cursor(history, order, None, None)?),
+                observer,
+                failed: false,
+            }),
+            ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValueScanCursor {
+                // The overlay owns observation so an AVET-enablement source
+                // range can be charged while it is reordered, without later
+                // double-charging those precharged datoms.
+                inner: Box::new(overlay.scan_cursor(history, order, observer)?),
+                observer: None,
+                failed: false,
+            }),
+        }
+    }
+
+    fn basis_prefix_cursor(
+        &self,
+        history: bool,
+        prefix: &IndexPrefix,
+        observer: Option<Arc<LogicalReadObserver>>,
+    ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
+        match &self.basis {
+            ReadBasis::Eager(database) => {
+                let datoms = if history {
+                    database.history_with_prefix(prefix)?
+                } else {
+                    database.datoms_with_prefix(prefix)?
+                };
+                Ok(DatabaseValuePrefixCursor {
+                    inner: DatabaseValuePrefixCursorInner::Eager(datoms.iter().cloned()),
+                    observer,
+                    failed: false,
+                })
             }
-            ReadBasis::TransactionOverlay(overlay) => {
-                Box::new(overlay.scan_cursor(history, order)?)
-            }
-        };
-        Ok(DatabaseValueScanCursor {
-            inner,
-            observer: None,
-            failed: false,
-        })
+            ReadBasis::Native(snapshot) => Ok(DatabaseValuePrefixCursor {
+                inner: DatabaseValuePrefixCursorInner::Native(Box::new(
+                    snapshot.prefix_cursor(history, prefix)?,
+                )),
+                observer,
+                failed: false,
+            }),
+            ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValuePrefixCursor {
+                // As with full scans, the overlay owns observation so its one
+                // necessarily reordered AVET backfill is bounded at source.
+                inner: DatabaseValuePrefixCursorInner::Overlay(Box::new(
+                    overlay.prefix_cursor(history, prefix, observer)?,
+                )),
+                observer: None,
+                failed: false,
+            }),
+        }
     }
 
     fn basis_prefix(
@@ -931,13 +1013,6 @@ impl DatabaseValue {
         let mut database = self.clone();
         database.filters = Arc::default();
         database
-    }
-
-    fn charge_datom(&self, datom: &Datom) -> Result<(), SemanticError> {
-        if let Some(observer) = &self.read_observer {
-            observer.charge_datom(datom)?;
-        }
-        Ok(())
     }
 
     fn charge_datoms(&self, datoms: &[Datom]) -> Result<(), SemanticError> {
@@ -976,8 +1051,10 @@ impl TransactionOverlay {
         &self,
         history: bool,
         order: IndexOrder,
+        observer: Option<Arc<LogicalReadObserver>>,
     ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
-        let base = self.base.basis_scan_cursor(history, order)?;
+        let base =
+            TransactionOverlayBaseCursor::Scan(self.base.basis_scan_cursor(history, order, None)?);
         let removals: Arc<[Datom]> = if history {
             Arc::from([])
         } else {
@@ -988,7 +1065,7 @@ impl TransactionOverlay {
                 .collect::<Vec<_>>()
                 .into()
         };
-        let mut delta = Vec::new();
+        let mut delta = Vec::<OverlayCursorDatom>::new();
 
         // `add-avet` copies the attribute's existing AEVT working set into
         // the transaction-local AVET. Do the same bounded, attribute-local
@@ -999,24 +1076,30 @@ impl TransactionOverlay {
                 schema_has_avet(&self.schema, attribute.id)
                     && !schema_has_avet(self.base.schema(), attribute.id)
             }) {
-                delta.extend(
-                    self.base
-                        .basis_prefix(
-                            history,
-                            &IndexPrefix::Aevt {
-                                attribute: attribute.id,
-                                entity: None,
-                                value: None,
-                            },
-                        )?
-                        .into_iter()
-                        .filter(|datom| {
-                            history
-                                || !removals
-                                    .iter()
-                                    .any(|removal| same_stored_eav(removal, datom))
-                        }),
-                );
+                for datom in self.base.basis_prefix_cursor(
+                    history,
+                    &IndexPrefix::Aevt {
+                        attribute: attribute.id,
+                        entity: None,
+                        value: None,
+                    },
+                    None,
+                )? {
+                    let datom = datom?;
+                    if let Some(observer) = &observer {
+                        observer.charge_datom(&datom)?;
+                    }
+                    if history
+                        || !removals
+                            .iter()
+                            .any(|removal| same_stored_eav(removal, &datom))
+                    {
+                        delta.push(OverlayCursorDatom {
+                            datom,
+                            precharged: true,
+                        });
+                    }
+                }
             }
         }
 
@@ -1029,12 +1112,15 @@ impl TransactionOverlay {
             if history
                 || !delta
                     .iter()
-                    .any(|existing| same_stored_eav(existing, datom))
+                    .any(|existing| same_stored_eav(&existing.datom, datom))
             {
-                delta.push(datom.clone());
+                delta.push(OverlayCursorDatom {
+                    datom: datom.clone(),
+                    precharged: false,
+                });
             }
         }
-        delta.sort_by(|left, right| left.cmp_in(right, order));
+        delta.sort_by(|left, right| left.datom.cmp_in(&right.datom, order));
         Ok(TransactionOverlayScanCursor {
             base,
             delta: delta.into_iter(),
@@ -1042,6 +1128,98 @@ impl TransactionOverlay {
             schema: Arc::clone(&self.schema),
             history,
             order,
+            observer,
+            base_next: None,
+            delta_next: None,
+            failed: false,
+        })
+    }
+
+    fn prefix_cursor(
+        &self,
+        history: bool,
+        prefix: &IndexPrefix,
+        observer: Option<Arc<LogicalReadObserver>>,
+    ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
+        let source_prefix = self.source_prefix(prefix);
+        let removals: Arc<[Datom]> = if history {
+            Arc::from([])
+        } else {
+            self.tx_data
+                .iter()
+                .filter(|datom| !datom.added)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into()
+        };
+        let mut delta = Vec::<OverlayCursorDatom>::new();
+
+        // A newly enabled AVET range is physically absent from db-before and
+        // must be sourced from AEVT, whose order cannot be merged directly
+        // into AVET. This is the one explicit broad prefix operation. Charge
+        // each source datom before retaining it so a small transaction cap
+        // stops the reorder before it can allocate the complete range.
+        let base = if source_prefix.order() == prefix.order() {
+            TransactionOverlayBaseCursor::Prefix(self.base.basis_prefix_cursor(
+                history,
+                &source_prefix,
+                None,
+            )?)
+        } else {
+            for datom in self
+                .base
+                .basis_prefix_cursor(history, &source_prefix, None)?
+            {
+                let datom = datom?;
+                if let Some(observer) = &observer {
+                    observer.charge_datom(&datom)?;
+                }
+                if overlay_index_member(&self.schema, &datom, prefix.order())
+                    && compare_prefix(&datom, prefix).is_eq()
+                    && (history
+                        || !removals
+                            .iter()
+                            .any(|removal| same_stored_eav(removal, &datom)))
+                {
+                    delta.push(OverlayCursorDatom {
+                        datom,
+                        precharged: true,
+                    });
+                }
+            }
+            TransactionOverlayBaseCursor::Empty
+        };
+
+        for datom in self
+            .tx_data
+            .iter()
+            .filter(|datom| {
+                overlay_index_member(&self.schema, datom, prefix.order())
+                    && compare_prefix(datom, prefix).is_eq()
+            })
+            .filter(|datom| history || datom.added)
+        {
+            if history
+                || !delta
+                    .iter()
+                    .any(|existing| same_stored_eav(&existing.datom, datom))
+            {
+                delta.push(OverlayCursorDatom {
+                    datom: datom.clone(),
+                    precharged: false,
+                });
+            }
+        }
+        delta.sort_by(|left, right| left.datom.cmp_in(&right.datom, prefix.order()));
+
+        Ok(TransactionOverlayScanCursor {
+            base,
+            delta: delta.into_iter(),
+            removals,
+            schema: Arc::clone(&self.schema),
+            history,
+            order: prefix.order(),
+            observer,
             base_next: None,
             delta_next: None,
             failed: false,
@@ -1121,12 +1299,15 @@ impl TransactionOverlayScanCursor<'_> {
             {
                 continue;
             }
-            self.base_next = Some(candidate);
+            self.base_next = Some(OverlayCursorDatom {
+                datom: candidate,
+                precharged: false,
+            });
         }
         Ok(())
     }
 
-    fn next_result(&mut self) -> Result<Option<Datom>, SemanticError> {
+    fn next_result(&mut self) -> Result<Option<OverlayCursorDatom>, SemanticError> {
         self.fill_base()?;
         if self.delta_next.is_none() {
             self.delta_next = self.delta.next();
@@ -1135,8 +1316,10 @@ impl TransactionOverlayScanCursor<'_> {
             (None, None) => Ok(None),
             (Some(_), None) => Ok(self.base_next.take()),
             (None, Some(_)) => Ok(self.delta_next.take()),
-            (Some(base), Some(delta)) if !self.history && same_stored_eav(base, delta) => {
-                if u64::from(delta.attribute) == crate::DB_ALTER_ATTRIBUTE {
+            (Some(base), Some(delta))
+                if !self.history && same_stored_eav(&base.datom, &delta.datom) =>
+            {
+                if u64::from(delta.datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
                     // Repeated alter hooks are distinct immutable history
                     // events, and the newest one is the current coordinate.
                     self.base_next = None;
@@ -1146,7 +1329,7 @@ impl TransactionOverlayScanCursor<'_> {
                     Ok(self.base_next.take())
                 }
             }
-            (Some(base), Some(delta)) => match base.cmp_in(delta, self.order) {
+            (Some(base), Some(delta)) => match base.datom.cmp_in(&delta.datom, self.order) {
                 std::cmp::Ordering::Less => Ok(self.base_next.take()),
                 std::cmp::Ordering::Greater => Ok(self.delta_next.take()),
                 std::cmp::Ordering::Equal => {
@@ -1166,7 +1349,16 @@ impl Iterator for TransactionOverlayScanCursor<'_> {
             return None;
         }
         match self.next_result() {
-            Ok(Some(datom)) => Some(Ok(datom)),
+            Ok(Some(item)) => {
+                if !item.precharged
+                    && let Some(observer) = &self.observer
+                    && let Err(error) = observer.charge_datom(&item.datom)
+                {
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+                Some(Ok(item.datom))
+            }
             Ok(None) => None,
             Err(error) => {
                 self.failed = true;
@@ -1565,6 +1757,50 @@ mod tests {
                 .expect("history values must reject the point-current cursor")
                 .code,
             "database/prefix-cursor-requires-current"
+        );
+    }
+
+    #[test]
+    fn observed_overlay_prefix_stops_at_the_logical_read_cap() {
+        const TAG: u32 = 1_000;
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                TAG,
+                Keyword::new("read-cap", "tag"),
+                ValueType::String,
+                Cardinality::Many,
+            ))
+            .unwrap();
+        let database = Database::new(schema).unwrap();
+        let entity = make_eid(USER_PARTITION, 1).unwrap();
+        let ops = (0..256)
+            .map(|value| TxOp::Add {
+                entity: EntityRef::Id(entity),
+                attribute: TAG,
+                value: Value::String(format!("tag-{value:03}")).into(),
+            })
+            .collect::<Vec<_>>();
+        let seeded = database.with(&ops, 1_000).unwrap().db_after;
+        let proposed = seeded.with(&[], 2_000).unwrap();
+        let observer = Arc::new(LogicalReadObserver::new(2, u64::MAX));
+        let overlay = overlay_for(&proposed, 2_000).with_read_observer(Arc::clone(&observer));
+
+        let error = overlay
+            .datoms_with_prefix(&IndexPrefix::Eavt {
+                entity,
+                attribute: Some(TAG),
+                value: None,
+            })
+            .unwrap_err();
+        assert_eq!(
+            (error.category, error.code),
+            (ErrorCategory::Busy, "transaction/read-capacity")
+        );
+        assert_eq!(
+            observer.snapshot().unwrap().datoms,
+            2,
+            "the cursor must charge successful yields one at a time; a late whole-prefix charge leaves this at zero"
         );
     }
 

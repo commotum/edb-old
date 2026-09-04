@@ -2,7 +2,6 @@ use crate::{
     AttributeRef, Database, DatabaseValue, Digest, EntityMap, EntityRef, ErrorCategory,
     IndexPrefix, Keyword, MapValue, SemanticError, TxForm, TxOp, TxValue, Value,
 };
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -765,6 +764,8 @@ enum ProgramRead<'a> {
     Exact(&'a DatabaseValue),
 }
 
+type ProgramPrefixCursor<'a> = Box<dyn Iterator<Item = Result<crate::Datom, SemanticError>> + 'a>;
+
 impl<'a> ProgramRead<'a> {
     fn schema(self) -> &'a crate::Schema {
         match self {
@@ -796,16 +797,15 @@ impl<'a> ProgramRead<'a> {
         }
     }
 
-    fn datoms_with_prefix(
-        self,
-        prefix: &IndexPrefix,
-    ) -> Result<Cow<'a, [crate::Datom]>, SemanticError> {
+    fn prefix_cursor(self, prefix: &IndexPrefix) -> Result<ProgramPrefixCursor<'a>, SemanticError> {
         match self {
             Self::AttributePredicate => {
                 unreachable!("validated attribute predicate attempted a database read")
             }
-            Self::Eager(database) => Ok(Cow::Borrowed(database.datoms_with_prefix(prefix)?)),
-            Self::Exact(database) => Ok(Cow::Owned(database.datoms_with_prefix(prefix)?)),
+            Self::Eager(database) => Ok(Box::new(
+                database.datoms_with_prefix(prefix)?.iter().cloned().map(Ok),
+            )),
+            Self::Exact(database) => Ok(Box::new(database.query_prefix_cursor(prefix)?)),
         }
     }
 }
@@ -1612,57 +1612,67 @@ impl Evaluation<'_, '_, '_, '_> {
                 }
                 Instruction::LoadOne(attribute) => {
                     let entity = database_entity_id(self.database, pop(stack)?)?;
-                    let datoms = self.database.datoms_with_prefix(&IndexPrefix::Eavt {
+                    let mut datoms = self.database.prefix_cursor(&IndexPrefix::Eavt {
                         entity,
                         attribute: Some(*attribute),
                         value: None,
                     })?;
-                    self.budget.charge(usize_as_u64(datoms.len())?)?;
-                    match datoms.as_ref() {
-                        [datom] => self.push(stack, RuntimeValue::Scalar(datom.value.clone()))?,
-                        [] => {
+                    let first = datoms.next().transpose()?;
+                    if first.is_some() {
+                        self.budget.charge(1)?;
+                    }
+                    match first {
+                        Some(datom) => {
+                            if datoms.next().transpose()?.is_some() {
+                                self.budget.charge(1)?;
+                                return Err(incorrect(
+                                    "program/not-cardinality-one",
+                                    format!("attribute {attribute} has multiple values"),
+                                ));
+                            }
+                            self.push(stack, RuntimeValue::Scalar(datom.value))?;
+                        }
+                        None => {
                             return Err(incorrect(
                                 "program/missing-value",
                                 format!("entity {entity} has no value for attribute {attribute}"),
-                            ));
-                        }
-                        _ => {
-                            return Err(incorrect(
-                                "program/not-cardinality-one",
-                                format!("attribute {attribute} has multiple values"),
                             ));
                         }
                     }
                 }
                 Instruction::LoadMany(attribute) => {
                     let entity = database_entity_id(self.database, pop(stack)?)?;
-                    let datoms = self.database.datoms_with_prefix(&IndexPrefix::Eavt {
+                    let datoms = self.database.prefix_cursor(&IndexPrefix::Eavt {
                         entity,
                         attribute: Some(*attribute),
                         value: None,
                     })?;
-                    self.budget.charge(usize_as_u64(datoms.len())?)?;
-                    if datoms.len() > self.budget.max_collection_items {
-                        return Err(busy(
-                            "program/collection-limit",
-                            "cardinality-many read exceeds its item limit",
-                        ));
+                    let mut values = Vec::new();
+                    for datom in datoms {
+                        let datom = datom?;
+                        self.budget.charge(1)?;
+                        if values.len() >= self.budget.max_collection_items {
+                            return Err(busy(
+                                "program/collection-limit",
+                                "cardinality-many read exceeds its item limit",
+                            ));
+                        }
+                        values.push(RuntimeValue::Scalar(datom.value));
                     }
-                    let values = datoms
-                        .iter()
-                        .map(|datom| RuntimeValue::Scalar(datom.value.clone()))
-                        .collect();
                     self.push(stack, RuntimeValue::Vector(values))?;
                 }
                 Instruction::Exists(attribute) => {
                     let entity = database_entity_id(self.database, pop(stack)?)?;
-                    let datoms = self.database.datoms_with_prefix(&IndexPrefix::Eavt {
+                    let mut datoms = self.database.prefix_cursor(&IndexPrefix::Eavt {
                         entity,
                         attribute: Some(*attribute),
                         value: None,
                     })?;
-                    self.budget.charge(usize_as_u64(datoms.len())?)?;
-                    self.push(stack, RuntimeValue::Scalar(Value::Bool(!datoms.is_empty())))?;
+                    let exists = datoms.next().transpose()?.is_some();
+                    if exists {
+                        self.budget.charge(1)?;
+                    }
+                    self.push(stack, RuntimeValue::Scalar(Value::Bool(exists)))?;
                 }
                 Instruction::Query(template) => {
                     let relation = execute_query_template(
@@ -2297,26 +2307,27 @@ fn execute_query_template(
             // access which subsequently finds no datoms.
             budget.charge(1)?;
             let datoms = if let Some(entity) = entity {
-                database.datoms_with_prefix(&IndexPrefix::Eavt {
+                database.prefix_cursor(&IndexPrefix::Eavt {
                     entity,
                     attribute: Some(pattern.attribute),
                     value: value.clone(),
                 })?
             } else if value.is_some() && (attribute.indexed || attribute.unique.is_some()) {
-                database.datoms_with_prefix(&IndexPrefix::Avet {
+                database.prefix_cursor(&IndexPrefix::Avet {
                     attribute: pattern.attribute,
                     value: value.clone(),
                     entity: None,
                 })?
             } else {
-                database.datoms_with_prefix(&IndexPrefix::Aevt {
+                database.prefix_cursor(&IndexPrefix::Aevt {
                     attribute: pattern.attribute,
                     entity: None,
                     value: None,
                 })?
             };
 
-            for datom in datoms.iter() {
+            for datom in datoms {
+                let datom = datom?;
                 budget.check_cancel()?;
                 // One unit for examining the datom plus its actual value
                 // width. This charges rejected candidates as real work while
@@ -3012,7 +3023,9 @@ fn busy(code: &'static str, message: impl Into<String>) -> SemanticError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database_value::LogicalReadObserver;
     use crate::{Attribute, Cardinality, Schema, Unique, ValueType};
+    use std::sync::Arc;
 
     const KEY: u32 = 1_000;
     const NAME: u32 = 1_001;
@@ -3199,6 +3212,102 @@ mod tests {
             exact(&exists, &database.database_value()),
             vec![vec![Value::Bool(true)]]
         );
+    }
+
+    #[test]
+    fn exact_program_prefix_reads_stop_per_yield_and_exists_reads_one() {
+        let (database, entity) = query_database();
+        let tags = (0..256)
+            .map(|value| TxOp::Add {
+                entity: EntityRef::Id(entity),
+                attribute: TAG,
+                value: Value::String(format!("bulk-{value:03}")).into(),
+            })
+            .collect::<Vec<_>>();
+        let database = database.with(&tags, 4_000).unwrap().db_after;
+
+        let exists = Program {
+            kind: ProgramKind::Query,
+            arity: 0,
+            instructions: vec![
+                Instruction::PushEntity(EntityRef::Id(entity)),
+                Instruction::Exists(TAG),
+                Instruction::Return,
+            ],
+        };
+        let exists_observer = Arc::new(LogicalReadObserver::new(2, u64::MAX));
+        let observed = database
+            .database_value()
+            .with_read_observer(Arc::clone(&exists_observer));
+        assert_eq!(
+            query_rows(
+                ProgramRuntime
+                    .execute_query(&exists, &observed, &[], ProgramControl::default())
+                    .unwrap()
+            ),
+            vec![vec![Value::Bool(true)]]
+        );
+        assert_eq!(exists_observer.snapshot().unwrap().datoms, 1);
+
+        let load_many = Program {
+            kind: ProgramKind::Query,
+            arity: 0,
+            instructions: vec![
+                Instruction::PushEntity(EntityRef::Id(entity)),
+                Instruction::LoadMany(TAG),
+                Instruction::Return,
+            ],
+        };
+        let load_observer = Arc::new(LogicalReadObserver::new(2, u64::MAX));
+        let observed = database
+            .database_value()
+            .with_read_observer(Arc::clone(&load_observer));
+        let error = ProgramRuntime
+            .execute_query(&load_many, &observed, &[], ProgramControl::default())
+            .unwrap_err();
+        assert_eq!(
+            (error.category, error.code),
+            (ErrorCategory::Busy, "transaction/read-capacity")
+        );
+        assert_eq!(
+            load_observer.snapshot().unwrap().datoms,
+            2,
+            "the third candidate is rejected before it is retained"
+        );
+
+        let query = Program {
+            kind: ProgramKind::Query,
+            arity: 0,
+            instructions: vec![
+                Instruction::Query(
+                    QueryTemplate::new(
+                        vec![0],
+                        vec![QueryPattern::new(
+                            QueryTerm::Constant(Value::Ref(entity)),
+                            TAG,
+                            QueryTerm::Variable(0),
+                        )],
+                    )
+                    .unwrap(),
+                ),
+                Instruction::ForEach {
+                    body: vec![Instruction::Unpack(1), Instruction::EmitRow(1)],
+                },
+                Instruction::Return,
+            ],
+        };
+        let query_observer = Arc::new(LogicalReadObserver::new(2, u64::MAX));
+        let observed = database
+            .database_value()
+            .with_read_observer(Arc::clone(&query_observer));
+        let error = ProgramRuntime
+            .execute_query(&query, &observed, &[], ProgramControl::default())
+            .unwrap_err();
+        assert_eq!(
+            (error.category, error.code),
+            (ErrorCategory::Busy, "transaction/read-capacity")
+        );
+        assert_eq!(query_observer.snapshot().unwrap().datoms, 2);
     }
 
     #[test]
