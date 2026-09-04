@@ -100,6 +100,47 @@ pub struct PeerLoadStats {
     pub compatibility_failures: u64,
 }
 
+/// Complete logical coordinate of one immutable value in one authoritative
+/// log generation. Unlike a live head, this can name a historical source
+/// value while an administrative rewrite or idempotent retry is in progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ExactEndpoint {
+    pub(crate) generation: u64,
+    pub(crate) basis_t: u64,
+    pub(crate) tx_hash: Digest,
+    pub(crate) state_hash: Digest,
+    pub(crate) eidx_frontier: u64,
+}
+
+impl ExactEndpoint {
+    fn validate(self) -> Result<Self, SemanticError> {
+        crate::t_to_tx(self.basis_t)?;
+        crate::identity::validate_frontier(self.eidx_frontier)?;
+        sql_basis(self.generation)?;
+        if self.state_hash == [0; 32] {
+            return Err(SemanticError::incorrect(
+                "peer/exact-endpoint-zero-state",
+                "an exact native endpoint requires a nonzero semantic state commitment",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// Auditable work performed while choosing one authenticated native base.
+/// `published_candidates` includes older candidates not inspected after a
+/// valid newer base wins; `examined_candidates` and `rejected_candidates`
+/// describe the actual newest-to-oldest authentication scan.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ExactOpenStats {
+    pub(crate) published_candidates: u64,
+    pub(crate) examined_candidates: u64,
+    pub(crate) rejected_candidates: u64,
+    pub(crate) selected_publication_revision: u64,
+    pub(crate) selected_manifest_hash: Digest,
+    pub(crate) tail_transactions: u64,
+}
+
 #[derive(Debug, Default)]
 struct PeerLoadCounters {
     manifest_candidates: AtomicU64,
@@ -274,6 +315,7 @@ impl TreeNodeCache {
 #[derive(Clone)]
 struct TreeBase {
     manifest: PersistentTreeManifest,
+    manifest_hash: Digest,
     roots: BTreeMap<(bool, u8), Arc<RootNode>>,
     metadata: Arc<MetadataProjection>,
 }
@@ -950,8 +992,17 @@ fn load_latest_native_manifest<C: GenericClient>(
                 AND bootstrap.eidx_frontier = m.eidx_frontier \
                 AND bootstrap.commitment_version = 2 \
                 AND bootstrap.tx_hash = catalog.genesis_hash \
+               LEFT JOIN atomic_semantic_commitment_roots semantic \
+                 ON semantic.database_id = m.database_id \
+                AND semantic.generation = m.log_generation \
+                AND semantic.basis_t = m.basis_t \
+                AND semantic.tx_hash = m.tx_hash \
+                AND semantic.state_hash = m.state_hash \
+                AND semantic.eidx_frontier = m.eidx_frontier \
+                AND semantic.commitment_version = 2 \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.log_generation = $3 \
+                AND semantic.tx_hash IS NOT NULL \
                 AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
                   OR (m.log_generation > 0 AND m.basis_t = 0 \
                       AND bootstrap.tx_hash IS NOT NULL) \
@@ -2193,7 +2244,7 @@ impl RootPinManager {
         let Some(tree) = tree else {
             return Ok(None);
         };
-        let manifest_hash = tree.manifest.hash()?;
+        let manifest_hash = tree.manifest_hash;
         let mut state = lock(&self.state);
         self.ensure_locked(&mut state)?;
         if !state.counts.contains_key(&manifest_hash)
@@ -2479,6 +2530,7 @@ impl Drop for RootPin {
 struct TieredReadCore {
     database_id: String,
     connection: PostgresConnectionConfig,
+    recent_limits: RecentLimits,
     load_counters: PeerLoadCounters,
     root_pins: Arc<RootPinManager>,
     io: Mutex<PeerIo>,
@@ -2750,6 +2802,7 @@ impl Peer {
         let read = Arc::new(TieredReadCore {
             database_id,
             connection: connection.clone(),
+            recent_limits,
             load_counters,
             root_pins,
             io: Mutex::new(PeerIo { client, tree_cache }),
@@ -3733,6 +3786,136 @@ impl Iterator for PeerIndexCursor {
 }
 
 impl TieredSnapshot {
+    /// Open one generation-qualified immutable value strictly from an
+    /// authenticated native publication plus its authenticated log tail.
+    /// There is intentionally no legacy segment, eager `Database`, or
+    /// `recover_to` branch in this writer-facing constructor.
+    pub(crate) fn open_exact_configured(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+        cache_entries: usize,
+        cache_bytes: usize,
+        recent_limits: RecentLimits,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        let endpoint = endpoint.validate()?;
+        let database_id = database_id.into();
+        let mut client = connection.connect_for("peer/exact-open")?;
+        verify_schema_compatibility(&mut client)?;
+        let counters = PeerLoadCounters::default();
+        let mut tree_cache = TreeNodeCache::new(cache_entries, cache_bytes);
+        let (base, scan_stats) = exact_tree_selection(
+            scan_latest_tree_base(
+                &mut client,
+                &database_id,
+                endpoint.basis_t,
+                endpoint.generation,
+                required_manifest,
+                &counters,
+                &mut tree_cache,
+            )?,
+            required_manifest,
+        )?;
+
+        // Pins close both load-versus-tree-GC and load-versus-generation-GC
+        // races before the authoritative tail is read.
+        let root_pins = RootPinManager::connect(connection, &database_id)?;
+        let generation_pin = root_pins.acquire_generation(endpoint.generation)?;
+        let root_pin = root_pins
+            .acquire(Some(&base))
+            .map_err(|error| exact_pin_error(error, required_manifest))?;
+        let (state, tail_transactions) = build_exact_tiered_state(
+            &mut client,
+            &database_id,
+            endpoint,
+            base,
+            generation_pin,
+            root_pin,
+            recent_limits,
+            0,
+        )?;
+        let stats = exact_open_stats(&state, scan_stats, tail_transactions)?;
+        let core = Arc::new(TieredReadCore {
+            database_id,
+            connection: connection.clone(),
+            recent_limits,
+            load_counters: counters,
+            root_pins,
+            io: Mutex::new(PeerIo { client, tree_cache }),
+        });
+        Ok((
+            Self {
+                core,
+                state: Arc::new(state),
+            },
+            stats,
+        ))
+    }
+
+    /// Re-select a native base while preserving this value's exact logical
+    /// endpoint. The returned state acquires its own manifest/generation pin;
+    /// the old immutable snapshot and its pins are untouched.
+    pub(crate) fn rebase_exact(
+        &self,
+        required_manifest: Option<Digest>,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        let endpoint = self.endpoint().validate()?;
+        self.core.root_pins.ensure()?;
+        let mut io = lock(&self.core.io);
+        let scan = {
+            let PeerIo { client, tree_cache } = &mut *io;
+            scan_latest_tree_base(
+                client,
+                &self.core.database_id,
+                endpoint.basis_t,
+                endpoint.generation,
+                required_manifest,
+                &self.core.load_counters,
+                tree_cache,
+            )?
+        };
+        let (base, scan_stats) = exact_tree_selection(scan, required_manifest)?;
+        let generation_pin = self
+            .core
+            .root_pins
+            .acquire_generation(endpoint.generation)?;
+        let root_pin = self
+            .core
+            .root_pins
+            .acquire(Some(&base))
+            .map_err(|error| exact_pin_error(error, required_manifest))?;
+        let local_generation = self.state.generation.saturating_add(1);
+        let (state, tail_transactions) = build_exact_tiered_state(
+            &mut io.client,
+            &self.core.database_id,
+            endpoint,
+            base,
+            generation_pin,
+            root_pin,
+            self.core.recent_limits,
+            local_generation,
+        )?;
+        let stats = exact_open_stats(&state, scan_stats, tail_transactions)?;
+        Ok((
+            Self {
+                core: Arc::clone(&self.core),
+                state: Arc::new(state),
+            },
+            stats,
+        ))
+    }
+
+    pub(crate) fn endpoint(&self) -> ExactEndpoint {
+        ExactEndpoint {
+            generation: self.state.excision_generation,
+            basis_t: self.state.basis_t,
+            tx_hash: self.state.current_hash,
+            state_hash: self.state.current_state_hash,
+            eidx_frontier: self.state.eidx_frontier,
+        }
+    }
+
     pub fn basis_t(&self) -> u64 {
         self.state.basis_t
     }
@@ -3837,6 +4020,14 @@ impl TieredSnapshot {
 
     pub(crate) fn recent_stats(&self) -> crate::recent::RecentStats {
         self.state.recent.stats()
+    }
+
+    pub(crate) fn durable_manifest_hash(&self) -> Option<Digest> {
+        self.state.tree_base.as_ref().map(|base| base.manifest_hash)
+    }
+
+    pub(crate) fn tree_cache_stats(&self) -> CacheStats {
+        lock(&self.core.io).tree_cache.stats
     }
 
     pub(crate) fn database_value(&self) -> crate::DatabaseValue {
@@ -4765,20 +4956,79 @@ fn derive_metadata_from_client<C: GenericClient>(
 /// Application leaves remain untouched until a snapshot read requests them.
 /// As in the recovered peer, schema and names are derived from ordinary index
 /// information rather than duplicated inside the durable root envelope.
-fn load_latest_tree_base<C: GenericClient>(
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TreeBaseScanStats {
+    published_candidates: u64,
+    examined_candidates: u64,
+    rejected_candidates: u64,
+}
+
+enum TreeBaseScan {
+    Selected(TreeBase, TreeBaseScanStats),
+    NoPublication(TreeBaseScanStats),
+    AllInvalid(TreeBaseScanStats),
+    RequiredCollecting(TreeBaseScanStats),
+}
+
+fn scan_latest_tree_base<C: GenericClient>(
     client: &mut C,
     database_id: &str,
     through: u64,
     excision_generation: u64,
+    required_manifest: Option<Digest>,
     counters: &PeerLoadCounters,
     cache: &mut TreeNodeCache,
-) -> Result<Option<TreeBase>, SemanticError> {
+) -> Result<TreeBaseScan, SemanticError> {
     let through_sql = sql_basis(through)?;
     let generation_sql = sql_basis(excision_generation)?;
+    let required_manifest = required_manifest.map(|hash| hash.to_vec());
+    // Count from the publication authority itself. Broken/missing manifest or
+    // semantic-root joins are invalid candidates, never evidence that no
+    // publication exists.
+    let published = client
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
+                            WHERE progress.database_id = p.database_id \
+                              AND progress.publication_revision = p.publication_revision \
+                              AND progress.manifest_hash = p.manifest_hash) \
+               FROM atomic_tree_publications p \
+              WHERE p.database_id = $1 AND p.basis_t <= $2 \
+                AND p.log_generation = $3 \
+                AND ($4::bytea IS NULL OR p.manifest_hash = $4)",
+            &[
+                &database_id,
+                &through_sql,
+                &generation_sql,
+                &required_manifest,
+            ],
+        )
+        .map_err(|error| postgres_error("peer/tree-publication-scan", error))?;
+    let mut stats = TreeBaseScanStats {
+        published_candidates: published.len() as u64,
+        ..TreeBaseScanStats::default()
+    };
+    if published.is_empty() {
+        return Ok(TreeBaseScan::NoPublication(stats));
+    }
+    if required_manifest.is_some() && published.iter().any(|row| row.get::<_, bool>(0)) {
+        stats.examined_candidates = 1;
+        stats.rejected_candidates = 1;
+        return Ok(TreeBaseScan::RequiredCollecting(stats));
+    }
     let rows = client
         .query(
             "SELECT p.publication_revision, m.basis_t, m.tx_hash, m.state_hash, \
-                    m.eidx_frontier, m.manifest_hash, m.payload \
+                    m.eidx_frontier, m.manifest_hash, m.payload, \
+                    ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
+                      OR (m.log_generation > 0 AND m.basis_t = 0 \
+                          AND bootstrap.tx_hash IS NOT NULL) \
+                      OR (m.log_generation > 0 AND m.basis_t > 0 \
+                          AND native.tx_hash IS NOT NULL)) \
+                    AND semantic.tx_hash IS NOT NULL, \
+                    EXISTS (SELECT 1 FROM atomic_tree_retirement_progress progress \
+                             WHERE progress.database_id = p.database_id \
+                               AND progress.publication_revision = p.publication_revision \
+                               AND progress.manifest_hash = p.manifest_hash) \
                FROM atomic_tree_publications p \
                JOIN atomic_tree_manifests m \
                  ON m.database_id = p.database_id \
@@ -4803,18 +5053,28 @@ fn load_latest_tree_base<C: GenericClient>(
                 AND bootstrap.eidx_frontier = m.eidx_frontier \
                 AND bootstrap.commitment_version = 2 \
                 AND bootstrap.tx_hash = catalog.genesis_hash \
+               LEFT JOIN atomic_semantic_commitment_roots semantic \
+                 ON semantic.database_id = m.database_id \
+                AND semantic.generation = m.log_generation \
+                AND semantic.basis_t = m.basis_t \
+                AND semantic.tx_hash = m.tx_hash \
+                AND semantic.state_hash = m.state_hash \
+                AND semantic.eidx_frontier = m.eidx_frontier \
+                AND semantic.commitment_version = 2 \
               WHERE m.database_id = $1 AND m.basis_t <= $2 \
                 AND m.log_generation = $3 \
-                AND ((m.log_generation = 0 AND legacy.tx_hash IS NOT NULL) \
-                  OR (m.log_generation > 0 AND m.basis_t = 0 \
-                      AND bootstrap.tx_hash IS NOT NULL) \
-                  OR (m.log_generation > 0 AND m.basis_t > 0 \
-                      AND native.tx_hash IS NOT NULL)) \
+                AND ($4::bytea IS NULL OR p.manifest_hash = $4) \
               ORDER BY p.publication_revision DESC",
-            &[&database_id, &through_sql, &generation_sql],
+            &[
+                &database_id,
+                &through_sql,
+                &generation_sql,
+                &required_manifest,
+            ],
         )
         .map_err(|error| postgres_error("peer/tree-manifests", error))?;
     for row in rows {
+        stats.examined_candidates = stats.examined_candidates.saturating_add(1);
         counters.manifest_candidates.fetch_add(1, Ordering::Relaxed);
         let publication_revision = pg_basis(row.get(0), "tree publication revision")?;
         let basis_t = pg_basis(row.get(1), "tree manifest basis")?;
@@ -4823,7 +5083,22 @@ fn load_latest_tree_base<C: GenericClient>(
         let eidx_frontier = pg_basis(row.get(4), "tree manifest entity frontier")?;
         let manifest_hash = digest(row.get(5), "tree manifest hash")?;
         let payload: Vec<u8> = row.get(6);
+        let authoritative: bool = row.get(7);
+        let collecting: bool = row.get(8);
+        if collecting {
+            stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
+            if required_manifest.is_some() {
+                return Ok(TreeBaseScan::RequiredCollecting(stats));
+            }
+            continue;
+        }
         let candidate = (|| {
+            if !authoritative {
+                return Err(fault(
+                    "peer/tree-manifest-authority",
+                    "tree publication is not bound to an authoritative generation endpoint",
+                ));
+            }
             if sha256(&payload) != manifest_hash {
                 return Err(fault(
                     "peer/tree-manifest-hash",
@@ -4933,15 +5208,209 @@ fn load_latest_tree_base<C: GenericClient>(
             )?);
             Ok(TreeBase {
                 manifest,
+                manifest_hash,
                 roots,
                 metadata,
             })
         })();
         if let Ok(base) = candidate {
-            return Ok(Some(base));
+            return Ok(TreeBaseScan::Selected(base, stats));
         }
+        stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
     }
-    Ok(None)
+    Ok(TreeBaseScan::AllInvalid(stats))
+}
+
+fn load_latest_tree_base<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    through: u64,
+    excision_generation: u64,
+    counters: &PeerLoadCounters,
+    cache: &mut TreeNodeCache,
+) -> Result<Option<TreeBase>, SemanticError> {
+    match scan_latest_tree_base(
+        client,
+        database_id,
+        through,
+        excision_generation,
+        None,
+        counters,
+        cache,
+    )? {
+        TreeBaseScan::Selected(base, _) => Ok(Some(base)),
+        TreeBaseScan::NoPublication(_) => Ok(None),
+        TreeBaseScan::AllInvalid(stats) => Err(fault(
+            "peer/all-native-publications-invalid",
+            format!(
+                "the generation has published native roots, but every candidate failed authenticated loading (published={}, examined={}, rejected={})",
+                stats.published_candidates, stats.examined_candidates, stats.rejected_candidates
+            ),
+        )),
+        TreeBaseScan::RequiredCollecting(_) => Err(fault(
+            "peer/unexpected-required-tree-scan",
+            "an unqualified native-base scan reported a required manifest state",
+        )),
+    }
+}
+
+fn exact_tree_selection(
+    scan: TreeBaseScan,
+    required_manifest: Option<Digest>,
+) -> Result<(TreeBase, TreeBaseScanStats), SemanticError> {
+    match scan {
+        TreeBaseScan::Selected(base, stats) => Ok((base, stats)),
+        TreeBaseScan::NoPublication(stats) => {
+            let (code, message) = if required_manifest.is_some() {
+                (
+                    "peer/exact-manifest-absent",
+                    "the required native manifest is not published at or before the exact endpoint",
+                )
+            } else {
+                (
+                    "peer/exact-no-native-publication",
+                    "the named generation has no native publication at or before the exact endpoint",
+                )
+            };
+            Err(SemanticError::new(
+                ErrorCategory::Unavailable,
+                code,
+                format!(
+                    "{message} (published={}, examined={}, rejected={})",
+                    stats.published_candidates,
+                    stats.examined_candidates,
+                    stats.rejected_candidates
+                ),
+            ))
+        }
+        TreeBaseScan::AllInvalid(stats) => {
+            let (code, message) = if required_manifest.is_some() {
+                (
+                    "peer/exact-manifest-corrupt",
+                    "the required native manifest failed authenticated loading",
+                )
+            } else {
+                (
+                    "peer/exact-all-native-publications-invalid",
+                    "every native publication for the named generation failed authenticated loading",
+                )
+            };
+            Err(fault(
+                code,
+                format!(
+                    "{message} (published={}, examined={}, rejected={})",
+                    stats.published_candidates,
+                    stats.examined_candidates,
+                    stats.rejected_candidates
+                ),
+            ))
+        }
+        TreeBaseScan::RequiredCollecting(stats) => Err(SemanticError::new(
+            ErrorCategory::Unavailable,
+            "peer/exact-manifest-collecting",
+            format!(
+                "the required native manifest is already being collected (published={}, examined={}, rejected={})",
+                stats.published_candidates, stats.examined_candidates, stats.rejected_candidates
+            ),
+        )),
+    }
+}
+
+fn exact_pin_error(error: SemanticError, required_manifest: Option<Digest>) -> SemanticError {
+    if required_manifest.is_some() && error.code == "peer/root-retired-during-load" {
+        SemanticError::new(
+            ErrorCategory::Unavailable,
+            "peer/exact-manifest-collecting",
+            "the required native manifest began collection before its snapshot pin was acquired",
+        )
+    } else {
+        error
+    }
+}
+
+fn build_exact_tiered_state<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    endpoint: ExactEndpoint,
+    base: TreeBase,
+    generation_pin: Arc<GenerationPin>,
+    root_pin: Option<Arc<RootPin>>,
+    recent_limits: RecentLimits,
+    local_generation: u64,
+) -> Result<(TieredState, u64), SemanticError> {
+    let base_metadata = Arc::clone(&base.metadata);
+    let tail = read_authenticated_tail(
+        client,
+        database_id,
+        endpoint.generation,
+        TailBase {
+            basis_t: base.manifest.basis_t,
+            tx_hash: base.manifest.tx_hash,
+            state_hash: base.manifest.state_hash,
+            eidx_frontier: base.manifest.eidx_frontier,
+        },
+        endpoint.basis_t,
+    )?;
+    if tail.end_hash != endpoint.tx_hash
+        || tail.end_state_hash != endpoint.state_hash
+        || tail.eidx_frontier != endpoint.eidx_frontier
+    {
+        return Err(fault(
+            "peer/exact-endpoint-mismatch",
+            "native base plus authenticated generation tail does not reach every requested endpoint coordinate",
+        ));
+    }
+    let tail_transactions = tail.transactions.len() as u64;
+    let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
+    let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
+    let recent = Arc::new(RecentTier::new_authenticated(
+        database_id,
+        base.manifest.basis_t,
+        base.manifest.tx_hash,
+        tail.transaction_hashes.into_iter().zip(tail.transactions),
+        metadata.endpoint(),
+        recent_limits,
+    )?);
+    let durable_base_t = base.manifest.basis_t;
+    Ok((
+        TieredState {
+            basis_t: endpoint.basis_t,
+            eidx_frontier: endpoint.eidx_frontier,
+            current_hash: endpoint.tx_hash,
+            current_state_hash: endpoint.state_hash,
+            excision_generation: endpoint.generation,
+            durable_base_t,
+            tree_base: Some(Arc::new(base)),
+            _root_pin: root_pin,
+            _generation_pin: generation_pin,
+            recent,
+            metadata,
+            avet_unready,
+            generation: local_generation,
+        },
+        tail_transactions,
+    ))
+}
+
+fn exact_open_stats(
+    state: &TieredState,
+    scan: TreeBaseScanStats,
+    tail_transactions: u64,
+) -> Result<ExactOpenStats, SemanticError> {
+    let base = state.tree_base.as_ref().ok_or_else(|| {
+        fault(
+            "peer/exact-native-base-lost",
+            "strict native construction produced no durable tree base",
+        )
+    })?;
+    Ok(ExactOpenStats {
+        published_candidates: scan.published_candidates,
+        examined_candidates: scan.examined_candidates,
+        rejected_candidates: scan.rejected_candidates,
+        selected_publication_revision: base.manifest.publication_revision,
+        selected_manifest_hash: base.manifest_hash,
+        tail_transactions,
+    })
 }
 
 struct AuthenticatedTail {
@@ -5514,6 +5983,186 @@ mod tests {
     use crate::{
         Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, Value, ValueType,
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_database(prefix: &str) -> String {
+        format!(
+            "{prefix}_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    #[test]
+    fn exact_native_scan_states_and_endpoint_validation_are_distinct() {
+        let stats = TreeBaseScanStats {
+            published_candidates: 2,
+            examined_candidates: 2,
+            rejected_candidates: 2,
+        };
+        assert_eq!(
+            exact_tree_selection(TreeBaseScan::NoPublication(Default::default()), None)
+                .err()
+                .expect("no publication must fail")
+                .code,
+            "peer/exact-no-native-publication"
+        );
+        assert_eq!(
+            exact_tree_selection(
+                TreeBaseScan::NoPublication(Default::default()),
+                Some([1; 32])
+            )
+            .err()
+            .expect("a missing required publication must fail")
+            .code,
+            "peer/exact-manifest-absent"
+        );
+        assert_eq!(
+            exact_tree_selection(TreeBaseScan::AllInvalid(stats), None)
+                .err()
+                .expect("all-invalid publications must fail")
+                .code,
+            "peer/exact-all-native-publications-invalid"
+        );
+        assert_eq!(
+            exact_tree_selection(TreeBaseScan::AllInvalid(stats), Some([1; 32]))
+                .err()
+                .expect("an invalid required publication must fail")
+                .code,
+            "peer/exact-manifest-corrupt"
+        );
+        assert_eq!(
+            exact_tree_selection(TreeBaseScan::RequiredCollecting(stats), Some([1; 32]))
+                .err()
+                .expect("a collecting required publication must fail")
+                .code,
+            "peer/exact-manifest-collecting"
+        );
+        assert_eq!(
+            ExactEndpoint {
+                generation: 1,
+                basis_t: 0,
+                tx_hash: [1; 32],
+                state_hash: [0; 32],
+                eidx_frontier: Database::bootstrap().unwrap().eidx_frontier(),
+            }
+            .validate()
+            .unwrap_err()
+            .code,
+            "peer/exact-endpoint-zero-state"
+        );
+    }
+
+    #[test]
+    fn strict_native_open_and_rebase_preserve_the_exact_endpoint_and_pins() {
+        let Some(connection) = std::env::var("ATOMIC_POSTGRES_URL").ok() else {
+            return;
+        };
+        let mut migrator = crate::PostgresMigrator::connect(&connection).unwrap();
+        migrator.migrate().unwrap();
+
+        let database_id = unique_database("exact_native_open");
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("exact", "name"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        let mut store = crate::PostgresStore::connect(&connection).unwrap();
+        store.create_database(&database_id, schema).unwrap();
+        drop(store);
+
+        let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+        let receipt = indexer.consolidate().unwrap();
+        let peer = Peer::connect(&connection, &database_id, 64).unwrap();
+        let endpoint = peer.tiered_snapshot().endpoint();
+        let (exact, opened) = TieredSnapshot::open_exact_configured(
+            &PostgresConnectionConfig::plaintext(&connection),
+            &database_id,
+            endpoint,
+            Some(receipt.manifest_hash),
+            64,
+            8 * 1024 * 1024,
+            RecentLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(exact.endpoint(), endpoint);
+        assert_eq!(exact.durable_manifest_hash(), Some(receipt.manifest_hash));
+        assert_eq!(opened.selected_manifest_hash, receipt.manifest_hash);
+        assert_eq!(
+            opened.selected_publication_revision,
+            receipt.publication_revision
+        );
+        assert_eq!(opened.rejected_candidates, 0);
+
+        let (rebased, rebased_stats) = exact.rebase_exact(Some(receipt.manifest_hash)).unwrap();
+        assert_eq!(rebased.endpoint(), endpoint);
+        assert_eq!(rebased.durable_manifest_hash(), Some(receipt.manifest_hash));
+        assert_eq!(rebased_stats.selected_manifest_hash, receipt.manifest_hash);
+        assert!(!Arc::ptr_eq(&exact.state, &rebased.state));
+        assert_eq!(
+            lock(&exact.core.root_pins.state)
+                .counts
+                .get(&receipt.manifest_hash),
+            Some(&2)
+        );
+        assert_eq!(
+            exact.datoms(false, IndexOrder::Eavt).unwrap().datoms,
+            rebased.datoms(false, IndexOrder::Eavt).unwrap().datoms
+        );
+        assert_eq!(exact.endpoint(), endpoint, "the old value did not advance");
+        drop(rebased);
+        assert_eq!(
+            lock(&exact.core.root_pins.state)
+                .counts
+                .get(&receipt.manifest_hash),
+            Some(&1)
+        );
+        assert!(exact.tree_cache_stats().current_entries <= 64);
+
+        let absent = TieredSnapshot::open_exact_configured(
+            &PostgresConnectionConfig::plaintext(&connection),
+            &database_id,
+            endpoint,
+            Some([0xff; 32]),
+            64,
+            8 * 1024 * 1024,
+            RecentLimits::default(),
+        )
+        .err()
+        .expect("an absent required manifest must fail");
+        assert_eq!(absent.code, "peer/exact-manifest-absent");
+
+        let unpublished_id = unique_database("exact_native_unpublished");
+        let mut unpublished_store = crate::PostgresStore::connect(&connection).unwrap();
+        let unpublished = unpublished_store
+            .create_database(&unpublished_id, Schema::new())
+            .unwrap();
+        let no_publication = TieredSnapshot::open_exact_configured(
+            &PostgresConnectionConfig::plaintext(&connection),
+            &unpublished_id,
+            ExactEndpoint {
+                generation: 0,
+                basis_t: unpublished.basis_t(),
+                tx_hash: [1; 32],
+                state_hash: [1; 32],
+                eidx_frontier: unpublished.eidx_frontier(),
+            },
+            None,
+            64,
+            8 * 1024 * 1024,
+            RecentLimits::default(),
+        )
+        .err()
+        .expect("a generation without a publication must fail");
+        assert_eq!(no_publication.code, "peer/exact-no-native-publication");
+    }
 
     #[test]
     fn tree_metadata_rebuild_preserves_aliases_without_retaining_assertion_history() {
