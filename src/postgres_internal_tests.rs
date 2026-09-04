@@ -353,6 +353,18 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
     let committed_stats = store.writer_residency_stats(&database_id);
     assert!(committed_stats.last_transaction_read_datoms > assessed.read_work.datoms);
     assert!(committed_stats.last_transaction_read_bytes > assessed.read_work.retained_bytes);
+    assert!(
+        committed_stats.last_transaction_prefix_memo_hits > 0,
+        "successor validation, entity predicates, and commitment recovery must reuse completed exact prefixes"
+    );
+    assert!(committed_stats.last_transaction_prefix_memo_admissions > 0);
+    assert!(
+        committed_stats.last_transaction_source_read_datoms
+            < committed_stats.last_transaction_read_datoms,
+        "memo replays remain logical reads but cannot repeat source deliveries"
+    );
+    assert!(committed.db_before.transaction_read_context().is_none());
+    assert!(committed.database.transaction_read_context().is_none());
 
     let replay = store
         .transact_with_fault(
@@ -427,24 +439,12 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
     // The first lookup seeds the immutable value's shared resident memo;
     // assessor monotonicity validation and overlay construction reuse it.
     let tx_instant_reads = u64::try_from(tx_instant_datoms.len()).unwrap();
-    let binding_role_reads = u64::try_from(
-        committed
-            .database
-            .datoms_with_prefix(&IndexPrefix::Aevt {
-                attribute: DB_ENTITY_PREDS as u32,
-                entity: None,
-                value: None,
-            })
-            .unwrap()
-            .len(),
-    )
-    .unwrap();
     let before_schema_rejection = store.writer_residency_stats(&database_id);
-    let without_successor_probe = schema_assessed.read_work.datoms
-        + tx_instant_reads
-        + binding_role_reads
-        + commitment_prior_reads;
-    assert_eq!(without_successor_probe + 1, 6);
+    // No program-binding attribute changed, so successor binding validation
+    // now returns before the unqualified :db.entity/preds/schema scan.
+    let without_successor_probe =
+        schema_assessed.read_work.datoms + tx_instant_reads + commitment_prior_reads;
+    assert_eq!(without_successor_probe + 1, 8);
     store
         .set_capacity_limits(CapacityLimits {
             max_transaction_read_datoms: without_successor_probe,

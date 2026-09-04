@@ -6,6 +6,7 @@
 //! logical delta.  It deliberately contains no `materialize` fallback.
 
 use crate::database::{UpsertIdentityValue, normalize_excision_before_t, validated_entity_tempids};
+use crate::database_value::TransactionReadContext;
 use crate::identity::{validate_frontier, validate_supported_eid};
 use crate::idents::IdentIndex;
 use crate::vocabulary::{supported_system_attributes, supported_system_idents};
@@ -24,8 +25,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AssessmentReadWork {
-    /// Physical prefix cursor misses. Repeated transaction-local requests for
-    /// the same structural prefix are counted in `prefix_hits` instead.
+    /// Exact-prefix source cursor misses. Repeated transaction-local requests
+    /// served by the shared attempt memo are counted in `prefix_hits`.
     pub(crate) prefixes: u64,
     pub(crate) prefix_hits: u64,
     pub(crate) datoms: u64,
@@ -216,8 +217,6 @@ struct Reader<'a> {
     base: &'a DatabaseValue,
     limits: AssessmentLimits,
     work: AssessmentReadWork,
-    prefix_memo: BTreeMap<IndexPrefix, Arc<[Datom]>>,
-    history_first_memo: BTreeMap<IndexPrefix, Option<Datom>>,
 }
 
 impl<'a> Reader<'a> {
@@ -226,8 +225,6 @@ impl<'a> Reader<'a> {
             base,
             limits,
             work: AssessmentReadWork::default(),
-            prefix_memo: BTreeMap::new(),
-            history_first_memo: BTreeMap::new(),
         }
     }
 
@@ -270,21 +267,21 @@ impl<'a> Reader<'a> {
         // redundancy, and uniqueness ranges (`datomic/db.clj`, get-ids and
         // transact-data preparation around 7051-7354). The native assessor's
         // synchronous equivalent is deliberately narrower: memoize an exact
-        // structural IndexPrefix for this one assessment, avoiding repeated
-        // PostgreSQL/tree work without inventing an asynchronous hint system.
-        if let Some(datoms) = self.prefix_memo.get(prefix).map(Arc::clone) {
+        // structural IndexPrefix for the complete transaction attempt,
+        // avoiding repeated PostgreSQL/tree work without inventing an
+        // asynchronous hint system.
+        let mut cursor = self.base.current_prefix_cursor(prefix)?;
+        if cursor.is_memo_hit() {
             self.work.prefix_hits = self.work.prefix_hits.saturating_add(1);
-            return Ok(datoms.iter().cloned().collect());
+        } else {
+            self.work.prefixes = self.work.prefixes.saturating_add(1);
         }
-        self.work.prefixes = self.work.prefixes.saturating_add(1);
         let mut datoms = Vec::new();
-        for datom in self.base.current_prefix_cursor(prefix)? {
+        for datom in &mut cursor {
             let datom = datom?;
             self.charge(&datom)?;
             datoms.push(datom);
         }
-        self.prefix_memo
-            .insert(prefix.clone(), Arc::from(datoms.clone()));
         Ok(datoms)
     }
 
@@ -294,18 +291,17 @@ impl<'a> Reader<'a> {
             entity: None,
             value: None,
         };
-        if let Some(first) = self.history_first_memo.get(&prefix) {
+        let mut cursor = self.base.history_prefix_cursor(&prefix)?;
+        if cursor.is_memo_hit() {
             self.work.prefix_hits = self.work.prefix_hits.saturating_add(1);
-            return Ok(first.is_some());
+        } else {
+            self.work.prefixes = self.work.prefixes.saturating_add(1);
         }
-        self.work.prefixes = self.work.prefixes.saturating_add(1);
-        let first = self.base.history_prefix_first(&prefix)?;
+        let first = cursor.next().transpose()?;
         if let Some(datom) = &first {
             self.charge(datom)?;
         }
-        let present = first.is_some();
-        self.history_first_memo.insert(prefix, first);
-        Ok(present)
+        Ok(first.is_some())
     }
 
     fn values(&mut self, entity: u64, attribute: u32) -> Result<Vec<Value>, SemanticError> {
@@ -396,6 +392,20 @@ pub(crate) fn assess_tiered_with_remaining_limits(
     tx_instant: i64,
     limits: AssessmentLimits,
 ) -> Result<TieredAssessment, SemanticError> {
+    // PostgreSQL supplies one context before persisted generation begins. The
+    // standalone semantic-oracle entry still needs the same cross-phase
+    // behavior, so give it a private unbounded observer while Reader enforces
+    // the caller's explicit assessment allowance.
+    let base = if base.transaction_read_context().is_some() {
+        base.clone()
+    } else {
+        base.clone()
+            .with_transaction_read_context(Arc::new(TransactionReadContext::new(
+                u64::MAX,
+                u64::MAX,
+            )))
+    };
+    let base = &base;
     if base
         .last_tx_instant()?
         .is_some_and(|prior| tx_instant < prior)
@@ -2615,7 +2625,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_prefix_reads_hit_the_transaction_local_memo_without_recharging_work() {
+    fn identical_prefix_reads_share_source_work_but_recharge_logical_work() {
         let initial = Database::new(schema()).unwrap();
         let seeded = initial.with(&add("one", 1), 10).unwrap().db_after;
         let value = DatabaseValue::eager(Arc::new(seeded));
@@ -2624,10 +2634,12 @@ mod tests {
             value: Some(Value::String("one".into())),
             entity: None,
         };
+        let context = Arc::new(TransactionReadContext::new(2, u64::MAX));
+        let observed = value.with_transaction_read_context(Arc::clone(&context));
         let mut reader = Reader::new(
-            &value,
+            &observed,
             AssessmentLimits {
-                max_read_datoms: 1,
+                max_read_datoms: 2,
                 max_read_bytes: u64::MAX,
             },
         );
@@ -2640,15 +2652,65 @@ mod tests {
         assert_eq!(charged.datoms, 1);
         assert!(charged.retained_bytes > 0);
 
-        // A second physical scan would exceed the one-datom budget. The exact
-        // same result instead comes from the assessment-local memo and leaves
-        // all I/O/read-capacity counters unchanged except the hit witness.
+        // The same result avoids a second source cursor but is still one
+        // logical delivery and therefore consumes one unit of capacity.
         let second = reader.prefix(&prefix).unwrap();
         assert_eq!(second, first);
         assert_eq!(reader.work.prefixes, charged.prefixes);
-        assert_eq!(reader.work.datoms, charged.datoms);
-        assert_eq!(reader.work.retained_bytes, charged.retained_bytes);
+        assert_eq!(reader.work.datoms, charged.datoms + 1);
+        assert_eq!(
+            reader.work.retained_bytes,
+            charged.retained_bytes.saturating_mul(2)
+        );
         assert_eq!(reader.work.prefix_hits, 1);
+        let work = context.snapshot().unwrap();
+        assert_eq!(work.logical_datoms, 2);
+        assert_eq!(work.source_datoms, 1);
+        assert_eq!(work.prefix_misses, 1);
+        assert_eq!(work.prefix_hits, 1);
+        assert_eq!(work.memo_admissions, 1);
+
+        let error = reader.prefix(&prefix).unwrap_err();
+        assert_eq!(error.code, "transaction/read-capacity");
+        assert_eq!(context.snapshot().unwrap().logical_datoms, 2);
+    }
+
+    #[test]
+    fn assessment_and_commitment_share_complete_exact_predecessor_reads() {
+        let initial = Database::new(schema()).unwrap();
+        let seeded = initial.with(&add("one", 1), 10).unwrap().db_after;
+        let entity = seeded
+            .lookup(NAME, &Value::String("one".into()))
+            .unwrap()
+            .unwrap();
+        let context = Arc::new(TransactionReadContext::new(128, u64::MAX));
+        let observed = seeded
+            .database_value()
+            .with_transaction_read_context(Arc::clone(&context));
+        let assessed = assess_tiered(
+            &observed,
+            &[TxOp::Add {
+                entity: EntityRef::Id(entity),
+                attribute: COUNT,
+                value: Value::Long(2).into(),
+            }],
+            11,
+        )
+        .unwrap();
+        let after_assessment = context.snapshot().unwrap();
+        let changes = crate::persistent_commitment::exact_semantic_changes(
+            &assessed.db_before,
+            &assessed.tx_data,
+        )
+        .unwrap();
+        assert!(!changes.is_empty());
+        let after_commitment = context.snapshot().unwrap();
+        assert_eq!(
+            after_commitment.source_datoms, after_assessment.source_datoms,
+            "commitment predecessor recovery must reuse assessor-completed prefixes"
+        );
+        assert!(after_commitment.prefix_hits > after_assessment.prefix_hits);
+        assert!(after_commitment.logical_datoms > after_assessment.logical_datoms);
     }
 
     #[test]

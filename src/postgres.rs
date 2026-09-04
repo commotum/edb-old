@@ -1,5 +1,5 @@
 use crate::database::PredicateRole;
-use crate::database_value::{LogicalReadObserver, LogicalReadWork};
+use crate::database_value::{TransactionReadContext, TransactionReadWork};
 use crate::encoding::program_call_digest;
 use crate::log_generation::{
     LineageTransactionContent, generation_transaction_hash, request_key_hash,
@@ -1931,6 +1931,14 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
     db_after: &DatabaseValue,
     tx_data: &[Datom],
 ) -> Result<(), SemanticError> {
+    if !tx_data.iter().any(|datom| {
+        matches!(
+            u64::from(datom.attribute),
+            crate::DB_FN | crate::DB_IDENT | crate::DB_ATTR_PREDS | crate::DB_ENTITY_PREDS
+        )
+    }) {
+        return Ok(());
+    }
     let mut changed_function_entities = BTreeSet::new();
     let mut changed_predicate_names = BTreeSet::new();
 
@@ -1982,6 +1990,14 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
             ));
         };
         resolve_program_in(client, cache, *hash)?;
+    }
+
+    // Ordinary data transactions cannot affect persisted program bindings.
+    // Do not scan all schema predicates or the unqualified
+    // :db.entity/preds AEVT range merely to rediscover an empty dependency
+    // set.
+    if changed_predicate_names.is_empty() {
+        return Ok(());
     }
 
     // Validate only dependency names whose binding/reference changed. An old
@@ -2162,6 +2178,16 @@ pub struct WriterResidencyStats {
     pub last_transaction_read_datoms: u64,
     /// Deterministic retained width of those delivered logical datoms.
     pub last_transaction_read_bytes: u64,
+    /// Successful datoms delivered by underlying exact-prefix cursors. Memo
+    /// replays increase logical reads but leave this source count unchanged.
+    pub last_transaction_source_read_datoms: u64,
+    pub last_transaction_source_read_bytes: u64,
+    pub last_transaction_prefix_memo_hits: u64,
+    pub last_transaction_prefix_memo_misses: u64,
+    pub last_transaction_prefix_memo_admissions: u64,
+    pub last_transaction_prefix_memo_rejections: u64,
+    pub last_transaction_prefix_memo_peak_entries: usize,
+    pub last_transaction_prefix_memo_peak_bytes: u64,
     pub last_commitment_node_visits: u64,
     pub last_commitment_node_hashes: u64,
     pub last_commitment_leaf_changes: u64,
@@ -2187,7 +2213,7 @@ struct WriterState {
     database: TieredSnapshot,
     commitment: PersistentCommitmentCoordinate,
     publication_revision: u64,
-    last_read_work: LogicalReadWork,
+    last_read_work: TransactionReadWork,
     last_commitment_work: CommitmentWork,
 }
 
@@ -2326,8 +2352,16 @@ impl PostgresStore {
             native_directory_reads: load.directory_reads,
             native_leaf_reads: load.leaf_reads,
             publication_revision: state.publication_revision,
-            last_transaction_read_datoms: state.last_read_work.datoms,
-            last_transaction_read_bytes: state.last_read_work.retained_bytes,
+            last_transaction_read_datoms: state.last_read_work.logical_datoms,
+            last_transaction_read_bytes: state.last_read_work.logical_retained_bytes,
+            last_transaction_source_read_datoms: state.last_read_work.source_datoms,
+            last_transaction_source_read_bytes: state.last_read_work.source_retained_bytes,
+            last_transaction_prefix_memo_hits: state.last_read_work.prefix_hits,
+            last_transaction_prefix_memo_misses: state.last_read_work.prefix_misses,
+            last_transaction_prefix_memo_admissions: state.last_read_work.memo_admissions,
+            last_transaction_prefix_memo_rejections: state.last_read_work.memo_rejections,
+            last_transaction_prefix_memo_peak_entries: state.last_read_work.memo_peak_entries,
+            last_transaction_prefix_memo_peak_bytes: state.last_read_work.memo_peak_retained_bytes,
             last_commitment_node_visits: state.last_commitment_work.node_visits,
             last_commitment_node_hashes: state.last_commitment_work.node_hashes,
             last_commitment_leaf_changes: state.last_commitment_work.leaf_changes,
@@ -2444,7 +2478,7 @@ impl PostgresStore {
                 database,
                 commitment,
                 publication_revision: opened.selected_publication_revision,
-                last_read_work: LogicalReadWork::default(),
+                last_read_work: TransactionReadWork::default(),
                 last_commitment_work: CommitmentWork::default(),
             },
         );
@@ -3444,13 +3478,13 @@ impl PostgresStore {
         };
         let db_before_snapshot = writer_before.database.clone();
         let db_before = db_before_snapshot.database_value();
-        let read_observer = Arc::new(LogicalReadObserver::new(
+        let read_context = Arc::new(TransactionReadContext::new(
             self.capacity_limits.max_transaction_read_datoms,
             self.capacity_limits.max_transaction_read_bytes,
         ));
         let observed_db_before = db_before
             .clone()
-            .with_read_observer(Arc::clone(&read_observer));
+            .with_transaction_read_context(Arc::clone(&read_context));
         let shared_budget = Arc::new(Mutex::new(ProgramBudget::new(
             self.capacity_limits.program.control(),
         )?));
@@ -3470,7 +3504,7 @@ impl PostgresStore {
                 "transaction exceeds the configured operation limit",
             ));
         }
-        let remaining = read_observer.remaining()?;
+        let remaining = read_context.remaining()?;
         let mut assessed = assess_tiered_with_remaining_limits(
             &observed_db_before,
             &ops,
@@ -3482,10 +3516,10 @@ impl PostgresStore {
         )?;
         assessed.db_before = assessed
             .db_before
-            .with_read_observer(Arc::clone(&read_observer));
+            .with_transaction_read_context(Arc::clone(&read_context));
         assessed.db_after = assessed
             .db_after
-            .with_read_observer(Arc::clone(&read_observer));
+            .with_transaction_read_context(Arc::clone(&read_context));
         validate_successor_program_bindings_in(
             &mut transaction,
             &program_cache,
@@ -3559,7 +3593,7 @@ impl PostgresStore {
             state_hash,
             envelope.clone(),
             &assessed.successor_schema,
-            read_observer.as_ref(),
+            read_context.observer().as_ref(),
         )?;
         if successor.endpoint()
             != (ExactEndpoint {
@@ -3776,8 +3810,10 @@ impl PostgresStore {
         // publication. After PostgreSQL acknowledges the commit, installing
         // this already-built immutable state is infallible.
         let receipt = CommitReceipt {
-            db_before: db_before.clone(),
-            database: successor.database_value(),
+            db_before: db_before.clone().without_transaction_read_context(),
+            database: successor
+                .database_value()
+                .without_transaction_read_context(),
             basis_t: envelope.basis_t,
             tx_hash,
             tempids: envelope.tempids.clone(),
@@ -3788,7 +3824,7 @@ impl PostgresStore {
             database: successor,
             commitment: next_commitment,
             publication_revision: writer_before.publication_revision,
-            last_read_work: read_observer.snapshot()?,
+            last_read_work: read_context.snapshot()?,
             last_commitment_work: commitment_work,
         };
         if transaction.commit().is_err() {
@@ -4323,7 +4359,7 @@ fn open_writer_state(
         database,
         commitment,
         publication_revision: opened.selected_publication_revision,
-        last_read_work: LogicalReadWork::default(),
+        last_read_work: TransactionReadWork::default(),
         last_commitment_work: CommitmentWork::default(),
     })
 }
@@ -4472,7 +4508,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
             database: db_after,
             commitment: committed,
             publication_revision: before_state.publication_revision,
-            last_read_work: LogicalReadWork::default(),
+            last_read_work: TransactionReadWork::default(),
             last_commitment_work: CommitmentWork::default(),
         },
     ))
