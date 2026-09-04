@@ -3071,6 +3071,7 @@ fn restore_tree_backup(
         excision_generation: target_generation,
         eidx_frontier: source.eidx_frontier,
         trees: source.trees,
+        pending_avet: source.pending_avet,
     };
     let payload = target.encode()?;
     let manifest_hash = sha256(&payload);
@@ -3102,7 +3103,7 @@ fn restore_tree_backup(
     // of equivalent physical revisions on restore retry.
     if let Some(existing) = client
         .query_opt(
-            "SELECT m.payload FROM atomic_tree_publications p \
+            "SELECT p.publication_revision, m.manifest_hash FROM atomic_tree_publications p \
                JOIN atomic_tree_manifests m \
                  ON m.database_id = p.database_id \
                 AND m.publication_revision = p.publication_revision \
@@ -3120,15 +3121,38 @@ fn restore_tree_backup(
         )
         .map_err(|error| crate::postgres::postgres_error("backup/restore-tree-existing", error))?
     {
-        let existing = PersistentTreeManifest::decode(&existing.get::<_, Vec<u8>>(0))?;
+        let existing_revision = unsigned(existing.get(0), "existing restored tree revision")?;
+        let existing_hash = digest(existing.get(1), "existing restored tree manifest hash")?;
+        let existing_record = store
+            .load_manifest(target_database_id, existing_revision)?
+            .ok_or_else(|| {
+                fault(
+                    "backup/restore-tree-existing",
+                    "published restored tree has no readable manifest record",
+                )
+            })?;
+        if existing_record.manifest_hash != existing_hash
+            || sha256(&existing_record.payload) != existing_hash
+        {
+            return Err(fault(
+                "backup/restore-tree-existing-hash",
+                "existing restored tree manifest bytes do not match their immutable hash",
+            ));
+        }
+        let existing = PersistentTreeManifest::decode(&existing_record.payload)?;
         if existing.database_id == target_database_id
             && existing.basis_t == target.basis_t
             && existing.tx_hash == target.tx_hash
             && existing.state_hash == target.state_hash
             && existing.excision_generation == target.excision_generation
             && existing.eidx_frontier == target.eidx_frontier
-            && existing.trees == target.trees
         {
+            // The published accelerator is already bound to the exact
+            // restored immutable database value. Its roots and pending AVET
+            // coordinate may have advanced at this same basis after an
+            // ambiguous first restore. Reinstalling the portable physical
+            // snapshot would regress readiness; any authenticated same-value
+            // publication is sufficient and remains disposable acceleration.
             return Ok(());
         }
     }
@@ -3318,6 +3342,7 @@ fn restore_request_base_archive(
         excision_generation: target_generation,
         eidx_frontier: source.eidx_frontier,
         trees: source.trees,
+        pending_avet: source.pending_avet,
     };
     let payload = target.encode()?;
     let target_manifest_hash = sha256(&payload);
@@ -3351,13 +3376,14 @@ fn restore_request_base_archive(
     let node_set_hash = request_base_archive_node_set_hash(&reachable);
     let expected_node_count = sql_u64(reachable.len() as u64, "request-base archive nodes")?;
     let archive_revision_sql = sql_u64(archive_revision, "request-base archive revision")?;
+    let manifest_version = PersistentTreeManifest::encoded_version(&payload)?;
     binding_client
         .execute(
             "INSERT INTO atomic_request_base_archives \
                  (database_id, generation, archive_revision, basis_t, tx_hash, state_hash, \
                   eidx_frontier, manifest_version, manifest_hash, payload, \
                   expected_node_count, node_set_hash) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 4, $8, $9, $10, $11) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
              ON CONFLICT (manifest_hash) DO NOTHING",
             &[
                 &target_database_id,
@@ -3367,6 +3393,7 @@ fn restore_request_base_archive(
                 &&target.tx_hash[..],
                 &&target.state_hash[..],
                 &sql_u64(target.eidx_frontier, "request-base archive frontier")?,
+                &manifest_version,
                 &&target_manifest_hash[..],
                 &payload,
                 &expected_node_count,
@@ -3393,7 +3420,7 @@ fn restore_request_base_archive(
         || digest(stored.get(4), "request-base archive transaction")? != target.tx_hash
         || digest(stored.get(5), "request-base archive state")? != target.state_hash
         || unsigned(stored.get(6), "request-base archive frontier")? != target.eidx_frontier
-        || stored.get::<_, i16>(7) != 4
+        || stored.get::<_, i16>(7) != manifest_version
         || stored.get::<_, Vec<u8>>(8) != payload
         || stored.get::<_, i64>(9) != expected_node_count
         || digest(stored.get(10), "request-base archive node set")? != node_set_hash
@@ -3709,7 +3736,6 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
         || decoded.excision_generation != excision_generation
         || excision_generation != log_generation
         || decoded.eidx_frontier != eidx_frontier
-        || decoded.hash().ok() != Some(manifest_hash)
     {
         return Ok(None);
     }
@@ -3856,6 +3882,7 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
         excision_generation: log_generation,
         eidx_frontier,
         trees: decoded.trees,
+        pending_avet: decoded.pending_avet,
     };
     let portable_payload = portable.encode()?;
     let portable_manifest_hash = sha256(&portable_payload);
@@ -4384,7 +4411,7 @@ fn decode_bound_tree_manifest(
         || required_state.is_some_and(|state| state != manifest.state_hash)
         || manifest.excision_generation != backup.log_generation
         || manifest.eidx_frontier != frontier
-        || manifest.hash()? != tree.manifest_hash
+        || sha256(&payload) != tree.manifest_hash
     {
         return Err(fault(
             "backup/tree-binding",
@@ -4632,6 +4659,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
             excision_generation: target_generation,
             eidx_frontier: source.eidx_frontier,
             trees: source.trees,
+            pending_avet: source.pending_avet,
         };
         let expected_payload = target.encode()?;
         let expected_hash = sha256(&expected_payload);
@@ -4673,7 +4701,8 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
             || digest(row.get(4), "restored archive transaction")? != target.tx_hash
             || digest(row.get(5), "restored archive state")? != target.state_hash
             || unsigned(row.get(6), "restored archive frontier")? != target.eidx_frontier
-            || row.get::<_, i16>(7) != 4
+            || row.get::<_, i16>(7)
+                != PersistentTreeManifest::encoded_version(&expected_payload)?
             || row.get::<_, Vec<u8>>(8) != expected_payload
             || client
                 .query_one(

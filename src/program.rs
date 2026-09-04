@@ -777,6 +777,17 @@ impl<'a> ProgramRead<'a> {
         }
     }
 
+    fn physical_avet_ready(self, attribute: u32) -> bool {
+        match self {
+            Self::AttributePredicate => false,
+            Self::Eager(database) => database
+                .schema()
+                .attribute(attribute)
+                .is_ok_and(|attribute| attribute.indexed || attribute.unique.is_some()),
+            Self::Exact(database) => database.physical_avet_ready(attribute),
+        }
+    }
+
     fn entid(self, ident: &Keyword) -> Option<u64> {
         match self {
             Self::AttributePredicate => {
@@ -2301,7 +2312,7 @@ fn execute_query_template(
                 binding,
                 arguments,
             )?;
-            let attribute = database.schema().attribute(pattern.attribute)?;
+            database.schema().attribute(pattern.attribute)?;
 
             // Every binding-driven index access is charged, including an
             // access which subsequently finds no datoms.
@@ -2312,7 +2323,7 @@ fn execute_query_template(
                     attribute: Some(pattern.attribute),
                     value: value.clone(),
                 })?
-            } else if value.is_some() && (attribute.indexed || attribute.unique.is_some()) {
+            } else if value.is_some() && database.physical_avet_ready(pattern.attribute) {
                 database.prefix_cursor(&IndexPrefix::Avet {
                     attribute: pattern.attribute,
                     value: value.clone(),
@@ -2414,14 +2425,13 @@ fn plan_query_patterns(
         let mut best_score = 0usize;
         for (at, pattern_index) in remaining.iter().copied().enumerate() {
             let pattern = &template.patterns[pattern_index];
-            let attribute = database.schema().attribute(pattern.attribute)?;
+            database.schema().attribute(pattern.attribute)?;
             let entity_bound = query_term_bound(&pattern.entity, &bound);
             let value_bound = query_term_bound(&pattern.value, &bound);
             // EAVT is the strongest access path. A bound value gets nearly as
             // much weight only when AVET actually exists for this attribute.
             let score = usize::from(entity_bound) * 100
-                + usize::from(value_bound && (attribute.indexed || attribute.unique.is_some()))
-                    * 80
+                + usize::from(value_bound && database.physical_avet_ready(pattern.attribute)) * 80
                 + usize::from(value_bound) * 10;
             if at == 0 || score > best_score {
                 best_at = at;

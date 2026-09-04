@@ -33,7 +33,7 @@ fn await_background_publication(
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let stats = service.background_indexing_stats();
-        if stats.published_basis_t >= basis_t {
+        if stats.published_basis_t >= basis_t && stats.pending_avet_projections == 0 {
             return stats;
         }
         assert!(

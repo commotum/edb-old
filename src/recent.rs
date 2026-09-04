@@ -13,6 +13,7 @@ use crate::{
     SemanticError, ValueType, encode_transaction, t_to_tx, transaction_hash, tx_to_t,
 };
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -715,10 +716,16 @@ impl RecentTier {
         let mut cursor = self
             .indexes
             .eavt
-            .seek_by(|candidate| stored_eav_cmp(candidate, datom));
-        cursor
-            .next()
-            .is_some_and(|candidate| same_eav(candidate.datom(), datom))
+            .seek_by(|candidate| logical_eav_cmp(candidate, datom));
+        while let Some(candidate) = cursor.next() {
+            if !same_logical_eav(candidate.datom(), datom) {
+                break;
+            }
+            if same_eav(candidate.datom(), datom) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn history_seek(&self, order: IndexOrder, key: &Datom) -> Option<Datom> {
@@ -966,7 +973,8 @@ pub struct RecentCursorStats {
 }
 
 /// Lazy ordered view over one raw memory-index tree. Current cursors collapse
-/// consecutive stored E/A/V operations and expose only a newest assertion.
+/// one contiguous logical E/A/V group while tracking its distinct stored
+/// representations, then expose each representation's newest assertion.
 #[derive(Clone, Debug)]
 pub struct RecentCursor {
     inner: BtCursor,
@@ -976,6 +984,7 @@ pub struct RecentCursor {
     range: RecentRange,
     prefix: Option<IndexPrefix>,
     pending: Option<RecentDatomRef>,
+    current_output: VecDeque<RecentDatomRef>,
     exhausted: bool,
     examined: u64,
     yielded: u64,
@@ -1004,6 +1013,7 @@ impl RecentCursor {
             range,
             prefix: None,
             pending: None,
+            current_output: VecDeque::new(),
             exhausted: false,
             examined: 0,
             yielded: 0,
@@ -1028,6 +1038,7 @@ impl RecentCursor {
             range: RecentRange::unbounded(),
             prefix: Some(prefix),
             pending: None,
+            current_output: VecDeque::new(),
             exhausted: false,
             examined: 0,
             yielded: 0,
@@ -1109,14 +1120,42 @@ impl Iterator for RecentCursor {
         }
 
         loop {
-            let winner = self.next_member()?;
-            while let Some(candidate) = self.next_member() {
-                if same_eav(winner.datom(), candidate.datom()) {
+            if self.current_output.is_empty() {
+                let first = self.next_member()?;
+                let mut group = vec![first];
+                while let Some(candidate) = self.next_member() {
+                    if same_logical_eav(group[0].datom(), candidate.datom()) {
+                        group.push(candidate);
+                    } else {
+                        self.pending = Some(candidate);
+                        break;
+                    }
+                }
+                // The recovered comparator makes this group newest-first.
+                // Select only the first operation for each exact stored value;
+                // a newer retraction shadows that representation without
+                // hiding a scale-distinct assertion in the same logical group.
+                let mut seen = Vec::<RecentDatomRef>::new();
+                for candidate in group {
+                    let value = &candidate.datom().value;
+                    match seen.binary_search_by(|prior| prior.datom().value.stored_cmp(value)) {
+                        Ok(_) => {}
+                        Err(position) => {
+                            seen.insert(position, candidate.clone());
+                            if candidate.datom().added {
+                                self.current_output.push_back(candidate);
+                            }
+                        }
+                    }
+                }
+                if self.current_output.is_empty() {
                     continue;
                 }
-                self.pending = Some(candidate);
-                break;
             }
+            let winner = self
+                .current_output
+                .pop_front()
+                .expect("a non-empty current group retained an assertion");
             let datom = winner.datom();
             if !self.prefix_member(datom) {
                 if self.exhausted {
@@ -1430,11 +1469,11 @@ fn same_eav(left: &Datom, right: &Datom) -> bool {
         && left.value.stored_eq(&right.value)
 }
 
-fn stored_eav_cmp(left: &Datom, right: &Datom) -> Ordering {
+fn logical_eav_cmp(left: &Datom, right: &Datom) -> Ordering {
     left.entity
         .cmp(&right.entity)
         .then(left.attribute.cmp(&right.attribute))
-        .then_with(|| left.value.stored_cmp(&right.value))
+        .then_with(|| left.value.index_cmp(&right.value))
 }
 
 fn primary_cmp_in(left: &Datom, right: &Datom, order: IndexOrder) -> Ordering {
@@ -1443,20 +1482,20 @@ fn primary_cmp_in(left: &Datom, right: &Datom, order: IndexOrder) -> Ordering {
             .entity
             .cmp(&right.entity)
             .then(left.attribute.cmp(&right.attribute))
-            .then_with(|| left.value.stored_cmp(&right.value)),
+            .then_with(|| left.value.index_cmp(&right.value)),
         IndexOrder::Aevt => left
             .attribute
             .cmp(&right.attribute)
             .then(left.entity.cmp(&right.entity))
-            .then_with(|| left.value.stored_cmp(&right.value)),
+            .then_with(|| left.value.index_cmp(&right.value)),
         IndexOrder::Avet => left
             .attribute
             .cmp(&right.attribute)
-            .then_with(|| left.value.stored_cmp(&right.value))
+            .then_with(|| left.value.index_cmp(&right.value))
             .then(left.entity.cmp(&right.entity)),
         IndexOrder::Vaet => left
             .value
-            .stored_cmp(&right.value)
+            .index_cmp(&right.value)
             .then(left.attribute.cmp(&right.attribute))
             .then(left.entity.cmp(&right.entity)),
     }
@@ -1899,6 +1938,150 @@ mod tests {
         assert_eq!(pairs.len(), 1);
         assert!(same_stored_datom(&pairs[0].retraction, &recent_retraction));
         assert!(same_stored_datom(&pairs[0].assertion, &durable_assertion));
+    }
+
+    #[test]
+    fn no_history_pairs_remain_adjacent_across_many_bigdecimal_scales() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let schema = application_schema(true);
+        let base_hash = [0x57; 32];
+        let entity = make_eid(USER_PARTITION, 1).unwrap();
+        let old_assertion = Datom {
+            entity,
+            attribute: 1_000,
+            value: Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+            tx: t_to_tx(1).unwrap(),
+            added: true,
+        };
+        let old_retraction = Datom {
+            value: Value::BigDec(BigDecimal::from_str("1.0").unwrap()),
+            tx: t_to_tx(2).unwrap(),
+            added: false,
+            ..old_assertion.clone()
+        };
+        let new_assertion = Datom {
+            value: Value::BigDec(BigDecimal::from_str("1.000").unwrap()),
+            tx: t_to_tx(3).unwrap(),
+            ..old_assertion.clone()
+        };
+        let new_retraction = Datom {
+            value: Value::BigDec(BigDecimal::from_str("1.0000").unwrap()),
+            tx: t_to_tx(4).unwrap(),
+            added: false,
+            ..old_assertion.clone()
+        };
+        let mut durable = vec![
+            old_assertion.clone(),
+            old_retraction.clone(),
+            new_assertion.clone(),
+        ];
+        durable.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+        let transaction = DurableTransaction {
+            database_id: DATABASE_ID.into(),
+            basis_t: 4,
+            previous_hash: base_hash,
+            eidx_frontier: INITIAL_EIDX_FRONTIER,
+            tempids: BTreeMap::new(),
+            tx_data: vec![new_retraction.clone()],
+        };
+        let tier = RecentTier::new(
+            DATABASE_ID,
+            3,
+            base_hash,
+            [transaction],
+            EndpointProjection::new(schema),
+            RecentLimits::default(),
+        )
+        .unwrap();
+
+        let pairs = tier
+            .no_history_pairs(IndexOrder::Eavt, &durable)
+            .unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().any(|pair| {
+            same_stored_datom(&pair.retraction, &new_retraction)
+                && same_stored_datom(&pair.assertion, &new_assertion)
+        }));
+        assert!(pairs.iter().any(|pair| {
+            same_stored_datom(&pair.retraction, &old_retraction)
+                && same_stored_datom(&pair.assertion, &old_assertion)
+        }));
+        assert!(
+            tier.consolidate_history_range(
+                IndexOrder::Eavt,
+                &durable,
+                &RecentRange::unbounded(),
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn current_cursor_tracks_scale_distinct_values_across_logical_interleaving() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let mut schema = Schema::new();
+        let mut attribute = Attribute::new(
+            1_000,
+            Keyword::new("item", "amount"),
+            ValueType::BigDec,
+            Cardinality::Many,
+        );
+        attribute.indexed = true;
+        schema.install(attribute).unwrap();
+        let entity = make_eid(USER_PARTITION, 1).unwrap();
+        let operations = [
+            ("1.00", true),
+            ("1.0", true),
+            ("1.00", false),
+            ("1.000", true),
+        ];
+        let base_hash = [0x58; 32];
+        let mut previous_hash = base_hash;
+        let mut transactions = Vec::new();
+        let mut datoms = Vec::new();
+        for (offset, (value, added)) in operations.into_iter().enumerate() {
+            let basis_t = offset as u64 + 1;
+            let datom = Datom {
+                entity,
+                attribute: 1_000,
+                value: Value::BigDec(BigDecimal::from_str(value).unwrap()),
+                tx: t_to_tx(basis_t).unwrap(),
+                added,
+            };
+            let transaction = DurableTransaction {
+                database_id: DATABASE_ID.into(),
+                basis_t,
+                previous_hash,
+                eidx_frontier: INITIAL_EIDX_FRONTIER,
+                tempids: BTreeMap::new(),
+                tx_data: vec![datom.clone()],
+            };
+            previous_hash = transaction_hash(&encode_transaction(&transaction).unwrap());
+            transactions.push(transaction);
+            datoms.push(datom);
+        }
+        let tier = RecentTier::new(
+            DATABASE_ID,
+            0,
+            base_hash,
+            transactions,
+            EndpointProjection::new(schema),
+            RecentLimits::default(),
+        )
+        .unwrap();
+
+        assert!(tier.touches_current(&datoms[0]));
+        assert!(tier.touches_current(&datoms[1]));
+        let current = tier.current_datoms(IndexOrder::Eavt);
+        assert_eq!(current.len(), 2);
+        assert!(current.iter().any(|datom| datom.value.stored_eq(&datoms[1].value)));
+        assert!(current.iter().any(|datom| datom.value.stored_eq(&datoms[3].value)));
+        assert!(!current.iter().any(|datom| datom.value.stored_eq(&datoms[0].value)));
     }
 
     #[test]

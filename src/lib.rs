@@ -99,7 +99,7 @@ pub use service::{
     TransactionTicket,
 };
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
-pub use tree_manifest::{ManifestTree, PersistentTreeManifest};
+pub use tree_manifest::{AvetProjectionWork, ManifestTree, PersistentTreeManifest};
 pub use tree_store::{
     PostgresTreeStore, TreeManifestRecord, TreePublicationDelta, TreePublishOutcome,
     TreeRootBinding, TreeStoreStats,

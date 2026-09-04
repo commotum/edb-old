@@ -19,7 +19,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::mem::size_of;
 
 const TREE_MAGIC: &[u8; 4] = b"ATIX";
-pub const TREE_FORMAT_VERSION: u16 = 3;
+/// Version 4 moves the stored-value representation tie-break after recovered
+/// logical V, descending T, and operation ordering. Version 3 roots are
+/// intentionally rejected: this project does not promise compatibility with
+/// databases produced by its unreleased reconstruction stages.
+pub const TREE_FORMAT_VERSION: u16 = 4;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
 const EMPTY_NODE_LEN: usize = HEADER_LEN + CHECKSUM_LEN;
@@ -179,6 +183,16 @@ pub struct TreeMergeEdits {
     /// authoritative EAVT/AEVT trees; this is not logical history deletion.
     pub projection_removals: Vec<Datom>,
     pub insertions: Vec<Datom>,
+    /// Endpoint attributes for recovered `filter-nohist-pairs`. During a
+    /// retained-history merge, every complete old+new stream of contiguous
+    /// leaves already selected for copy-on-write is filtered, not merely the
+    /// pairs introduced by the uncovered tail. This remains segment-local:
+    /// untouched leaves are never scanned or rewritten.
+    pub no_history_attributes: BTreeSet<u32>,
+    /// Optional exact witnesses supplied by a caller. Native incremental
+    /// indexing normally discovers these from the rebuilt leaf streams using
+    /// `no_history_attributes`; retaining the explicit form keeps the merge
+    /// primitive independently testable and fail-closed.
     pub no_history_pairs: Vec<NoHistoryPair>,
     pub affected_ranges: Vec<TreeAffectedRange>,
 }
@@ -552,7 +566,7 @@ impl RoutingKey {
                     self.has(ROUTING_VALUE_PRESENT),
                     self.value.as_ref(),
                     &other.value,
-                    true,
+                    false,
                 )
             }),
             IndexOrder::Aevt => compare_present_to_value(
@@ -572,7 +586,7 @@ impl RoutingKey {
                     self.has(ROUTING_VALUE_PRESENT),
                     self.value.as_ref(),
                     &other.value,
-                    true,
+                    false,
                 )
             }),
             IndexOrder::Avet => compare_present_to_value(
@@ -585,7 +599,7 @@ impl RoutingKey {
                     self.has(ROUTING_VALUE_PRESENT),
                     self.value.as_ref(),
                     &other.value,
-                    true,
+                    false,
                 )
             })
             .then_with(|| {
@@ -599,7 +613,7 @@ impl RoutingKey {
                 self.has(ROUTING_VALUE_PRESENT),
                 self.value.as_ref(),
                 &other.value,
-                true,
+                false,
             )
             .then_with(|| {
                 compare_present_to_value(
@@ -616,7 +630,8 @@ impl RoutingKey {
                 )
             }),
         };
-        ordering.then_with(|| {
+        ordering
+            .then_with(|| {
             if self.has(ROUTING_TX_PRESENT) {
                 other
                     .tx
@@ -631,7 +646,20 @@ impl RoutingKey {
                 // native zero (notably entity 0 in VAET).
                 Ordering::Less
             }
-        })
+            })
+            .then_with(|| {
+                if self.has(ROUTING_TX_PRESENT) {
+                    compare_routing_to_value(
+                        self.value
+                            .as_ref()
+                            .expect("an exact routing key retains its value"),
+                        &other.value,
+                        true,
+                    )
+                } else {
+                    Ordering::Equal
+                }
+            })
     }
 
     pub(crate) fn cmp_key(&self, other: &Self, order: IndexOrder) -> Ordering {
@@ -829,7 +857,7 @@ fn compare_routing_parts(
                 left_value,
                 right_components & ROUTING_VALUE_PRESENT != 0,
                 right_value,
-                true,
+                false,
             )
         }),
         IndexOrder::Aevt => compare_present_values(
@@ -852,7 +880,7 @@ fn compare_routing_parts(
                 left_value,
                 right_components & ROUTING_VALUE_PRESENT != 0,
                 right_value,
-                true,
+                false,
             )
         }),
         IndexOrder::Avet => compare_present_values(
@@ -867,7 +895,7 @@ fn compare_routing_parts(
                 left_value,
                 right_components & ROUTING_VALUE_PRESENT != 0,
                 right_value,
-                true,
+                false,
             )
         })
         .then_with(|| {
@@ -883,7 +911,7 @@ fn compare_routing_parts(
             left_value,
             right_components & ROUTING_VALUE_PRESENT != 0,
             right_value,
-            true,
+            false,
         )
         .then_with(|| {
             compare_present_values(
@@ -902,19 +930,29 @@ fn compare_routing_parts(
             )
         }),
     };
-    ordering.then_with(|| {
-        match (
-            left_components & ROUTING_TX_PRESENT != 0,
-            right_components & ROUTING_TX_PRESENT != 0,
-        ) {
-            (false, false) => Ordering::Equal,
-            (false, true) => Ordering::Less,
-            (true, false) => Ordering::Greater,
-            (true, true) => right_tx
-                .cmp(&left_tx)
-                .then_with(|| right_added.cmp(&left_added)),
-        }
-    })
+    ordering
+        .then_with(|| {
+            match (
+                left_components & ROUTING_TX_PRESENT != 0,
+                right_components & ROUTING_TX_PRESENT != 0,
+            ) {
+                (false, false) => Ordering::Equal,
+                (false, true) => Ordering::Less,
+                (true, false) => Ordering::Greater,
+                (true, true) => right_tx
+                    .cmp(&left_tx)
+                    .then_with(|| right_added.cmp(&left_added)),
+            }
+        })
+        .then_with(|| {
+            if left_components & ROUTING_TX_PRESENT != 0
+                && right_components & ROUTING_TX_PRESENT != 0
+            {
+                compare_optional_routing_values(left_value, right_value, true)
+            } else {
+                Ordering::Equal
+            }
+        })
 }
 
 fn compare_present_to_value<T: Ord>(present: bool, left: &T, right: &T) -> Ordering {
@@ -1315,7 +1353,7 @@ fn minimum_tuple_difference(
             (None, None) => Ordering::Equal,
             (None, Some(_)) => Ordering::Less,
             (Some(_), None) => Ordering::Greater,
-            (Some(prior), Some(current)) => prior.stored_cmp(current),
+            (Some(prior), Some(current)) => prior.index_cmp(current),
         };
         if ordering.is_ne() {
             let mut prefix = current[..index]
@@ -1350,7 +1388,7 @@ fn sparse_routing_key(order: IndexOrder, prior: &Datom, current: &Datom) -> Rout
                 RoutingKey::exact(current)
             }
         }
-        IndexOrder::Vaet if prior.value.stored_cmp(&current.value).is_ne() => {
+        IndexOrder::Vaet if prior.value.index_cmp(&current.value).is_ne() => {
             RoutingKey::sparse(None, None, Some(RoutingValue::exact(&current.value)), added)
         }
         IndexOrder::Vaet if current.attribute != prior.attribute => RoutingKey::sparse(
@@ -1708,8 +1746,34 @@ pub fn merge_tree(
     let old_root = context.load_root(descriptor)?;
     context.retirement_candidates.insert(descriptor.root_hash);
     let removals = combined_removals(edits, descriptor.order)?;
-    let points = affected_points(edits, descriptor.order);
-    let pair_removals = pair_removals(edits, descriptor.order)?;
+    let mut points = affected_points(edits, descriptor.order);
+    let mut no_history_pairs = edits.no_history_pairs.clone();
+    if descriptor.history && !edits.no_history_attributes.is_empty() {
+        no_history_pairs.extend(discover_segment_no_history_pairs(
+            descriptor,
+            &old_root,
+            old_nodes,
+            edits,
+            &removals,
+            &points,
+        )?);
+        no_history_pairs.sort_by(|left, right| {
+            left.retraction
+                .cmp_in(&right.retraction, descriptor.order)
+        });
+        no_history_pairs.dedup_by(|right, left| {
+            same_datom(&left.retraction, &right.retraction)
+                && same_datom(&left.assertion, &right.assertion)
+        });
+        validate_no_history_pairs(descriptor.order, &no_history_pairs)?;
+        for pair in &no_history_pairs {
+            points.push(pair.retraction.clone());
+            points.push(pair.assertion.clone());
+        }
+        points.sort_by(|left, right| left.cmp_in(right, descriptor.order));
+        points.dedup_by(|right, left| same_datom(left, right));
+    }
+    let pair_removals = pair_removals(&no_history_pairs, descriptor.order)?;
     let mut applied = AppliedEdits::default();
     let mut output_directories = Vec::new();
     let mut inside_affected_run = false;
@@ -1874,7 +1938,7 @@ pub fn merge_tree(
         }
     }
 
-    let expected_filtered = edits.no_history_pairs.len().saturating_mul(2) as u64;
+    let expected_filtered = no_history_pairs.len().saturating_mul(2) as u64;
     if applied.removals != removals.len() as u64
         || applied.insertions != edits.insertions.len() as u64
         || applied.filtered != expected_filtered
@@ -1931,7 +1995,7 @@ pub fn merge_tree(
     context.stats.removals = applied.removals;
     context.stats.projection_removals = edits.projection_removals.len() as u64;
     context.stats.insertions = applied.insertions;
-    context.stats.no_history_pairs = edits.no_history_pairs.len() as u64;
+    context.stats.no_history_pairs = no_history_pairs.len() as u64;
     context.stats.output_datoms = output_count;
 
     let retired_nodes = context
@@ -2579,7 +2643,9 @@ fn validate_merge_edits(
             "retained history accepts additions and exact noHistory pairs, not arbitrary removals",
         ));
     }
-    if !history && !edits.no_history_pairs.is_empty() {
+    if !history
+        && (!edits.no_history_pairs.is_empty() || !edits.no_history_attributes.is_empty())
+    {
         return Err(SemanticError::incorrect(
             "tree/current-no-history-filter",
             "noHistory pair filtering applies only to retained history",
@@ -2610,42 +2676,7 @@ fn validate_merge_edits(
         }
     }
 
-    let mut pair_datoms = Vec::with_capacity(edits.no_history_pairs.len().saturating_mul(2));
-    let mut previous_retraction = None::<&Datom>;
-    for pair in &edits.no_history_pairs {
-        if pair.retraction.added
-            || !pair.assertion.added
-            || !same_eav(&pair.retraction, &pair.assertion)
-            || !pair.retraction.cmp_in(&pair.assertion, order).is_lt()
-        {
-            return Err(SemanticError::incorrect(
-                "tree/invalid-no-history-pair",
-                "noHistory filter requires an ordered exact retraction/assertion E/A/V pair",
-            ));
-        }
-        if previous_retraction
-            .is_some_and(|previous| !previous.cmp_in(&pair.retraction, order).is_lt())
-        {
-            return Err(SemanticError::incorrect(
-                "tree/noncanonical-no-history-pairs",
-                "noHistory pairs must be strictly ordered by retraction",
-            ));
-        }
-        previous_retraction = Some(&pair.retraction);
-        pair_datoms.push(pair.retraction.clone());
-        pair_datoms.push(pair.assertion.clone());
-    }
-    pair_datoms.sort_by(|left, right| left.cmp_in(right, order));
-    if pair_datoms
-        .windows(2)
-        .any(|pair| !pair[0].cmp_in(&pair[1], order).is_lt())
-    {
-        return Err(SemanticError::incorrect(
-            "tree/duplicate-no-history-datom",
-            "one exact history datom cannot participate in multiple pair removals",
-        ));
-    }
-    validate_persistent_index_datoms(order, &pair_datoms)?;
+    validate_no_history_pairs(order, &edits.no_history_pairs)?;
 
     for (index, range) in edits.affected_ranges.iter().enumerate() {
         if let (Some(start), Some(end)) = (&range.start, &range.end)
@@ -2672,6 +2703,49 @@ fn validate_merge_edits(
             }
         }
     }
+    Ok(())
+}
+
+fn validate_no_history_pairs(
+    order: IndexOrder,
+    pairs: &[NoHistoryPair],
+) -> Result<(), SemanticError> {
+    let mut pair_datoms = Vec::with_capacity(pairs.len().saturating_mul(2));
+    let mut previous_retraction = None::<&Datom>;
+    for pair in pairs {
+        if pair.retraction.added
+            || !pair.assertion.added
+            || !same_logical_eav(&pair.retraction, &pair.assertion)
+            || !pair.retraction.cmp_in(&pair.assertion, order).is_lt()
+        {
+            return Err(SemanticError::incorrect(
+                "tree/invalid-no-history-pair",
+                "noHistory filter requires an ordered logically equal retraction/assertion E/A/V pair",
+            ));
+        }
+        if previous_retraction
+            .is_some_and(|previous| !previous.cmp_in(&pair.retraction, order).is_lt())
+        {
+            return Err(SemanticError::incorrect(
+                "tree/noncanonical-no-history-pairs",
+                "noHistory pairs must be strictly ordered by retraction",
+            ));
+        }
+        previous_retraction = Some(&pair.retraction);
+        pair_datoms.push(pair.retraction.clone());
+        pair_datoms.push(pair.assertion.clone());
+    }
+    pair_datoms.sort_by(|left, right| left.cmp_in(right, order));
+    if pair_datoms
+        .windows(2)
+        .any(|pair| !pair[0].cmp_in(&pair[1], order).is_lt())
+    {
+        return Err(SemanticError::incorrect(
+            "tree/duplicate-no-history-datom",
+            "one exact history datom cannot participate in multiple pair removals",
+        ));
+    }
+    validate_persistent_index_datoms(order, &pair_datoms)?;
     Ok(())
 }
 
@@ -2732,9 +2806,11 @@ fn combined_removals(
     Ok(removals)
 }
 
-fn pair_removals(edits: &TreeMergeEdits, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-    let mut removals = edits
-        .no_history_pairs
+fn pair_removals(
+    pairs: &[NoHistoryPair],
+    order: IndexOrder,
+) -> Result<Vec<Datom>, SemanticError> {
+    let mut removals = pairs
         .iter()
         .flat_map(|pair| [pair.retraction.clone(), pair.assertion.clone()])
         .collect::<Vec<_>>();
@@ -2749,6 +2825,170 @@ fn pair_removals(edits: &TreeMergeEdits, order: IndexOrder) -> Result<Vec<Datom>
         ));
     }
     Ok(removals)
+}
+
+/// Recover `filter-nohist-pairs` from the complete streams of only those old
+/// leaves this copy-on-write operation already selected. A single pending
+/// datom carries adjacency across selected leaf and directory boundaries; an
+/// untouched leaf ends the segment. Memory is therefore one decoded leaf,
+/// one pending datom, and the exact removal witnesses that the merge must
+/// authenticate—never the complete tree.
+fn discover_segment_no_history_pairs(
+    descriptor: &TreeDescriptor,
+    root: &RootNode,
+    old_nodes: &TreeNodeSet,
+    edits: &TreeMergeEdits,
+    removals: &[Datom],
+    points: &[Datom],
+) -> Result<Vec<NoHistoryPair>, SemanticError> {
+    let mut pairs = Vec::new();
+    let mut pending = None;
+    if root.directories.is_empty() {
+        let mut ignored = AppliedEdits::default();
+        let merged = apply_leaf_edits(
+            Vec::new(),
+            removals,
+            &edits.insertions,
+            &[],
+            descriptor.order,
+            &mut ignored,
+        )?;
+        discover_no_history_in_stream(
+            merged,
+            &edits.no_history_attributes,
+            &mut pending,
+            &mut pairs,
+        );
+        return Ok(pairs);
+    }
+
+    let mut ignored_reads = TreeReadStats::default();
+    for (directory_index, directory_ref) in root.directories.iter().enumerate() {
+        let lower = if directory_index == 0 {
+            None
+        } else {
+            Some(&directory_ref.key)
+        };
+        let upper = root
+            .directories
+            .get(directory_index + 1)
+            .map(|reference| &reference.key);
+        if !interval_is_affected(
+            lower,
+            upper,
+            points,
+            &edits.affected_ranges,
+            descriptor.order,
+        ) {
+            pending = None;
+            continue;
+        }
+        let directory = load_directory(
+            directory_ref,
+            descriptor.order,
+            descriptor.history,
+            old_nodes,
+            &mut ignored_reads,
+        )?;
+        for (leaf_index, leaf_ref) in directory.leaves.iter().enumerate() {
+            let leaf_lower = if directory_index == 0 && leaf_index == 0 {
+                None
+            } else {
+                Some(&leaf_ref.key)
+            };
+            let leaf_upper = directory
+                .leaves
+                .get(leaf_index + 1)
+                .map(|reference| &reference.key)
+                .or(upper);
+            if !interval_is_affected(
+                leaf_lower,
+                leaf_upper,
+                points,
+                &edits.affected_ranges,
+                descriptor.order,
+            ) {
+                pending = None;
+                continue;
+            }
+            let leaf = load_leaf(
+                leaf_ref,
+                descriptor.order,
+                descriptor.history,
+                old_nodes,
+                &mut ignored_reads,
+            )?;
+            let leaf_removals =
+                datoms_in_interval(removals, leaf_lower, leaf_upper, descriptor.order);
+            let leaf_insertions = datoms_in_interval(
+                &edits.insertions,
+                leaf_lower,
+                leaf_upper,
+                descriptor.order,
+            );
+            let mut ignored = AppliedEdits::default();
+            let merged = apply_leaf_edits(
+                leaf.datoms(),
+                &leaf_removals,
+                &leaf_insertions,
+                &[],
+                descriptor.order,
+                &mut ignored,
+            )?;
+            discover_no_history_in_stream(
+                merged,
+                &edits.no_history_attributes,
+                &mut pending,
+                &mut pairs,
+            );
+        }
+    }
+    Ok(pairs)
+}
+
+/// Inspect the complete old+new streams of the leaves selected by `edits`
+/// and return the exact noHistory omissions that this one physical order
+/// would make. The native indexer uses this on canonical EAVT, then applies
+/// the exact witnesses to every history sibling, preserving fact equivalence
+/// even though different orderings have different physical leaf boundaries.
+pub(crate) fn discover_merge_no_history_pairs(
+    descriptor: &TreeDescriptor,
+    old_nodes: &TreeNodeSet,
+    edits: &TreeMergeEdits,
+) -> Result<Vec<NoHistoryPair>, SemanticError> {
+    validate_merge_edits(descriptor.order, descriptor.history, edits)?;
+    if !descriptor.history || edits.no_history_attributes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut reads = TreeReadStats::default();
+    let root = load_root(descriptor, old_nodes, &mut reads)?;
+    let removals = combined_removals(edits, descriptor.order)?;
+    let points = affected_points(edits, descriptor.order);
+    discover_segment_no_history_pairs(descriptor, &root, old_nodes, edits, &removals, &points)
+}
+
+fn discover_no_history_in_stream(
+    datoms: impl IntoIterator<Item = Datom>,
+    no_history_attributes: &BTreeSet<u32>,
+    pending: &mut Option<Datom>,
+    pairs: &mut Vec<NoHistoryPair>,
+) {
+    for datom in datoms {
+        if let Some(previous) = pending.take() {
+            if !previous.added
+                && datom.added
+                && no_history_attributes.contains(&previous.attribute)
+                && same_logical_eav(&previous, &datom)
+            {
+                pairs.push(NoHistoryPair {
+                    retraction: previous,
+                    assertion: datom,
+                });
+                continue;
+            }
+        }
+        *pending = Some(datom);
+    }
 }
 
 fn interval_is_affected(
@@ -3016,10 +3256,10 @@ fn flush_merge_directory(
     }))
 }
 
-fn same_eav(left: &Datom, right: &Datom) -> bool {
+fn same_logical_eav(left: &Datom, right: &Datom) -> bool {
     left.entity == right.entity
         && left.attribute == right.attribute
-        && left.value.stored_eq(&right.value)
+        && left.value.index_cmp(&right.value).is_eq()
 }
 
 fn load_root(
@@ -4749,6 +4989,74 @@ mod tests {
     }
 
     #[test]
+    fn nested_tuple_scale_ties_do_not_hide_a_later_tuple_difference() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let tuple = |spelling: &str, suffix: &str| {
+            Value::Tuple(vec![
+                Some(Value::Tuple(vec![Some(Value::BigDec(
+                    BigDecimal::from_str(spelling).unwrap(),
+                ))])),
+                Some(Value::String(suffix.into())),
+            ])
+        };
+        let prior = Datom {
+            entity: make_eid(USER_PARTITION, 1).unwrap(),
+            attribute: 7,
+            value: tuple("1.0", "shared-prefix-alpha"),
+            tx: t_to_tx(1).unwrap(),
+            added: true,
+        };
+        let current = Datom {
+            value: tuple("1.00", "shared-prefix-bravo"),
+            tx: t_to_tx(2).unwrap(),
+            ..prior.clone()
+        };
+        let Value::Tuple(prior_values) = &prior.value else {
+            unreachable!()
+        };
+        let Value::Tuple(current_values) = &current.value else {
+            unreachable!()
+        };
+        assert_eq!(
+            prior_values[0]
+                .as_ref()
+                .unwrap()
+                .index_cmp(current_values[0].as_ref().unwrap()),
+            Ordering::Equal
+        );
+        assert!(prior.value.index_cmp(&current.value).is_lt());
+
+        let separator = sparse_routing_key(IndexOrder::Eavt, &prior, &current);
+        let Some(RoutingValue::Tuple { prefix, .. }) = separator.value.as_ref() else {
+            panic!("tuple boundary should retain a sparse tuple prefix")
+        };
+        assert_eq!(prefix.len(), 2, "logical-equal first member was not skipped");
+        assert!(separator.cmp_datom(&prior, IndexOrder::Eavt).is_gt());
+        assert!(separator.cmp_datom(&current, IndexOrder::Eavt).is_le());
+
+        let mut config = tiny_config();
+        config.max_leaf_datoms = 1;
+        for order in [IndexOrder::Eavt, IndexOrder::Aevt, IndexOrder::Avet] {
+            let built = build_tree(
+                order,
+                true,
+                vec![prior.clone(), current.clone()],
+                &config,
+            )
+            .unwrap();
+            validate_tree(&built.descriptor, &built.nodes).unwrap();
+            assert_eq!(
+                range_tree(&built.descriptor, &built.nodes, None, None)
+                    .unwrap()
+                    .datoms,
+                vec![prior.clone(), current.clone()]
+            );
+        }
+    }
+
+    #[test]
     fn leaves_are_canonical_columnar_values_and_build_is_deterministic() {
         let datoms = sorted_datoms(IndexOrder::Eavt, true);
         let first = build_tree(IndexOrder::Eavt, true, datoms.clone(), &tiny_config()).unwrap();
@@ -5432,6 +5740,148 @@ mod tests {
         let error =
             merge_tree(&old.descriptor, &old.nodes, &arbitrary_removal, &config).unwrap_err();
         assert_eq!(error.code, "tree/history-removal");
+    }
+
+    #[test]
+    fn history_rebuild_filters_an_older_pair_incidentally_sharing_the_leaf() {
+        let order = IndexOrder::Eavt;
+        let mut config = cow_config();
+        config.max_leaf_datoms = 16;
+        let assertion = datom(50, 2, 7, 10, true);
+        let retraction = Datom {
+            tx: t_to_tx(20).unwrap(),
+            added: false,
+            ..assertion.clone()
+        };
+        let untouched = datom(49, 1, 1, 1, true);
+        let old = build_tree(
+            order,
+            true,
+            vec![untouched.clone(), retraction.clone(), assertion.clone()],
+            &config,
+        )
+        .unwrap();
+        let inserted = datom(51, 3, 9, 30, true);
+        let edits = TreeMergeEdits {
+            insertions: vec![inserted.clone()],
+            no_history_attributes: BTreeSet::from([2]),
+            ..TreeMergeEdits::default()
+        };
+        let merged = merge_tree(&old.descriptor, &old.nodes, &edits, &config).unwrap();
+        let complete = overlay(&old.nodes, &merged.new_nodes);
+        validate_tree(&merged.descriptor, &complete).unwrap();
+        assert_eq!(
+            range_tree(&merged.descriptor, &complete, None, None)
+                .unwrap()
+                .datoms,
+            vec![untouched, inserted]
+        );
+        assert_eq!(merged.stats.no_history_pairs, 1);
+    }
+
+    #[test]
+    fn history_rebuild_carries_no_history_adjacency_across_selected_leaves() {
+        let order = IndexOrder::Eavt;
+        let mut config = cow_config();
+        config.max_leaf_datoms = 1;
+        let assertion = datom(50, 2, 7, 10, true);
+        let retraction = Datom {
+            tx: t_to_tx(20).unwrap(),
+            added: false,
+            ..assertion.clone()
+        };
+        let old = build_tree(
+            order,
+            true,
+            vec![retraction.clone(), assertion.clone()],
+            &config,
+        )
+        .unwrap();
+        let edits = TreeMergeEdits {
+            no_history_attributes: BTreeSet::from([2]),
+            affected_ranges: vec![TreeAffectedRange::unbounded()],
+            ..TreeMergeEdits::default()
+        };
+        let merged = merge_tree(&old.descriptor, &old.nodes, &edits, &config).unwrap();
+        let complete = overlay(&old.nodes, &merged.new_nodes);
+        validate_tree(&merged.descriptor, &complete).unwrap();
+        assert!(
+            range_tree(&merged.descriptor, &complete, None, None)
+                .unwrap()
+                .datoms
+                .is_empty()
+        );
+        assert_eq!(merged.stats.affected_leaves, 2);
+        assert_eq!(merged.stats.no_history_pairs, 1);
+    }
+
+    #[test]
+    fn history_cow_filters_logically_equal_bigdecimal_scales_in_both_directions() {
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let order = IndexOrder::Eavt;
+        let config = cow_config();
+        let entity = make_eid(USER_PARTITION, 50).unwrap();
+        let old_assertion = Datom {
+            entity,
+            attribute: 2,
+            value: Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+            tx: t_to_tx(10).unwrap(),
+            added: true,
+        };
+        let old_retraction = Datom {
+            entity,
+            attribute: 2,
+            value: Value::BigDec(BigDecimal::from_str("1.0").unwrap()),
+            tx: t_to_tx(20).unwrap(),
+            added: false,
+        };
+        let new_assertion = Datom {
+            entity: make_eid(USER_PARTITION, 50).unwrap(),
+            attribute: 2,
+            value: Value::BigDec(BigDecimal::from_str("1.000").unwrap()),
+            tx: t_to_tx(30).unwrap(),
+            added: true,
+        };
+        let new_retraction = Datom {
+            value: Value::BigDec(BigDecimal::from_str("1.0000").unwrap()),
+            tx: t_to_tx(40).unwrap(),
+            added: false,
+            ..new_assertion.clone()
+        };
+        let mut durable = vec![
+            old_assertion.clone(),
+            old_retraction.clone(),
+            new_assertion.clone(),
+        ];
+        durable.sort_by(|left, right| left.cmp_in(right, order));
+        let old = build_tree(order, true, durable, &config).unwrap();
+        let edits = TreeMergeEdits {
+            insertions: vec![new_retraction.clone()],
+            no_history_pairs: vec![
+                NoHistoryPair {
+                    retraction: new_retraction,
+                    assertion: new_assertion,
+                },
+                NoHistoryPair {
+                    retraction: old_retraction,
+                    assertion: old_assertion,
+                },
+            ],
+            ..TreeMergeEdits::default()
+        };
+
+        let merged = merge_tree(&old.descriptor, &old.nodes, &edits, &config).unwrap();
+        let complete = overlay(&old.nodes, &merged.new_nodes);
+        validate_tree(&merged.descriptor, &complete).unwrap();
+        assert!(
+            range_tree(&merged.descriptor, &complete, None, None)
+                .unwrap()
+                .datoms
+                .is_empty()
+        );
+        assert_eq!(merged.stats.no_history_pairs, 2);
     }
 
     #[test]

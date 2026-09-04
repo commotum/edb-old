@@ -185,55 +185,31 @@ impl Value {
         }
     }
 
-    /// Equality used to decide whether a stored fact is redundant. The
-    /// recovered implementation adds BigDecimal scale to numeric equality at
-    /// this boundary even though index comparison ignores scale.
+    /// Equality used to decide whether a stored fact is redundant. Recovered
+    /// `equals-with-strict-scale` adds scale only when both top-level values
+    /// are BigDecimal. Tuple/list equality continues through Clojure's logical
+    /// comparison, so nested `1.0M` and `1.00M` remain equal.
     pub fn stored_eq(&self, other: &Self) -> bool {
         self.index_cmp(other) == Ordering::Equal
             && match (self, other) {
                 (Self::BigDec(left), Self::BigDec(right)) => {
                     left.fractional_digit_count() == right.fractional_digit_count()
                 }
-                (Self::Tuple(left), Self::Tuple(right)) => {
-                    left.len() == right.len()
-                        && left
-                            .iter()
-                            .zip(right)
-                            .all(|(left, right)| match (left, right) {
-                                (None, None) => true,
-                                (Some(left), Some(right)) => left.stored_eq(right),
-                                _ => false,
-                            })
-                }
                 _ => true,
             }
     }
 
-    /// Total ordering for physical/canonical storage boundaries.
+    /// Ordering for recovered stored-fact equality boundaries.
     ///
     /// Datomic's logical comparator intentionally considers numerically equal
     /// values equal across representations. Its stored equality adds the
-    /// BigDecimal scale distinction. Persistent Rust collections therefore
-    /// need the same distinction as a final tie-breaker or two legal stored
-    /// values such as `1.0M` and `1.00M` collapse into one sort position.
+    /// BigDecimal scale distinction only for top-level BigDecimals; tuples
+    /// retain logical recursive comparison.
     pub fn stored_cmp(&self, other: &Self) -> Ordering {
         self.index_cmp(other).then_with(|| match (self, other) {
             (Self::BigDec(left), Self::BigDec(right)) => left
                 .fractional_digit_count()
                 .cmp(&right.fractional_digit_count()),
-            (Self::Tuple(left), Self::Tuple(right)) => left
-                .iter()
-                .zip(right)
-                .find_map(|(left, right)| {
-                    let ordering = match (left, right) {
-                        (None, None) => Ordering::Equal,
-                        (None, Some(_)) => Ordering::Less,
-                        (Some(_), None) => Ordering::Greater,
-                        (Some(left), Some(right)) => left.stored_cmp(right),
-                    };
-                    ordering.is_ne().then_some(ordering)
-                })
-                .unwrap_or_else(|| left.len().cmp(&right.len())),
             _ => Ordering::Equal,
         })
     }
@@ -520,6 +496,12 @@ mod tests {
         let another = Value::BigDec(BigDecimal::from_str("1.00").unwrap());
         assert_eq!(one.index_cmp(&another), Ordering::Equal);
         assert!(!one.stored_eq(&another));
+
+        let nested_one = Value::Tuple(vec![Some(one)]);
+        let nested_another = Value::Tuple(vec![Some(another)]);
+        assert_eq!(nested_one.index_cmp(&nested_another), Ordering::Equal);
+        assert!(nested_one.stored_eq(&nested_another));
+        assert_eq!(nested_one.stored_cmp(&nested_another), Ordering::Equal);
     }
 
     #[test]

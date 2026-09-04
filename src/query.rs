@@ -1317,10 +1317,7 @@ fn select_datoms<'a>(
         }
         if let Some(attribute) = attribute {
             if let Some(value) = value
-                && database
-                    .schema()
-                    .attribute(attribute)
-                    .is_ok_and(|a| a.indexed || a.unique.is_some())
+                && database.physical_avet_ready(attribute)
             {
                 let prefix = IndexPrefix::Avet {
                     attribute,

@@ -101,6 +101,10 @@ pub struct OperationalMetrics {
     pub tree_publications: u64,
     /// Canonical native manifests retained for this database.
     pub tree_manifests: u64,
+    /// Authenticated AVET attribute projections still being copied or
+    /// removed in the newest usable native publication. Zero means every
+    /// logically requested AVET projection is physically ready.
+    pub pending_avet_projections: u64,
     /// Unique immutable native nodes reachable from this database's retained
     /// publications, including roots, directories, and leaves.
     pub tree_nodes: u64,
@@ -529,7 +533,7 @@ impl PostgresOperator {
                                   OR ( \
                                       CASE WHEN publication.manifest_hash IS NOT NULL \
                                                 AND manifest.manifest_hash IS NOT NULL \
-                                                AND manifest.manifest_version = 4 \
+                                                AND manifest.manifest_version IN (4, 5) \
                                                 AND semantic.database_id IS NOT NULL \
                                                 AND publication.basis_t <= request.basis_t - 1 \
                                                 AND NOT EXISTS ( \
@@ -538,7 +542,7 @@ impl PostgresOperator {
                                                 ) \
                                            THEN 1 ELSE 0 END \
                                       + CASE WHEN archive.manifest_hash IS NOT NULL \
-                                                   AND archive.manifest_version = 4 \
+                                                   AND archive.manifest_version IN (4, 5) \
                                                    AND archive_complete.manifest_hash IS NOT NULL \
                                                    AND archive_semantic.database_id IS NOT NULL \
                                                    AND archive.basis_t <= request.basis_t - 1 \
@@ -2431,7 +2435,8 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             && stored_revision == revision
             && stored_basis == basis
             && stored_tx == published_tx
-            && stored_version == 4
+            && PersistentTreeManifest::encoded_version(&payload)
+                .is_ok_and(|version| stored_version == version)
             && sha256(&payload) == manifest_hash;
         if !publication_valid {
             problem(
@@ -2548,28 +2553,49 @@ fn inspect_native_trees<C: postgres::GenericClient>(
         // it is no longer a usable index for the current database value.
         if publication_valid && stored_generation == generation {
             metrics.index_basis_t = metrics.index_basis_t.max(basis);
+            metrics.pending_avet_projections = manifest.pending_avet.len() as u64;
             if deep {
-                match (
-                    native_eavt_datoms(&manifest_nodes, false),
-                    native_eavt_datoms(&manifest_nodes, true),
-                ) {
-                    (Ok(current), Ok(history)) => {
-                        newest_active_projection = Some(NativeSemanticProjection {
-                            revision,
-                            generation: stored_generation,
-                            basis_t: basis,
-                            tx_hash: stored_tx,
-                            current,
-                            history,
-                        });
+                let mut indexes = Vec::with_capacity(8);
+                let mut projection_error = None;
+                for history in [false, true] {
+                    for order in [
+                        IndexOrder::Eavt,
+                        IndexOrder::Aevt,
+                        IndexOrder::Avet,
+                        IndexOrder::Vaet,
+                    ] {
+                        match native_tree_datoms(&manifest_nodes, order, history) {
+                            Ok(datoms) => indexes.push(NativeIndexProjection {
+                                order,
+                                history,
+                                datoms,
+                            }),
+                            Err(error) => {
+                                projection_error = Some(error);
+                                break;
+                            }
+                        }
                     }
-                    (Err(error), _) | (_, Err(error)) => {
-                        problem(
-                            problems,
-                            error.code,
-                            format!("tree revision {revision}: {}", error.message),
-                        );
-                    }
+                }
+                if let Some(error) = projection_error {
+                    problem(
+                        problems,
+                        error.code,
+                        format!("tree revision {revision}: {}", error.message),
+                    );
+                } else {
+                    newest_active_projection = Some(NativeSemanticProjection {
+                        revision,
+                        generation: stored_generation,
+                        basis_t: basis,
+                        tx_hash: stored_tx,
+                        indexes,
+                        pending_avet: manifest
+                            .pending_avet
+                            .iter()
+                            .map(|work| work.attribute)
+                            .collect(),
+                    });
                 }
             }
         }
@@ -2591,9 +2617,14 @@ fn inspect_native_trees<C: postgres::GenericClient>(
     // but cannot prove that a differently shaped semantic commitment contains
     // the same set. This explicit administrative boundary already pays for a
     // complete tree walk, so replay the named immutable log value and compare
-    // exact EAVT information here. Ordinary peer/writer adoption deliberately
-    // trusts the restricted index publisher, as Datomic trusts its adopted
-    // storage root; copying `state_hash` into another manifest is not a proof.
+    // current EAVT plus every sibling projection here. History EAVT is the
+    // physical authority for historical siblings: `:db/noHistory` is applied
+    // by indexing jobs, and a later false setting resumes retention without
+    // resurrecting facts already omitted from a published base. Replaying only
+    // the endpoint database cannot reproduce that schedule-dependent physical
+    // history. Ordinary peer/writer adoption deliberately trusts the restricted
+    // index publisher, as Datomic trusts its adopted storage root; copying
+    // `state_hash` into another manifest is not a proof.
     if deep && let Some(projection) = newest_active_projection {
         match recover_generation_to(
             client,
@@ -2603,26 +2634,75 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             projection.tx_hash,
         ) {
             Ok(recovered) => match checkpoint_information(&recovered.database) {
-                Ok((expected_current, expected_history)) => {
-                    let current_matches =
-                        same_stored_datoms(&projection.current, &expected_current);
-                    let history_matches =
-                        same_stored_datoms(&projection.history, &expected_history);
-                    if !current_matches || !history_matches {
-                        problem(
-                            problems,
-                            "integrity/tree-semantic-mismatch",
-                            format!(
-                                "tree revision {} does not contain the current/history information derived from authoritative generation {} at basis {} (current: {} vs {}, history: {} vs {})",
-                                projection.revision,
-                                projection.generation,
-                                projection.basis_t,
-                                projection.current.len(),
-                                expected_current.len(),
-                                projection.history.len(),
-                                expected_history.len(),
+                Ok((expected_current, _replayed_history)) => {
+                    let physical_history_eavt = projection
+                        .indexes
+                        .iter()
+                        .find(|index| index.history && index.order == IndexOrder::Eavt)
+                        .map(|index| index.datoms.clone());
+                    for actual in projection.indexes {
+                        // Authenticated history EAVT cannot be compared to an
+                        // endpoint-only replay for the noHistory reason above.
+                        // Its derived siblings can and must agree with it.
+                        if actual.history && actual.order == IndexOrder::Eavt {
+                            continue;
+                        }
+                        let Some(source) = (if actual.history {
+                            physical_history_eavt.as_deref()
+                        } else {
+                            Some(expected_current.as_slice())
+                        }) else {
+                            problem(
+                                problems,
+                                "integrity/tree-derived-index-mismatch",
+                                format!(
+                                    "tree revision {} lacks the physical EAVT history authority",
+                                    projection.revision
+                                ),
+                            );
+                            continue;
+                        };
+                        match derive_index_projection(&recovered.database, source, actual.order) {
+                            Ok(mut expected) => {
+                                let mut observed = actual.datoms;
+                                if actual.order == IndexOrder::Avet {
+                                    observed.retain(|datom| {
+                                        !projection.pending_avet.contains(&datom.attribute)
+                                    });
+                                    expected.retain(|datom| {
+                                        !projection.pending_avet.contains(&datom.attribute)
+                                    });
+                                }
+                                if !same_stored_datoms(&observed, &expected) {
+                                    problem(
+                                        problems,
+                                        "integrity/tree-derived-index-mismatch",
+                                        format!(
+                                            "tree revision {} {:?} history={} disagrees with authoritative generation {} at basis {} ({} vs {} datoms; {} pending AVET attribute(s) excluded)",
+                                            projection.revision,
+                                            actual.order,
+                                            actual.history,
+                                            projection.generation,
+                                            projection.basis_t,
+                                            observed.len(),
+                                            expected.len(),
+                                            projection.pending_avet.len(),
+                                        ),
+                                    );
+                                }
+                            }
+                            Err(error) => problem(
+                                problems,
+                                error.code,
+                                format!(
+                                    "tree revision {} {:?} history={} projection: {}",
+                                    projection.revision,
+                                    actual.order,
+                                    actual.history,
+                                    error.message
+                                ),
                             ),
-                        );
+                        }
                     }
                 }
                 Err(error) => problem(
@@ -2654,12 +2734,19 @@ struct NativeSemanticProjection {
     generation: u64,
     basis_t: u64,
     tx_hash: Digest,
-    current: Vec<Datom>,
-    history: Vec<Datom>,
+    indexes: Vec<NativeIndexProjection>,
+    pending_avet: BTreeSet<u32>,
 }
 
-fn native_eavt_datoms(
+struct NativeIndexProjection {
+    order: IndexOrder,
+    history: bool,
+    datoms: Vec<Datom>,
+}
+
+fn native_tree_datoms(
     nodes: &BTreeMap<Digest, Vec<u8>>,
+    order: IndexOrder,
     history: bool,
 ) -> Result<Vec<Datom>, SemanticError> {
     let mut datoms = Vec::new();
@@ -2667,7 +2754,7 @@ fn native_eavt_datoms(
         let TreeNode::Leaf(leaf) = decode_tree_node(hash, payload)? else {
             continue;
         };
-        if leaf.order != IndexOrder::Eavt || leaf.history != history {
+        if leaf.order != order || leaf.history != history {
             continue;
         }
         for index in 0..leaf.len() {
@@ -2677,7 +2764,36 @@ fn native_eavt_datoms(
             );
         }
     }
-    datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+    datoms.sort_by(|left, right| left.cmp_in(right, order));
+    Ok(datoms)
+}
+
+fn derive_index_projection(
+    database: &crate::Database,
+    source: &[Datom],
+    order: IndexOrder,
+) -> Result<Vec<Datom>, SemanticError> {
+    let mut datoms = source
+        .iter()
+        .filter_map(|datom| {
+            let included = match order {
+                IndexOrder::Eavt | IndexOrder::Aevt => Ok(true),
+                IndexOrder::Avet => database.schema().attribute(datom.attribute).map(|attribute| {
+                    attribute.indexed || attribute.unique.is_some()
+                }),
+                IndexOrder::Vaet => database
+                    .schema()
+                    .attribute(datom.attribute)
+                    .map(|attribute| attribute.value_type == crate::ValueType::Ref),
+            };
+            match included {
+                Ok(true) => Some(Ok(datom.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    datoms.sort_by(|left, right| left.cmp_in(right, order));
     Ok(datoms)
 }
 
@@ -3002,7 +3118,7 @@ fn global_derived_reachability<C: postgres::GenericClient>(
             || stored_basis != published_basis
             || stored_tx != published_tx
             || stored_state != authoritative_state
-            || stored_version != 4
+            || stored_version != PersistentTreeManifest::encoded_version(&payload)?
             || stored_hash != published_hash
             || sha256(&payload) != published_hash
         {

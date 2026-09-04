@@ -1,9 +1,11 @@
 mod common;
 
 use atomic_core::{
-    Attribute, Cardinality, IndexOrder, Keyword, PostgresStore, PostgresTreeStore, Schema,
-    TreeManifestRecord, TreePublishOutcome, TreeRootBinding, ValueType, sha256,
+    Attribute, Cardinality, IndexOrder, Keyword, ManifestTree, PersistentTreeManifest,
+    PostgresStore, PostgresTreeStore, Schema, TreeManifestRecord, TreePublishOutcome,
+    TreeRootBinding, ValueType, sha256,
 };
+use atomic_core::persistent_tree::TreeDescriptor;
 use postgres::{Client, NoTls};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +26,45 @@ fn unique(prefix: &str) -> String {
 
 fn digest(bytes: Vec<u8>) -> [u8; 32] {
     bytes.try_into().unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn manifest_payload(
+    database_id: &str,
+    publication_revision: u64,
+    basis_t: u64,
+    tx_hash: [u8; 32],
+    state_hash: [u8; 32],
+    excision_generation: u64,
+    eidx_frontier: u64,
+    roots: &[TreeRootBinding],
+) -> Vec<u8> {
+    PersistentTreeManifest {
+        database_id: database_id.to_owned(),
+        publication_revision,
+        basis_t,
+        tx_hash,
+        state_hash,
+        excision_generation,
+        eidx_frontier,
+        trees: roots
+            .iter()
+            .map(|root| ManifestTree {
+                descriptor: TreeDescriptor {
+                    root_hash: root.root_hash,
+                    order: root.order,
+                    history: root.history,
+                    count: root.datom_count,
+                    first_hash: None,
+                    last_hash: None,
+                },
+                root_bytes: root.encoded_bytes,
+            })
+            .collect(),
+        pending_avet: Vec::new(),
+    }
+    .encode()
+    .unwrap()
 }
 
 #[test]
@@ -122,8 +163,16 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
     drop(observer);
 
     let publication_revision = expected_revision + 1;
-    let payload = format!("ATIM-v4-{database_id}-revision-{publication_revision}-basis-{basis_t}")
-        .into_bytes();
+    let payload = manifest_payload(
+        &database_id,
+        publication_revision,
+        basis_t,
+        tx_hash,
+        state_hash,
+        generation,
+        database.eidx_frontier(),
+        &roots,
+    );
     let manifest = TreeManifestRecord {
         database_id: database_id.clone(),
         publication_revision,
@@ -153,8 +202,16 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
     // part of the authenticated content identity, so the two immutable
     // manifests can safely describe the same basis and roots.
     let successor_revision = publication_revision + 1;
-    let successor_payload =
-        format!("ATIM-v4-{database_id}-revision-{successor_revision}-basis-{basis_t}").into_bytes();
+    let successor_payload = manifest_payload(
+        &database_id,
+        successor_revision,
+        basis_t,
+        tx_hash,
+        state_hash,
+        generation,
+        database.eidx_frontier(),
+        &manifest.roots,
+    );
     let successor = TreeManifestRecord {
         publication_revision: successor_revision,
         manifest_hash: sha256(&successor_payload),
@@ -206,16 +263,23 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
             &[&database_id],
         )
         .unwrap();
-    let old_payload = format!(
-        "ATIM-v4-{database_id}-revision-{}-basis-1",
-        successor_revision + 1
-    )
-    .into_bytes();
+    let old_tx_hash = digest(old_row.get(0));
+    let old_state_hash = digest(old_row.get(1));
+    let old_payload = manifest_payload(
+        &database_id,
+        successor_revision + 1,
+        1,
+        old_tx_hash,
+        old_state_hash,
+        generation,
+        database.eidx_frontier(),
+        &successor.roots,
+    );
     let regressing = TreeManifestRecord {
         publication_revision: successor_revision + 1,
         basis_t: 1,
-        tx_hash: digest(old_row.get(0)),
-        state_hash: digest(old_row.get(1)),
+        tx_hash: old_tx_hash,
+        state_hash: old_state_hash,
         manifest_hash: sha256(&old_payload),
         payload: old_payload,
         ..successor.clone()
@@ -228,11 +292,16 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
 
     let mut gap = successor.clone();
     gap.publication_revision = successor_revision + 2;
-    let gap_payload = format!(
-        "ATIM-v4-{database_id}-revision-{}-gap",
-        successor_revision + 2
-    )
-    .into_bytes();
+    let gap_payload = manifest_payload(
+        &database_id,
+        successor_revision + 2,
+        successor.basis_t,
+        successor.tx_hash,
+        successor.state_hash,
+        successor.excision_generation,
+        successor.eidx_frontier,
+        &successor.roots,
+    );
     gap.manifest_hash = sha256(&gap_payload);
     gap.payload = gap_payload;
     let gap_error = store

@@ -285,6 +285,7 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
         excision_generation: generation,
         eidx_frontier,
         trees: manifest_trees,
+        pending_avet: Vec::new(),
     };
     let payload = forged_manifest.encode().unwrap();
     let manifest_hash = sha256(&payload);

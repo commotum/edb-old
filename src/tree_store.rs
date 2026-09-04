@@ -9,11 +9,280 @@ use crate::postgres::{postgres_error, verify_schema_compatibility};
 use crate::{Digest, ErrorCategory, IndexOrder, PostgresConnectionConfig, SemanticError, sha256};
 use postgres::Client;
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
-const TREE_MANIFEST_VERSION: i16 = 4;
 const ROOT_BINDING_COUNT: usize = 8;
 const DELTA_INSERT_BATCH: usize = 512;
+const MAX_AVET_SORT_ROW_BYTES: u64 = 64 * 1024 * 1024;
+const AVET_SORT_FRAME_BYTES: u64 = 8 + 8 + 8 + 32;
+const MAX_ACTIVE_AVET_SORT_READERS: usize = 8;
+
+#[derive(Debug)]
+struct AvetSortReaderState {
+    start_offset: u64,
+    next_offset: u64,
+    next_ordinal: u64,
+    exhausted: bool,
+}
+
+#[derive(Debug)]
+struct AvetSortLevel {
+    file: File,
+    byte_count: u64,
+    row_count: u64,
+    last_run: Option<(u64, u64)>,
+    locate_offset: u64,
+    locate_run: u64,
+    readers: BTreeMap<u64, AvetSortReaderState>,
+}
+
+#[derive(Debug)]
+struct AvetSortJob {
+    levels: BTreeMap<u32, AvetSortLevel>,
+    ready: Option<(u32, u64)>,
+}
+
+#[derive(Debug)]
+struct AvetSortWorkspace {
+    directory: PathBuf,
+    job: Option<(Digest, AvetSortJob)>,
+}
+
+impl AvetSortWorkspace {
+    fn configured() -> Self {
+        let directory = std::env::var_os("ATOMIC_INDEX_WORK_DIRECTORY")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        Self {
+            directory,
+            job: None,
+        }
+    }
+
+    fn reset(&mut self, work_key: Digest) -> Result<(), SemanticError> {
+        self.job = Some((
+            work_key,
+            AvetSortJob {
+                levels: BTreeMap::new(),
+                ready: None,
+            },
+        ));
+        Ok(())
+    }
+
+    fn job_mut(&mut self, work_key: Digest) -> Result<&mut AvetSortJob, SemanticError> {
+        match self.job.as_mut() {
+            Some((actual, job)) if *actual == work_key => Ok(job),
+            _ => Err(fault(
+                "tree/avet-sort-workspace-mismatch",
+                "AVET sort operation does not name the active spill workspace",
+            )),
+        }
+    }
+
+    fn job(&self, work_key: Digest) -> Option<&AvetSortJob> {
+        self.job
+            .as_ref()
+            .and_then(|(actual, job)| (*actual == work_key).then_some(job))
+    }
+
+    fn discard(&mut self, work_key: Digest) -> Result<(), SemanticError> {
+        if self.job.as_ref().is_some_and(|(actual, _)| *actual == work_key) {
+            self.job = None;
+        }
+        Ok(())
+    }
+}
+
+impl Default for AvetSortWorkspace {
+    fn default() -> Self {
+        Self::configured()
+    }
+}
+
+fn avet_sort_io(code: &'static str, error: io::Error) -> SemanticError {
+    SemanticError::new(ErrorCategory::Unavailable, code, error.to_string())
+}
+
+fn avet_sort_corrupt(code: &'static str, error: io::Error) -> SemanticError {
+    SemanticError::new(ErrorCategory::Fault, code, error.to_string())
+}
+
+#[derive(Debug)]
+struct AvetSortFrame {
+    run_id: u64,
+    ordinal: u64,
+    payload: Vec<u8>,
+    next_offset: u64,
+}
+
+fn read_avet_sort_frame(
+    file: &mut File,
+    offset: u64,
+    file_bytes: u64,
+) -> Result<Option<AvetSortFrame>, SemanticError> {
+    if offset == file_bytes {
+        return Ok(None);
+    }
+    if offset > file_bytes || file_bytes - offset < AVET_SORT_FRAME_BYTES {
+        return Err(fault(
+            "tree/avet-sort-framing",
+            "AVET sort spill ends inside a frame header",
+        ));
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| avet_sort_io("tree/avet-sort-seek", error))?;
+    let mut header = [0_u8; AVET_SORT_FRAME_BYTES as usize];
+    file.read_exact(&mut header)
+        .map_err(|error| avet_sort_corrupt("tree/avet-sort-framing", error))?;
+    let run_id = u64::from_be_bytes(header[0..8].try_into().expect("eight-byte run"));
+    let ordinal = u64::from_be_bytes(header[8..16].try_into().expect("eight-byte ordinal"));
+    let length = u64::from_be_bytes(header[16..24].try_into().expect("eight-byte length"));
+    if length > MAX_AVET_SORT_ROW_BYTES {
+        return Err(fault(
+            "tree/avet-sort-row-size",
+            "AVET sort spill contains an impossible row length",
+        ));
+    }
+    let next_offset = offset
+        .checked_add(AVET_SORT_FRAME_BYTES)
+        .and_then(|next| next.checked_add(length))
+        .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort frame offset overflow"))?;
+    if next_offset > file_bytes {
+        return Err(fault(
+            "tree/avet-sort-framing",
+            "AVET sort spill ends inside a framed payload",
+        ));
+    }
+    let mut payload = vec![
+        0_u8;
+        usize::try_from(length).map_err(|_| {
+            fault(
+                "tree/avet-sort-row-size",
+                "AVET sort row exceeds addressable memory",
+            )
+        })?
+    ];
+    file.read_exact(&mut payload)
+        .map_err(|error| avet_sort_corrupt("tree/avet-sort-read", error))?;
+    let expected: Digest = header[24..56]
+        .try_into()
+        .expect("thirty-two-byte spill hash");
+    if sha256(&payload) != expected {
+        return Err(fault(
+            "tree/avet-sort-payload-hash",
+            "AVET sort spill payload does not match its frame hash",
+        ));
+    }
+    Ok(Some(AvetSortFrame {
+        run_id,
+        ordinal,
+        payload,
+        next_offset,
+    }))
+}
+
+fn require_avet_sort_frame(
+    frame: &AvetSortFrame,
+    run_id: u64,
+    ordinal: u64,
+) -> Result<(), SemanticError> {
+    if frame.run_id != run_id || frame.ordinal != ordinal {
+        return Err(fault(
+            "tree/avet-sort-ordinal",
+            "AVET sort spill has a run or ordinal gap",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_avet_sort_reader(
+    level: &mut AvetSortLevel,
+    run_id: u64,
+) -> Result<(), SemanticError> {
+    if level.readers.contains_key(&run_id) {
+        return Ok(());
+    }
+    level.readers.retain(|_, reader| !reader.exhausted);
+    if level.readers.len() >= MAX_ACTIVE_AVET_SORT_READERS {
+        return Err(fault(
+            "tree/avet-sort-reader-bound",
+            "AVET external merge exceeded its fixed active-reader bound",
+        ));
+    }
+    if level.last_run.is_none_or(|(last, _)| run_id > last) {
+        return Err(fault(
+            "tree/avet-sort-run-missing",
+            "AVET external merge names a missing spill run",
+        ));
+    }
+    let monotonic = run_id >= level.locate_run;
+    let mut offset = if monotonic { level.locate_offset } else { 0 };
+    let mut start = None;
+    let mut expected_ordinal = 0_u64;
+    while let Some(frame) = read_avet_sort_frame(&mut level.file, offset, level.byte_count)? {
+        if frame.run_id > run_id {
+            break;
+        }
+        if frame.run_id == run_id {
+            if start.is_none() {
+                start = Some(offset);
+            }
+            require_avet_sort_frame(&frame, run_id, expected_ordinal)?;
+            expected_ordinal = expected_ordinal.checked_add(1).ok_or_else(|| {
+                fault("tree/avet-sort-size", "AVET sort ordinal overflow")
+            })?;
+        }
+        offset = frame.next_offset;
+    }
+    let start = start.ok_or_else(|| {
+        fault(
+            "tree/avet-sort-run-missing",
+            "AVET external merge could not locate its spill run",
+        )
+    })?;
+    if monotonic {
+        level.locate_offset = offset;
+        level.locate_run = run_id
+            .checked_add(1)
+            .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort run overflow"))?;
+    }
+    level.readers.insert(
+        run_id,
+        AvetSortReaderState {
+            start_offset: start,
+            next_offset: start,
+            next_ordinal: 0,
+            exhausted: false,
+        },
+    );
+    Ok(())
+}
+
+fn validate_final_avet_sort_run(
+    level: &mut AvetSortLevel,
+    row_count: u64,
+) -> Result<(), SemanticError> {
+    let mut offset = 0_u64;
+    let mut ordinal = 0_u64;
+    while let Some(frame) = read_avet_sort_frame(&mut level.file, offset, level.byte_count)? {
+        require_avet_sort_frame(&frame, 0, ordinal)?;
+        ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort ordinal overflow"))?;
+        offset = frame.next_offset;
+    }
+    if ordinal != row_count || offset != level.byte_count {
+        return Err(fault(
+            "tree/avet-sort-final-gap",
+            "external AVET final run is not one contiguous ordinal sequence",
+        ));
+    }
+    Ok(())
+}
 
 /// Measured physical work performed by one tree-store handle.
 ///
@@ -107,6 +376,7 @@ pub struct PostgresTreeStore {
     stats: TreeStoreStats,
     active_build_intent: Option<Digest>,
     active_build_database_lock: Option<i64>,
+    avet_sort_workspace: AvetSortWorkspace,
 }
 
 impl PostgresTreeStore {
@@ -125,6 +395,7 @@ impl PostgresTreeStore {
             stats: TreeStoreStats::default(),
             active_build_intent: None,
             active_build_database_lock: None,
+            avet_sort_workspace: AvetSortWorkspace::default(),
         })
     }
 
@@ -138,6 +409,37 @@ impl PostgresTreeStore {
 
     pub fn reset_stats(&mut self) {
         self.stats = TreeStoreStats::default();
+    }
+
+    /// Place disposable external-index runs on an operator-selected local
+    /// work disk. PostgreSQL remains the sole durable authority; unnamed
+    /// files in this directory are closed and removed automatically on crash.
+    pub fn with_index_work_directory(
+        mut self,
+        directory: impl AsRef<Path>,
+    ) -> Result<Self, SemanticError> {
+        if self.avet_sort_workspace.job.is_some() {
+            return Err(SemanticError::conflict(
+                "tree/avet-sort-workspace-active",
+                "cannot move an active AVET external-sort workspace",
+            ));
+        }
+        let directory = directory.as_ref().to_path_buf();
+        let metadata = std::fs::metadata(&directory)
+            .map_err(|error| avet_sort_io("tree/avet-sort-work-directory", error))?;
+        if !metadata.is_dir() {
+            return Err(SemanticError::incorrect(
+                "tree/avet-sort-work-directory",
+                "AVET index work path is not a directory",
+            ));
+        }
+        // Prove access now rather than failing halfway through a broad build.
+        drop(
+            tempfile::tempfile_in(&directory)
+                .map_err(|error| avet_sort_io("tree/avet-sort-work-directory", error))?,
+        );
+        self.avet_sort_workspace.directory = directory;
+        Ok(self)
     }
 
     /// Reborrow a schema-checked session while retaining only local physical
@@ -605,6 +907,8 @@ impl PostgresTreeStore {
                 )
             })?;
         let manifest_lineage = (manifest.excision_generation > 0).then_some(lineage_id.as_str());
+        let manifest_version =
+            crate::PersistentTreeManifest::encoded_version(&manifest.payload)?;
         let mut transaction = self
             .client
             .transaction()
@@ -626,7 +930,7 @@ impl PostgresTreeStore {
                     &&manifest.state_hash[..],
                     &generation,
                     &frontier,
-                    &TREE_MANIFEST_VERSION,
+                    &manifest_version,
                     &&manifest.manifest_hash[..],
                     &&manifest.payload[..],
                     &generation,
@@ -903,6 +1207,8 @@ impl PostgresTreeStore {
         if matches!(delta, TreePublicationDelta::Unknown) {
             let manifest_lineage =
                 (manifest.excision_generation > 0).then_some(lineage_id.as_str());
+            let manifest_version =
+                crate::PersistentTreeManifest::encoded_version(&manifest.payload)?;
             manifest_inserted = transaction
                 .execute(
                     "INSERT INTO atomic_tree_manifests \
@@ -919,7 +1225,7 @@ impl PostgresTreeStore {
                         &&manifest.state_hash[..],
                         &generation,
                         &frontier,
-                        &TREE_MANIFEST_VERSION,
+                        &manifest_version,
                         &&manifest.manifest_hash[..],
                         &&manifest.payload[..],
                         &generation,
@@ -1137,7 +1443,7 @@ impl PostgresTreeStore {
         let current_generation = pg_u64(row.get(12), "current log generation")?;
         let durable_lineage: String = row.get(13);
         let publication_generation = pg_u64(row.get(14), "tree publication generation")?;
-        if version != TREE_MANIFEST_VERSION
+        if version != crate::PersistentTreeManifest::encoded_version(&payload)?
             || stored_log_generation != generation
             || publication_generation != generation
             || current_generation != generation
@@ -1182,6 +1488,266 @@ impl PostgresTreeStore {
             .manifest_read_bytes
             .saturating_add(manifest.payload.len() as u64);
         Ok(Some(manifest))
+    }
+
+    /// Return the completed final run for this process-local AVET external
+    /// sort. The recovered implementation spills merge runs to local files;
+    /// these files are likewise disposable work space, never database
+    /// authority. Loss merely regenerates them from the immutable AEVT root.
+    pub(crate) fn avet_sort_ready(
+        &mut self,
+        work_key: Digest,
+    ) -> Result<Option<(u32, u64)>, SemanticError> {
+        Ok(self
+            .avet_sort_workspace
+            .job(work_key)
+            .and_then(|job| job.ready))
+    }
+
+    pub(crate) fn reset_avet_sort(&mut self, work_key: Digest) -> Result<(), SemanticError> {
+        // One indexer advances one projection at a time. Removing the prior
+        // job gives local spill storage a strict single-job bound.
+        self.avet_sort_workspace.reset(work_key)
+    }
+
+    pub(crate) fn insert_avet_sort_rows(
+        &mut self,
+        work_key: Digest,
+        level: u32,
+        run_id: u64,
+        first_ordinal: u64,
+        payloads: &[Vec<u8>],
+    ) -> Result<(), SemanticError> {
+        let last_exclusive = first_ordinal
+            .checked_add(payloads.len() as u64)
+            .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort ordinal overflow"))?;
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let work_directory = self.avet_sort_workspace.directory.clone();
+        let job = self.avet_sort_workspace.job_mut(work_key)?;
+        if job.ready.is_some() {
+            return Err(fault(
+                "tree/avet-sort-finalized",
+                "cannot append to a finalized AVET sort workspace",
+            ));
+        }
+        if let std::collections::btree_map::Entry::Vacant(entry) = job.levels.entry(level) {
+            entry.insert(AvetSortLevel {
+                file: tempfile::tempfile_in(work_directory)
+                    .map_err(|error| avet_sort_io("tree/avet-sort-create", error))?,
+                byte_count: 0,
+                row_count: 0,
+                last_run: None,
+                locate_offset: 0,
+                locate_run: 0,
+                readers: BTreeMap::new(),
+            });
+        }
+        let level_state = job
+            .levels
+            .get_mut(&level)
+            .expect("AVET sort level was inserted above");
+        let append_is_canonical = match level_state.last_run {
+            None => run_id == 0 && first_ordinal == 0,
+            Some((last_run, next_ordinal)) if last_run == run_id => {
+                next_ordinal == first_ordinal
+            }
+            Some((last_run, _)) => {
+                last_run.checked_add(1) == Some(run_id) && first_ordinal == 0
+            }
+        };
+        if !append_is_canonical {
+            return Err(fault(
+                "tree/avet-sort-ordinal",
+                "AVET sort runs and ordinals must append contiguously",
+            ));
+        }
+        level_state
+            .file
+            .seek(SeekFrom::Start(level_state.byte_count))
+            .map_err(|error| avet_sort_io("tree/avet-sort-seek", error))?;
+        let mut written_bytes = 0_u64;
+        for (index, payload) in payloads.iter().enumerate() {
+            let length = payload.len() as u64;
+            if length > MAX_AVET_SORT_ROW_BYTES {
+                return Err(SemanticError::incorrect(
+                    "tree/avet-sort-row-size",
+                    "one canonical AVET sort row exceeds the global tree-node byte limit",
+                ));
+            }
+            let ordinal = first_ordinal
+                .checked_add(index as u64)
+                .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort ordinal overflow"))?;
+            let payload_hash = sha256(payload);
+            level_state
+                .file
+                .write_all(&run_id.to_be_bytes())
+                .and_then(|()| level_state.file.write_all(&ordinal.to_be_bytes()))
+                .and_then(|()| level_state.file.write_all(&length.to_be_bytes()))
+                .and_then(|()| level_state.file.write_all(&payload_hash))
+                .and_then(|()| level_state.file.write_all(payload))
+                .map_err(|error| avet_sort_io("tree/avet-sort-write", error))?;
+            written_bytes = written_bytes
+                .checked_add(AVET_SORT_FRAME_BYTES.saturating_add(length))
+                .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort byte count overflow"))?;
+        }
+        level_state
+            .file
+            .flush()
+            .map_err(|error| avet_sort_io("tree/avet-sort-flush", error))?;
+        level_state.last_run = Some((run_id, last_exclusive));
+        level_state.row_count = level_state
+            .row_count
+            .checked_add(payloads.len() as u64)
+            .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort row count overflow"))?;
+        level_state.byte_count = level_state
+            .byte_count
+            .checked_add(written_bytes)
+            .ok_or_else(|| fault("tree/avet-sort-size", "AVET sort byte count overflow"))?;
+        Ok(())
+    }
+
+    /// Fetch a small sequential ordinal page, additionally capped by encoded
+    /// bytes. Each run retains only its current file offset. A caller that
+    /// rewinds or resumes after losing its cursor scans framing bytes once;
+    /// ordinary projection chunks continue at O(1) from the retained offset.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_avet_sort_page(
+        &mut self,
+        work_key: Digest,
+        level: u32,
+        run_id: u64,
+        first_ordinal: u64,
+        candidate_rows: usize,
+        maximum_bytes: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, SemanticError> {
+        if candidate_rows == 0 || maximum_bytes == 0 {
+            return Err(SemanticError::incorrect(
+                "tree/avet-sort-page-limit",
+                "AVET sort page limits must be positive",
+            ));
+        }
+        let job = self.avet_sort_workspace.job_mut(work_key)?;
+        let Some(level_state) = job.levels.get_mut(&level) else {
+            if first_ordinal == 0 {
+                return Ok(Vec::new());
+            }
+            return Err(fault(
+                "tree/avet-sort-run-missing",
+                "AVET sort resume names a missing spill run",
+            ));
+        };
+        ensure_avet_sort_reader(level_state, run_id)?;
+        let reader = level_state
+            .readers
+            .get_mut(&run_id)
+            .expect("AVET sort reader was installed above");
+        if first_ordinal < reader.next_ordinal {
+            reader.next_offset = reader.start_offset;
+            reader.next_ordinal = 0;
+            reader.exhausted = false;
+        }
+
+        let mut rows = Vec::new();
+        let mut bytes = 0_u64;
+        while reader.next_ordinal < first_ordinal {
+            let Some(frame) = read_avet_sort_frame(
+                &mut level_state.file,
+                reader.next_offset,
+                level_state.byte_count,
+            )? else {
+                return Err(fault(
+                    "tree/avet-sort-ordinal",
+                    "AVET sort run ended before its requested ordinal",
+                ));
+            };
+            require_avet_sort_frame(&frame, run_id, reader.next_ordinal)?;
+            reader.next_offset = frame.next_offset;
+            reader.next_ordinal += 1;
+        }
+        while rows.len() < candidate_rows && !reader.exhausted {
+            let Some(frame) = read_avet_sort_frame(
+                &mut level_state.file,
+                reader.next_offset,
+                level_state.byte_count,
+            )? else {
+                reader.exhausted = true;
+                break;
+            };
+            if frame.run_id != run_id {
+                reader.exhausted = true;
+                break;
+            }
+            require_avet_sort_frame(&frame, run_id, reader.next_ordinal)?;
+            if !rows.is_empty() && bytes.saturating_add(frame.payload.len() as u64) > maximum_bytes {
+                break;
+            }
+            rows.push((frame.ordinal, frame.payload));
+            bytes = bytes.saturating_add(rows.last().expect("row was pushed").1.len() as u64);
+            reader.next_offset = frame.next_offset;
+            reader.next_ordinal += 1;
+        }
+        Ok(rows)
+    }
+
+    pub(crate) fn delete_avet_sort_level(
+        &mut self,
+        work_key: Digest,
+        level: u32,
+    ) -> Result<(), SemanticError> {
+        let job = self.avet_sort_workspace.job_mut(work_key)?;
+        job.levels.remove(&level);
+        Ok(())
+    }
+
+    pub(crate) fn finish_avet_sort(
+        &mut self,
+        work_key: Digest,
+        final_level: u32,
+        row_count: u64,
+    ) -> Result<(), SemanticError> {
+        let job = self.avet_sort_workspace.job_mut(work_key)?;
+        if job.ready.is_some() {
+            return Err(fault(
+                "tree/avet-sort-finalized",
+                "AVET sort workspace was finalized more than once",
+            ));
+        }
+        let valid = match job.levels.get(&final_level) {
+            None => row_count == 0,
+            Some(level) => {
+                row_count > 0
+                    && level.last_run == Some((0, row_count))
+                    && level.row_count == row_count
+                    && level
+                        .file
+                        .metadata()
+                        .is_ok_and(|metadata| metadata.len() == level.byte_count)
+            }
+        };
+        if !valid {
+            return Err(fault(
+                "tree/avet-sort-final-gap",
+                "external AVET final run is not one contiguous ordinal sequence",
+            ));
+        }
+        if let Some(level) = job.levels.get_mut(&final_level) {
+            validate_final_avet_sort_run(level, row_count)?;
+        }
+        job.ready = Some((final_level, row_count));
+        Ok(())
+    }
+
+    pub(crate) fn discard_avet_sort(&mut self, work_key: Digest) -> Result<(), SemanticError> {
+        self.avet_sort_workspace.discard(work_key)
+    }
+
+    /// Drop any disposable local sort after a conclusive publication
+    /// selection proves no AVET projection remains. This covers an ambiguous
+    /// successful CAS whose client never reached keyed cleanup.
+    pub(crate) fn discard_completed_avet_sort(&mut self) {
+        self.avet_sort_workspace.job = None;
     }
 }
 
@@ -1640,7 +2206,7 @@ fn verify_manifest_row(
         || stored_state != expected.state_hash
         || stored_generation != expected.excision_generation
         || stored_frontier != expected.eidx_frontier
-        || stored_version != TREE_MANIFEST_VERSION
+        || stored_version != crate::PersistentTreeManifest::encoded_version(&stored_payload)?
         || stored_payload != expected.payload
         || stored_log_generation != expected.excision_generation
         || if expected.excision_generation == 0 {
@@ -1794,6 +2360,20 @@ fn validate_manifest(manifest: &TreeManifestRecord) -> Result<(), SemanticError>
         &manifest.payload,
         "tree/manifest-hash-mismatch",
     )?;
+    let decoded = crate::PersistentTreeManifest::decode(&manifest.payload)?;
+    if decoded.database_id != manifest.database_id
+        || decoded.publication_revision != manifest.publication_revision
+        || decoded.basis_t != manifest.basis_t
+        || decoded.tx_hash != manifest.tx_hash
+        || decoded.state_hash != manifest.state_hash
+        || decoded.excision_generation != manifest.excision_generation
+        || decoded.eidx_frontier != manifest.eidx_frontier
+    {
+        return Err(SemanticError::incorrect(
+            "tree/manifest-envelope-mismatch",
+            "canonical manifest payload disagrees with its publication metadata",
+        ));
+    }
     if manifest.roots.len() != ROOT_BINDING_COUNT {
         return Err(SemanticError::incorrect(
             "tree/incomplete-root-set",
@@ -1821,6 +2401,22 @@ fn validate_manifest(manifest: &TreeManifestRecord) -> Result<(), SemanticError>
         return Err(SemanticError::incorrect(
             "tree/incomplete-root-set",
             "tree manifest root coordinates are incomplete",
+        ));
+    }
+    if decoded.trees.len() != manifest.roots.len()
+        || decoded.trees.iter().any(|tree| {
+            !manifest.roots.iter().any(|root| {
+                root.order == tree.descriptor.order
+                    && root.history == tree.descriptor.history
+                    && root.root_hash == tree.descriptor.root_hash
+                    && root.datom_count == tree.descriptor.count
+                    && root.encoded_bytes == tree.root_bytes
+            })
+        })
+    {
+        return Err(SemanticError::incorrect(
+            "tree/manifest-root-envelope-mismatch",
+            "canonical manifest roots disagree with relational root bindings",
         ));
     }
     Ok(())
@@ -1894,6 +2490,39 @@ fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
 mod tests {
     use super::*;
 
+    fn spill_level(runs: &[Vec<Vec<u8>>]) -> AvetSortLevel {
+        let mut file = tempfile::tempfile().unwrap();
+        let mut byte_count = 0_u64;
+        let mut row_count = 0_u64;
+        for (run_id, payloads) in runs.iter().enumerate() {
+            for (ordinal, payload) in payloads.iter().enumerate() {
+                let length = payload.len() as u64;
+                file.write_all(&(run_id as u64).to_be_bytes()).unwrap();
+                file.write_all(&(ordinal as u64).to_be_bytes()).unwrap();
+                file.write_all(&length.to_be_bytes()).unwrap();
+                file.write_all(&sha256(payload)).unwrap();
+                file.write_all(payload).unwrap();
+                byte_count += AVET_SORT_FRAME_BYTES + length;
+                row_count += 1;
+            }
+        }
+        file.flush().unwrap();
+        AvetSortLevel {
+            file,
+            byte_count,
+            row_count,
+            last_run: runs.last().map(|last| {
+                (
+                    runs.len().saturating_sub(1) as u64,
+                    last.len() as u64,
+                )
+            }),
+            locate_offset: 0,
+            locate_run: 0,
+            readers: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn build_intent_set_commitment_is_ordered_and_cardinality_bound() {
         let one = sha256(b"one");
@@ -1905,6 +2534,102 @@ mod tests {
         assert_eq!(first, build_intent_node_set_hash(&set));
         set.remove(&one);
         assert_ne!(first, build_intent_node_set_hash(&set));
+    }
+
+    #[test]
+    fn avet_spill_locates_multiple_runs_and_validates_one_final_run() {
+        let mut level = spill_level(&[
+            vec![b"zero-a".to_vec(), b"zero-b".to_vec()],
+            vec![b"one".to_vec()],
+            vec![b"two-a".to_vec(), b"two-b".to_vec()],
+        ]);
+        ensure_avet_sort_reader(&mut level, 1).unwrap();
+        let one = level.readers.get(&1).unwrap();
+        let frame = read_avet_sort_frame(&mut level.file, one.start_offset, level.byte_count)
+            .unwrap()
+            .unwrap();
+        require_avet_sort_frame(&frame, 1, 0).unwrap();
+        assert_eq!(frame.payload, b"one");
+
+        // A rewind to an earlier run scans framing from zero and does not
+        // confuse the monotonic locator retained for later runs.
+        ensure_avet_sort_reader(&mut level, 0).unwrap();
+        let zero = level.readers.get(&0).unwrap();
+        let frame = read_avet_sort_frame(&mut level.file, zero.start_offset, level.byte_count)
+            .unwrap()
+            .unwrap();
+        require_avet_sort_frame(&frame, 0, 0).unwrap();
+        assert_eq!(frame.payload, b"zero-a");
+        assert_eq!(
+            validate_final_avet_sort_run(&mut level, 5)
+                .unwrap_err()
+                .code,
+            "tree/avet-sort-ordinal"
+        );
+
+        let mut final_level = spill_level(&[vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+        ]]);
+        validate_final_avet_sort_run(&mut final_level, 3).unwrap();
+        assert_eq!(
+            validate_final_avet_sort_run(&mut final_level, 2)
+                .unwrap_err()
+                .code,
+            "tree/avet-sort-final-gap"
+        );
+    }
+
+    #[test]
+    fn avet_spill_detects_payload_corruption_and_impossible_lengths() {
+        let mut corrupt = spill_level(&[vec![b"payload".to_vec()]]);
+        corrupt
+            .file
+            .seek(SeekFrom::Start(AVET_SORT_FRAME_BYTES))
+            .unwrap();
+        corrupt.file.write_all(b"P").unwrap();
+        corrupt.file.flush().unwrap();
+        assert_eq!(
+            read_avet_sort_frame(&mut corrupt.file, 0, corrupt.byte_count)
+                .unwrap_err()
+                .code,
+            "tree/avet-sort-payload-hash"
+        );
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&0_u64.to_be_bytes()).unwrap();
+        file.write_all(&0_u64.to_be_bytes()).unwrap();
+        file.write_all(&(MAX_AVET_SORT_ROW_BYTES + 1).to_be_bytes())
+            .unwrap();
+        file.write_all(&[0; 32]).unwrap();
+        file.flush().unwrap();
+        assert_eq!(
+            read_avet_sort_frame(&mut file, 0, AVET_SORT_FRAME_BYTES)
+                .unwrap_err()
+                .code,
+            "tree/avet-sort-row-size"
+        );
+    }
+
+    #[test]
+    fn avet_spill_enforces_the_fixed_active_reader_bound() {
+        let runs = (0..=MAX_ACTIVE_AVET_SORT_READERS)
+            .map(|run| vec![format!("run-{run}").into_bytes()])
+            .collect::<Vec<_>>();
+        let mut level = spill_level(&runs);
+        for run in 0..MAX_ACTIVE_AVET_SORT_READERS as u64 {
+            ensure_avet_sort_reader(&mut level, run).unwrap();
+        }
+        assert_eq!(
+            ensure_avet_sort_reader(&mut level, MAX_ACTIVE_AVET_SORT_READERS as u64)
+                .unwrap_err()
+                .code,
+            "tree/avet-sort-reader-bound"
+        );
+        level.readers.get_mut(&0).unwrap().exhausted = true;
+        ensure_avet_sort_reader(&mut level, MAX_ACTIVE_AVET_SORT_READERS as u64).unwrap();
+        assert_eq!(level.readers.len(), MAX_ACTIVE_AVET_SORT_READERS);
     }
 
     fn roots(hash: Digest, bytes: u64) -> Vec<TreeRootBinding> {
@@ -1929,8 +2654,33 @@ mod tests {
     }
 
     fn manifest() -> TreeManifestRecord {
-        let payload = b"canonical tree manifest".to_vec();
         let node = b"canonical empty root";
+        let roots = roots(sha256(node), node.len() as u64);
+        let canonical = crate::PersistentTreeManifest {
+            database_id: "database".to_owned(),
+            publication_revision: 1,
+            basis_t: 1,
+            tx_hash: [1; 32],
+            state_hash: [2; 32],
+            excision_generation: 0,
+            eidx_frontier: 1,
+            trees: roots
+                .iter()
+                .map(|root| crate::ManifestTree {
+                    descriptor: crate::persistent_tree::TreeDescriptor {
+                        root_hash: root.root_hash,
+                        order: root.order,
+                        history: root.history,
+                        count: root.datom_count,
+                        first_hash: None,
+                        last_hash: None,
+                    },
+                    root_bytes: root.encoded_bytes,
+                })
+                .collect(),
+            pending_avet: Vec::new(),
+        };
+        let payload = canonical.encode().unwrap();
         TreeManifestRecord {
             database_id: "database".to_owned(),
             publication_revision: 1,
@@ -1941,7 +2691,7 @@ mod tests {
             eidx_frontier: 1,
             manifest_hash: sha256(&payload),
             payload,
-            roots: roots(sha256(node), node.len() as u64),
+            roots,
         }
     }
 

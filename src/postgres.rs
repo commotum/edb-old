@@ -224,12 +224,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         20,
         include_str!("../migrations/0020_request_base_archives.sql"),
     ),
+    (
+        21,
+        include_str!("../migrations/0021_resumable_avet_projection.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 20;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 21;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -996,7 +1000,7 @@ fn authenticated_manifest_nodes<C: GenericClient>(
     let publication_generation = pg_basis(row.get(10), "closure publication generation")?;
     let manifest_generation = pg_basis(row.get(11), "closure manifest generation")?;
     let manifest = crate::PersistentTreeManifest::decode(&payload)?;
-    if version != 4
+    if version != crate::PersistentTreeManifest::encoded_version(&payload)?
         || sha256(&payload) != manifest_hash
         || manifest.database_id != database_id
         || manifest.publication_revision != revision

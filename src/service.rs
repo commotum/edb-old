@@ -6,7 +6,8 @@ use crate::postgres::{
 };
 use crate::{
     DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, PostgresConnectionConfig,
-    PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
+    PersistentTreeManifest, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
+    SemanticError, TxForm, TxOp,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem::size_of;
@@ -87,6 +88,11 @@ pub struct BackgroundIndexingStats {
     /// service's backlog accounting.
     pub published_revision: u64,
     pub published_basis_t: u64,
+    /// Authenticated broad AVET projection jobs still represented by the
+    /// adopted manifest. This is physical cleanup/backfill observability, not
+    /// Datomic's positive-add `t-needing-avet` / `sync-schema` coordinate:
+    /// drops are included here too.
+    pub pending_avet_projections: u64,
     /// Greatest append-only physical revision observed, usable or corrupt.
     pub newest_observed_revision: u64,
     pub target_basis_t: u64,
@@ -273,10 +279,14 @@ struct IndexingSeed {
     /// Newest fully authenticated publication selected for replay.
     published_revision: u64,
     published_basis_t: u64,
+    pending_avet_projections: u64,
     /// Greatest physical publication coordinate, independent of validity.
     newest_observed_revision: u64,
     target_basis_t: u64,
     pending: VecDeque<Novelty>,
+    /// Latest schema-membership transaction that must reach a fully projected
+    /// root before the special indexing demand can be cleared.
+    required_publication_t: u64,
     /// No usable native publication covers the newest observed revision. A
     /// positive generation's canonical basis-zero value is publishable too.
     needs_publication: bool,
@@ -286,12 +296,14 @@ struct IndexingSeed {
 struct IndexingBacklog {
     published_revision: u64,
     published_basis_t: u64,
+    pending_avet_projections: u64,
     newest_observed_revision: u64,
     target_basis_t: u64,
     pending: VecDeque<Novelty>,
     total_datoms: u64,
     total_bytes: u64,
     indexing_through: Option<u64>,
+    required_publication_t: u64,
     needs_publication: bool,
 }
 
@@ -333,12 +345,14 @@ impl BackgroundIndexing {
             backlog: Mutex::new(IndexingBacklog {
                 published_revision: seed.published_revision,
                 published_basis_t: seed.published_basis_t,
+                pending_avet_projections: seed.pending_avet_projections,
                 newest_observed_revision: seed.newest_observed_revision,
                 target_basis_t: seed.target_basis_t,
                 pending: seed.pending,
                 total_datoms,
                 total_bytes,
                 indexing_through: None,
+                required_publication_t: seed.required_publication_t,
                 needs_publication: seed.needs_publication,
             }),
             sender,
@@ -377,6 +391,10 @@ impl BackgroundIndexing {
             // threshold; disabling it should publish the matching physical
             // projection as well.
             backlog.needs_publication |= changes_avet_membership;
+            if changes_avet_membership {
+                backlog.required_publication_t =
+                    backlog.required_publication_t.max(novelty.basis_t);
+            }
             should_index(&backlog, self.config)
         };
         if should_wake {
@@ -428,12 +446,19 @@ impl BackgroundIndexing {
         true
     }
 
-    fn complete_job(&self, published_revision: u64, published_basis_t: u64) {
+    fn complete_job(
+        &self,
+        published_revision: u64,
+        published_basis_t: u64,
+        pending_avet_projections: usize,
+        index_work_remaining: bool,
+    ) {
         let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
         backlog.published_revision = backlog.published_revision.max(published_revision);
         backlog.newest_observed_revision = backlog.newest_observed_revision.max(published_revision);
         backlog.published_basis_t = backlog.published_basis_t.max(published_basis_t);
         backlog.target_basis_t = backlog.target_basis_t.max(published_basis_t);
+        backlog.pending_avet_projections = pending_avet_projections as u64;
         while backlog
             .pending
             .front()
@@ -445,7 +470,10 @@ impl BackgroundIndexing {
             }
         }
         backlog.indexing_through = None;
-        backlog.needs_publication = backlog.published_revision < backlog.newest_observed_revision;
+        backlog.needs_publication = index_work_remaining
+            || pending_avet_projections != 0
+            || backlog.published_revision < backlog.newest_observed_revision
+            || backlog.published_basis_t < backlog.required_publication_t;
         self.jobs_completed.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -563,6 +591,7 @@ impl BackgroundIndexing {
         BackgroundIndexingStats {
             published_revision: backlog.published_revision,
             published_basis_t: backlog.published_basis_t,
+            pending_avet_projections: backlog.pending_avet_projections,
             newest_observed_revision: backlog.newest_observed_revision,
             target_basis_t: backlog.target_basis_t,
             memory_index_transactions: memory_transactions,
@@ -1813,7 +1842,12 @@ fn run_index_worker(
                         Ok(Some(receipt)) => {
                             shared
                                 .indexing
-                                .complete_job(receipt.publication_revision, receipt.basis_t);
+                                .complete_job(
+                                    receipt.publication_revision,
+                                    receipt.basis_t,
+                                    receipt.pending_avet_projections,
+                                    receipt.index_work_remaining,
+                                );
                             break;
                         }
                         Ok(None) => {
@@ -2006,9 +2040,17 @@ fn load_indexing_seed(
     // implementing a second, potentially divergent candidate selector here.
     let publication = client
         .query_opt(
-            "SELECT basis_t, tx_hash FROM atomic_tree_publications \
-              WHERE database_id = $1 AND publication_revision = $2 \
-                AND log_generation = $3",
+            "SELECT p.basis_t, p.tx_hash, m.payload, \
+                    COALESCE(l.complete, false), \
+                    EXISTS (SELECT 1 FROM atomic_tree_delta_headers delta \
+                             WHERE delta.manifest_hash = p.manifest_hash \
+                               AND delta.delta_state = 2) \
+               FROM atomic_tree_publications p \
+               JOIN atomic_tree_manifests m ON m.manifest_hash = p.manifest_hash \
+               LEFT JOIN atomic_tree_live_sets l \
+                 ON l.database_id = p.database_id AND l.manifest_hash = p.manifest_hash \
+              WHERE p.database_id = $1 AND p.publication_revision = $2 \
+                AND p.log_generation = $3",
             &[
                 &database_id,
                 &sql_basis(
@@ -2041,8 +2083,29 @@ fn load_indexing_seed(
             "the activated publication has an invalid transaction hash",
         )
     })?;
+    let manifest_payload: Vec<u8> = publication.get(2);
+    let manifest = PersistentTreeManifest::decode(&manifest_payload)?;
+    if manifest.database_id != database_id
+        || manifest.publication_revision != activated_publication_revision
+        || manifest.basis_t != published_basis_t
+        || manifest.tx_hash != published_hash
+        || manifest.excision_generation != excision_generation
+    {
+        return Err(SemanticError::new(
+            ErrorCategory::Fault,
+            "service/index-seed-manifest-mismatch",
+            "the activated publication disagrees with its canonical manifest",
+        ));
+    }
+    let pending_avet_projections = manifest.pending_avet.len() as u64;
+    let live_complete: bool = publication.get(3);
+    let live_work_pending: bool = publication.get(4);
     let published_revision = activated_publication_revision;
-    let mut needs_publication = published_revision < newest_observed_revision;
+    let mut needs_publication = published_revision < newest_observed_revision
+        || pending_avet_projections != 0
+        || !live_complete
+        || live_work_pending;
+    let mut required_publication_t = 0_u64;
 
     let rows = read_authenticated_log_range(
         &mut client,
@@ -2056,12 +2119,16 @@ fn load_indexing_seed(
     let mut pending = VecDeque::with_capacity(rows.len());
     for row in rows {
         let transaction = row.transaction;
-        needs_publication |= transaction.tx_data.iter().any(|datom| {
+        let changes_avet_membership = transaction.tx_data.iter().any(|datom| {
             matches!(
                 u64::from(datom.attribute),
                 crate::DB_INDEX | crate::DB_UNIQUE
             )
         });
+        needs_publication |= changes_avet_membership;
+        if changes_avet_membership {
+            required_publication_t = required_publication_t.max(transaction.basis_t);
+        }
         let retained = crate::recent::retained_entry_stats(&transaction)?;
         pending.push_back(Novelty {
             basis_t: transaction.basis_t,
@@ -2080,9 +2147,11 @@ fn load_indexing_seed(
         lineage_id,
         published_revision,
         published_basis_t,
+        pending_avet_projections,
         newest_observed_revision,
         target_basis_t,
         pending,
+        required_publication_t,
         needs_publication,
     })
 }
@@ -2266,9 +2335,11 @@ mod tests {
                 lineage_id: "lineage".to_owned(),
                 published_revision: 0,
                 published_basis_t: 0,
+                pending_avet_projections: 0,
                 newest_observed_revision: 0,
                 target_basis_t: 0,
                 pending: VecDeque::new(),
+                required_publication_t: 0,
                 needs_publication: true,
             },
             sender,
@@ -2276,7 +2347,7 @@ mod tests {
 
         assert!(indexing.should_continue());
         assert!(indexing.begin_job());
-        indexing.complete_job(1, 0);
+        indexing.complete_job(1, 0, 0, false);
         assert!(!indexing.should_continue());
         indexing.note_commit(
             Novelty {
@@ -2289,7 +2360,7 @@ mod tests {
         assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
         assert!(indexing.should_continue());
         assert!(indexing.begin_job());
-        indexing.complete_job(2, 1);
+        indexing.complete_job(2, 1, 0, false);
         assert!(!indexing.should_continue());
         assert_eq!(indexing.stats().published_basis_t, 1);
         assert_eq!(indexing.stats().published_revision, 2);
@@ -2304,6 +2375,7 @@ mod tests {
                 lineage_id: "lineage".to_owned(),
                 published_revision: 0,
                 published_basis_t: 0,
+                pending_avet_projections: 0,
                 newest_observed_revision: 1,
                 target_basis_t: 1,
                 pending: VecDeque::from([Novelty {
@@ -2311,6 +2383,7 @@ mod tests {
                     datoms: 1,
                     bytes: 1_024,
                 }]),
+                required_publication_t: 0,
                 needs_publication: true,
             },
             sender,
@@ -2318,7 +2391,7 @@ mod tests {
 
         assert!(indexing.should_continue());
         assert!(indexing.begin_job());
-        indexing.complete_job(2, 1);
+        indexing.complete_job(2, 1, 0, false);
         let repaired = indexing.stats();
         assert_eq!(repaired.published_revision, 2);
         assert_eq!(repaired.newest_observed_revision, 2);
@@ -2334,12 +2407,14 @@ mod tests {
         let mut backlog = IndexingBacklog {
             published_revision: 1,
             published_basis_t: 1,
+            pending_avet_projections: 0,
             newest_observed_revision: 1,
             target_basis_t: 2,
             pending: VecDeque::new(),
             total_datoms: 1,
             total_bytes: config.memory_index_threshold_bytes,
             indexing_through: None,
+            required_publication_t: 0,
             needs_publication: false,
         };
         assert!(!should_index(&backlog, config));
@@ -2353,6 +2428,7 @@ mod tests {
                 lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
+                pending_avet_projections: 0,
                 newest_observed_revision: 1,
                 target_basis_t: 2,
                 pending: VecDeque::from([Novelty {
@@ -2360,6 +2436,7 @@ mod tests {
                     datoms: 1,
                     bytes: config.memory_index_max_bytes,
                 }]),
+                required_publication_t: 0,
                 needs_publication: false,
             },
             sender,
@@ -2390,6 +2467,7 @@ mod tests {
                 lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
+                pending_avet_projections: 0,
                 newest_observed_revision: 1,
                 target_basis_t: 2,
                 pending: VecDeque::from([Novelty {
@@ -2397,6 +2475,7 @@ mod tests {
                     datoms: 1,
                     bytes: 1,
                 }]),
+                required_publication_t: 0,
                 needs_publication: false,
             },
             sender,
@@ -2407,7 +2486,7 @@ mod tests {
         assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
         assert!(indexing.should_continue());
         assert!(indexing.begin_job());
-        indexing.complete_job(2, 2);
+        indexing.complete_job(2, 2, 0, false);
         assert_eq!(indexing.stats().total_bytes, 0);
         assert!(!indexing.should_continue());
 
@@ -2415,6 +2494,62 @@ mod tests {
         // oversized transaction must return its capacity error rather than
         // park forever on a publication that cannot make room.
         assert!(!indexing.force_publication());
+    }
+
+    #[test]
+    fn physical_progress_does_not_clear_pending_or_newer_schema_work() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let indexing = BackgroundIndexing::new(
+            test_config(),
+            IndexingSeed {
+                lineage_id: "lineage".to_owned(),
+                published_revision: 1,
+                published_basis_t: 1,
+                pending_avet_projections: 0,
+                newest_observed_revision: 1,
+                target_basis_t: 1,
+                pending: VecDeque::new(),
+                required_publication_t: 0,
+                needs_publication: false,
+            },
+            sender,
+        );
+        indexing.note_commit(
+            Novelty {
+                basis_t: 2,
+                datoms: 1,
+                bytes: 1,
+            },
+            true,
+        );
+        assert!(indexing.begin_job());
+        indexing.complete_job(2, 2, 1, true);
+        let partial = indexing.stats();
+        assert_eq!(partial.published_basis_t, 2);
+        assert_eq!(partial.total_bytes, 0, "durable EAVT progress releases recent novelty");
+        assert_eq!(partial.pending_avet_projections, 1);
+        assert!(indexing.should_continue());
+
+        // A newer toggle racing the older same-basis chunks must survive the
+        // older job's final completion signal.
+        indexing.note_commit(
+            Novelty {
+                basis_t: 3,
+                datoms: 1,
+                bytes: 1,
+            },
+            true,
+        );
+        assert!(indexing.begin_job());
+        indexing.complete_job(3, 2, 0, false);
+        assert!(indexing.should_continue());
+
+        assert!(indexing.begin_job());
+        indexing.complete_job(4, 3, 0, false);
+        let complete = indexing.stats();
+        assert_eq!(complete.pending_avet_projections, 0);
+        assert_eq!(complete.total_bytes, 0);
+        assert!(!indexing.should_continue());
     }
 
     #[test]
@@ -2515,9 +2650,11 @@ mod tests {
                 lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
+                pending_avet_projections: 0,
                 newest_observed_revision: 1,
                 target_basis_t: 1,
                 pending: VecDeque::new(),
+                required_publication_t: 0,
                 needs_publication: false,
             },
             sender,

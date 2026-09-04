@@ -409,7 +409,7 @@ fn representation_distinct_decimals_do_not_cross_cancel_in_windows() {
     let one_scale_tuple = decimal_tuple("1.0");
     let two_scale_tuple = decimal_tuple("1.00");
     assert!(one_scale_tuple.index_cmp(&two_scale_tuple).is_eq());
-    assert!(!one_scale_tuple.stored_eq(&two_scale_tuple));
+    assert!(one_scale_tuple.stored_eq(&two_scale_tuple));
 
     let before = Database::new(representation_schema()).unwrap();
     let two_scale_asserted = before
@@ -480,15 +480,15 @@ fn representation_distinct_decimals_do_not_cross_cancel_in_windows() {
                 .values(entity, AMOUNT_TUPLE)
                 .unwrap()
         ),
-        vec![1, 2]
+        vec![2]
     );
 
     // In recovered logical order the t=3 assertion of 1.0M sits between the
     // t=4 retraction and t=2 assertion of 1.00M. BigDecimal scale is part of
-    // the port's stored fact identity, including recursively inside tuples:
-    // the scan must connect the exact retraction to its older assertion
-    // without hiding the interleaved equal-magnitude sibling. A window at the
-    // current basis must also agree with the unwindowed current index.
+    // stored fact identity only when the value itself is a BigDecimal.
+    // Recovered tuple equality recurses through logical comparison, so the
+    // t=3 tuple assertion is redundant and the t=4 tuple retraction removes
+    // the one logical tuple fact. A basis window must agree with current.
     assert_eq!(
         decimal_scales(current.values(entity, AMOUNT).unwrap()),
         vec![1]
@@ -503,9 +503,8 @@ fn representation_distinct_decimals_do_not_cross_cancel_in_windows() {
         ),
         vec![1]
     );
-    assert_eq!(
-        tuple_decimal_scales(current.values(entity, AMOUNT_TUPLE).unwrap()),
-        vec![1]
+    assert!(
+        tuple_decimal_scales(current.values(entity, AMOUNT_TUPLE).unwrap()).is_empty()
     );
     assert_eq!(
         tuple_decimal_scales(
@@ -515,6 +514,6 @@ fn representation_distinct_decimals_do_not_cross_cancel_in_windows() {
                 .values(entity, AMOUNT_TUPLE)
                 .unwrap()
         ),
-        vec![1]
+        Vec::<i64>::new()
     );
 }

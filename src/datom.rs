@@ -33,26 +33,31 @@ impl Datom {
                 .entity
                 .cmp(&other.entity)
                 .then(self.attribute.cmp(&other.attribute))
-                .then_with(|| self.value.stored_cmp(&other.value)),
+                .then_with(|| self.value.index_cmp(&other.value)),
             IndexOrder::Aevt => self
                 .attribute
                 .cmp(&other.attribute)
                 .then(self.entity.cmp(&other.entity))
-                .then_with(|| self.value.stored_cmp(&other.value)),
+                .then_with(|| self.value.index_cmp(&other.value)),
             IndexOrder::Avet => self
                 .attribute
                 .cmp(&other.attribute)
-                .then_with(|| self.value.stored_cmp(&other.value))
+                .then_with(|| self.value.index_cmp(&other.value))
                 .then(self.entity.cmp(&other.entity)),
             IndexOrder::Vaet => self
                 .value
-                .stored_cmp(&other.value)
+                .index_cmp(&other.value)
                 .then(self.attribute.cmp(&other.attribute))
                 .then(self.entity.cmp(&other.entity)),
         };
         ordering
             .then_with(|| other.tx.cmp(&self.tx))
             .then_with(|| other.added.cmp(&self.added))
+            // The recovered comparator orders a logical E/A/V group by
+            // descending transaction and operation. Retain a final physical
+            // tie-break only for two otherwise identical stored coordinates,
+            // e.g. BigDecimal scale variants in one transaction.
+            .then_with(|| self.value.stored_cmp(&other.value))
     }
 }
 

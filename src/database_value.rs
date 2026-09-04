@@ -2005,12 +2005,9 @@ impl From<&PeerSnapshot> for DatabaseValue {
 }
 
 fn collapse_retractions(datoms: Vec<Datom>) -> Vec<Datom> {
-    // Datomic's recovered index comparators place T after logical E/A/V. Our
-    // physical comparators refine V with stored representation first, which is
-    // necessary to retain values such as 1.0M and 1.00M but can separate one
-    // exact value's events in AVET/VAET. Establish the recovered logical order
-    // over this already prefix-limited result, decide visibility there, then
-    // emit in the caller's original physical index order.
+    // Establish one E/A/logical-V temporal order independent of the caller's
+    // EAVT/AEVT/AVET/VAET traversal, decide visibility for each exact stored
+    // representation there, then emit in the caller's original index order.
     let mut temporal_order = (0..datoms.len()).collect::<Vec<_>>();
     temporal_order.sort_by(|left, right| {
         let left = &datoms[*left];
@@ -2054,13 +2051,11 @@ fn collapse_retractions(datoms: Vec<Datom>) -> Vec<Datom> {
             }
         }
 
-        // The recovered implementation uses `common/compare` as the exact
-        // shadowing boundary. Its transaction redundancy path instead uses
-        // `equals-with-strict-scale`, and native storage deliberately retains
-        // 1.0M and 1.00M as distinct legal facts. Equality under `stored_cmp`
-        // above is the port's `stored_eq` boundary: it keeps a window at the
-        // current basis equal to the unwindowed value and recursively retains
-        // the same distinction inside tuples.
+        // The transaction redundancy path uses recovered
+        // `equals-with-strict-scale`: top-level 1.0M and 1.00M remain distinct
+        // stored facts, while tuple/list members recurse through logical
+        // comparison. Using the same `stored_cmp` boundary here keeps a
+        // current-basis window equal to the unwindowed database value.
         start = end;
     }
     datoms

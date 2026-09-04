@@ -8,17 +8,51 @@ use crate::persistent_tree::TreeDescriptor;
 use crate::{Digest, ErrorCategory, IndexOrder, SemanticError, sha256};
 
 const MAGIC: &[u8; 4] = b"ATIM";
-const VERSION: u16 = 4;
+const LEGACY_VERSION: u16 = 4;
+const VERSION: u16 = 5;
 const HEADER_LEN: usize = 12;
 const CHECKSUM_LEN: usize = 32;
 const ROOTS: usize = 8;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+const AVET_WORK_BYTES: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestTree {
     pub descriptor: TreeDescriptor,
     /// Encoded bytes of the root node itself, not its subtree.
     pub root_bytes: u64,
+}
+
+/// One resumable physical AVET projection transition.
+///
+/// Logical schema facts can become durable before an attribute's historical
+/// AEVT range has been copied into (or removed from) AVET.  This fixed-size
+/// coordinate is authenticated by the manifest so peers can keep the
+/// attribute unavailable while the indexer advances one immutable chunk at a
+/// time. `offset` is an ordinal in a deterministically regenerated external
+/// AVET sort, never a copied value, so a legal large value cannot inflate the
+/// manifest.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AvetProjectionWork {
+    pub attribute: u32,
+    pub adding: bool,
+    pub history: bool,
+    /// Addition first empties a possibly stale target range, then copies the
+    /// exact AEVT projection. Removal only uses the clearing phase.
+    pub clearing: bool,
+    pub offset: u64,
+}
+
+impl AvetProjectionWork {
+    pub fn new(attribute: u32, adding: bool) -> Self {
+        Self {
+            attribute,
+            adding,
+            history: false,
+            clearing: true,
+            offset: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,11 +68,24 @@ pub struct PersistentTreeManifest {
     pub excision_generation: u64,
     pub eidx_frontier: u64,
     pub trees: Vec<ManifestTree>,
+    /// Attribute projection work not yet physically complete in AVET.
+    /// Presence is also the durable `storageHasAVET=false` witness.
+    pub pending_avet: Vec<AvetProjectionWork>,
 }
 
 impl PersistentTreeManifest {
     pub fn encode(&self) -> Result<Vec<u8>, SemanticError> {
+        self.encode_version(VERSION)
+    }
+
+    fn encode_version(&self, version: u16) -> Result<Vec<u8>, SemanticError> {
         self.validate()?;
+        if version == LEGACY_VERSION && !self.pending_avet.is_empty() {
+            return Err(SemanticError::incorrect(
+                "tree/manifest-version",
+                "legacy tree manifests cannot carry pending AVET work",
+            ));
+        }
         let mut body = Vec::new();
         put_bytes(&mut body, self.database_id.as_bytes())?;
         put_u64(&mut body, self.publication_revision);
@@ -57,6 +104,25 @@ impl PersistentTreeManifest {
             encode_optional_digest(&mut body, tree.descriptor.first_hash);
             encode_optional_digest(&mut body, tree.descriptor.last_hash);
         }
+        if version >= VERSION {
+            put_u32(
+                &mut body,
+                u32::try_from(self.pending_avet.len()).map_err(|_| {
+                    SemanticError::incorrect(
+                        "tree/manifest-pending-avet-count",
+                        "pending AVET work exceeds u32",
+                    )
+                })?,
+            );
+            for work in &self.pending_avet {
+                put_u32(&mut body, work.attribute);
+                body.push(u8::from(work.adding));
+                body.push(u8::from(work.history));
+                body.push(u8::from(work.clearing));
+                body.push(0);
+                put_u64(&mut body, work.offset);
+            }
+        }
         let body_len = u32::try_from(body.len()).map_err(|_| {
             SemanticError::incorrect(
                 "tree/manifest-size",
@@ -65,7 +131,7 @@ impl PersistentTreeManifest {
         })?;
         let mut bytes = Vec::with_capacity(HEADER_LEN + body.len() + CHECKSUM_LEN);
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_be_bytes());
+        bytes.extend_from_slice(&version.to_be_bytes());
         bytes.extend_from_slice(&[0, 0]);
         bytes.extend_from_slice(&body_len.to_be_bytes());
         bytes.extend_from_slice(&body);
@@ -94,7 +160,7 @@ impl PersistentTreeManifest {
             ));
         }
         let version = u16::from_be_bytes(bytes[4..6].try_into().expect("checked header"));
-        if version != VERSION {
+        if !matches!(version, LEGACY_VERSION | VERSION) {
             return Err(fault(
                 "tree/manifest-version",
                 format!("tree manifest version {version} is unsupported"),
@@ -162,6 +228,40 @@ impl PersistentTreeManifest {
                 root_bytes,
             });
         }
+        let pending_avet = if version >= VERSION {
+            let count = cursor.u32()? as usize;
+            if count > usize::try_from(crate::MAX_SCHEMA_ATTRIBUTE_ID).unwrap_or(usize::MAX)
+                || count > cursor.remaining() / AVET_WORK_BYTES
+            {
+                return Err(fault(
+                    "tree/manifest-pending-avet-count",
+                    "pending AVET work count exceeds the canonical body or schema space",
+                ));
+            }
+            let mut pending = Vec::with_capacity(count);
+            for _ in 0..count {
+                let attribute = cursor.u32()?;
+                let adding = cursor.boolean()?;
+                let history = cursor.boolean()?;
+                let clearing = cursor.boolean()?;
+                if cursor.u8()? != 0 {
+                    return Err(fault(
+                        "tree/manifest-pending-avet-reserved",
+                        "pending AVET work has nonzero reserved bytes",
+                    ));
+                }
+                pending.push(AvetProjectionWork {
+                    attribute,
+                    adding,
+                    history,
+                    clearing,
+                    offset: cursor.u64()?,
+                });
+            }
+            pending
+        } else {
+            Vec::new()
+        };
         cursor.finish()?;
         let manifest = Self {
             database_id,
@@ -172,9 +272,10 @@ impl PersistentTreeManifest {
             excision_generation,
             eidx_frontier,
             trees,
+            pending_avet,
         };
         manifest.validate()?;
-        if manifest.encode()? != bytes {
+        if manifest.encode_version(version)? != bytes {
             return Err(fault(
                 "tree/noncanonical-manifest",
                 "persistent tree manifest does not have one canonical encoding",
@@ -183,7 +284,10 @@ impl PersistentTreeManifest {
         Ok(manifest)
     }
 
-    pub fn hash(&self) -> Result<Digest, SemanticError> {
+    /// Hash this value's current canonical v5 encoding. This is deliberately
+    /// not called `hash`: a manifest decoded from stored v4 bytes is addressed
+    /// by the hash of those exact bytes, not by re-encoding its logical value.
+    pub fn canonical_v5_hash(&self) -> Result<Digest, SemanticError> {
         Ok(sha256(&self.encode()?))
     }
 
@@ -191,6 +295,23 @@ impl PersistentTreeManifest {
         self.trees
             .iter()
             .find(|tree| tree.descriptor.order == order && tree.descriptor.history == history)
+    }
+
+    pub(crate) fn encoded_version(bytes: &[u8]) -> Result<i16, SemanticError> {
+        if bytes.len() < HEADER_LEN + CHECKSUM_LEN || bytes.get(..4) != Some(MAGIC.as_slice()) {
+            return Err(fault(
+                "tree/manifest-header",
+                "tree manifest has no readable version header",
+            ));
+        }
+        let version = u16::from_be_bytes(bytes[4..6].try_into().expect("checked header"));
+        if !matches!(version, LEGACY_VERSION | VERSION) {
+            return Err(fault(
+                "tree/manifest-version",
+                format!("tree manifest version {version} is unsupported"),
+            ));
+        }
+        Ok(version as i16)
     }
 
     fn validate(&self) -> Result<(), SemanticError> {
@@ -250,6 +371,46 @@ impl PersistentTreeManifest {
                     ));
                 }
             }
+        }
+        let mut previous = None;
+        for work in &self.pending_avet {
+            if work.attribute == 0 || previous.is_some_and(|attribute| attribute >= work.attribute) {
+                return Err(SemanticError::incorrect(
+                    "tree/manifest-pending-avet-order",
+                    "pending AVET work must name positive, strictly ordered attributes",
+                ));
+            }
+            if work.attribute > crate::MAX_SCHEMA_ATTRIBUTE_ID {
+                return Err(SemanticError::incorrect(
+                    "tree/manifest-pending-avet-attribute",
+                    "pending AVET work exceeds the schema attribute id space",
+                ));
+            }
+            if work.clearing && work.offset != 0 {
+                return Err(SemanticError::incorrect(
+                    "tree/manifest-pending-avet-cursor",
+                    "AVET clearing work must restart from the shrinking range prefix",
+                ));
+            }
+            if !work.adding && !work.clearing {
+                return Err(SemanticError::incorrect(
+                    "tree/manifest-pending-avet-phase",
+                    "AVET removal work cannot enter the addition phase",
+                ));
+            }
+            if !work.clearing {
+                let source_count = self
+                    .tree(IndexOrder::Aevt, work.history)
+                    .map(|tree| tree.descriptor.count)
+                    .unwrap_or(0);
+                if work.offset > source_count {
+                    return Err(SemanticError::incorrect(
+                        "tree/manifest-pending-avet-cursor",
+                        "AVET projection offset exceeds its immutable AEVT source tree",
+                    ));
+                }
+            }
+            previous = Some(work.attribute);
         }
         Ok(())
     }
@@ -345,6 +506,10 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+
     fn take(&mut self, length: usize) -> Result<&'a [u8], SemanticError> {
         let end = self
             .offset
@@ -436,6 +601,7 @@ mod tests {
             excision_generation: 0,
             eidx_frontier: 1_000,
             trees,
+            pending_avet: Vec::new(),
         }
     }
 
@@ -444,12 +610,51 @@ mod tests {
         let manifest = manifest();
         let bytes = manifest.encode().unwrap();
         assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
-        assert_eq!(manifest.hash().unwrap(), sha256(&bytes));
+        assert_eq!(manifest.canonical_v5_hash().unwrap(), sha256(&bytes));
 
         let mut genesis = manifest.clone();
         genesis.basis_t = 0;
         let bytes = genesis.encode().unwrap();
         assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), genesis);
+    }
+
+    #[test]
+    fn legacy_v4_decodes_without_projection_work() {
+        let manifest = manifest();
+        let bytes = manifest.encode_version(LEGACY_VERSION).unwrap();
+        assert_eq!(PersistentTreeManifest::encoded_version(&bytes).unwrap(), 4);
+        assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
+        assert_eq!(sha256(&bytes), sha256(&manifest.encode_version(4).unwrap()));
+    }
+
+    #[test]
+    fn pending_projection_round_trip_and_count_are_bounded() {
+        let mut manifest = manifest();
+        manifest.pending_avet = vec![AvetProjectionWork {
+            attribute: 42,
+            adding: true,
+            history: true,
+            clearing: false,
+            offset: 1,
+        }];
+        let bytes = manifest.encode().unwrap();
+        assert_eq!(PersistentTreeManifest::decode(&bytes).unwrap(), manifest);
+
+        // The pending count is the final body word when there are no rows.
+        // Recompute the checksum so decode reaches the allocation guard rather
+        // than rejecting this as an unrelated checksum failure.
+        let mut impossible = self::manifest().encode().unwrap();
+        let count_offset = impossible.len() - CHECKSUM_LEN - 4;
+        impossible[count_offset..count_offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        let checksum = sha256(&impossible[..impossible.len() - CHECKSUM_LEN]);
+        let checksum_offset = impossible.len() - CHECKSUM_LEN;
+        impossible[checksum_offset..].copy_from_slice(&checksum);
+        assert_eq!(
+            PersistentTreeManifest::decode(&impossible)
+                .unwrap_err()
+                .code,
+            "tree/manifest-pending-avet-count"
+        );
     }
 
     #[test]
@@ -478,7 +683,10 @@ mod tests {
 
         let mut successor = manifest.clone();
         successor.publication_revision += 1;
-        assert_ne!(successor.hash().unwrap(), manifest.hash().unwrap());
+        assert_ne!(
+            successor.canonical_v5_hash().unwrap(),
+            manifest.canonical_v5_hash().unwrap()
+        );
 
         let mut wrong_order = manifest.clone();
         wrong_order.trees.swap(0, 1);
@@ -537,6 +745,7 @@ mod tests {
             excision_generation: 0,
             eidx_frontier: 1_000,
             trees,
+            pending_avet: Vec::new(),
         };
         let bytes = manifest.encode().unwrap();
         assert!(bytes.len() < 2_048);

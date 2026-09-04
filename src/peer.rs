@@ -4,7 +4,7 @@ use crate::operations::tree_manifest_advisory_key;
 use crate::persistent_tree::{
     ChildRef, DirectoryNode, LeafSegment, RootNode, TreeBuildStats, TreeConfig, TreeMergeEdits,
     TreeNode, TreeNodeSet, TreeRangeResult, TreeReadStats, TreeSeekResult, build_tree,
-    decode_tree_node, merge_tree,
+    decode_tree_node, discover_merge_no_history_pairs, merge_tree,
 };
 use crate::postgres::{
     is_postgres_connection_error, postgres_error, read_authenticated_log_range, recover_to,
@@ -16,10 +16,10 @@ use crate::recent::{
 };
 use crate::state_commitment::{checkpoint_information, verify_checkpoint_state_hash};
 use crate::{
-    Database, DatabaseValue, Datom, Digest, DurableTransaction, Entity, EntityIdentifier,
-    ErrorCategory, IndexManifest, IndexOrder, IndexPrefix, IndexSegment, ManifestTree,
-    PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, PullPattern, Query,
-    QueryControl, QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
+    AvetProjectionWork, Database, DatabaseValue, Datom, Digest, DurableTransaction, Entity,
+    EntityIdentifier, ErrorCategory, IndexManifest, IndexOrder, IndexPrefix, IndexSegment,
+    ManifestTree, PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, PullPattern,
+    Query, QueryControl, QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
     TreeManifestRecord, TreePublicationDelta, TreePublishOutcome, TreeRootBinding, View,
     decode_index_manifest, decode_index_segment, encode_genesis, sha256, tx_to_t,
 };
@@ -35,6 +35,9 @@ use std::time::{Duration, Instant};
 const DEFAULT_SEGMENT_DATOMS: usize = 4_096;
 const MANIFEST_SELECTION_PAGE_SIZE: i64 = 32;
 const MAX_MANIFEST_CANDIDATE_PROBES: u64 = 256;
+const AVET_PROJECTION_CHUNK_DATOMS: usize = 512;
+const AVET_SORT_FAN_IN: u64 = 4;
+const AVET_SORT_PAGE_DATOMS: usize = 8;
 type LoadedBase = (Database, Digest, u64);
 type BaseSelection = (Option<LoadedBase>, u64);
 
@@ -63,6 +66,12 @@ pub struct IndexBuildReceipt {
     /// Selection exhausted its operational corruption-probe budget. An
     /// administrative build may still recover and publish a replacement.
     pub manifest_probe_limit_reached: bool,
+    /// Attributes whose AVET projection remains authenticated but incomplete
+    /// in this fully live publication.
+    pub pending_avet_projections: usize,
+    /// This root is durable progress, but its bounded live-set fold and/or a
+    /// same-basis projection successor still requires another worker step.
+    pub index_work_remaining: bool,
     /// Compatibility name for the number of unique immutable tree nodes.
     pub segment_count: usize,
     pub reused: bool,
@@ -587,6 +596,19 @@ where
     Ok((metadata, unready))
 }
 
+fn manifest_avet_unready(manifest: &PersistentTreeManifest) -> BTreeSet<u32> {
+    manifest
+        .pending_avet
+        .iter()
+        // A removal's stale physical rows are excluded by RecentTier's
+        // endpoint-schema membership filter on both scan and prefix paths.
+        // storageHasAVET readiness gates additions only; unrelated AVET
+        // attributes remain available while a dropped range is reclaimed.
+        .filter(|work| work.adding)
+        .map(|work| work.attribute)
+        .collect()
+}
+
 /// Keep only the current install/alter hooks and facts belonging to the
 /// attribute entities they name. `:db/ident` remains globally available from
 /// `IdentIndex`; retaining every ident-bearing entity here would turn this
@@ -647,6 +669,12 @@ fn same_eav(left: &Datom, right: &Datom) -> bool {
         && left.value.stored_eq(&right.value)
 }
 
+fn same_logical_eav(left: &Datom, right: &Datom) -> bool {
+    left.entity == right.entity
+        && left.attribute == right.attribute
+        && left.value.index_cmp(&right.value) == std::cmp::Ordering::Equal
+}
+
 fn ident_assertion_cmp(left: &Datom, right: &Datom) -> std::cmp::Ordering {
     left.tx
         .cmp(&right.tx)
@@ -660,6 +688,7 @@ fn ident_assertion_cmp(left: &Datom, right: &Datom) -> std::cmp::Ordering {
 pub struct PostgresIndexer {
     client: Client,
     tree_store: PostgresTreeStore,
+    source_pin_client: Option<Client>,
     connection: PostgresConnectionConfig,
     database_id: String,
     segment_datoms: usize,
@@ -687,6 +716,7 @@ impl PostgresIndexer {
         Ok(Self {
             client,
             tree_store,
+            source_pin_client: None,
             connection: connection.clone(),
             database_id: database_id.into(),
             segment_datoms: DEFAULT_SEGMENT_DATOMS,
@@ -712,6 +742,20 @@ impl PostgresIndexer {
         let _ = build_tree(IndexOrder::Eavt, false, Vec::new(), &config)?;
         self.segment_datoms = config.max_leaf_datoms;
         self.tree_config = config;
+        Ok(self)
+    }
+
+    /// Select the local work disk used by recovered-style external AVET
+    /// merge runs. Files are unnamed and disposable; durable state remains in
+    /// PostgreSQL and an interrupted sort regenerates from its pinned AEVT
+    /// source. `ATOMIC_INDEX_WORK_DIRECTORY` supplies the process default.
+    pub fn with_index_work_directory(
+        mut self,
+        directory: impl AsRef<std::path::Path>,
+    ) -> Result<Self, SemanticError> {
+        self.tree_store = self
+            .tree_store
+            .with_index_work_directory(directory.as_ref())?;
         Ok(self)
     }
 
@@ -767,6 +811,7 @@ impl PostgresIndexer {
         verify_schema_compatibility(&mut client)?;
         self.tree_store.reconnect()?;
         self.client = client;
+        self.source_pin_client = None;
         Ok(())
     }
 
@@ -774,9 +819,18 @@ impl PostgresIndexer {
         &mut self,
         fault_point: IndexBuildFault,
     ) -> Result<IndexBuildReceipt, SemanticError> {
-        Ok(self
-            .consolidate_once(fault_point, IndexBuildScope::Administrative)?
-            .expect("administrative consolidation never yields bounded publication work"))
+        let mut next_fault = fault_point;
+        loop {
+            if let Some(receipt) =
+                self.consolidate_once(next_fault, IndexBuildScope::Administrative)?
+            {
+                return Ok(receipt);
+            }
+            // A successful partial projection is already an immutable restart
+            // point. Fault injection applies to the caller's first physical
+            // attempt only; later chunks use the ordinary path.
+            next_fault = IndexBuildFault::None;
+        }
     }
 
     /// Advance one bounded automatic-indexing step. `None` means one durable
@@ -820,6 +874,13 @@ impl PostgresIndexer {
             basis_t,
             excision_generation,
         )?;
+        if selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
+            previous.publication_revision == selection.newest_observed_revision
+                && selection.newest_live_complete
+                && previous.pending_avet.is_empty()
+        }) {
+            self.tree_store.discard_completed_avet_sort();
+        }
         if scope == IndexBuildScope::Background && !selection.newest_live_complete {
             let manifest_hash = selection.newest_observed_manifest_hash.ok_or_else(|| {
                 background_rebuild_required(
@@ -835,14 +896,15 @@ impl PostgresIndexer {
             self.tree_store.advance_publication_work(manifest_hash)?;
             return Ok(None);
         }
-        if let Some((previous, _, _)) = selection.usable.as_ref()
+        if let Some((previous, previous_hash, _, _)) = selection.usable.as_ref()
             && previous.publication_revision == selection.newest_observed_revision
             && selection.newest_live_complete
+            && previous.pending_avet.is_empty()
             && previous.basis_t == basis_t
             && previous.tx_hash == tx_hash
             && previous.state_hash == stored_state
         {
-            let manifest_hash = previous.hash()?;
+            let manifest_hash = *previous_hash;
             let stats = self.tree_store.stats();
             return Ok(Some(IndexBuildReceipt {
                 publication_revision: previous.publication_revision,
@@ -851,6 +913,8 @@ impl PostgresIndexer {
                 manifest_candidates_examined: selection.manifest_candidates_examined,
                 manifest_candidates_rejected: selection.manifest_candidates_rejected,
                 manifest_probe_limit_reached: selection.manifest_probe_limit_reached,
+                pending_avet_projections: 0,
+                index_work_remaining: false,
                 segment_count: 0,
                 reused: true,
                 input_datoms: 0,
@@ -876,14 +940,47 @@ impl PostgresIndexer {
                     )
                 })?;
 
-        let can_increment = selection.usable.as_ref().is_some_and(|(previous, _, _)| {
+        let advancing_pending = selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
             selection.newest_live_complete
+                && previous.publication_revision == selection.newest_observed_revision
+                && !previous.pending_avet.is_empty()
+        });
+        let can_increment = selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
+            selection.newest_live_complete
+                && previous.pending_avet.is_empty()
                 && (scope == IndexBuildScope::Background
                     || previous.publication_revision == selection.newest_observed_revision)
         });
+        // Selection may decode/cache source nodes before a potentially long
+        // external AVET sort. Acquire the same shared manifest coordinate
+        // used by immutable peers, then revalidate after the lock closes the
+        // select-versus-GC race. Keeping this connection alive through CAS
+        // publication prevents zero-age GC from retiring the source paths.
+        let source_manifest_pin = if advancing_pending || can_increment {
+            let (previous, manifest_hash, _, _) = selection
+                .usable
+                .as_ref()
+                .expect("source pin eligibility requires a usable predecessor");
+            let pin_client = match self.source_pin_client.take() {
+                Some(client) => client,
+                None => {
+                    let mut client = self.connection.connect_for("index/source-manifest-pin")?;
+                    verify_schema_compatibility(&mut client)?;
+                    client
+                }
+            };
+            Some(acquire_index_source_manifest_pin(
+                pin_client,
+                &self.database_id,
+                previous.publication_revision,
+                *manifest_hash,
+            )?)
+        } else {
+            None
+        };
         let fallback_predecessor = if can_increment
             && scope == IndexBuildScope::Background
-            && selection.usable.as_ref().is_some_and(|(previous, _, _)| {
+            && selection.usable.as_ref().is_some_and(|(previous, _, _, _)| {
                 previous.publication_revision != selection.newest_observed_revision
             }) {
             if selection.newest_observed_generation != Some(excision_generation) {
@@ -911,8 +1008,27 @@ impl PostgresIndexer {
         } else {
             None
         };
-        let mut build = if can_increment {
-            let (previous, base_projection, old_cache) = selection
+        let mut publish_basis_t = basis_t;
+        let mut publish_tx_hash = tx_hash;
+        let mut publish_state_hash = stored_state;
+        let mut build = if advancing_pending {
+            let (previous, previous_hash, base_projection, old_cache) = selection
+                .usable
+                .expect("pending eligibility requires a usable newest predecessor");
+            publish_basis_t = previous.basis_t;
+            publish_tx_hash = previous.tx_hash;
+            publish_state_hash = previous.state_hash;
+            drop(transaction);
+            build_avet_projection_step(
+                &mut self.tree_store,
+                &previous,
+                previous_hash,
+                &base_projection,
+                &self.tree_config,
+                old_cache,
+            )?
+        } else if can_increment {
+            let (previous, previous_hash, base_projection, old_cache) = selection
                 .usable
                 .expect("incremental eligibility requires a usable predecessor");
             let authenticated_tail = load_authenticated_index_tail(
@@ -940,6 +1056,7 @@ impl PostgresIndexer {
             build_incremental_native(
                 &mut self.tree_store,
                 &previous,
+                previous_hash,
                 &tail,
                 &tail_hashes,
                 &base_projection,
@@ -993,17 +1110,20 @@ impl PostgresIndexer {
             };
             *claimed_predecessor = predecessor_manifest_hash;
         }
+        let completed_avet_sort = build.completed_avet_sort;
 
         let tree_manifest = PersistentTreeManifest {
             database_id: self.database_id.clone(),
             publication_revision,
-            basis_t,
-            tx_hash,
-            state_hash: stored_state,
+            basis_t: publish_basis_t,
+            tx_hash: publish_tx_hash,
+            state_hash: publish_state_hash,
             excision_generation,
             eidx_frontier: build.eidx_frontier,
             trees: build.trees,
+            pending_avet: build.pending_avet,
         };
+        let projection_complete = tree_manifest.pending_avet.is_empty();
         let tree_manifest_payload = tree_manifest.encode()?;
         let tree_manifest_hash = sha256(&tree_manifest_payload);
         let tree_roots = tree_manifest
@@ -1020,9 +1140,9 @@ impl PostgresIndexer {
         let tree_record = TreeManifestRecord {
             database_id: self.database_id.clone(),
             publication_revision,
-            basis_t,
-            tx_hash,
-            state_hash: stored_state,
+            basis_t: publish_basis_t,
+            tx_hash: publish_tx_hash,
+            state_hash: publish_state_hash,
             excision_generation,
             eidx_frontier: build.eidx_frontier,
             manifest_hash: tree_manifest_hash,
@@ -1073,14 +1193,32 @@ impl PostgresIndexer {
                 return Err(error);
             }
         };
+        if let Some(source_pin) = source_manifest_pin {
+            self.source_pin_client = Some(source_pin.release()?);
+        }
+        if let Some(sort_key) = completed_avet_sort {
+            // Keep the complete immutable source run across staging, CAS, and
+            // injected failure. Only a durable publication (including an
+            // exact ambiguous retry) makes it disposable.
+            self.tree_store.discard_avet_sort(sort_key)?;
+        }
         let tree_store_stats = self.tree_store.stats();
+        // Administrative consolidation preserves its one-call completion
+        // contract by looping projection successors. Background work reports
+        // every durable publication immediately, while explicitly retaining
+        // the follow-up flag for bounded live-set folding/reselection.
+        if scope == IndexBuildScope::Administrative && !projection_complete {
+            return Ok(None);
+        }
         Ok(Some(IndexBuildReceipt {
             publication_revision,
-            basis_t,
+            basis_t: publish_basis_t,
             manifest_hash: tree_manifest_hash,
             manifest_candidates_examined: selection.manifest_candidates_examined,
             manifest_candidates_rejected: selection.manifest_candidates_rejected,
             manifest_probe_limit_reached: selection.manifest_probe_limit_reached,
+            pending_avet_projections: tree_manifest.pending_avet.len(),
+            index_work_remaining: scope == IndexBuildScope::Background,
             segment_count: build.nodes.len(),
             reused: publication == TreePublishOutcome::AlreadyPublished,
             input_datoms: build.input_datoms,
@@ -1096,6 +1234,65 @@ impl PostgresIndexer {
     }
 }
 
+struct IndexSourceManifestPin {
+    client: Client,
+    key: i64,
+}
+
+fn acquire_index_source_manifest_pin(
+    mut client: Client,
+    database_id: &str,
+    publication_revision: u64,
+    manifest_hash: Digest,
+) -> Result<IndexSourceManifestPin, SemanticError> {
+    let key = tree_manifest_advisory_key(&manifest_hash);
+    client
+        .query_one("SELECT pg_advisory_lock_shared($1)", &[&key])
+        .map_err(|error| postgres_error("index/source-manifest-pin", error))?;
+    let available = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications \
+                              WHERE database_id = $1 AND publication_revision = $2 \
+                                AND manifest_hash = $3) \
+                    AND NOT EXISTS (SELECT 1 FROM atomic_tree_retirement_progress \
+                                     WHERE database_id = $1 \
+                                       AND publication_revision = $2 \
+                                       AND manifest_hash = $3)",
+            &[
+                &database_id,
+                &sql_basis(publication_revision)?,
+                &&manifest_hash[..],
+            ],
+        )
+        .map_err(|error| postgres_error("index/source-manifest-pin-verify", error))?
+        .get::<_, bool>(0);
+    if !available {
+        return Err(SemanticError::new(
+            ErrorCategory::Conflict,
+            "index/source-manifest-retired",
+            "native source publication retired before the index build pinned it",
+        ));
+    }
+    Ok(IndexSourceManifestPin { client, key })
+}
+
+impl IndexSourceManifestPin {
+    fn release(mut self) -> Result<Client, SemanticError> {
+        let unlocked = self
+            .client
+            .query_one("SELECT pg_advisory_unlock_shared($1)", &[&self.key])
+            .map_err(|error| postgres_error("index/source-manifest-unpin", error))?
+            .get::<_, bool>(0);
+        if !unlocked {
+            return Err(fault(
+                "index/source-manifest-pin-lost",
+                "index source session no longer holds its manifest pin",
+            ));
+        }
+        Ok(self.client)
+    }
+}
+
 fn background_rebuild_required(message: &'static str) -> SemanticError {
     SemanticError::new(
         ErrorCategory::Unavailable,
@@ -1107,11 +1304,15 @@ fn background_rebuild_required(message: &'static str) -> SemanticError {
 struct NativeIndexBuild {
     trees: Vec<ManifestTree>,
     nodes: TreeNodeSet,
+    pending_avet: Vec<AvetProjectionWork>,
     eidx_frontier: u64,
     input_datoms: u64,
     tail_datoms: u64,
     encoded_bytes: u64,
     reused_subtrees: u64,
+    /// Disposable external-sort workspace that becomes unnecessary only once
+    /// this candidate is durably visible (or confirmed as already visible).
+    completed_avet_sort: Option<Digest>,
     publication_delta: TreePublicationDelta,
 }
 
@@ -1165,11 +1366,13 @@ fn build_initial_native(
     Ok(NativeIndexBuild {
         trees,
         nodes,
+        pending_avet: Vec::new(),
         eidx_frontier: database.eidx_frontier(),
         input_datoms: stats.input_datoms,
         tail_datoms: 0,
         encoded_bytes: stats.encoded_bytes,
         reused_subtrees: 0,
+        completed_avet_sort: None,
         publication_delta: TreePublicationDelta::Replace { live_nodes },
     })
 }
@@ -1193,6 +1396,7 @@ pub(crate) fn build_full_native_tree(
             excision_generation: log_generation,
             eidx_frontier: build.eidx_frontier,
             trees: build.trees,
+            pending_avet: Vec::new(),
         },
         nodes: build.nodes,
     })
@@ -1286,7 +1490,7 @@ struct NativeManifestSelection {
     manifest_candidates_examined: u64,
     manifest_candidates_rejected: u64,
     manifest_probe_limit_reached: bool,
-    usable: Option<(PersistentTreeManifest, MetadataProjection, TreeNodeSet)>,
+    usable: Option<(PersistentTreeManifest, Digest, MetadataProjection, TreeNodeSet)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1549,7 +1753,7 @@ fn load_indexer_tree_manifest_candidate<C: GenericClient>(
     excision_generation: u64,
     publication_revision: u64,
     manifest_hash: Digest,
-) -> Result<(PersistentTreeManifest, MetadataProjection, TreeNodeSet), SemanticError> {
+) -> Result<(PersistentTreeManifest, Digest, MetadataProjection, TreeNodeSet), SemanticError> {
     let row = client
         .query_opt(
             "SELECT m.basis_t, m.tx_hash, m.state_hash, m.eidx_frontier, \
@@ -1678,7 +1882,7 @@ fn load_indexer_tree_manifest_candidate<C: GenericClient>(
         }
     }
     let (metadata, cache) = derive_metadata_from_store(tree_store, &manifest)?;
-    Ok((manifest, metadata, cache))
+    Ok((manifest, manifest_hash, metadata, cache))
 }
 
 fn manifest_root_hashes(manifest: &PersistentTreeManifest) -> BTreeMap<(bool, u8), Digest> {
@@ -1772,9 +1976,6 @@ fn load_authenticated_index_tail<C: GenericClient>(
 
 #[derive(Clone)]
 struct CurrentTreeChange {
-    entity: u64,
-    attribute: u32,
-    value: crate::Value,
     old: Option<Datom>,
     current: Option<Datom>,
 }
@@ -1783,6 +1984,7 @@ struct CurrentTreeChange {
 fn build_incremental_native(
     store: &mut PostgresTreeStore,
     previous: &PersistentTreeManifest,
+    previous_manifest_hash: Digest,
     tail: &[DurableTransaction],
     tail_hashes: &[Digest],
     base_projection: &MetadataProjection,
@@ -1817,10 +2019,10 @@ fn build_incremental_native(
             "manifest omitted current EAVT",
         )
     })?;
-    let history_eavt = previous.tree(IndexOrder::Eavt, true).ok_or_else(|| {
+    let history_aevt = previous.tree(IndexOrder::Aevt, true).ok_or_else(|| {
         fault(
-            "index/missing-history-eavt",
-            "manifest omitted history EAVT",
+            "index/missing-history-aevt",
+            "manifest omitted history AEVT",
         )
     })?;
     let mut changes = BTreeMap::<Vec<u8>, CurrentTreeChange>::new();
@@ -1829,15 +2031,15 @@ fn build_incremental_native(
         if changes.contains_key(&key) {
             continue;
         }
-        let lower = eav_bound(datom, true);
-        let found = postgres_tree_seek(store, &current_eavt.descriptor, &lower, &mut old_cache)?
-            .filter(|candidate| same_eav(candidate, datom));
+        let found = postgres_tree_exact_stored_eav(
+            store,
+            &current_eavt.descriptor,
+            datom,
+            &mut old_cache,
+        )?;
         changes.insert(
             key,
             CurrentTreeChange {
-                entity: datom.entity,
-                attribute: datom.attribute,
-                value: datom.value.clone(),
                 old: found.clone(),
                 current: found,
             },
@@ -1880,133 +2082,89 @@ fn build_incremental_native(
         })
         .collect::<Vec<_>>();
 
-    // noHistory is evaluated exactly at this indexing endpoint. Only E/A/V
-    // groups touched by the uncovered tail can become a new eligible pair;
-    // prior physical omissions are never recomputed or resurrected.
-    let mut durable_history_for_pairs = Vec::new();
-    for change in changes.values() {
-        if !endpoint_projection
-            .schema
-            .attribute(change.attribute)
-            .is_ok_and(|attribute| attribute.no_history)
-        {
-            continue;
-        }
-        let exemplar = Datom {
-            entity: change.entity,
-            attribute: change.attribute,
-            value: change.value.clone(),
-            tx: u64::MAX,
-            added: true,
-        };
-        let lower = eav_bound(&exemplar, true);
-        let upper = eav_bound(&exemplar, false);
-        durable_history_for_pairs.extend(postgres_tree_range(
-            store,
-            &history_eavt.descriptor,
-            Some(&lower),
-            Some(&upper),
-            &mut old_cache,
-        )?);
+    let (_, endpoint_avet_unready) = apply_metadata_and_avet_readiness(
+        base_projection,
+        &BTreeSet::new(),
+        tail,
+        |attribute| {
+            let (lower, upper) = attribute_bounds(attribute)?;
+            Ok(postgres_tree_seek(
+                store,
+                &history_aevt.descriptor,
+                &lower,
+                &mut old_cache,
+            )?
+            .is_some_and(|datom| {
+                datom.attribute == attribute
+                    && datom.cmp_in(&upper, IndexOrder::Aevt).is_lt()
+            }))
+        },
+    )?;
+    let mut projection_changes = changed_avet_attributes(
+        &base_projection.schema,
+        &endpoint_projection.schema,
+    )
+    .into_iter()
+    // Recovered `can-immediately-toggle-storage-has-avet?` makes an empty
+    // attribute ready in the same indexing pass.  Only removals and additions
+    // for which the storageHasAVET fold found prior values need broad work.
+    .filter(|(attribute, _, after)| !*after || endpoint_avet_unready.contains(attribute))
+    .map(|change @ (attribute, _, _)| (attribute, change))
+    .collect::<BTreeMap<_, _>>();
+    // A false->true transition can be hidden by a disable/re-enable cycle
+    // inside one uncovered tail. The recovered storageHasAVET fold retains
+    // that fact even when base and endpoint schemas compare equal.
+    for attribute in endpoint_avet_unready {
+        projection_changes.entry(attribute).or_insert((
+            attribute,
+            effective_avet(&base_projection.schema, attribute),
+            true,
+        ));
     }
-    sort_dedup_datoms(&mut durable_history_for_pairs, IndexOrder::Eavt);
+    let changed_avet = projection_changes.into_values().collect::<Vec<_>>();
+    // Changed AVET projections become authenticated resumable work. This
+    // tail publication deliberately leaves those physical ranges untouched;
+    // same-basis successor publications below copy/remove fixed-size chunks.
+    let avet_backfills = BTreeMap::<u32, (Vec<Datom>, Vec<Datom>)>::new();
+    let avet_drops = BTreeMap::<u32, (Vec<Datom>, Vec<Datom>)>::new();
+    let pending_avet = changed_avet
+        .iter()
+        .map(|(attribute, _, after)| AvetProjectionWork::new(*attribute, *after))
+        .collect::<Vec<_>>();
 
-    let changed_avet =
-        changed_avet_attributes(&base_projection.schema, &endpoint_projection.schema);
-    let mut avet_backfills = BTreeMap::<u32, (Vec<Datom>, Vec<Datom>)>::new();
-    let mut avet_drops = BTreeMap::<u32, (Vec<Datom>, Vec<Datom>)>::new();
-    if !changed_avet.is_empty() {
-        let current_aevt = &previous
-            .tree(IndexOrder::Aevt, false)
-            .ok_or_else(|| {
-                fault(
-                    "index/missing-current-aevt",
-                    "manifest omitted current AEVT",
-                )
-            })?
-            .descriptor;
-        let history_aevt = &previous
-            .tree(IndexOrder::Aevt, true)
-            .ok_or_else(|| {
-                fault(
-                    "index/missing-history-aevt",
-                    "manifest omitted history AEVT",
-                )
-            })?
-            .descriptor;
-        let current_avet = &previous
-            .tree(IndexOrder::Avet, false)
-            .ok_or_else(|| {
-                fault(
-                    "index/missing-current-avet",
-                    "manifest omitted current AVET",
-                )
-            })?
-            .descriptor;
-        let history_avet = &previous
-            .tree(IndexOrder::Avet, true)
-            .ok_or_else(|| {
-                fault(
-                    "index/missing-history-avet",
-                    "manifest omitted history AVET",
-                )
-            })?
-            .descriptor;
-        for (attribute, before, after) in &changed_avet {
-            let (lower, upper) = attribute_bounds(*attribute)?;
-            if !before && *after {
-                let durable_current = postgres_tree_range(
-                    store,
-                    current_aevt,
-                    Some(&lower),
-                    Some(&upper),
-                    &mut old_cache,
-                )?;
-                let durable_history = postgres_tree_range(
-                    store,
-                    history_aevt,
-                    Some(&lower),
-                    Some(&upper),
-                    &mut old_cache,
-                )?;
-                let final_current = recent
-                    .merge_current_range(
-                        IndexOrder::Aevt,
-                        &durable_current,
-                        &RecentRange::unbounded(),
-                    )?
-                    .into_iter()
-                    .filter(|datom| datom.attribute == *attribute)
-                    .collect::<Vec<_>>();
-                let final_history = recent
-                    .consolidate_history_range(
-                        IndexOrder::Aevt,
-                        &durable_history,
-                        &RecentRange::unbounded(),
-                    )?
-                    .into_iter()
-                    .filter(|datom| datom.attribute == *attribute)
-                    .collect::<Vec<_>>();
-                avet_backfills.insert(*attribute, (final_current, final_history));
-            } else if *before && !after {
-                let current = postgres_tree_range(
-                    store,
-                    current_avet,
-                    Some(&lower),
-                    Some(&upper),
-                    &mut old_cache,
-                )?;
-                let history = postgres_tree_range(
-                    store,
-                    history_avet,
-                    Some(&lower),
-                    Some(&upper),
-                    &mut old_cache,
-                )?;
-                avet_drops.insert(*attribute, (current, history));
-            }
-        }
-    }
+    // Recovered noHistory filtering is local to physically rebuilt segments,
+    // but the four history orders are alternative projections of the same
+    // facts and their leaf boundaries differ. Use the canonical EAVT selected
+    // stream to decide exact omissions, then apply those witnesses to every
+    // sibling where the fact is a member. This is a deliberate native
+    // consistency strengthening: Datomic documents no precise removal time,
+    // and this keeps deterministic cross-index query coherence without a
+    // global or fixed-point sweep.
+    let history_eavt = previous.tree(IndexOrder::Eavt, true).ok_or_else(|| {
+        fault(
+            "index/missing-history-eavt",
+            "prior manifest omitted a history EAVT tree",
+        )
+    })?;
+    let mut eavt_history_edits = history_edits(
+        IndexOrder::Eavt,
+        &recent,
+        &changed_avet,
+        &avet_backfills,
+        &avet_drops,
+    )?;
+    canonicalize_merge_edits(&mut eavt_history_edits, IndexOrder::Eavt);
+    preload_merge_paths(
+        store,
+        &history_eavt.descriptor,
+        &eavt_history_edits,
+        &mut old_cache,
+    )?;
+    let coordinated_no_history_pairs = discover_merge_no_history_pairs(
+        &history_eavt.descriptor,
+        &old_cache,
+        &eavt_history_edits,
+    )?;
 
     let mut candidate_nodes = TreeNodeSet::default();
     let mut trees = Vec::with_capacity(8);
@@ -2019,14 +2177,33 @@ fn build_incremental_native(
                 fault("index/missing-tree", "prior manifest omitted an index tree")
             })?;
             let mut edits = if history {
-                history_edits(
+                let mut edits = history_edits(
                     order,
                     &recent,
-                    &durable_history_for_pairs,
                     &changed_avet,
                     &avet_backfills,
                     &avet_drops,
-                )?
+                )?;
+                for pair in &coordinated_no_history_pairs {
+                    let avet_projection_changed = order == IndexOrder::Avet
+                        && changed_avet.iter().any(|(attribute, _, _)| {
+                            *attribute == pair.retraction.attribute
+                        });
+                    if !avet_projection_changed
+                        && schema_index_member(
+                            &endpoint_projection.schema,
+                            &pair.retraction,
+                            order,
+                        )?
+                    {
+                        edits.no_history_pairs.push(pair.clone());
+                    }
+                }
+                // Discovery was coordinated above. Disable the per-order pass
+                // so no sibling can make an additional locality-dependent
+                // omission after the canonical union is fixed.
+                edits.no_history_attributes.clear();
+                edits
             } else {
                 current_edits(
                     order,
@@ -2072,17 +2249,537 @@ fn build_incremental_native(
     Ok(NativeIndexBuild {
         trees,
         nodes: candidate_nodes,
+        pending_avet,
         eidx_frontier,
         input_datoms: tail_datoms,
         tail_datoms,
         encoded_bytes,
         reused_subtrees,
+        completed_avet_sort: None,
         publication_delta: TreePublicationDelta::Incremental {
-            predecessor_manifest_hash: previous.hash()?,
+            predecessor_manifest_hash: previous_manifest_hash,
             added_nodes,
             retired_nodes,
         },
     })
+}
+
+/// Advance one authenticated AVET projection chunk without advancing logical
+/// time. Every returned node set is bounded by one input chunk plus the
+/// shallow changed paths, and the successor manifest remains explicitly
+/// unavailable for the attribute until both current and history phases seal.
+fn build_avet_projection_step(
+    store: &mut PostgresTreeStore,
+    previous: &PersistentTreeManifest,
+    previous_manifest_hash: Digest,
+    metadata: &MetadataProjection,
+    config: &TreeConfig,
+    mut old_cache: TreeNodeSet,
+) -> Result<NativeIndexBuild, SemanticError> {
+    let work = *previous.pending_avet.first().ok_or_else(|| {
+        SemanticError::incorrect(
+            "index/no-pending-avet-projection",
+            "AVET projection step requires authenticated pending work",
+        )
+    })?;
+    if effective_avet(&metadata.schema, work.attribute) != work.adding {
+        return Err(fault(
+            "index/pending-avet-schema-mismatch",
+            "pending AVET projection direction disagrees with the manifest schema",
+        ));
+    }
+
+    let target_index = previous
+        .trees
+        .iter()
+        .position(|tree| tree.descriptor.order == IndexOrder::Avet && tree.descriptor.history == work.history)
+        .ok_or_else(|| fault("index/missing-projection-target", "manifest omitted AVET projection target"))?;
+    let target = &previous.trees[target_index];
+    let mut edits = TreeMergeEdits::default();
+    let (chunk_datoms, chunk_complete, sort_key) = if work.clearing {
+        // Clearing always removes the shrinking AVET prefix. This is required
+        // not only for a drop, but for disable/data/re-enable tails whose old
+        // physical AVET range may be stale before the exact AEVT projection is
+        // copied back.
+        let chunk = postgres_tree_attribute_chunk(
+            store,
+            &target.descriptor,
+            work.attribute,
+            0,
+            0,
+            0,
+            AVET_PROJECTION_CHUNK_DATOMS,
+            config.max_leaf_bytes as u64,
+            &mut old_cache,
+        )?;
+        edits.projection_removals = chunk.datoms.clone();
+        (chunk.datoms, chunk.complete, None)
+    } else {
+        debug_assert!(work.adding, "only AVET additions have a copy phase");
+        let source = previous
+            .tree(IndexOrder::Aevt, work.history)
+            .ok_or_else(|| fault("index/missing-projection-source", "manifest omitted AEVT projection source"))?;
+        let (sort_key, final_level, row_count) = prepare_avet_projection_sort(
+            store,
+            &previous.database_id,
+            &source.descriptor,
+            work.attribute,
+            config,
+            &mut old_cache,
+        )?;
+        if work.offset > row_count {
+            return Err(fault(
+                "index/avet-projection-offset",
+                "authenticated AVET projection offset exceeds its regenerated source",
+            ));
+        }
+        let datoms = read_avet_projection_output(
+            store,
+            sort_key,
+            final_level,
+            work.offset,
+            row_count,
+            AVET_PROJECTION_CHUNK_DATOMS,
+            config.max_leaf_bytes as u64,
+        )?;
+        let complete = work
+            .offset
+            .checked_add(datoms.len() as u64)
+            .is_some_and(|next| next == row_count);
+        if datoms.is_empty() && !complete {
+            return Err(fault(
+                "index/avet-sort-gap",
+                "external AVET sort ended before its authenticated row count",
+            ));
+        }
+        edits.insertions = datoms.clone();
+        (datoms, complete, Some(sort_key))
+    };
+    if chunk_datoms
+        .iter()
+        .any(|datom| datom.attribute != work.attribute)
+    {
+        return Err(fault(
+            "index/avet-projection-range",
+            "bounded AVET projection source escaped its attribute range",
+        ));
+    }
+    canonicalize_merge_edits(&mut edits, IndexOrder::Avet);
+
+    let mut trees = previous.trees.clone();
+    let mut nodes = TreeNodeSet::default();
+    let mut retired_nodes = BTreeSet::new();
+    let mut encoded_bytes = 0_u64;
+    let mut reused_subtrees = 0_u64;
+    if !chunk_datoms.is_empty() {
+        preload_merge_paths(store, &target.descriptor, &edits, &mut old_cache)?;
+        let merged = merge_tree(&target.descriptor, &old_cache, &edits, config)?;
+        let root_bytes = merged
+            .new_nodes
+            .get(&merged.descriptor.root_hash)
+            .or_else(|| old_cache.get(&merged.descriptor.root_hash))
+            .ok_or_else(|| {
+                fault(
+                    "index/missing-projection-root",
+                    "bounded AVET projection merge did not resolve its root",
+                )
+            })?
+            .len() as u64;
+        encoded_bytes = merged.stats.encoded_bytes_written;
+        reused_subtrees = merged
+            .stats
+            .reused_directory_refs
+            .saturating_add(merged.stats.reused_leaf_refs)
+            .saturating_add(merged.stats.reused_hashes);
+        retired_nodes.extend(merged.retired_nodes.iter().copied());
+        trees[target_index] = ManifestTree {
+            descriptor: merged.descriptor,
+            root_bytes,
+        };
+        for (hash, bytes) in merged.new_nodes.into_nodes() {
+            nodes.insert_known(hash, bytes)?;
+        }
+    }
+
+    let mut pending_avet = previous.pending_avet.clone();
+    if chunk_complete {
+        if work.clearing && work.adding {
+            pending_avet[0] = AvetProjectionWork {
+                clearing: false,
+                offset: 0,
+                ..work
+            };
+        } else if work.history {
+            pending_avet.remove(0);
+        } else {
+            pending_avet[0] = AvetProjectionWork {
+                history: true,
+                clearing: true,
+                offset: 0,
+                ..work
+            };
+        }
+    } else if !work.clearing {
+        pending_avet[0] = AvetProjectionWork {
+            offset: work
+                .offset
+                .checked_add(chunk_datoms.len() as u64)
+                .ok_or_else(|| fault("index/avet-projection-offset", "AVET projection offset overflow"))?,
+            ..work
+        };
+    }
+
+    let added_nodes = nodes.iter().map(|(hash, _)| *hash).collect();
+    Ok(NativeIndexBuild {
+        trees,
+        nodes,
+        pending_avet,
+        eidx_frontier: previous.eidx_frontier,
+        input_datoms: chunk_datoms.len() as u64,
+        tail_datoms: 0,
+        encoded_bytes,
+        reused_subtrees,
+        completed_avet_sort: if chunk_complete { sort_key } else { None },
+        publication_delta: TreePublicationDelta::Incremental {
+            predecessor_manifest_hash: previous_manifest_hash,
+            added_nodes,
+            retired_nodes,
+        },
+    })
+}
+
+/// Build (or reuse) one session-local external sort of an immutable AEVT
+/// attribute range. Recovered 1.0.7705 spills bounded runs and merges no more
+/// than four at a time before `merge-one-index`; this keeps that algorithmic
+/// boundary with anonymous local work files containing checksummed native
+/// frames. Only the compact final ordinal is durable in the manifest.
+#[allow(clippy::too_many_arguments)]
+fn prepare_avet_projection_sort(
+    store: &mut PostgresTreeStore,
+    database_id: &str,
+    source: &crate::persistent_tree::TreeDescriptor,
+    attribute: u32,
+    config: &TreeConfig,
+    cache: &mut TreeNodeSet,
+) -> Result<(Digest, u32, u64), SemanticError> {
+    let work_key = avet_sort_work_key(database_id, source, attribute);
+    if let Some((level, count)) = store.avet_sort_ready(work_key)? {
+        return Ok((work_key, level, count));
+    }
+    store.reset_avet_sort(work_key)?;
+
+    let mut directory = 0_u32;
+    let mut leaf = 0_u32;
+    let mut slot = 0_u32;
+    let mut run_count = 0_u64;
+    let mut row_count = 0_u64;
+    loop {
+        let mut chunk = postgres_tree_attribute_chunk(
+            store,
+            source,
+            attribute,
+            directory,
+            leaf,
+            slot,
+            AVET_PROJECTION_CHUNK_DATOMS,
+            config.max_leaf_bytes as u64,
+            cache,
+        )?;
+        if chunk.datoms.iter().any(|datom| datom.attribute != attribute) {
+            return Err(fault(
+                "index/avet-sort-range",
+                "AEVT external-sort run escaped its attribute range",
+            ));
+        }
+        chunk
+            .datoms
+            .sort_by(|left, right| left.cmp_in(right, IndexOrder::Avet));
+        if chunk
+            .datoms
+            .windows(2)
+            .any(|pair| !pair[0].cmp_in(&pair[1], IndexOrder::Avet).is_lt())
+        {
+            return Err(fault(
+                "index/avet-sort-duplicate",
+                "AEVT projection is not a strict AVET set",
+            ));
+        }
+        let payloads = chunk
+            .datoms
+            .iter()
+            .map(crate::encoding::canonical_datom_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+        store.insert_avet_sort_rows(work_key, 0, run_count, 0, &payloads)?;
+        row_count = row_count
+            .checked_add(payloads.len() as u64)
+            .ok_or_else(|| fault("index/avet-sort-size", "AVET sort row count overflow"))?;
+        if !payloads.is_empty() {
+            run_count = run_count
+                .checked_add(1)
+                .ok_or_else(|| fault("index/avet-sort-size", "AVET sort run count overflow"))?;
+        }
+        if chunk.complete {
+            break;
+        }
+        directory = chunk.directory;
+        leaf = chunk.leaf;
+        slot = chunk.slot;
+        // Source traversal is intentionally not a whole-tree cache. The next
+        // fixed structural seek reloads at most one root/directory/leaf path.
+        *cache = TreeNodeSet::default();
+    }
+
+    let mut level = 0_u32;
+    while run_count > 1 {
+        let next_level = level
+            .checked_add(1)
+            .ok_or_else(|| fault("index/avet-sort-size", "AVET sort level overflow"))?;
+        let output_runs = run_count.div_ceil(AVET_SORT_FAN_IN);
+        for output_run in 0..output_runs {
+            let first_input = output_run
+                .checked_mul(AVET_SORT_FAN_IN)
+                .ok_or_else(|| fault("index/avet-sort-size", "AVET sort run overflow"))?;
+            let last_input = first_input
+                .saturating_add(AVET_SORT_FAN_IN)
+                .min(run_count);
+            merge_avet_sort_runs(
+                store,
+                work_key,
+                level,
+                first_input..last_input,
+                next_level,
+                output_run,
+                config.max_leaf_bytes as u64,
+            )?;
+        }
+        store.delete_avet_sort_level(work_key, level)?;
+        level = next_level;
+        run_count = output_runs;
+    }
+    store.finish_avet_sort(work_key, level, row_count)?;
+    Ok((work_key, level, row_count))
+}
+
+fn avet_sort_work_key(
+    database_id: &str,
+    source: &crate::persistent_tree::TreeDescriptor,
+    attribute: u32,
+) -> Digest {
+    let mut bytes = Vec::with_capacity(database_id.len() + 96);
+    // v2 binds offsets to tree-ordering v4 (logical value before T/op and
+    // only then a stored-representation tie-break). Never resume an ordinal
+    // generated by the earlier physical-value-first comparator.
+    bytes.extend_from_slice(b"atomic/avet-external-sort/v2\0");
+    bytes.extend_from_slice(&(database_id.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(database_id.as_bytes());
+    bytes.extend_from_slice(&source.root_hash);
+    bytes.extend_from_slice(&attribute.to_be_bytes());
+    bytes.push(u8::from(source.history));
+    bytes.push(match source.order {
+        IndexOrder::Eavt => 0,
+        IndexOrder::Aevt => 1,
+        IndexOrder::Avet => 2,
+        IndexOrder::Vaet => 3,
+    });
+    sha256(&bytes)
+}
+
+struct AvetSortReader {
+    run_id: u64,
+    next_ordinal: u64,
+    buffered: VecDeque<Datom>,
+    exhausted: bool,
+}
+
+impl AvetSortReader {
+    fn new(run_id: u64) -> Self {
+        Self {
+            run_id,
+            next_ordinal: 0,
+            buffered: VecDeque::new(),
+            exhausted: false,
+        }
+    }
+
+    fn refill(
+        &mut self,
+        store: &mut PostgresTreeStore,
+        work_key: Digest,
+        level: u32,
+        maximum_bytes: u64,
+    ) -> Result<(), SemanticError> {
+        if self.exhausted || !self.buffered.is_empty() {
+            return Ok(());
+        }
+        let rows = store.read_avet_sort_page(
+            work_key,
+            level,
+            self.run_id,
+            self.next_ordinal,
+            AVET_SORT_PAGE_DATOMS,
+            maximum_bytes,
+        )?;
+        if rows.is_empty() {
+            self.exhausted = true;
+            return Ok(());
+        }
+        for (ordinal, payload) in rows {
+            if ordinal != self.next_ordinal {
+                return Err(fault(
+                    "index/avet-sort-ordinal",
+                    "external AVET sort run has an ordinal gap",
+                ));
+            }
+            let mut decoded = crate::encoding::decode_canonical_datoms(&payload, 1)?;
+            let datom = decoded.pop().expect("one canonical datom was requested");
+            if crate::encoding::canonical_datom_bytes(&datom)? != payload {
+                return Err(fault(
+                    "index/avet-sort-canonical",
+                    "external AVET sort row is not canonical",
+                ));
+            }
+            self.buffered.push_back(datom);
+            self.next_ordinal = self
+                .next_ordinal
+                .checked_add(1)
+                .ok_or_else(|| fault("index/avet-sort-size", "AVET sort ordinal overflow"))?;
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_avet_sort_runs(
+    store: &mut PostgresTreeStore,
+    work_key: Digest,
+    input_level: u32,
+    input_runs: std::ops::Range<u64>,
+    output_level: u32,
+    output_run: u64,
+    maximum_bytes: u64,
+) -> Result<(), SemanticError> {
+    let mut readers = input_runs.map(AvetSortReader::new).collect::<Vec<_>>();
+    let mut output = Vec::<Vec<u8>>::new();
+    let mut output_bytes = 0_u64;
+    let mut output_ordinal = 0_u64;
+    let mut previous = None::<Datom>;
+    loop {
+        for reader in &mut readers {
+            reader.refill(store, work_key, input_level, maximum_bytes)?;
+        }
+        let selected = readers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, reader)| reader.buffered.front().map(|datom| (index, datom)))
+            .min_by(|(_, left), (_, right)| left.cmp_in(right, IndexOrder::Avet))
+            .map(|(index, _)| index);
+        let Some(selected) = selected else {
+            break;
+        };
+        let datom = readers[selected]
+            .buffered
+            .pop_front()
+            .expect("selected sort reader has a head");
+        if previous
+            .as_ref()
+            .is_some_and(|previous| !previous.cmp_in(&datom, IndexOrder::Avet).is_lt())
+        {
+            return Err(fault(
+                "index/avet-sort-order",
+                "external AVET merge did not produce a strict global order",
+            ));
+        }
+        let payload = crate::encoding::canonical_datom_bytes(&datom)?;
+        let payload_bytes = payload.len() as u64;
+        if !output.is_empty()
+            && (output.len() >= AVET_PROJECTION_CHUNK_DATOMS
+                || output_bytes.saturating_add(payload_bytes) > maximum_bytes)
+        {
+            store.insert_avet_sort_rows(
+                work_key,
+                output_level,
+                output_run,
+                output_ordinal,
+                &output,
+            )?;
+            output_ordinal = output_ordinal
+                .checked_add(output.len() as u64)
+                .ok_or_else(|| fault("index/avet-sort-size", "AVET sort ordinal overflow"))?;
+            output.clear();
+            output_bytes = 0;
+        }
+        output_bytes = output_bytes.saturating_add(payload_bytes);
+        output.push(payload);
+        previous = Some(datom);
+    }
+    if !output.is_empty() {
+        store.insert_avet_sort_rows(
+            work_key,
+            output_level,
+            output_run,
+            output_ordinal,
+            &output,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_avet_projection_output(
+    store: &mut PostgresTreeStore,
+    work_key: Digest,
+    final_level: u32,
+    first_ordinal: u64,
+    row_count: u64,
+    maximum_datoms: usize,
+    maximum_bytes: u64,
+) -> Result<Vec<Datom>, SemanticError> {
+    let mut output = Vec::new();
+    let mut output_bytes = 0_u64;
+    let mut next = first_ordinal;
+    while output.len() < maximum_datoms && next < row_count {
+        let rows = store.read_avet_sort_page(
+            work_key,
+            final_level,
+            0,
+            next,
+            AVET_SORT_PAGE_DATOMS.min(maximum_datoms - output.len()),
+            maximum_bytes.saturating_sub(output_bytes).max(1),
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        for (ordinal, payload) in rows {
+            if ordinal != next {
+                return Err(fault(
+                    "index/avet-sort-ordinal",
+                    "final external AVET sort has an ordinal gap",
+                ));
+            }
+            if !output.is_empty()
+                && output_bytes.saturating_add(payload.len() as u64) > maximum_bytes
+            {
+                return Ok(output);
+            }
+            let mut decoded = crate::encoding::decode_canonical_datoms(&payload, 1)?;
+            let datom = decoded.pop().expect("one canonical datom was requested");
+            if output
+                .last()
+                .is_some_and(|previous: &Datom| !previous.cmp_in(&datom, IndexOrder::Avet).is_lt())
+            {
+                return Err(fault(
+                    "index/avet-sort-order",
+                    "final external AVET sort page is not strictly ordered",
+                ));
+            }
+            output_bytes = output_bytes.saturating_add(payload.len() as u64);
+            output.push(datom);
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| fault("index/avet-sort-size", "AVET sort ordinal overflow"))?;
+        }
+    }
+    Ok(output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2127,7 +2824,6 @@ fn current_edits(
 fn history_edits(
     order: IndexOrder,
     recent: &RecentTier,
-    durable_history_for_pairs: &[Datom],
     changed_avet: &[(u32, bool, bool)],
     avet_backfills: &BTreeMap<u32, (Vec<Datom>, Vec<Datom>)>,
     avet_drops: &BTreeMap<u32, (Vec<Datom>, Vec<Datom>)>,
@@ -2139,13 +2835,6 @@ fn history_edits(
                 .any(|(candidate, _, _)| *candidate == attribute)
     };
     let projection = recent.projection();
-    let mut durable = Vec::new();
-    for datom in durable_history_for_pairs {
-        if schema_index_member(projection.schema(), datom, order)? {
-            durable.push(datom.clone());
-        }
-    }
-    durable.sort_by(|left, right| left.cmp_in(right, order));
     let mut edits = TreeMergeEdits {
         insertions: recent
             .datoms(order)
@@ -2153,10 +2842,15 @@ fn history_edits(
             .filter(|datom| !changed(datom.attribute))
             .cloned()
             .collect(),
-        no_history_pairs: recent
-            .no_history_pairs(order, &durable)?
-            .into_iter()
-            .filter(|pair| !changed(pair.retraction.attribute))
+        // Recovered `filter-nohist-pairs` runs after old and new segment data
+        // are merged. Let `merge_tree` inspect every complete selected leaf
+        // stream so incidental older durable pairs in rewritten segments are
+        // eligible too; untouched leaves remain opaque and unchanged.
+        no_history_attributes: projection
+            .schema()
+            .attributes()
+            .filter(|attribute| attribute.no_history && !changed(attribute.id))
+            .map(|attribute| attribute.id)
             .collect(),
         ..TreeMergeEdits::default()
     };
@@ -2395,33 +3089,41 @@ fn postgres_tree_seek(
     Ok(None)
 }
 
-fn postgres_tree_range(
+/// Find one exact stored E/A/V inside a recovered logical-comparator group.
+/// BigDecimal scale is deliberately ordered only after T/op, so an exact
+/// representation is not necessarily the group's first physical datom.
+fn postgres_tree_exact_stored_eav(
     store: &mut PostgresTreeStore,
     descriptor: &crate::persistent_tree::TreeDescriptor,
-    start: Option<&Datom>,
-    end: Option<&Datom>,
+    exemplar: &Datom,
     cache: &mut TreeNodeSet,
-) -> Result<Vec<Datom>, SemanticError> {
-    if let (Some(start), Some(end)) = (start, end)
-        && !start.cmp_in(end, descriptor.order).is_lt()
-    {
-        return Err(SemanticError::incorrect(
-            "index/invalid-tree-range",
-            "tree range start must be below its exclusive end",
-        ));
+) -> Result<Option<Datom>, SemanticError> {
+    let lower = eav_bound(exemplar, true);
+    let mut candidate = postgres_tree_seek(store, descriptor, &lower, cache)?;
+    while let Some(datom) = candidate {
+        if !same_logical_eav(&datom, exemplar) {
+            return Ok(None);
+        }
+        if same_eav(&datom, exemplar) {
+            return Ok(Some(datom));
+        }
+        candidate = postgres_tree_successor(store, descriptor, &datom, cache)?;
     }
+    Ok(None)
+}
+
+fn postgres_tree_successor(
+    store: &mut PostgresTreeStore,
+    descriptor: &crate::persistent_tree::TreeDescriptor,
+    key: &Datom,
+    cache: &mut TreeNodeSet,
+) -> Result<Option<Datom>, SemanticError> {
     let root = load_old_root(store, descriptor, cache)?;
     if root.directories.is_empty() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    let first_directory = start.map_or(0, |key| {
-        floor_tree_child(&root.directories, key, descriptor.order)
-    });
-    let mut output = Vec::new();
+    let first_directory = floor_tree_child(&root.directories, key, descriptor.order);
     for (directory_index, reference) in root.directories.iter().enumerate().skip(first_directory) {
-        if end.is_some_and(|end| !reference.key.cmp_datom(end, descriptor.order).is_lt()) {
-            break;
-        }
         let directory = load_old_directory(
             store,
             cache,
@@ -2430,30 +3132,221 @@ fn postgres_tree_range(
             descriptor.history,
         )?;
         let first_leaf = if directory_index == first_directory {
-            start.map_or(0, |key| {
-                floor_tree_child(&directory.leaves, key, descriptor.order)
-            })
+            floor_tree_child(&directory.leaves, key, descriptor.order)
         } else {
             0
         };
-        for leaf_ref in directory.leaves.iter().skip(first_leaf) {
-            if end.is_some_and(|end| !leaf_ref.key.cmp_datom(end, descriptor.order).is_lt()) {
-                break;
-            }
+        for (leaf_index, leaf_ref) in directory.leaves.iter().enumerate().skip(first_leaf) {
             let leaf = load_old_leaf(store, cache, leaf_ref, descriptor.order, descriptor.history)?;
-            for index in 0..leaf.len() {
-                let datom = leaf.datom(index).expect("validated leaf columns");
-                if start.is_some_and(|start| datom.cmp_in(start, descriptor.order).is_lt()) {
-                    continue;
+            let mut index = if directory_index == first_directory && leaf_index == first_leaf {
+                leaf_lower_bound(&leaf, key, descriptor.order)
+            } else {
+                0
+            };
+            while let Some(datom) = leaf.datom(index) {
+                if datom.cmp_in(key, descriptor.order).is_gt() {
+                    return Ok(Some(datom));
                 }
-                if end.is_some_and(|end| !datom.cmp_in(end, descriptor.order).is_lt()) {
-                    return Ok(output);
-                }
-                output.push(datom);
+                index += 1;
             }
         }
     }
-    Ok(output)
+    Ok(None)
+}
+
+struct TreeStructuralChunk {
+    datoms: Vec<Datom>,
+    directory: u32,
+    leaf: u32,
+    slot: u32,
+    complete: bool,
+}
+
+/// Read at most one fixed working chunk from an attribute range. For a new
+/// cursor the tree seek establishes absolute root/directory/leaf ordinals;
+/// later calls resume those ordinals without copying a possibly huge value
+/// into manifest metadata. The source root must remain immutable for the
+/// lifetime of the cursor (the AVET-add state machine uses AEVT).
+#[allow(clippy::too_many_arguments)]
+fn postgres_tree_attribute_chunk(
+    store: &mut PostgresTreeStore,
+    descriptor: &crate::persistent_tree::TreeDescriptor,
+    attribute: u32,
+    resume_directory: u32,
+    resume_leaf: u32,
+    resume_slot: u32,
+    maximum_datoms: usize,
+    maximum_bytes: u64,
+    cache: &mut TreeNodeSet,
+) -> Result<TreeStructuralChunk, SemanticError> {
+    if !matches!(descriptor.order, IndexOrder::Aevt | IndexOrder::Avet) {
+        return Err(SemanticError::incorrect(
+            "index/invalid-avet-projection-source",
+            "AVET projection chunks require an AEVT or AVET source",
+        ));
+    }
+    if maximum_datoms == 0 || maximum_bytes == 0 {
+        return Err(SemanticError::incorrect(
+            "index/invalid-avet-projection-limit",
+            "AVET projection chunk limits must be positive",
+        ));
+    }
+    let (start, end) = attribute_bounds(attribute)?;
+    let root = load_old_root(store, descriptor, cache)?;
+    if root.directories.is_empty() {
+        return Ok(TreeStructuralChunk {
+            datoms: Vec::new(),
+            directory: 0,
+            leaf: 0,
+            slot: 0,
+            complete: true,
+        });
+    }
+
+    let fresh = resume_directory == 0 && resume_leaf == 0 && resume_slot == 0;
+    let mut directory_index = if fresh {
+        floor_tree_child(&root.directories, &start, descriptor.order)
+    } else {
+        usize::try_from(resume_directory).map_err(|_| {
+            fault(
+                "index/avet-projection-cursor",
+                "AVET projection directory cursor exceeds usize",
+            )
+        })?
+    };
+    if directory_index >= root.directories.len() {
+        return Err(fault(
+            "index/avet-projection-cursor",
+            "AVET projection directory cursor is outside its immutable source root",
+        ));
+    }
+    let mut output = Vec::new();
+    let mut retained_bytes = 0_u64;
+    while directory_index < root.directories.len() {
+        let reference = &root.directories[directory_index];
+        if !reference.key.cmp_datom(&end, descriptor.order).is_lt() {
+            return Ok(TreeStructuralChunk {
+                datoms: output,
+                directory: 0,
+                leaf: 0,
+                slot: 0,
+                complete: true,
+            });
+        }
+        let directory = load_old_directory(
+            store,
+            cache,
+            reference,
+            descriptor.order,
+            descriptor.history,
+        )?;
+        let mut leaf_index = if fresh && directory_index == floor_tree_child(&root.directories, &start, descriptor.order) {
+            floor_tree_child(&directory.leaves, &start, descriptor.order)
+        } else {
+            usize::try_from(resume_leaf).map_err(|_| {
+                fault(
+                    "index/avet-projection-cursor",
+                    "AVET projection leaf cursor exceeds usize",
+                )
+            })?
+        };
+        if !fresh && directory_index != usize::try_from(resume_directory).unwrap_or(usize::MAX) {
+            leaf_index = 0;
+        }
+        while leaf_index < directory.leaves.len() {
+            let leaf_ref = &directory.leaves[leaf_index];
+            if !leaf_ref.key.cmp_datom(&end, descriptor.order).is_lt() {
+                return Ok(TreeStructuralChunk {
+                    datoms: output,
+                    directory: 0,
+                    leaf: 0,
+                    slot: 0,
+                    complete: true,
+                });
+            }
+            let leaf = load_old_leaf(store, cache, leaf_ref, descriptor.order, descriptor.history)?;
+            let mut slot = if fresh
+                && directory_index == floor_tree_child(&root.directories, &start, descriptor.order)
+                && leaf_index == floor_tree_child(&directory.leaves, &start, descriptor.order)
+            {
+                leaf_lower_bound(&leaf, &start, descriptor.order)
+            } else if !fresh
+                && directory_index == usize::try_from(resume_directory).unwrap_or(usize::MAX)
+                && leaf_index == usize::try_from(resume_leaf).unwrap_or(usize::MAX)
+            {
+                usize::try_from(resume_slot).map_err(|_| {
+                    fault(
+                        "index/avet-projection-cursor",
+                        "AVET projection slot cursor exceeds usize",
+                    )
+                })?
+            } else {
+                0
+            };
+            if slot > leaf.len() {
+                return Err(fault(
+                    "index/avet-projection-cursor",
+                    "AVET projection slot cursor is outside its immutable source leaf",
+                ));
+            }
+            while slot < leaf.len() {
+                let datom = leaf.datom(slot).expect("validated leaf columns");
+                if datom.cmp_in(&start, descriptor.order).is_lt() {
+                    slot += 1;
+                    continue;
+                }
+                if !datom.cmp_in(&end, descriptor.order).is_lt() {
+                    return Ok(TreeStructuralChunk {
+                        datoms: output,
+                        directory: 0,
+                        leaf: 0,
+                        slot: 0,
+                        complete: true,
+                    });
+                }
+                let datom_bytes = datom.retained_bytes();
+                if !output.is_empty()
+                    && (output.len() >= maximum_datoms
+                        || retained_bytes.saturating_add(datom_bytes) > maximum_bytes)
+                {
+                    return Ok(TreeStructuralChunk {
+                        datoms: output,
+                        directory: u32::try_from(directory_index).map_err(|_| {
+                            fault(
+                                "index/avet-projection-cursor",
+                                "AVET projection directory cursor exceeds u32",
+                            )
+                        })?,
+                        leaf: u32::try_from(leaf_index).map_err(|_| {
+                            fault(
+                                "index/avet-projection-cursor",
+                                "AVET projection leaf cursor exceeds u32",
+                            )
+                        })?,
+                        slot: u32::try_from(slot).map_err(|_| {
+                            fault(
+                                "index/avet-projection-cursor",
+                                "AVET projection slot cursor exceeds u32",
+                            )
+                        })?,
+                        complete: false,
+                    });
+                }
+                retained_bytes = retained_bytes.saturating_add(datom_bytes);
+                output.push(datom);
+                slot += 1;
+            }
+            leaf_index += 1;
+        }
+        directory_index += 1;
+    }
+    Ok(TreeStructuralChunk {
+        datoms: output,
+        directory: 0,
+        leaf: 0,
+        slot: 0,
+        complete: true,
+    })
 }
 
 /// Read one exact prefix through authenticated child references. This is the
@@ -3348,7 +4241,7 @@ impl Peer {
             }
             let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
                 &base_metadata,
-                &BTreeSet::new(),
+                &manifest_avet_unready(&base.manifest),
                 &tail.transactions,
                 |attribute| {
                     tree_base_has_attribute_history(
@@ -3871,7 +4764,7 @@ impl Peer {
             } = &mut *io;
             apply_metadata_and_avet_readiness(
                 &base_metadata,
-                &BTreeSet::new(),
+                &manifest_avet_unready(&tree_base.manifest),
                 &tail.transactions,
                 |attribute| {
                     tree_base_has_attribute_history(
@@ -4072,7 +4965,7 @@ impl Peer {
                 } = &mut *io;
                 apply_metadata_and_avet_readiness(
                     &base_metadata,
-                    &BTreeSet::new(),
+                    &manifest_avet_unready(&base.manifest),
                     &tail.transactions,
                     |attribute| {
                         tree_base_has_attribute_history(
@@ -4435,6 +5328,13 @@ impl PeerIndexCursor {
             };
             let recent = &self.durable.snapshot.state.recent;
             if !recent.includes(self.order, &datom)?
+                || (self.order == IndexOrder::Avet
+                    && self
+                        .durable
+                        .snapshot
+                        .state
+                        .avet_unready
+                        .contains(&datom.attribute))
                 || (!self.history && recent.touches_current(&datom))
             {
                 continue;
@@ -4446,8 +5346,21 @@ impl PeerIndexCursor {
 
     fn next_result(&mut self) -> Result<Option<Datom>, SemanticError> {
         self.fill_durable()?;
-        if self.recent_next.is_none() {
-            self.recent_next = self.recent.next();
+        while self.recent_next.is_none() {
+            let Some(datom) = self.recent.next() else {
+                break;
+            };
+            if self.order == IndexOrder::Avet
+                && self
+                    .durable
+                    .snapshot
+                    .state
+                    .avet_unready
+                    .contains(&datom.attribute)
+            {
+                continue;
+            }
+            self.recent_next = Some(datom);
         }
         let take_durable = match (&self.durable_next, &self.recent_next) {
             (Some(durable), Some(recent)) => !recent.cmp_in(durable, self.order).is_lt(),
@@ -5056,6 +5969,7 @@ impl TieredSnapshot {
         order: IndexOrder,
         key: &Datom,
     ) -> Result<TreeSeekResult, SemanticError> {
+        self.ensure_avet_ready(order, (order == IndexOrder::Avet).then_some(key.attribute))?;
         let mut cursor = self.range_cursor(history, order, Some(key), None)?;
         let datom = cursor.next().transpose()?;
         Ok(TreeSeekResult {
@@ -5208,24 +6122,30 @@ impl TieredSnapshot {
         order: IndexOrder,
         attribute: Option<u32>,
     ) -> Result<(), SemanticError> {
-        if order != IndexOrder::Avet || self.state.avet_unready.is_empty() {
+        if order != IndexOrder::Avet {
             return Ok(());
         }
-        if attribute.is_some_and(|attribute| !self.state.avet_unready.contains(&attribute)) {
+        let Some(attribute) = attribute else {
+            // An unqualified AVET cursor remains useful while one attribute
+            // is backfilled: PeerIndexCursor excludes precisely those
+            // physically-unready attributes from both durable and recent
+            // input streams.
+            return Ok(());
+        };
+        if !effective_avet(&self.state.metadata.schema, attribute) {
+            return Err(SemanticError::incorrect(
+                "peer/avet-attribute-not-indexed",
+                format!("attribute {attribute} does not have AVET storage at this database value"),
+            ));
+        }
+        if !self.state.avet_unready.contains(&attribute) {
             return Ok(());
         }
-        let attributes = self
-            .state
-            .avet_unready
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
         Err(SemanticError::new(
             ErrorCategory::Unavailable,
             "peer/avet-not-ready",
             format!(
-                "AVET backfill is not yet published for attribute(s) {attributes}; consolidate and refresh the native index"
+                "AVET backfill is not yet published for attribute {attribute}; consolidate and refresh the native index"
             ),
         ))
     }
@@ -6798,7 +7718,7 @@ fn build_exact_tiered_state<C: GenericClient>(
     let tail_transactions = tail.transactions.len() as u64;
     let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
         &base_metadata,
-        &BTreeSet::new(),
+        &manifest_avet_unready(&base.manifest),
         &tail.transactions,
         |attribute| tree_base_has_attribute_history(client, &base, attribute, counters, tree_cache),
     )?;
@@ -7795,6 +8715,7 @@ mod tests {
                 excision_generation: endpoint.generation,
                 eidx_frontier: endpoint.eidx_frontier,
                 trees: build.trees.clone(),
+                pending_avet: Vec::new(),
             };
             let payload = manifest.encode().unwrap();
             let manifest_hash = sha256(&payload);
@@ -7965,6 +8886,7 @@ mod tests {
             excision_generation: endpoint.generation,
             eidx_frontier: endpoint.eidx_frontier,
             trees: build.trees,
+            pending_avet: Vec::new(),
         };
         let payload = manifest.encode().unwrap();
         let new_manifest_hash = sha256(&payload);
