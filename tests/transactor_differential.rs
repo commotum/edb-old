@@ -458,6 +458,22 @@ fn generated_production_transactions_match_the_pure_kernel() {
         .map(|ordinal| seeded.tempids[&format!("person-{ordinal}")])
         .collect();
 
+    // Keep schema/data interaction inside the generated production run, not
+    // only in isolated assessor units. This one localized transition covers
+    // rename/alias derivation, AVET enablement over extant values, no-history
+    // metadata, background publication, and exact report equivalence.
+    let mut altered_tag = oracle.schema().attribute(PERSON_TAG).unwrap().clone();
+    altered_tag.ident = Keyword::new("person", "label");
+    altered_tag.indexed = true;
+    altered_tag.no_history = true;
+    assert!(generated_step_both(
+        &service,
+        &mut oracle,
+        "generated-schema-transition".into(),
+        vec![TxOp::AlterAttribute(altered_tag)],
+        20_001,
+    ));
+
     let mut random = Deterministic(0x4d59_5df4_d0f3_3173);
     let mut coverage = [0_usize; 12];
     let mut successes = 0_usize;
@@ -615,7 +631,7 @@ fn generated_production_transactions_match_the_pure_kernel() {
             &mut oracle,
             format!("generated-step-{step}"),
             operations,
-            20_001 + step as i64,
+            20_002 + step as i64,
         );
         let expected_rejection = matches!(family, 6 | 9 | 10);
         assert_eq!(
