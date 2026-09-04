@@ -1284,7 +1284,14 @@ fn build_incremental_native(
             .get_mut(&key)
             .expect("tail E/A/V was collected above");
         if datom.added {
-            if change.current.is_none() {
+            // Datomic's transaction reducer makes one deliberate exception to
+            // ordinary redundant-assertion elimination: :db.alter/attribute
+            // is a transaction event even when the same E/A/V hook is already
+            // current (`filter-assess-tx-datoms`/Db.with in 1.0.7705). The
+            // eager kernel and durable replay therefore move the current hook
+            // to the newest tx. Preserve that exact replacement here while
+            // leaving every ordinary same-E/A/V assertion as a no-op.
+            if change.current.is_none() || u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
                 change.current = Some(datom.clone());
             }
         } else {

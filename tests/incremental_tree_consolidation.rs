@@ -1,10 +1,10 @@
 use atomic_core::{
-    Attribute, Cardinality, EntityRef, IndexBuildFault, IndexOrder, Keyword, Peer,
-    PersistentTreeManifest, PostgresIndexer, PostgresStore, Schema, TxOp, TxValue, Value,
-    ValueType, View,
+    Attribute, Cardinality, DB_ALTER_ATTRIBUTE, EntityRef, IndexBuildFault, IndexOrder, Keyword,
+    Peer, PersistentTreeManifest, PostgresIndexer, PostgresStore, Schema, TxOp, TxValue, Value,
+    ValueType, View, t_to_tx,
 };
 use postgres::{Client, NoTls};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod common;
 use common::InformationSource;
@@ -24,6 +24,43 @@ fn unique(prefix: &str) -> String {
             .unwrap()
             .as_nanos()
     )
+}
+
+fn await_background_publication(
+    service: &atomic_core::TransactionService,
+    basis_t: u64,
+) -> atomic_core::BackgroundIndexingStats {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let stats = service.background_indexing_stats();
+        if stats.published_basis_t >= basis_t {
+            return stats;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "schema-triggered physical publication did not complete"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn latest_avet_counts(connection: &str, database_id: &str) -> (i64, i64) {
+    let mut client = Client::connect(connection, NoTls).unwrap();
+    let row = client
+        .query_one(
+            "SELECT COALESCE(sum(root.datom_count) FILTER (WHERE NOT root.history), 0)::bigint, \
+                    COALESCE(sum(root.datom_count) FILTER (WHERE root.history), 0)::bigint \
+               FROM atomic_tree_manifest_roots root \
+              WHERE root.index_order = 2 \
+                AND root.manifest_hash = ( \
+                    SELECT publication.manifest_hash \
+                      FROM atomic_tree_publications publication \
+                     WHERE publication.database_id = $1 \
+                     ORDER BY publication.publication_revision DESC LIMIT 1)",
+            &[&database_id],
+        )
+        .unwrap();
+    (row.get(0), row.get(1))
 }
 
 fn schema(no_history: bool, indexed: bool) -> Schema {
@@ -72,7 +109,11 @@ fn assert_snapshot_matches(
             assert_eq!(
                 snapshot.datoms(history, order).unwrap().datoms,
                 expected.test_datoms(
-                    if history { View::History } else { View::Current },
+                    if history {
+                        View::History
+                    } else {
+                        View::Current
+                    },
                     order,
                 ),
                 "tree/oracle mismatch for {order:?} history={history}"
@@ -313,6 +354,7 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         .with_segment_datoms(8)
         .unwrap();
     indexer.consolidate().unwrap();
+    let baseline_physical_avet = latest_avet_counts(&connection, &database_id);
 
     let mut indexed = populated
         .db_after
@@ -329,23 +371,44 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         &[TxOp::AlterAttribute(indexed)],
         2_000,
     );
+    let enabled_hook = enabled
+        .tx_data
+        .iter()
+        .find(|datom| {
+            datom.entity == 0
+                && u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE
+                && datom.value == Value::Ref(u64::from(ITEM_COUNT))
+                && datom.added
+        })
+        .expect("enable transaction omitted its alter-attribute event");
+    assert_eq!(enabled_hook.tx, t_to_tx(enabled.basis_t).unwrap());
+    let enabled_stats = await_background_publication(&service, enabled.basis_t);
+    assert!(enabled_stats.jobs_completed > 0);
     service.shutdown();
     let enabled_build = indexer.consolidate().unwrap();
-    assert!(enabled_build.tail_datoms < 10);
+    assert!(enabled_build.reused);
+    assert!(enabled.tx_data.len() < 10);
+    let enabled_physical_avet = latest_avet_counts(&connection, &database_id);
+    assert!(enabled_physical_avet.0 - baseline_physical_avet.0 >= 256);
+    assert!(enabled_physical_avet.1 - baseline_physical_avet.1 >= 256);
     assert!(
-        enabled_build.segment_count > 10,
-        "AVET backfill was not visible in work counters"
+        enabled_physical_avet.0 + enabled_physical_avet.1 > enabled.tx_data.len() as i64,
+        "physical AVET roots did not expose the historical attribute-range backfill"
     );
-    assert_snapshot_matches(
-        &Peer::connect(&connection, &database_id, 64)
-            .unwrap()
-            .snapshot(),
-        &enabled.db_after,
-    );
-    let enabled_avet = enabled
-        .db_after
-        .datoms(IndexOrder::Avet)
+    let refreshed = Peer::connect(&connection, &database_id, 64)
         .unwrap()
+        .snapshot();
+    assert_eq!(refreshed.basis_t(), enabled.db_after.basis_t());
+    assert_eq!(refreshed.schema(), enabled.db_after.schema());
+    assert_eq!(
+        enabled.db_after.datoms(IndexOrder::Avet).unwrap_err().code,
+        "peer/avet-not-ready",
+        "the immutable db-after must not retroactively gain a physical AVET"
+    );
+    let enabled_avet = refreshed
+        .datoms(false, IndexOrder::Avet)
+        .unwrap()
+        .datoms
         .into_iter()
         .filter(|datom| datom.attribute == ITEM_COUNT)
         .count();
@@ -366,17 +429,63 @@ fn avet_schema_transition_is_an_explicit_attribute_range_job() {
         &[TxOp::AlterAttribute(unindexed)],
         3_000,
     );
+    let disabled_hook = disabled
+        .tx_data
+        .iter()
+        .find(|datom| {
+            datom.entity == 0
+                && u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE
+                && datom.value == Value::Ref(u64::from(ITEM_COUNT))
+                && datom.added
+        })
+        .expect("disable transaction omitted its repeated alter-attribute event");
+    assert_eq!(disabled_hook.tx, t_to_tx(disabled.basis_t).unwrap());
+    let disabled_stats = await_background_publication(&service, disabled.basis_t);
+    assert!(disabled_stats.jobs_completed > 0);
     service.shutdown();
     let disabled_build = indexer.consolidate().unwrap();
-    assert!(
-        disabled_build.node_reads > 10,
-        "AVET drop did not read its attribute range"
-    );
-    assert_snapshot_matches(
-        &Peer::connect(&connection, &database_id, 64)
-            .unwrap()
-            .snapshot(),
-        &disabled.db_after,
+    assert!(disabled_build.reused);
+    assert!(disabled.tx_data.len() < 10);
+    let disabled_physical_avet = latest_avet_counts(&connection, &database_id);
+    let schema_tail_noise = disabled.tx_data.len() as i64;
+    assert!(enabled_physical_avet.0 - disabled_physical_avet.0 >= 256 - schema_tail_noise);
+    assert!(enabled_physical_avet.1 - disabled_physical_avet.1 >= 256 - schema_tail_noise);
+    let final_snapshot = Peer::connect(&connection, &database_id, 64)
+        .unwrap()
+        .snapshot();
+    assert_snapshot_matches(&final_snapshot, &disabled.db_after);
+    let current_hook = final_snapshot
+        .datoms(false, IndexOrder::Eavt)
+        .unwrap()
+        .datoms
+        .into_iter()
+        .find(|datom| {
+            datom.entity == 0
+                && u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE
+                && datom.value == Value::Ref(u64::from(ITEM_COUNT))
+                && datom.added
+        })
+        .expect("published current tree omitted the alter-attribute event");
+    assert_eq!(current_hook.tx, t_to_tx(disabled.basis_t).unwrap());
+    let hook_history = final_snapshot
+        .datoms(true, IndexOrder::Eavt)
+        .unwrap()
+        .datoms
+        .into_iter()
+        .filter(|datom| {
+            datom.entity == 0
+                && u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE
+                && datom.value == Value::Ref(u64::from(ITEM_COUNT))
+                && datom.added
+        })
+        .map(|datom| datom.tx)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hook_history,
+        vec![
+            t_to_tx(disabled.basis_t).unwrap(),
+            t_to_tx(enabled.basis_t).unwrap(),
+        ]
     );
     assert_eq!(
         disabled
