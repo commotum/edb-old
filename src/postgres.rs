@@ -2910,7 +2910,6 @@ impl PostgresStore {
     /// transaction named by the request record, including its exact
     /// `db-before`; it is therefore safe to use after an acknowledgement
     /// timeout without guessing the server-selected basis or transaction time.
-    #[cfg(test)]
     pub(crate) fn resolve_request_outcome(
         &mut self,
         database_id: &str,
@@ -2929,18 +2928,21 @@ impl PostgresStore {
                 "exact request reconstruction requires a configured PostgreSQL connection",
             )
         })?;
+        let cached = self.current.get(database_id).cloned();
+        let shared_snapshot = cached.as_ref().map(|state| state.database.clone());
         let mut transaction = self
             .client
-            .build_transaction()
-            .isolation_level(postgres::IsolationLevel::RepeatableRead)
-            .read_only(true)
-            .start()
+            .transaction()
             .map_err(|error| postgres_error("postgres/request-outcome-begin", error))?;
+        // The authoritative writer holds FOR UPDATE on this row through both
+        // request binding and head publication. Waiting on the same row makes
+        // an absent outcome definitive with respect to the ambiguous attempt,
+        // rather than observing a snapshot taken while its commit is in flight.
         let head = transaction
             .query_opt(
-                "SELECT h.log_generation, d.lineage_id \
+                "SELECT h.basis_t, h.tx_hash, h.log_generation, d.lineage_id \
                    FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
-                  WHERE h.database_id = $1",
+                  WHERE h.database_id = $1 FOR SHARE OF h",
                 &[&database_id],
             )
             .map_err(|error| postgres_error("postgres/request-outcome-database", error))?;
@@ -2950,9 +2952,29 @@ impl PostgresStore {
                 .map_err(|error| postgres_error("postgres/request-outcome-commit", error))?;
             return Err(not_found(database_id));
         };
-        let generation = pg_basis(head.get(0), "head log generation")?;
-        let lineage_id: String = head.get(1);
+        let head_basis = pg_basis(head.get(0), "head basis")?;
+        let head_hash = digest(head.get::<_, Vec<u8>>(1), "head transaction hash")?;
+        let generation = pg_basis(head.get(2), "head log generation")?;
+        let lineage_id: String = head.get(3);
         let generation_sql = sql_basis(generation)?;
+        let head_commitment = load_persistent_coordinate(
+            &mut transaction,
+            database_id,
+            generation,
+            head_basis,
+        )?
+        .ok_or_else(|| {
+            fault(
+                "postgres/request-outcome-head-root-missing",
+                "head has no exact v2 semantic commitment coordinate",
+            )
+        })?;
+        if head_commitment.tx_hash != head_hash {
+            return Err(fault(
+                "postgres/request-outcome-head-coordinate",
+                "head transaction hash disagrees with its semantic commitment",
+            ));
+        }
         let key_hash = request_key_hash(&lineage_id, request_key)?;
         let row = if generation == 0 {
             transaction.query_opt(
@@ -2982,7 +3004,7 @@ impl PostgresStore {
         }
         let basis = pg_basis(row.get::<_, i64>(0), "request outcome")?;
         let hash = digest(row.get::<_, Vec<u8>>(1), "request transaction hash")?;
-        let (receipt, _) = reconstruct_exact_request_receipt(
+        let (receipt, replay_state) = reconstruct_exact_request_receipt(
             &mut transaction,
             &connection,
             database_id,
@@ -2994,10 +3016,23 @@ impl PostgresStore {
             self.capacity_limits.writer_tree_cache_entries,
             self.capacity_limits.writer_tree_cache_bytes,
             self.writer_recent_limits,
+            shared_snapshot.as_ref(),
         )?;
+        let live_head_state = if basis == head_basis && hash == head_hash {
+            Some(select_freshest_head_writer_state(
+                cached,
+                replay_state,
+                &head_commitment,
+            )?)
+        } else {
+            None
+        };
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/request-outcome-commit", error))?;
+        if let Some(live_head_state) = live_head_state {
+            self.current.insert(database_id.to_owned(), live_head_state);
+        }
         Ok(Some(receipt))
     }
 
@@ -3066,6 +3101,59 @@ impl PostgresStore {
         tx_instant_override: Option<i64>,
         request_hash: Digest,
     ) -> Result<CommitReceipt, SemanticError> {
+        self.transact_authoritative_fenced_at(
+            lease,
+            database_id,
+            request_key,
+            compare_basis_t,
+            forms,
+            tx_instant_override,
+            request_hash,
+            CommitFault::None,
+        )
+    }
+
+    /// Exercise the real fenced/form-expanding authority path at a
+    /// deterministic publication boundary. This is deliberately test-only:
+    /// production callers may observe an unknown outcome but cannot request
+    /// one.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn transact_authoritative_fenced_with_fault(
+        &mut self,
+        lease: &TransactorLease,
+        database_id: &str,
+        request_key: &str,
+        compare_basis_t: Option<u64>,
+        forms: &[TxForm],
+        tx_instant_override: Option<i64>,
+        request_hash: Digest,
+        fault_point: CommitFault,
+    ) -> Result<CommitReceipt, SemanticError> {
+        self.transact_authoritative_fenced_at(
+            lease,
+            database_id,
+            request_key,
+            compare_basis_t,
+            forms,
+            tx_instant_override,
+            request_hash,
+            fault_point,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transact_authoritative_fenced_at(
+        &mut self,
+        lease: &TransactorLease,
+        database_id: &str,
+        request_key: &str,
+        compare_basis_t: Option<u64>,
+        forms: &[TxForm],
+        tx_instant_override: Option<i64>,
+        request_hash: Digest,
+        fault_point: CommitFault,
+    ) -> Result<CommitReceipt, SemanticError> {
         let max_primitive_ops = self.capacity_limits.max_transaction_ops;
         self.transact_generated(
             database_id,
@@ -3073,7 +3161,7 @@ impl PostgresStore {
             compare_basis_t,
             tx_instant_override,
             request_hash,
-            CommitFault::None,
+            fault_point,
             Some(lease),
             None,
             |transaction, db_before, shared_budget, program_cache| {
@@ -3253,16 +3341,35 @@ impl PostgresStore {
                 self.capacity_limits.writer_tree_cache_entries,
                 self.capacity_limits.writer_tree_cache_bytes,
                 self.writer_recent_limits,
+                cached.as_ref().map(|state| &state.database),
             )?;
+            let live_head_state = if basis == head_basis && hash == head_hash {
+                Some(select_freshest_head_writer_state(
+                    cached,
+                    replay_state,
+                    &head_commitment,
+                )?)
+            } else {
+                None
+            };
             if transaction.commit().is_err() {
                 self.current.remove(database_id);
                 return Err(unknown_outcome(
                     idem_key_hash,
+                    "outcome-read",
                     "PostgreSQL did not acknowledge the idempotent outcome read",
                 ));
             }
-            if basis == head_basis && hash == head_hash {
-                self.current.insert(database_id.to_owned(), replay_state);
+            if fault_point == CommitFault::AfterCommitBeforeResponse {
+                self.current.remove(database_id);
+                return Err(unknown_outcome(
+                    idem_key_hash,
+                    "outcome-read",
+                    "injected acknowledgment loss after idempotent outcome read",
+                ));
+            }
+            if let Some(live_head_state) = live_head_state {
+                self.current.insert(database_id.to_owned(), live_head_state);
             }
             return Ok(receipt);
         }
@@ -3296,6 +3403,7 @@ impl PostgresStore {
             ));
         }
 
+        let shared_snapshot = cached.as_ref().map(|state| state.database.clone());
         let writer_before = match cached {
             Some(state)
                 if state.commitment == head_commitment
@@ -3311,6 +3419,7 @@ impl PostgresStore {
                 self.capacity_limits.writer_tree_cache_entries,
                 self.capacity_limits.writer_tree_cache_bytes,
                 self.writer_recent_limits,
+                shared_snapshot.as_ref(),
             )?,
         };
         let db_before_snapshot = writer_before.database.clone();
@@ -3645,6 +3754,7 @@ impl PostgresStore {
             self.current.remove(database_id);
             return Err(unknown_outcome(
                 idem_key_hash,
+                "publication",
                 "PostgreSQL did not acknowledge the transaction commit",
             ));
         }
@@ -3652,6 +3762,7 @@ impl PostgresStore {
             self.current.remove(database_id);
             return Err(unknown_outcome(
                 idem_key_hash,
+                "publication",
                 "injected acknowledgment loss after PostgreSQL commit",
             ));
         }
@@ -4116,6 +4227,30 @@ fn exact_endpoint(coordinate: &PersistentCommitmentCoordinate) -> ExactEndpoint 
     }
 }
 
+/// Keep exact replay receipts independent from the live writer's physical
+/// representation. A request-base binding may reconstruct the same logical
+/// head from an older tree publication; installing that value would lengthen
+/// the live recent tier and retain history that a covering publication already
+/// made unnecessary. Publication revision numbers are local to their normal or
+/// archived manifest namespace, so they are deliberately not compared here:
+/// an already-installed exact-head value is the authoritative live choice.
+fn select_freshest_head_writer_state(
+    cached: Option<WriterState>,
+    reconstructed: WriterState,
+    head: &PersistentCommitmentCoordinate,
+) -> Result<WriterState, SemanticError> {
+    let endpoint = exact_endpoint(head);
+    if reconstructed.commitment != *head || reconstructed.database.endpoint() != endpoint {
+        return Err(fault(
+            "postgres/replay-head-coordinate",
+            "the reconstructed idempotent outcome does not name the locked logical head",
+        ));
+    }
+    Ok(cached
+        .filter(|state| state.commitment == *head && state.database.endpoint() == endpoint)
+        .unwrap_or(reconstructed))
+}
+
 fn open_writer_state(
     connection: &PostgresConnectionConfig,
     database_id: &str,
@@ -4124,17 +4259,22 @@ fn open_writer_state(
     cache_entries: usize,
     cache_bytes: usize,
     recent_limits: RecentLimits,
+    shared_snapshot: Option<&TieredSnapshot>,
 ) -> Result<WriterState, SemanticError> {
     let endpoint = exact_endpoint(&commitment);
-    let (database, opened) = TieredSnapshot::open_exact_configured(
-        connection,
-        database_id.to_owned(),
-        endpoint,
-        required_manifest,
-        cache_entries,
-        cache_bytes,
-        recent_limits,
-    )?;
+    let (database, opened) = if let Some(shared_snapshot) = shared_snapshot {
+        shared_snapshot.open_exact_sharing_core(database_id, endpoint, required_manifest)?
+    } else {
+        TieredSnapshot::open_exact_configured(
+            connection,
+            database_id.to_owned(),
+            endpoint,
+            required_manifest,
+            cache_entries,
+            cache_bytes,
+            recent_limits,
+        )?
+    };
     if database.endpoint() != endpoint {
         return Err(fault(
             "postgres/native-open-endpoint",
@@ -4163,6 +4303,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
     cache_entries: usize,
     cache_bytes: usize,
     recent_limits: RecentLimits,
+    shared_snapshot: Option<&TieredSnapshot>,
 ) -> Result<(CommitReceipt, WriterState), SemanticError> {
     if !matches!(request_kind, 1 | 2) {
         return Err(fault(
@@ -4232,6 +4373,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
         cache_entries,
         cache_bytes,
         recent_limits,
+        shared_snapshot,
     )?;
     let mut transactions = read_authenticated_log_range(
         client,
@@ -4470,13 +4612,18 @@ fn injected(point: &str) -> SemanticError {
     )
 }
 
-fn unknown_outcome(request_key_hash: Digest, message: impl Into<String>) -> SemanticError {
+fn unknown_outcome(
+    request_key_hash: Digest,
+    ambiguity_kind: &'static str,
+    message: impl Into<String>,
+) -> SemanticError {
     SemanticError::new(
         ErrorCategory::UnknownOutcome,
         "postgres/unknown-outcome",
         message,
     )
     .detail("request_key_hash", digest_hex(&request_key_hash))
+    .detail("ambiguity_kind", ambiguity_kind)
 }
 
 fn digest_hex(digest: &Digest) -> String {

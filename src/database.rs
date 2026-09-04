@@ -31,6 +31,39 @@ pub enum TxValue {
     Entity(EntityRef),
 }
 
+/// The raw value key used while resolving unique identities. Datomic permits
+/// uniqueness on refs (`datomic_pro_docs/03_schema/03_identity_and_uniqueness.md`),
+/// and recovered `ProcessExpander/get-ids` compares unresolved ref tempids
+/// before replacing them (`db.clj:6712-6797, 7366-7455`). Reference tempids
+/// therefore remain symbolic here: two entity tempids asserting the same
+/// ref-valued identity must unify even when the referenced entity is new.
+#[derive(Clone, Debug)]
+pub(crate) enum UpsertIdentityValue {
+    Resolved(Value),
+    TempRef(String),
+}
+
+impl UpsertIdentityValue {
+    pub(crate) fn same_key(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Resolved(left), Self::Resolved(right)) => left.index_cmp(right).is_eq(),
+            (Self::TempRef(left), Self::TempRef(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn resolved(&self) -> Option<&Value> {
+        match self {
+            Self::Resolved(value) => Some(value),
+            Self::TempRef(_) => None,
+        }
+    }
+
+    pub(crate) fn is_nan(&self) -> bool {
+        self.resolved().is_some_and(Value::is_nan)
+    }
+}
+
 impl From<Value> for TxValue {
     fn from(value: Value) -> Self {
         Self::Scalar(value)
@@ -1509,7 +1542,7 @@ impl Database {
         let (schema_logical, _schema_changes, allocation_start) =
             self.prepare_schema_information(&ordered_ops, tx, allocation_start)?;
 
-        let (tempids, eidx_frontier) = self.resolve_tempids(&ordered_ops, allocation_start)?;
+        let (tempids, eidx_frontier) = self.resolve_tempids(&ordered_ops, tx, allocation_start)?;
         let mut logical = schema_logical;
         let mut ensures = Vec::new();
         let mut touched_constituents = BTreeSet::new();
@@ -2024,12 +2057,10 @@ impl Database {
     fn resolve_tempids(
         &self,
         ops: &[TxOp],
+        tx: u64,
         allocation_start: u64,
     ) -> Result<(BTreeMap<String, u64>, u64), SemanticError> {
-        let mut names = BTreeSet::new();
-        for op in ops {
-            collect_tempids_op(op, &mut names);
-        }
+        let names = validated_entity_tempids(ops)?;
         let names: Vec<_> = names.into_iter().collect();
         let positions: BTreeMap<_, _> = names
             .iter()
@@ -2037,13 +2068,13 @@ impl Database {
             .map(|(index, name)| (name.clone(), index))
             .collect();
         let mut union = UnionFind::new(names.len());
-        let mut identities: Vec<(usize, u32, Value, Unique)> = Vec::new();
+        let mut identities: Vec<(usize, u32, UpsertIdentityValue, Unique)> = Vec::new();
 
         for op in ops {
             let TxOp::Add {
                 entity: EntityRef::Temp(name),
                 attribute,
-                value: TxValue::Scalar(value),
+                value,
             } = op
             else {
                 continue;
@@ -2052,14 +2083,14 @@ impl Database {
             let Some(unique) = schema.unique else {
                 continue;
             };
-            self.schema.validate_value(schema, value)?;
+            let value = self.resolve_upsert_identity_value(*attribute, value, tx)?;
             if value.is_nan() {
                 return Err(SemanticError::incorrect(
                     "transaction/nan-cannot-identify",
                     "NaN cannot participate in upsert or uniqueness",
                 ));
             }
-            identities.push((positions[name], *attribute, value.clone(), unique));
+            identities.push((positions[name], *attribute, value, unique));
         }
 
         for left in 0..identities.len() {
@@ -2069,7 +2100,7 @@ impl Database {
                 if *left_unique == Unique::Identity
                     && *right_unique == Unique::Identity
                     && left_attr == right_attr
-                    && left_value.index_cmp(right_value).is_eq()
+                    && left_value.same_key(right_value)
                 {
                     union.join(*left_temp, *right_temp);
                 }
@@ -2078,6 +2109,9 @@ impl Database {
 
         let mut existing_by_root: BTreeMap<usize, u64> = BTreeMap::new();
         for (temp, attribute, value, unique) in &identities {
+            let Some(value) = value.resolved() else {
+                continue;
+            };
             if let Some(existing) = self.lookup(*attribute, value)? {
                 if *unique == Unique::Value {
                     return Err(SemanticError::conflict(
@@ -2121,6 +2155,38 @@ impl Database {
         }
         validate_frontier(next)?;
         Ok((result, next))
+    }
+
+    fn resolve_upsert_identity_value(
+        &self,
+        attribute: u32,
+        value: &TxValue,
+        tx: u64,
+    ) -> Result<UpsertIdentityValue, SemanticError> {
+        let descriptor = self.schema.attribute(attribute)?;
+        match value {
+            TxValue::Scalar(value) => {
+                self.validate_explicit_value_refs(value)?;
+                self.schema.validate_value(descriptor, value)?;
+                Ok(UpsertIdentityValue::Resolved(value.clone()))
+            }
+            TxValue::Entity(EntityRef::Temp(name)) if descriptor.value_type == ValueType::Ref => {
+                Ok(UpsertIdentityValue::TempRef(name.clone()))
+            }
+            TxValue::Entity(entity) if descriptor.value_type == ValueType::Ref => {
+                let value = Value::Ref(self.resolve_entity(entity, tx, &BTreeMap::new())?);
+                self.schema.validate_value(descriptor, &value)?;
+                Ok(UpsertIdentityValue::Resolved(value))
+            }
+            TxValue::Entity(_) => Err(SemanticError::incorrect(
+                "transaction/value-type",
+                format!(
+                    "attribute {} requires {:?}",
+                    descriptor.ident.qualified_name(),
+                    descriptor.value_type
+                ),
+            )),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2575,31 +2641,52 @@ fn validate_entity_predicate_name(attribute: u32, value: &Value) -> Result<(), S
     Ok(())
 }
 
-fn collect_tempids_op(op: &TxOp, output: &mut BTreeSet<String>) {
+/// Match recovered `ProcessExpander`: permanent ids are assigned to tempids in
+/// E position. A reference tempid may be used in V only when another
+/// normalized datom establishes it as an entity; otherwise `replace_tempid`
+/// raises `:db.error/tempid-not-an-entity` (`db.clj:7376-7390`). Running this
+/// after form normalization also covers tempids introduced by nested maps.
+pub(crate) fn validated_entity_tempids(ops: &[TxOp]) -> Result<BTreeSet<String>, SemanticError> {
+    let mut entities = BTreeSet::new();
+    let mut values = BTreeSet::new();
+    for op in ops {
+        collect_tempids_op(op, &mut entities, &mut values);
+    }
+    if let Some(tempid) = values.difference(&entities).next() {
+        return Err(SemanticError::incorrect(
+            "transaction/tempid-not-an-entity",
+            format!("tempid '{tempid}' is used only as a value in transaction data"),
+        )
+        .detail("tempid", tempid.clone()));
+    }
+    Ok(entities)
+}
+
+fn collect_tempids_op(op: &TxOp, entities: &mut BTreeSet<String>, values: &mut BTreeSet<String>) {
     match op {
         TxOp::Add { entity, value, .. } => {
-            collect_tempids_entity(entity, output);
-            collect_tempids_value(value, output);
+            collect_tempids_entity(entity, entities);
+            collect_tempids_value(value, values);
         }
         TxOp::Retract { entity, value, .. } => {
-            collect_tempids_entity(entity, output);
+            collect_tempids_entity(entity, entities);
             if let Some(value) = value {
-                collect_tempids_value(value, output);
+                collect_tempids_value(value, values);
             }
         }
         TxOp::Cas {
             entity, old, new, ..
         } => {
-            collect_tempids_entity(entity, output);
+            collect_tempids_entity(entity, entities);
             if let Some(old) = old {
-                collect_tempids_value(old, output);
+                collect_tempids_value(old, values);
             }
-            collect_tempids_value(new, output);
+            collect_tempids_value(new, values);
         }
-        TxOp::RetractEntity(entity) => collect_tempids_entity(entity, output),
+        TxOp::RetractEntity(entity) => collect_tempids_entity(entity, entities),
         TxOp::Ensure { entity, spec } => {
-            collect_tempids_entity(entity, output);
-            collect_tempids_entity(spec, output);
+            collect_tempids_entity(entity, entities);
+            collect_tempids_entity(spec, values);
         }
         TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
     }

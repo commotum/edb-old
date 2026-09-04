@@ -2712,7 +2712,7 @@ impl Peer {
                 end_state_hash,
                 eidx_frontier,
             } = tail;
-            let recent = Arc::new(RecentTier::new_authenticated(
+            let recent = Arc::new(RecentTier::new_authenticated_existing(
                 &database_id,
                 base.manifest.basis_t,
                 base.manifest.tx_hash,
@@ -3210,7 +3210,7 @@ impl Peer {
         let base_metadata = Arc::clone(&tree_base.metadata);
         let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
         let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
-        let recent = Arc::new(RecentTier::new_authenticated(
+        let recent = Arc::new(RecentTier::new_authenticated_existing(
             &self.core.read.database_id,
             tree_base.manifest.basis_t,
             tree_base.manifest.tx_hash,
@@ -3268,7 +3268,7 @@ impl Peer {
         let metadata = Arc::new(state.metadata.apply(&tail.transactions)?);
         let mut avet_unready = (*state.avet_unready).clone();
         avet_unready.extend(state.metadata.avet_unready_after(&metadata));
-        let recent = state.recent.extend_authenticated(
+        let recent = state.recent.extend_authenticated_existing(
             tail.transaction_hashes
                 .iter()
                 .copied()
@@ -3384,7 +3384,7 @@ impl Peer {
             }
             let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
             let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
-            let recent = Arc::new(RecentTier::new_authenticated(
+            let recent = Arc::new(RecentTier::new_authenticated_existing(
                 &self.core.read.database_id,
                 base.manifest.basis_t,
                 base.manifest.tx_hash,
@@ -3860,7 +3860,30 @@ impl TieredSnapshot {
         &self,
         required_manifest: Option<Digest>,
     ) -> Result<(Self, ExactOpenStats), SemanticError> {
-        let endpoint = self.endpoint().validate()?;
+        self.open_exact_sharing_core(
+            self.core.database_id.as_str(),
+            self.endpoint(),
+            required_manifest,
+        )
+    }
+
+    /// Open another exact immutable endpoint while reusing this database's
+    /// read core. Historical idempotency receipts need distinct states and
+    /// root pins, but they do not need a private PostgreSQL I/O session, tree
+    /// cache, or root-pin manager for every retained report.
+    pub(crate) fn open_exact_sharing_core(
+        &self,
+        database_id: &str,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        if self.core.database_id != database_id {
+            return Err(fault(
+                "peer/shared-core-database-mismatch",
+                "an exact native value cannot reuse another database's read core",
+            ));
+        }
+        let endpoint = endpoint.validate()?;
         self.core.root_pins.ensure()?;
         let mut io = lock(&self.core.io);
         let scan = {
@@ -3904,6 +3927,11 @@ impl TieredSnapshot {
             },
             stats,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_read_core(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.core, &other.core)
     }
 
     pub(crate) fn endpoint(&self) -> ExactEndpoint {
@@ -4018,10 +4046,17 @@ impl TieredSnapshot {
         avet_unready.extend(self.state.metadata.avet_unready_after(&metadata));
         let basis_t = transaction.basis_t;
         let eidx_frontier = transaction.eidx_frontier;
-        let recent = self
-            .state
-            .recent
-            .extend_authenticated(std::iter::once((tx_hash, transaction)), metadata.endpoint())?;
+        let recent = if successor_schema.is_some() {
+            self.state.recent.extend_authenticated(
+                std::iter::once((tx_hash, transaction)),
+                metadata.endpoint(),
+            )?
+        } else {
+            self.state.recent.extend_authenticated_existing(
+                std::iter::once((tx_hash, transaction)),
+                metadata.endpoint(),
+            )?
+        };
 
         let mut state = (*self.state).clone();
         state.basis_t = basis_t;
@@ -5391,7 +5426,7 @@ fn build_exact_tiered_state<C: GenericClient>(
     let tail_transactions = tail.transactions.len() as u64;
     let metadata = Arc::new(base_metadata.apply(&tail.transactions)?);
     let avet_unready = Arc::new(base_metadata.avet_unready_after(&metadata));
-    let recent = Arc::new(RecentTier::new_authenticated(
+    let recent = Arc::new(RecentTier::new_authenticated_existing(
         database_id,
         base.manifest.basis_t,
         base.manifest.tx_hash,

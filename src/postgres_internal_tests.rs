@@ -575,6 +575,10 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
         )
         .unwrap_err();
     assert_eq!(error.category, ErrorCategory::UnknownOutcome);
+    assert_eq!(
+        error.details.get("ambiguity_kind").map(String::as_str),
+        Some("publication")
+    );
     let resolved = store
         .resolve_request_outcome(&database_id, "request-unknown")
         .unwrap()
@@ -609,17 +613,72 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
     assert!(replayed.replayed);
     assert_database_values_eq(&replayed.db_before, &resolved.db_before);
     assert_database_values_eq(&replayed.database, &resolved.database);
+    assert!(resolved.database.shares_tiered_read_core(&replayed.database));
+    assert!(
+        replayed
+            .db_before
+            .shares_tiered_read_core(&replayed.database)
+    );
+
+    // Retaining many exact old reports must retain immutable states and their
+    // pins, but not create one PeerIo session, tree cache, and pin manager per
+    // retry. All reconstructed values reuse the installed writer read core.
+    let replay_core = replayed.database.clone();
+    let mut retained_replays = vec![replayed];
+    for _ in 0..16 {
+        let retained = store
+            .transact_with_fault(
+                &database_id,
+                "request-unknown",
+                1,
+                &add_item("committed", 1),
+                1_000,
+                CommitFault::None,
+            )
+            .unwrap();
+        assert!(retained.replayed);
+        assert!(retained.db_before.shares_tiered_read_core(&replay_core));
+        assert!(retained.database.shares_tiered_read_core(&replay_core));
+        retained_replays.push(retained);
+    }
+    assert_eq!(retained_replays.len(), 17);
     let residency = store.writer_residency_stats(&database_id);
     assert_eq!(residency.eager_database_values, 0);
     assert_eq!(residency.eager_current_facts, 0);
     assert_eq!(residency.eager_history_datoms, 0);
+
+    // Losing the acknowledgment of a read-only idempotent replay is not a
+    // possibly-new publication. It remains an honest UnknownOutcome for that
+    // response, but the service must not emit a second committed report.
+    let outcome_read_error = store
+        .transact_with_fault(
+            &database_id,
+            "request-unknown",
+            1,
+            &add_item("committed", 1),
+            1_000,
+            CommitFault::AfterCommitBeforeResponse,
+        )
+        .unwrap_err();
+    assert_eq!(outcome_read_error.category, ErrorCategory::UnknownOutcome);
+    assert_eq!(
+        outcome_read_error
+            .details
+            .get("ambiguity_kind")
+            .map(String::as_str),
+        Some("outcome-read")
+    );
+    assert_eq!(store.recover(&database_id).unwrap().basis_t(), 2);
 
     let fresh = store
         .transact_with_fault(
             &database_id,
             "request-after-replay",
             2,
-            &add_item("second", 2),
+            // Update the existing identity so the read-work assertion below
+            // observes a non-empty AVET/EAVT result rather than a perfectly
+            // valid collection of zero-result prefix probes.
+            &add_item("committed", 2),
             2_000,
             CommitFault::None,
         )
@@ -647,6 +706,94 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
         .map(|row| (row.get(0), row.get(1)))
         .unwrap();
     assert_eq!(bound, (2, 2));
+}
+
+#[test]
+fn lower_recent_limits_preserve_exact_retry_and_the_fresher_live_head() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("lower_limits_exact_retry");
+    let mut original = migrated_store(&connection);
+    original.create_database(&database_id, schema()).unwrap();
+    publish_native_base(&connection, &database_id);
+    let committed = original
+        .transact_with_fault(
+            &database_id,
+            "oversized-under-new-limit",
+            1,
+            &add_item("already-committed", 1),
+            1_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert_eq!(committed.basis_t, 2);
+    assert!(committed.tx_data.len() > 1);
+    publish_native_base(&connection, &database_id);
+    drop(original);
+
+    // Simulate a restart with a limit lower than an outcome that was valid
+    // when committed. The covering head opens with an empty recent tail.
+    let mut restarted = PostgresStore::connect(&connection).unwrap();
+    restarted
+        .set_writer_recent_limits(crate::recent::RecentLimits {
+            soft_datoms: 1,
+            soft_bytes: u64::MAX - 1,
+            hard_datoms: 1,
+            hard_bytes: u64::MAX,
+        })
+        .unwrap();
+    let lease = restarted
+        .acquire_lease(&database_id, &unique("lower-limit-holder"), 60_000)
+        .unwrap();
+    restarted.activate_transactor_state(&lease, 60_000).unwrap();
+    assert_eq!(
+        restarted.writer_residency_stats(&database_id).recent_datoms,
+        0
+    );
+
+    // The receipt's archived db-before plus its one authenticated transaction
+    // must remain reconstructable. Installing that older physical shape would
+    // unnecessarily reintroduce the oversized tail into the live writer, so
+    // the already-open covering head remains authoritative for residency.
+    let replayed = restarted
+        .transact_with_fault(
+            &database_id,
+            "oversized-under-new-limit",
+            1,
+            &add_item("already-committed", 1),
+            1_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(replayed.basis_t, 2);
+    assert_eq!(replayed.tx_data, committed.tx_data);
+    assert_eq!(
+        restarted.writer_residency_stats(&database_id).recent_datoms,
+        0
+    );
+
+    // The reconstruction exception is not an admission loophole: an ordinary
+    // new transaction that crosses the current hard cap is still rejected and
+    // leaves the committed head unchanged.
+    let error = restarted
+        .transact_with_fault(
+            &database_id,
+            "new-over-current-limit",
+            2,
+            &add_item("must-consolidate-first", 2),
+            2_000,
+            CommitFault::None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "recent/hard-capacity");
+    assert_eq!(restarted.recover(&database_id).unwrap().basis_t(), 2);
+    assert_eq!(
+        restarted.writer_residency_stats(&database_id).recent_datoms,
+        0
+    );
+    restarted.release_lease(&lease).unwrap();
 }
 
 #[test]

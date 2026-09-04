@@ -128,6 +128,14 @@ impl DatabaseValue {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn shares_tiered_read_core(&self, other: &Self) -> bool {
+        match (&self.basis, &other.basis) {
+            (ReadBasis::Native(left), ReadBasis::Native(right)) => left.shares_read_core(right),
+            _ => false,
+        }
+    }
+
     /// Build the ephemeral exact db-after used while validating one assessed
     /// transaction. A committed successor must install a new tiered value;
     /// overlays are deliberately not chainable across commits.

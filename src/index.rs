@@ -30,6 +30,100 @@ pub enum IndexPrefix {
     },
 }
 
+impl PartialOrd for IndexPrefix {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexPrefix {
+    fn cmp(&self, other: &Self) -> Ordering {
+        prefix_rank(self)
+            .cmp(&prefix_rank(other))
+            .then_with(|| match (self, other) {
+                (
+                    Self::Eavt {
+                        entity: left_entity,
+                        attribute: left_attribute,
+                        value: left_value,
+                    },
+                    Self::Eavt {
+                        entity: right_entity,
+                        attribute: right_attribute,
+                        value: right_value,
+                    },
+                ) => left_entity
+                    .cmp(right_entity)
+                    .then_with(|| left_attribute.cmp(right_attribute))
+                    .then_with(|| compare_optional_value(left_value, right_value)),
+                (
+                    Self::Aevt {
+                        attribute: left_attribute,
+                        entity: left_entity,
+                        value: left_value,
+                    },
+                    Self::Aevt {
+                        attribute: right_attribute,
+                        entity: right_entity,
+                        value: right_value,
+                    },
+                ) => left_attribute
+                    .cmp(right_attribute)
+                    .then_with(|| left_entity.cmp(right_entity))
+                    .then_with(|| compare_optional_value(left_value, right_value)),
+                (
+                    Self::Avet {
+                        attribute: left_attribute,
+                        value: left_value,
+                        entity: left_entity,
+                    },
+                    Self::Avet {
+                        attribute: right_attribute,
+                        value: right_value,
+                        entity: right_entity,
+                    },
+                ) => left_attribute
+                    .cmp(right_attribute)
+                    .then_with(|| compare_optional_value(left_value, right_value))
+                    .then_with(|| left_entity.cmp(right_entity)),
+                (
+                    Self::Vaet {
+                        value: left_value,
+                        attribute: left_attribute,
+                        entity: left_entity,
+                    },
+                    Self::Vaet {
+                        value: right_value,
+                        attribute: right_attribute,
+                        entity: right_entity,
+                    },
+                ) => left_value
+                    .index_cmp(right_value)
+                    .then_with(|| left_attribute.cmp(right_attribute))
+                    .then_with(|| left_entity.cmp(right_entity)),
+                _ => Ordering::Equal,
+            })
+    }
+}
+
+fn prefix_rank(prefix: &IndexPrefix) -> u8 {
+    match prefix {
+        IndexPrefix::Eavt { .. } => 0,
+        IndexPrefix::Aevt { .. } => 1,
+        IndexPrefix::Avet { .. } => 2,
+        IndexPrefix::Vaet { .. } => 3,
+    }
+}
+
+fn compare_optional_value(left: &Option<Value>, right: &Option<Value>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => left.index_cmp(right),
+    }
+}
+
 impl IndexPrefix {
     pub fn order(&self) -> IndexOrder {
         match self {

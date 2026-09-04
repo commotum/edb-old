@@ -5,6 +5,7 @@
 //! ranges from the db-before value and keeps the proposed successor as a small
 //! logical delta.  It deliberately contains no `materialize` fallback.
 
+use crate::database::{UpsertIdentityValue, validated_entity_tempids};
 use crate::identity::{validate_frontier, validate_supported_eid};
 use crate::idents::IdentIndex;
 use crate::vocabulary::{supported_system_attributes, supported_system_idents};
@@ -23,7 +24,10 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AssessmentReadWork {
+    /// Physical prefix cursor misses. Repeated transaction-local requests for
+    /// the same structural prefix are counted in `prefix_hits` instead.
     pub(crate) prefixes: u64,
+    pub(crate) prefix_hits: u64,
     pub(crate) datoms: u64,
     pub(crate) retained_bytes: u64,
 }
@@ -206,6 +210,7 @@ struct Reader<'a> {
     base: &'a DatabaseValue,
     limits: AssessmentLimits,
     work: AssessmentReadWork,
+    prefix_memo: BTreeMap<IndexPrefix, Arc<[Datom]>>,
 }
 
 impl<'a> Reader<'a> {
@@ -214,10 +219,21 @@ impl<'a> Reader<'a> {
             base,
             limits,
             work: AssessmentReadWork::default(),
+            prefix_memo: BTreeMap::new(),
         }
     }
 
     fn prefix(&mut self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
+        // Recovered ProcessExpander eagerly prefetches identity, composite,
+        // redundancy, and uniqueness ranges (`datomic/db.clj`, get-ids and
+        // transact-data preparation around 7051-7354). The native assessor's
+        // synchronous equivalent is deliberately narrower: memoize an exact
+        // structural IndexPrefix for this one assessment, avoiding repeated
+        // PostgreSQL/tree work without inventing an asynchronous hint system.
+        if let Some(datoms) = self.prefix_memo.get(prefix).map(Arc::clone) {
+            self.work.prefix_hits = self.work.prefix_hits.saturating_add(1);
+            return Ok(datoms.iter().cloned().collect());
+        }
         self.work.prefixes = self.work.prefixes.saturating_add(1);
         let mut datoms = Vec::new();
         for datom in self.base.current_prefix_cursor(prefix)? {
@@ -255,6 +271,8 @@ impl<'a> Reader<'a> {
             self.work.retained_bytes = next_bytes;
             datoms.push(datom);
         }
+        self.prefix_memo
+            .insert(prefix.clone(), Arc::from(datoms.clone()));
         Ok(datoms)
     }
 
@@ -363,7 +381,7 @@ pub(crate) fn assess_tiered_with_limits(
     let mut reader = Reader::new(base, limits);
     let (mut logical, allocation_start) =
         prepare_schema_information(&mut reader, &ordered, tx, initial_allocation_start)?;
-    let (tempids, eidx_frontier) = resolve_tempids(&mut reader, &ordered, allocation_start)?;
+    let (tempids, eidx_frontier) = resolve_tempids(&mut reader, &ordered, tx, allocation_start)?;
     let mut ensures = Vec::new();
     let mut touched = BTreeSet::new();
     for op in &ordered {
@@ -1012,12 +1030,10 @@ fn same_eav(left: &Datom, right: &Datom) -> bool {
 fn resolve_tempids(
     reader: &mut Reader<'_>,
     ops: &[TxOp],
+    tx: u64,
     allocation_start: u64,
 ) -> Result<(BTreeMap<String, u64>, u64), SemanticError> {
-    let mut names = BTreeSet::new();
-    for op in ops {
-        collect_tempids_op(op, &mut names);
-    }
+    let names = validated_entity_tempids(ops)?;
     let names = names.into_iter().collect::<Vec<_>>();
     let positions = names
         .iter()
@@ -1030,7 +1046,7 @@ fn resolve_tempids(
         let TxOp::Add {
             entity: EntityRef::Temp(name),
             attribute,
-            value: TxValue::Scalar(value),
+            value,
         } = op
         else {
             continue;
@@ -1039,14 +1055,14 @@ fn resolve_tempids(
         let Some(unique) = descriptor.unique else {
             continue;
         };
-        reader.base.schema().validate_value(descriptor, value)?;
+        let value = resolve_upsert_identity_value(reader, *attribute, value, tx)?;
         if value.is_nan() {
             return Err(SemanticError::incorrect(
                 "transaction/nan-cannot-identify",
                 "NaN cannot participate in upsert or uniqueness",
             ));
         }
-        identities.push((positions[name], *attribute, value.clone(), unique));
+        identities.push((positions[name], *attribute, value, unique));
     }
     for left in 0..identities.len() {
         for right in left + 1..identities.len() {
@@ -1055,7 +1071,7 @@ fn resolve_tempids(
             if *left_unique == Unique::Identity
                 && *right_unique == Unique::Identity
                 && left_attr == right_attr
-                && left_value.index_cmp(right_value).is_eq()
+                && left_value.same_key(right_value)
             {
                 union.join(*left_temp, *right_temp);
             }
@@ -1064,6 +1080,9 @@ fn resolve_tempids(
 
     let mut existing_by_root = BTreeMap::new();
     for (temp, attribute, value, unique) in &identities {
+        let Some(value) = value.resolved() else {
+            continue;
+        };
         if let Some(existing) = reader.lookup(*attribute, value)? {
             if *unique == Unique::Value {
                 return Err(SemanticError::conflict(
@@ -1107,6 +1126,38 @@ fn resolve_tempids(
     }
     validate_frontier(next)?;
     Ok((result, next))
+}
+
+fn resolve_upsert_identity_value(
+    reader: &mut Reader<'_>,
+    attribute: u32,
+    value: &TxValue,
+    tx: u64,
+) -> Result<UpsertIdentityValue, SemanticError> {
+    let descriptor = reader.base.schema().attribute(attribute)?;
+    match value {
+        TxValue::Scalar(value) => {
+            validate_explicit_value_refs(reader.base, value)?;
+            reader.base.schema().validate_value(descriptor, value)?;
+            Ok(UpsertIdentityValue::Resolved(value.clone()))
+        }
+        TxValue::Entity(EntityRef::Temp(name)) if descriptor.value_type == ValueType::Ref => {
+            Ok(UpsertIdentityValue::TempRef(name.clone()))
+        }
+        TxValue::Entity(entity) if descriptor.value_type == ValueType::Ref => {
+            let value = Value::Ref(resolve_entity(reader, entity, tx, &BTreeMap::new())?);
+            reader.base.schema().validate_value(descriptor, &value)?;
+            Ok(UpsertIdentityValue::Resolved(value))
+        }
+        TxValue::Entity(_) => Err(SemanticError::incorrect(
+            "transaction/value-type",
+            format!(
+                "attribute {} requires {:?}",
+                descriptor.ident.qualified_name(),
+                descriptor.value_type
+            ),
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1865,48 +1916,6 @@ fn compare_logical(left: &LogicalDatom, right: &LogicalDatom) -> Ordering {
         .then_with(|| right.added.cmp(&left.added))
 }
 
-fn collect_tempids_op(op: &TxOp, output: &mut BTreeSet<String>) {
-    match op {
-        TxOp::Add { entity, value, .. } => {
-            collect_tempids_entity(entity, output);
-            collect_tempids_value(value, output);
-        }
-        TxOp::Retract { entity, value, .. } => {
-            collect_tempids_entity(entity, output);
-            if let Some(value) = value {
-                collect_tempids_value(value, output);
-            }
-        }
-        TxOp::Cas {
-            entity, old, new, ..
-        } => {
-            collect_tempids_entity(entity, output);
-            if let Some(old) = old {
-                collect_tempids_value(old, output);
-            }
-            collect_tempids_value(new, output);
-        }
-        TxOp::RetractEntity(entity) => collect_tempids_entity(entity, output),
-        TxOp::Ensure { entity, spec } => {
-            collect_tempids_entity(entity, output);
-            collect_tempids_entity(spec, output);
-        }
-        TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
-    }
-}
-
-fn collect_tempids_value(value: &TxValue, output: &mut BTreeSet<String>) {
-    if let TxValue::Entity(entity) = value {
-        collect_tempids_entity(entity, output);
-    }
-}
-
-fn collect_tempids_entity(entity: &EntityRef, output: &mut BTreeSet<String>) {
-    if let EntityRef::Temp(name) = entity {
-        output.insert(name.clone());
-    }
-}
-
 #[derive(Debug)]
 struct UnionFind {
     parent: Vec<usize>,
@@ -2062,7 +2071,45 @@ mod tests {
         );
         assessed.validate_exact(None).unwrap();
         assert!(assessed.read_work.prefixes > 0);
+        assert!(assessed.read_work.prefix_hits > 0);
         assert!(assessed.read_work.datoms > 0);
+    }
+
+    #[test]
+    fn identical_prefix_reads_hit_the_transaction_local_memo_without_recharging_work() {
+        let initial = Database::new(schema()).unwrap();
+        let seeded = initial.with(&add("one", 1), 10).unwrap().db_after;
+        let value = DatabaseValue::eager(Arc::new(seeded));
+        let prefix = IndexPrefix::Avet {
+            attribute: NAME,
+            value: Some(Value::String("one".into())),
+            entity: None,
+        };
+        let mut reader = Reader::new(
+            &value,
+            AssessmentLimits {
+                max_read_datoms: 1,
+                max_read_bytes: u64::MAX,
+            },
+        );
+
+        let first = reader.prefix(&prefix).unwrap();
+        assert_eq!(first.len(), 1);
+        let charged = reader.work;
+        assert_eq!(charged.prefixes, 1);
+        assert_eq!(charged.prefix_hits, 0);
+        assert_eq!(charged.datoms, 1);
+        assert!(charged.retained_bytes > 0);
+
+        // A second physical scan would exceed the one-datom budget. The exact
+        // same result instead comes from the assessment-local memo and leaves
+        // all I/O/read-capacity counters unchanged except the hit witness.
+        let second = reader.prefix(&prefix).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(reader.work.prefixes, charged.prefixes);
+        assert_eq!(reader.work.datoms, charged.datoms);
+        assert_eq!(reader.work.retained_bytes, charged.retained_bytes);
+        assert_eq!(reader.work.prefix_hits, 1);
     }
 
     #[test]
