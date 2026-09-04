@@ -303,13 +303,9 @@ fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
         .collect();
     assert_eq!(anonymous.len(), 2, "both identical map forms must survive");
     assert_ne!(anonymous[0], anonymous[1]);
-    assert!(
-        anonymous
-            .iter()
-            .all(|entity| {
-                emitted.db_after.values(*entity, BALANCE).unwrap() == vec![Value::Long(11)]
-            })
-    );
+    assert!(anonymous.iter().all(|entity| {
+        emitted.db_after.values(*entity, BALANCE).unwrap() == vec![Value::Long(11)]
+    }));
     first.shutdown();
 
     let base = PostgresIndexer::connect(&connection, &database_id)

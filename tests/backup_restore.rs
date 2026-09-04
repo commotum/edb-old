@@ -139,13 +139,7 @@ fn restored_native_receipts_survive_backup_restore_backup_and_exact_retry() {
             value: TxValue::Scalar(Value::String(format!("seed-{ordinal}"))),
         })
         .collect::<Vec<_>>();
-    let seed = common::transact(
-        &service,
-        "portable-seed",
-        created.basis_t(),
-        &seed_ops,
-        500,
-    );
+    let seed = common::transact(&service, "portable-seed", created.basis_t(), &seed_ops, 500);
     service.shutdown();
     let mut indexer = PostgresIndexer::connect(&connection, &source)
         .unwrap()

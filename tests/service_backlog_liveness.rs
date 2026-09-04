@@ -80,9 +80,11 @@ fn large_envelopes_schedule_exact_backlog_before_recent_capacity_and_keep_progre
         .basis_t();
     drop(setup);
 
-    let mut capacity_limits = CapacityLimits::default();
-    capacity_limits.max_transaction_ops = 8;
-    capacity_limits.max_transaction_bytes = 24 * 1024;
+    let capacity_limits = CapacityLimits {
+        max_transaction_ops: 8,
+        max_transaction_bytes: 24 * 1024,
+        ..CapacityLimits::default()
+    };
     let service = TransactionService::start_with_indexing(
         TransactionServiceConfig {
             connection: connection.clone(),

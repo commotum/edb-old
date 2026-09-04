@@ -885,13 +885,7 @@ impl PortableBackup {
         }
         for tree in request_base_trees(&log) {
             if deep {
-                objects_read += verify_tree_backup(
-                    directory,
-                    &manifest,
-                    &log,
-                    &tree,
-                    None,
-                )?;
+                objects_read += verify_tree_backup(directory, &manifest, &log, &tree, None)?;
             } else {
                 verify_tree_presence(directory, &manifest, &log, &tree)?;
             }
@@ -2040,10 +2034,8 @@ fn stage_restore_semantic_coordinates(
             let content = LineageTransactionContent::decode(&row.content_payload)?;
             let mut durable = content.to_transaction(previous);
             durable.database_id = target_database_id.to_owned();
-            let changes = crate::persistent_commitment::eager_semantic_changes(
-                &database,
-                &durable.tx_data,
-            )?;
+            let changes =
+                crate::persistent_commitment::eager_semantic_changes(&database, &durable.tx_data)?;
             let (next_root, _) = crate::persistent_commitment::advance_persistent_commitment(
                 &mut transaction,
                 root,
@@ -2377,8 +2369,7 @@ fn activate_restore_candidate(
             candidate.generation,
             manifest.basis,
         )? {
-            if endpoint.tx_hash != restored.head_hash
-                || endpoint.state_hash != restored.state_hash
+            if endpoint.tx_hash != restored.head_hash || endpoint.state_hash != restored.state_hash
             {
                 return Err(fault(
                     "backup/restore-semantic-endpoint",
@@ -3435,10 +3426,7 @@ fn restore_request_base_archive(
                     &[&&target_manifest_hash[..], &batch],
                 )
                 .map_err(|error| {
-                    crate::postgres::postgres_error(
-                        "backup/restore-request-base-node-plan",
-                        error,
-                    )
+                    crate::postgres::postgres_error("backup/restore-request-base-node-plan", error)
                 })?;
         }
         let mut store = PostgresTreeStore::connect_configured(connection)?;
@@ -3750,10 +3738,7 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
         }
     };
     let root_rows = client
-        .query(
-            roots_sql,
-            &[&&manifest_hash[..]],
-        )
+        .query(roots_sql, &[&&manifest_hash[..]])
         .map_err(|error| crate::postgres::postgres_error("backup/tree-roots-read", error))?;
     if root_rows.len() != decoded.trees.len() {
         return Ok(None);
@@ -3913,9 +3898,7 @@ fn capture_bound_request_tree<C: postgres::GenericClient>(
                         AND archive.manifest_hash = $3)",
             &[&database_id, &generation_sql, &&source_manifest_hash[..]],
         )
-        .map_err(|error| {
-            crate::postgres::postgres_error("backup/request-base-variants", error)
-        })?;
+        .map_err(|error| crate::postgres::postgres_error("backup/request-base-variants", error))?;
     let normal_count = unsigned(variants.get(0), "request base publication variants")?;
     let archive_count = unsigned(variants.get(1), "request base archive variants")?;
     if normal_count.saturating_add(archive_count) != 1 {
@@ -3950,9 +3933,7 @@ fn capture_bound_request_tree<C: postgres::GenericClient>(
                     )",
                 &[&database_id, &generation_sql, &&source_manifest_hash[..]],
             )
-            .map_err(|error| {
-                crate::postgres::postgres_error("backup/request-base-read", error)
-            })?
+            .map_err(|error| crate::postgres::postgres_error("backup/request-base-read", error))?
             .ok_or_else(|| {
                 fault(
                     "backup/request-base-corrupt",
@@ -4633,8 +4614,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
                 })?;
             let tx_hash = digest(row.get(0), "restored request-base transaction hash")?;
             if digest(row.get(1), "restored request-base state hash")? != source.state_hash
-                || unsigned(row.get(2), "restored request-base frontier")?
-                    != source.eidx_frontier
+                || unsigned(row.get(2), "restored request-base frontier")? != source.eidx_frontier
             {
                 return Err(fault(
                     "backup/restore-check-request-base-coordinate",
@@ -4723,10 +4703,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
                 &[&&expected_hash[..]],
             )
             .map_err(|error| {
-                crate::postgres::postgres_error(
-                    "backup/restore-check-request-base-roots",
-                    error,
-                )
+                crate::postgres::postgres_error("backup/restore-check-request-base-roots", error)
             })?;
         if root_rows.len() != target.trees.len() {
             return Err(fault(
@@ -4741,8 +4718,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
                     != tree.descriptor.root_hash
                 || unsigned(root_row.get(3), "restored archive root count")?
                     != tree.descriptor.count
-                || unsigned(root_row.get(4), "restored archive root bytes")?
-                    != tree.root_bytes
+                || unsigned(root_row.get(4), "restored archive root bytes")? != tree.root_bytes
             {
                 return Err(fault(
                     "backup/restore-check-request-base-roots",
@@ -4755,9 +4731,8 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
         for tree in &target.trees {
             let root_hash = tree.descriptor.root_hash;
             let expected_root_bytes = tree.root_bytes;
-            let validated = persistent_tree::validate_tree_streaming(
-                &tree.descriptor,
-                |node_hash| {
+            let validated =
+                persistent_tree::validate_tree_streaming(&tree.descriptor, |node_hash| {
                     let payload: Vec<u8> = client
                         .query_opt(
                             "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
@@ -4777,8 +4752,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
                         })?
                         .get(0);
                     if payload != read_object(directory, *node_hash)?
-                        || (*node_hash == root_hash
-                            && payload.len() as u64 != expected_root_bytes)
+                        || (*node_hash == root_hash && payload.len() as u64 != expected_root_bytes)
                     {
                         return Err(fault(
                             "backup/restore-check-request-base-node",
@@ -4786,8 +4760,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
                         ));
                     }
                     Ok(payload)
-                },
-            )?;
+                })?;
             reachable.extend(validated.node_hashes);
         }
         let planned = client

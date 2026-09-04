@@ -219,12 +219,7 @@ fn over_hard_startup_tail_requires_explicit_admin_consolidation() {
         ..CapacityLimits::default()
     };
     let error = match TransactionService::start_with_indexing(
-        config(
-            &connection,
-            &database_id,
-            "must-not-catch-up",
-            constrained,
-        ),
+        config(&connection, &database_id, "must-not-catch-up", constrained),
         BackgroundIndexingConfig {
             memory_index_threshold_bytes: 1,
             memory_index_max_bytes: 1,

@@ -1,15 +1,15 @@
+use atomic_core::persistent_tree::TreeConfig;
 use atomic_core::{
     Attribute, Cardinality, DB_EXCISE, DB_FN, DB_IDENT, Digest, EntityRef, ExcisionFault,
     GarbageInventory, IndexBuildFault, IndexOrder, IndexSegment, Instruction, Keyword,
     MAX_LOG_GENERATION_ROWS_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
-    MAX_TREE_BUILD_INTENT_NODES_PER_GC,
-    MAX_TREE_RETIREMENT_NODES_PER_GC, Peer, PersistentTreeManifest, PortableBackup,
-    PostgresIndexer, PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramKind,
-    RECOMMENDED_GARBAGE_COLLECTION_AGE, RestoreFault, Schema, TreeManifestRecord,
-    TreePublicationDelta, TreePublishOutcome, TreeRootBinding, TxOp, TxValue, USER_PARTITION,
-    Value, ValueType, encode_index_segment, encode_program, make_eid, sha256,
+    MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_RETIREMENT_NODES_PER_GC, Peer,
+    PersistentTreeManifest, PortableBackup, PostgresIndexer, PostgresOperator, PostgresStore,
+    PostgresTreeStore, Program, ProgramKind, RECOMMENDED_GARBAGE_COLLECTION_AGE, RestoreFault,
+    Schema, TreeManifestRecord, TreePublicationDelta, TreePublishOutcome, TreeRootBinding, TxOp,
+    TxValue, USER_PARTITION, Value, ValueType, encode_index_segment, encode_program, make_eid,
+    sha256,
 };
-use atomic_core::persistent_tree::TreeConfig;
 use postgres::{Client, NoTls};
 use std::collections::BTreeSet;
 use std::fs;
@@ -1250,9 +1250,11 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
         1_000,
     );
     service.shutdown();
-    let mut tiny_leaves = TreeConfig::default();
-    tiny_leaves.max_leaf_datoms = 1;
-    tiny_leaves.target_leaf_bytes = 64;
+    let tiny_leaves = TreeConfig {
+        max_leaf_datoms: 1,
+        target_leaf_bytes: 64,
+        ..TreeConfig::default()
+    };
     let mut indexer = PostgresIndexer::connect(&connection, &source)
         .unwrap()
         .with_tree_config(tiny_leaves)
@@ -1325,13 +1327,15 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
         archive_steps += 1;
         saw_bounded_resume |= !candidate.is_complete;
         assert!(
-            candidate.rows_removed
-                <= MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC as u64 + 10,
+            candidate.rows_removed <= MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC as u64 + 10,
             "one archive release exceeded its bounded node batch plus fixed root metadata"
         );
         apply_exact_inventory(&mut operator, &dry);
     }
-    assert!(archive_steps >= 2, "both exact request bases were not released");
+    assert!(
+        archive_steps >= 2,
+        "both exact request bases were not released"
+    );
     assert!(
         saw_bounded_resume,
         "large request-base archive did not exercise resumable bounded release"

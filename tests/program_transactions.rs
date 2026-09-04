@@ -488,7 +488,10 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
     )
     .unwrap();
     assert_eq!(
-        rebound.db_before.values(function_eid, DB_FN as u32).unwrap(),
+        rebound
+            .db_before
+            .values(function_eid, DB_FN as u32)
+            .unwrap(),
         vec![Value::Function(v1)]
     );
     assert_eq!(

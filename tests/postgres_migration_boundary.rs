@@ -6,7 +6,6 @@ use atomic_core::{
 use postgres::{Client, NoTls};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[allow(dead_code)]
 mod common;
 
 const ITEM_NAME: u32 = 1_000;

@@ -919,10 +919,7 @@ impl PostgresOperator {
                 database_id: candidate.database_id.clone(),
                 generation: candidate.generation,
                 manifest_hash: candidate.manifest_hash,
-                rows_removed: positive_or_zero(
-                    row.get(0),
-                    "collected request-base archive rows",
-                )?,
+                rows_removed: positive_or_zero(row.get(0), "collected request-base archive rows")?,
                 is_complete: row.get(1),
             });
         }
@@ -3243,12 +3240,11 @@ fn garbage_candidates<C: postgres::GenericClient>(
         .into_iter()
         .map(|row| digest(row.get(0), "program garbage hash"))
         .collect::<Result<Vec<_>, _>>()?;
-    let request_base_archives =
-        request_base_archive_candidates(client, older_than_millis)?;
+    let request_base_archives = request_base_archive_candidates(client, older_than_millis)?;
     let mut semantic_nodes = if request_base_archives.is_empty() {
         client
-        .query(
-            "SELECT node_hash \
+            .query(
+                "SELECT node_hash \
                FROM atomic_semantic_commitment_nodes node \
               WHERE node.created_at < clock_timestamp() - \
                                       $1::bigint * interval '1 millisecond' \
@@ -3258,15 +3254,15 @@ fn garbage_candidates<C: postgres::GenericClient>(
                                  WHERE parent.left_hash = node.node_hash \
                                     OR parent.right_hash = node.node_hash) \
               ORDER BY node.created_at, node.node_hash LIMIT $2",
-            &[
-                &older_than_millis,
-                &(MAX_SEMANTIC_COMMITMENT_NODES_PER_GC as i64),
-            ],
-        )
-        .map_err(|error| operation_error("operations/gc-semantic-node-candidates", error))?
-        .into_iter()
-        .map(|row| digest(row.get(0), "semantic commitment garbage hash"))
-        .collect::<Result<Vec<_>, _>>()?
+                &[
+                    &older_than_millis,
+                    &(MAX_SEMANTIC_COMMITMENT_NODES_PER_GC as i64),
+                ],
+            )
+            .map_err(|error| operation_error("operations/gc-semantic-node-candidates", error))?
+            .into_iter()
+            .map(|row| digest(row.get(0), "semantic commitment garbage hash"))
+            .collect::<Result<Vec<_>, _>>()?
     } else {
         Vec::new()
     };
@@ -3434,10 +3430,7 @@ fn request_base_archive_candidates<C: postgres::GenericClient>(
                 continue;
             };
             let generation_locked: bool = client
-                .query_one(
-                    "SELECT pg_try_advisory_xact_lock($1)",
-                    &[&generation_key],
-                )
+                .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&generation_key])
                 .map_err(|error| {
                     operation_error("operations/gc-request-base-generation-pin", error)
                 })?
@@ -3475,10 +3468,7 @@ fn request_base_archive_candidates<C: postgres::GenericClient>(
                         break;
                     };
                     let locked: bool = client
-                        .query_one(
-                            "SELECT pg_try_advisory_xact_lock($1)",
-                            &[&lock_key],
-                        )
+                        .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&lock_key])
                         .map_err(|error| {
                             operation_error("operations/gc-request-base-restore-pin", error)
                         })?
