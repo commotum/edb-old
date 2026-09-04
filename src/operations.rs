@@ -11,10 +11,11 @@ use crate::postgres::{
     AuthenticatedLogTransaction, insert_program_generation_refs, read_authenticated_log_range,
     recover_generation_to, verify_schema_compatibility,
 };
+use crate::state_commitment::checkpoint_information;
 use crate::{
-    Digest, PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, SemanticError,
-    decode_genesis, decode_index_manifest, decode_index_segment, decode_transaction, sha256,
-    transaction_hash,
+    Datom, Digest, IndexOrder, PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore,
+    SemanticError, decode_genesis, decode_index_manifest, decode_index_segment, decode_transaction,
+    sha256, transaction_hash,
 };
 use postgres::{Client, GenericClient, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2377,6 +2378,7 @@ fn inspect_native_trees<C: postgres::GenericClient>(
     let mut all_nodes = BTreeMap::<Digest, Vec<u8>>::new();
     let mut newest_manifest_hash = None;
     let mut newest_authenticated_nodes = None;
+    let mut newest_active_projection = None;
 
     for publication in publications {
         let revision = positive_or_zero(publication.get(0), "tree publication revision")?;
@@ -2542,12 +2544,36 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             newest_authenticated_nodes =
                 Some(manifest_nodes.keys().copied().collect::<BTreeSet<_>>());
         }
-        all_nodes.extend(manifest_nodes);
         // A prior excision generation remains retained physical history, but
         // it is no longer a usable index for the current database value.
         if publication_valid && stored_generation == generation {
             metrics.index_basis_t = metrics.index_basis_t.max(basis);
+            if deep {
+                match (
+                    native_eavt_datoms(&manifest_nodes, false),
+                    native_eavt_datoms(&manifest_nodes, true),
+                ) {
+                    (Ok(current), Ok(history)) => {
+                        newest_active_projection = Some(NativeSemanticProjection {
+                            revision,
+                            generation: stored_generation,
+                            basis_t: basis,
+                            tx_hash: stored_tx,
+                            current,
+                            history,
+                        });
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        problem(
+                            problems,
+                            error.code,
+                            format!("tree revision {revision}: {}", error.message),
+                        );
+                    }
+                }
+            }
         }
+        all_nodes.extend(manifest_nodes);
     }
     if !native_live_membership_matches(
         client,
@@ -2561,9 +2587,109 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             "current native live membership is absent, incomplete, or disagrees with authenticated reachability",
         );
     }
+    // Content hashes authenticate one conditionally published physical value,
+    // but cannot prove that a differently shaped semantic commitment contains
+    // the same set. This explicit administrative boundary already pays for a
+    // complete tree walk, so replay the named immutable log value and compare
+    // exact EAVT information here. Ordinary peer/writer adoption deliberately
+    // trusts the restricted index publisher, as Datomic trusts its adopted
+    // storage root; copying `state_hash` into another manifest is not a proof.
+    if deep && let Some(projection) = newest_active_projection {
+        match recover_generation_to(
+            client,
+            database_id,
+            projection.generation,
+            projection.basis_t,
+            projection.tx_hash,
+        ) {
+            Ok(recovered) => match checkpoint_information(&recovered.database) {
+                Ok((expected_current, expected_history)) => {
+                    let current_matches =
+                        same_stored_datoms(&projection.current, &expected_current);
+                    let history_matches =
+                        same_stored_datoms(&projection.history, &expected_history);
+                    if !current_matches || !history_matches {
+                        problem(
+                            problems,
+                            "integrity/tree-semantic-mismatch",
+                            format!(
+                                "tree revision {} does not contain the current/history information derived from authoritative generation {} at basis {} (current: {} vs {}, history: {} vs {})",
+                                projection.revision,
+                                projection.generation,
+                                projection.basis_t,
+                                projection.current.len(),
+                                expected_current.len(),
+                                projection.history.len(),
+                                expected_history.len(),
+                            ),
+                        );
+                    }
+                }
+                Err(error) => problem(
+                    problems,
+                    error.code,
+                    format!(
+                        "tree revision {} semantic projection: {}",
+                        projection.revision, error.message
+                    ),
+                ),
+            },
+            Err(error) => problem(
+                problems,
+                error.code,
+                format!(
+                    "tree revision {} authoritative replay: {}",
+                    projection.revision, error.message
+                ),
+            ),
+        }
+    }
     metrics.tree_nodes = all_nodes.len() as u64;
     metrics.tree_node_bytes = all_nodes.values().map(|bytes| bytes.len() as u64).sum();
     Ok(())
+}
+
+struct NativeSemanticProjection {
+    revision: u64,
+    generation: u64,
+    basis_t: u64,
+    tx_hash: Digest,
+    current: Vec<Datom>,
+    history: Vec<Datom>,
+}
+
+fn native_eavt_datoms(
+    nodes: &BTreeMap<Digest, Vec<u8>>,
+    history: bool,
+) -> Result<Vec<Datom>, SemanticError> {
+    let mut datoms = Vec::new();
+    for (hash, payload) in nodes {
+        let TreeNode::Leaf(leaf) = decode_tree_node(hash, payload)? else {
+            continue;
+        };
+        if leaf.order != IndexOrder::Eavt || leaf.history != history {
+            continue;
+        }
+        for index in 0..leaf.len() {
+            datoms.push(
+                leaf.datom(index)
+                    .expect("authenticated leaf columns have equal lengths"),
+            );
+        }
+    }
+    datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+    Ok(datoms)
+}
+
+fn same_stored_datoms(left: &[Datom], right: &[Datom]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.entity == right.entity
+                && left.attribute == right.attribute
+                && left.value.stored_eq(&right.value)
+                && left.tx == right.tx
+                && left.added == right.added
+        })
 }
 
 fn native_live_membership_matches<C: postgres::GenericClient>(

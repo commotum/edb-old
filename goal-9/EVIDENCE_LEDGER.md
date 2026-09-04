@@ -356,12 +356,35 @@ requirements are labeled rather than misrepresented as Datomic behavior.
 - **1.0.7705:** startup adopts a durable root and then reduces the authoritative
   log tail at `transactor/src-clj/datomic/update.clj:2793-2857` and
   `peer/src-clj/datomic/log.clj:1406-1520`.
-- **Repair:** a manifest checksum and matching endpoint transaction id do not
-  prove that independently supplied current/history datoms are the state
-  derived from that log. Atomic must commit a canonical state/root digest at
-  authoritative publication and require an adopted base to match it. The
-  native digest format is PostgreSQL/Rust-specific; the authority direction is
-  recovered rather than invented.
+- **Recovered trust boundary:** Datomic conditionally adopts the index root
+  produced by its trusted indexer, then reduces the authoritative log tail. Its
+  immutable segment/root identities authenticate the adopted physical value;
+  the recovered code does not supply a succinct proof that a second index
+  shape contains exactly the log-derived datom set (`log.clj:1-24`,
+  `update.clj:1925-1990,2793-2857`).
+- **Native repair and limit:** authoritative publication commits the canonical
+  v2 semantic state digest. Ordinary native adoption requires the exact
+  `(generation,basis,tx-hash,state-hash,eidx-frontier)` coordinate, canonical
+  manifest and node content hashes, complete root bindings/live membership,
+  and the root-last PostgreSQL publication. This detects missing or changed
+  immutable content and stale/misbound roots. Copying the right semantic hash
+  into an independently rebuilt, internally self-consistent physical tree is
+  still only a claim: proving equality between the packing-independent
+  semantic treap and four packing/order-dependent B-trees without reading
+  leaves would require a new shared accumulator or authenticated cross-tree
+  proof format. A duplicate checksum cannot provide that proof.
+- **Explicit verification boundary:** `PostgresOperator::inspect_database(...,
+  true)` is the broad administrative check. It authenticates the complete
+  native tree, reconstructs the named authoritative log value, and compares
+  its exact current and retained-history EAVT information. Ordinary peer and
+  writer opens deliberately trust roots published by the restricted native
+  indexer role, matching Datomic's conditionally-published-root model. A
+  PostgreSQL superuser or intentionally Byzantine indexer that can publish a
+  new self-consistent false tree is outside ordinary corruption detection;
+  deep inspection detects the false tree, while role separation, immutable
+  rows, conditional publication, and triggers prevent untrusted runtime roles
+  from creating one. This narrower claim replaces the impossible assertion
+  that endpoint metadata alone proves global semantic equivalence.
 
 ### C25 — Keep the production transactor tiered as well as the peer
 
