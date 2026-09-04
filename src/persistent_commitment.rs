@@ -37,6 +37,7 @@ impl PersistentSemanticRoot {
         self.root.unwrap_or_else(semantic_empty_hash)
     }
 
+    #[cfg(test)]
     pub(crate) fn count(self) -> u64 {
         self.count
     }
@@ -593,14 +594,14 @@ pub(crate) fn eager_semantic_changes(
                 attribute: Some(datom.attribute),
                 value: Some(datom.value.clone()),
             })?
-            .into_iter()
+            .iter()
             .find(|candidate| candidate.value.stored_eq(&datom.value));
         if datom.added {
             if prior.is_none() {
                 changes.push(SemanticSetChange::insert(datom)?);
             }
         } else if let Some(prior) = prior {
-            changes.push(SemanticSetChange::remove(&prior)?);
+            changes.push(SemanticSetChange::remove(prior)?);
         }
     }
     Ok(changes)

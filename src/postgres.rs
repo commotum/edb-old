@@ -3110,6 +3110,7 @@ impl PostgresStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn transact_authoritative_fenced(
         &mut self,
         lease: &TransactorLease,
@@ -3813,7 +3814,6 @@ impl PostgresStore {
 
 pub(crate) struct Recovered {
     pub(crate) database: Database,
-    pub(crate) final_transaction: Option<DurableTransaction>,
     pub(crate) final_hash: Digest,
 }
 
@@ -3988,7 +3988,7 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
             transaction.database_id = database_id.to_owned();
             transaction
         };
-        if !matches!(request_kind, 0 | 1 | 2) || (generation == 0 && request_kind != 1) {
+        if !matches!(request_kind, 0..=2) || (generation == 0 && request_kind != 1) {
             return Err(fault(
                 "recovery/request-kind",
                 "transaction request record has an invalid kind",
@@ -4113,7 +4113,6 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
     }
 
     let mut previous_hash = genesis_hash;
-    let mut final_transaction = None;
     let mut target_state_hash = [0; 32];
     for (offset, row) in rows.into_iter().enumerate() {
         let expected_basis = offset as u64 + 1;
@@ -4203,7 +4202,6 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
         };
         target_state_hash = stored_state_hash;
         previous_hash = stored_hash;
-        final_transaction = Some(envelope);
     }
     if database.basis_t() != target_basis || previous_hash != target_hash {
         return Err(fault(
@@ -4228,7 +4226,6 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
     }
     Ok(Recovered {
         database,
-        final_transaction,
         final_hash: previous_hash,
     })
 }
@@ -4291,6 +4288,7 @@ fn select_freshest_head_writer_state(
         .unwrap_or(reconstructed))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_writer_state(
     connection: &PostgresConnectionConfig,
     database_id: &str,

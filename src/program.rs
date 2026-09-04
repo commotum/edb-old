@@ -1257,6 +1257,7 @@ impl ProgramRuntime {
     /// predicates need the same lazy db-before/db-after read boundary as
     /// queries do. The eager entry above remains a compatibility adapter for
     /// the semantic reference kernel.
+    #[cfg(test)]
     pub(crate) fn execute_prevalidated_exact_with_budget(
         &self,
         program: &ValidatedProgram,

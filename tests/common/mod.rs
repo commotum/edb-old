@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use atomic_core::{
     CapacityLimits, Database, DatabaseValue, Datom, IndexOrder, Schema, SemanticError,
     ServiceTransactionReport, TransactionClient, TransactionRequest, TransactionService,
@@ -82,7 +84,6 @@ impl InformationSource for DatabaseValue {
     }
 }
 
-#[allow(dead_code)]
 pub fn assert_same_information(left: &impl InformationSource, right: &impl InformationSource) {
     assert_eq!(left.test_basis_t(), right.test_basis_t());
     assert_eq!(left.test_eidx_frontier(), right.test_eidx_frontier());
@@ -105,7 +106,6 @@ pub fn assert_same_information(left: &impl InformationSource, right: &impl Infor
 /// Deliberately bypass ordinary PostgreSQL triggers for one tightly scoped
 /// fault-injection or maintenance operation, then restore them before
 /// returning. Production code must never use this as an ordinary write path.
-#[allow(dead_code)]
 pub fn with_replica_triggers_disabled<T>(
     client: &mut Client,
     operation: impl FnOnce(&mut Client) -> Result<T, postgres::Error>,

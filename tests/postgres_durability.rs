@@ -1,7 +1,7 @@
 use atomic_core::{
-    Attribute, AttributeName, Cardinality, DB_IDENT, Database, EntityIdentifier, EntityRef,
-    IndexOrder, Keyword, PostgresStore, PullAttribute, PullPattern, Schema, TxOp, TxValue, Unique,
-    Value, ValueType, View, canonical_genesis_datoms, encode_genesis, sha256,
+    Attribute, AttributeName, Cardinality, DB_IDENT, EntityIdentifier, EntityRef, Keyword,
+    PostgresStore, PullAttribute, PullPattern, Schema, TxOp, TxValue, Unique, Value, ValueType,
+    canonical_genesis_datoms, encode_genesis, sha256,
 };
 use postgres::{Client, NoTls};
 use std::process::Command;

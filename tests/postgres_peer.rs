@@ -1,8 +1,8 @@
 use atomic_core::persistent_tree::{TreeNode, decode_tree_node};
 use atomic_core::{
-    Attribute, AttributeName, Binding, Cardinality, Clause, DataPattern, Database, EntityRef,
-    EntityValue, FindElement, FindSpec, Function, IndexBuildFault, IndexOrder, IndexPrefix,
-    InputSpec, Instruction, Keyword, Peer, PostgresIndexer, PostgresStore, Program, ProgramKind,
+    Attribute, AttributeName, Binding, Cardinality, Clause, DataPattern, EntityRef, EntityValue,
+    FindElement, FindSpec, Function, IndexBuildFault, IndexOrder, IndexPrefix, InputSpec,
+    Instruction, Keyword, Peer, PostgresIndexer, PostgresStore, Program, ProgramKind,
     PullAttribute, PullPattern, Query, QueryControl, QueryEngine, QueryExtensions, QueryInput,
     QueryOutcome, QueryResult, QuerySource, QueryValue, Schema, Term, TransactionRequest,
     TransactionService, TransactionServiceConfig, TxOp, TxValue, Unique, Value, ValueType,
