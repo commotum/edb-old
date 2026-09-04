@@ -359,10 +359,9 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
         })
         .unwrap();
     assert_eq!(tx_instant_datoms.len(), 1);
-    // Selection, assessor monotonicity validation, and overlay construction
-    // each read the same resident native EAVT coordinate today. They remain
-    // three real logical reads until txInstant becomes scalar metadata.
-    let tx_instant_reads = u64::try_from(tx_instant_datoms.len()).unwrap() * 3;
+    // The first lookup seeds the immutable value's shared resident memo;
+    // assessor monotonicity validation and overlay construction reuse it.
+    let tx_instant_reads = u64::try_from(tx_instant_datoms.len()).unwrap();
     let binding_role_reads = u64::try_from(
         committed
             .database
@@ -380,6 +379,7 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
         + tx_instant_reads
         + binding_role_reads
         + commitment_prior_reads;
+    assert_eq!(without_successor_probe + 1, 6);
     store
         .set_capacity_limits(CapacityLimits {
             max_transaction_read_datoms: without_successor_probe,

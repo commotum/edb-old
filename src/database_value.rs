@@ -9,7 +9,7 @@ use crate::{
 use std::fmt;
 use std::iter::Cloned;
 use std::slice::Iter;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::vec::IntoIter;
 
 type ReadFilter = dyn Fn(&DatabaseValue, &Datom) -> bool + Send + Sync;
@@ -118,6 +118,62 @@ fn read_observer_poisoned() -> SemanticError {
     )
 }
 
+/// One immutable value lineage's derived transaction-instant coordinate.
+///
+/// Stable Rust does not yet expose fallible `OnceLock` initialization, so the
+/// small initialization mutex preserves retry-after-error behavior while the
+/// populated fast path remains lock-free. This is a discardable memo, not
+/// mutable database state.
+#[derive(Debug)]
+struct LastTxInstantMemo {
+    value: OnceLock<Option<i64>>,
+    initialization: Mutex<()>,
+}
+
+impl LastTxInstantMemo {
+    fn empty() -> Self {
+        Self {
+            value: OnceLock::new(),
+            initialization: Mutex::new(()),
+        }
+    }
+
+    fn seeded(value: Option<i64>) -> Self {
+        Self {
+            value: OnceLock::from(value),
+            initialization: Mutex::new(()),
+        }
+    }
+
+    fn get_or_try_init(
+        &self,
+        initialize: impl FnOnce() -> Result<Option<i64>, SemanticError>,
+    ) -> Result<Option<i64>, SemanticError> {
+        if let Some(value) = self.value.get() {
+            return Ok(*value);
+        }
+        let _initialization = self.initialization.lock().map_err(|_| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "database/tx-instant-memo-poisoned",
+                "transaction-instant memo initialization mutex was poisoned",
+            )
+        })?;
+        if let Some(value) = self.value.get() {
+            return Ok(*value);
+        }
+        let value = initialize()?;
+        self.value.set(value).map_err(|_| {
+            SemanticError::new(
+                ErrorCategory::Fault,
+                "database/tx-instant-memo-race",
+                "transaction-instant memo was initialized outside its serialization boundary",
+            )
+        })?;
+        Ok(value)
+    }
+}
+
 /// One exact immutable database value used by read-side APIs.
 ///
 /// The two basis representations are deliberate rather than an extensible
@@ -128,6 +184,7 @@ fn read_observer_poisoned() -> SemanticError {
 #[derive(Clone)]
 pub struct DatabaseValue {
     basis: ReadBasis,
+    last_tx_instant_memo: Arc<LastTxInstantMemo>,
     as_of_t: Option<u64>,
     since_t: Option<u64>,
     history: bool,
@@ -277,8 +334,10 @@ impl fmt::Debug for DatabaseValue {
 
 impl DatabaseValue {
     pub fn eager(database: Arc<Database>) -> Self {
+        let last_tx_instant_memo = Arc::new(LastTxInstantMemo::seeded(database.last_tx_instant()));
         Self {
             basis: ReadBasis::Eager(database),
+            last_tx_instant_memo,
             as_of_t: None,
             since_t: None,
             history: false,
@@ -294,6 +353,7 @@ impl DatabaseValue {
     pub(crate) fn tiered(snapshot: TieredSnapshot) -> Self {
         Self {
             basis: ReadBasis::Native(snapshot),
+            last_tx_instant_memo: Arc::new(LastTxInstantMemo::empty()),
             as_of_t: None,
             since_t: None,
             history: false,
@@ -416,6 +476,7 @@ impl DatabaseValue {
                 eidx_frontier,
                 last_tx_instant,
             })),
+            last_tx_instant_memo: Arc::new(LastTxInstantMemo::seeded(Some(last_tx_instant))),
             as_of_t: None,
             since_t: None,
             history: false,
@@ -461,15 +522,17 @@ impl DatabaseValue {
     /// The most recent transaction instant at this immutable basis.
     ///
     /// A native value resolves the single transaction entity through its lazy
-    /// index. It never invokes the eager compatibility materializer.
+    /// index at most once across immutable clones. It never invokes the eager
+    /// compatibility materializer.
     pub fn last_tx_instant(&self) -> Result<Option<i64>, SemanticError> {
-        match &self.basis {
-            ReadBasis::Eager(database) => Ok(database.last_tx_instant()),
-            ReadBasis::Native(snapshot) => {
-                snapshot.last_tx_instant_observed(self.read_observer.as_deref())
-            }
-            ReadBasis::TransactionOverlay(overlay) => Ok(Some(overlay.last_tx_instant)),
-        }
+        self.last_tx_instant_memo
+            .get_or_try_init(|| match &self.basis {
+                ReadBasis::Eager(database) => Ok(database.last_tx_instant()),
+                ReadBasis::Native(snapshot) => {
+                    snapshot.last_tx_instant_observed(self.read_observer.as_deref())
+                }
+                ReadBasis::TransactionOverlay(overlay) => Ok(Some(overlay.last_tx_instant)),
+            })
     }
 
     pub fn schema(&self) -> &Schema {
@@ -1224,6 +1287,7 @@ mod tests {
         make_eid,
     };
     use bigdecimal::BigDecimal;
+    use std::cell::Cell;
     use std::str::FromStr;
 
     const AMOUNT: u32 = 1_000;
@@ -1259,6 +1323,51 @@ mod tests {
                 expected.value
             );
         }
+    }
+
+    #[test]
+    fn transaction_instant_memo_is_seeded_shared_and_initialized_once() {
+        let database = Database::bootstrap().unwrap();
+        let report = database.with(&[], 1_234).unwrap();
+        let value = report.db_after.database_value();
+        assert_eq!(
+            value.last_tx_instant_memo.value.get(),
+            Some(&Some(1_234)),
+            "eager values seed their resident coordinate"
+        );
+
+        let derived = value
+            .clone()
+            .as_of(0)
+            .history()
+            .with_read_observer(Arc::new(LogicalReadObserver::new(u64::MAX, u64::MAX)));
+        assert!(Arc::ptr_eq(
+            &value.last_tx_instant_memo,
+            &derived.last_tx_instant_memo
+        ));
+        assert_eq!(derived.last_tx_instant().unwrap(), Some(1_234));
+
+        let lazy = Arc::new(LastTxInstantMemo::empty());
+        let lazy_clone = Arc::clone(&lazy);
+        let initializations = Cell::new(0_u32);
+        assert_eq!(
+            lazy.get_or_try_init(|| {
+                initializations.set(initializations.get() + 1);
+                Ok(Some(9_876))
+            })
+            .unwrap(),
+            Some(9_876)
+        );
+        assert_eq!(
+            lazy_clone
+                .get_or_try_init(|| {
+                    initializations.set(initializations.get() + 1);
+                    Ok(Some(1))
+                })
+                .unwrap(),
+            Some(9_876)
+        );
+        assert_eq!(initializations.get(), 1);
     }
 
     fn assert_prefix_matches_eager(
@@ -1447,6 +1556,11 @@ mod tests {
 
         assert_eq!(overlay.basis_t(), report.db_after.basis_t());
         assert_eq!(overlay.eidx_frontier(), report.db_after.eidx_frontier());
+        assert_eq!(
+            overlay.last_tx_instant_memo.value.get(),
+            Some(&Some(4_000)),
+            "transaction overlays seed their successor coordinate"
+        );
         assert_eq!(overlay.last_tx_instant().unwrap(), Some(4_000));
         assert_eq!(overlay.schema(), report.db_after.schema());
 
