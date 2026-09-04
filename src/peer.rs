@@ -1,3 +1,4 @@
+use crate::database_value::LogicalReadObserver;
 use crate::idents::IdentIndex;
 use crate::operations::tree_manifest_advisory_key;
 use crate::persistent_tree::{
@@ -3376,7 +3377,7 @@ impl Peer {
             &state.metadata,
             &state.avet_unready,
             &tail.transactions,
-            |attribute| before.has_attribute_history(attribute),
+            |attribute| before.has_attribute_history(attribute, None),
         )?;
         let metadata = Arc::new(metadata);
         let recent = state.recent.extend_authenticated_existing(
@@ -4095,6 +4096,13 @@ impl TieredSnapshot {
     /// Transaction instant at this exact basis, read through the native index
     /// rather than by materializing the compatibility `Database`.
     pub fn last_tx_instant(&self) -> Result<Option<i64>, SemanticError> {
+        self.last_tx_instant_observed(None)
+    }
+
+    pub(crate) fn last_tx_instant_observed(
+        &self,
+        read_observer: Option<&LogicalReadObserver>,
+    ) -> Result<Option<i64>, SemanticError> {
         if self.state.basis_t == 0 {
             return Ok(None);
         }
@@ -4108,7 +4116,13 @@ impl TieredSnapshot {
             },
         )?;
         let first = datoms.next().transpose()?;
+        if let (Some(observer), Some(datom)) = (read_observer, &first) {
+            observer.charge_datom(datom)?;
+        }
         let second = datoms.next().transpose()?;
+        if let (Some(observer), Some(datom)) = (read_observer, &second) {
+            observer.charge_datom(datom)?;
+        }
         match (first, second) {
             (
                 Some(Datom {
@@ -4140,7 +4154,11 @@ impl TieredSnapshot {
             && !self.state.avet_unready.contains(&attribute)
     }
 
-    fn has_attribute_history(&self, attribute: u32) -> Result<bool, SemanticError> {
+    fn has_attribute_history(
+        &self,
+        attribute: u32,
+        read_observer: Option<&LogicalReadObserver>,
+    ) -> Result<bool, SemanticError> {
         let mut cursor = self.prefix_cursor(
             true,
             &IndexPrefix::Aevt {
@@ -4149,7 +4167,11 @@ impl TieredSnapshot {
                 value: None,
             },
         )?;
-        cursor.next().transpose().map(|datom| datom.is_some())
+        let datom = cursor.next().transpose()?;
+        if let (Some(observer), Some(datom)) = (read_observer, &datom) {
+            observer.charge_datom(datom)?;
+        }
+        Ok(datom.is_some())
     }
 
     /// Path-copy one authenticated committed transaction into a successor
@@ -4162,12 +4184,14 @@ impl TieredSnapshot {
         state_hash: Digest,
         transaction: DurableTransaction,
         successor_schema: &crate::Schema,
+        read_observer: &LogicalReadObserver,
     ) -> Result<Self, SemanticError> {
         self.authenticated_successor_checked(
             tx_hash,
             state_hash,
             transaction,
             Some(successor_schema),
+            Some(read_observer),
         )
     }
 
@@ -4181,7 +4205,7 @@ impl TieredSnapshot {
         state_hash: Digest,
         transaction: DurableTransaction,
     ) -> Result<Self, SemanticError> {
-        self.authenticated_successor_checked(tx_hash, state_hash, transaction, None)
+        self.authenticated_successor_checked(tx_hash, state_hash, transaction, None, None)
     }
 
     fn authenticated_successor_checked(
@@ -4190,12 +4214,13 @@ impl TieredSnapshot {
         state_hash: Digest,
         transaction: DurableTransaction,
         successor_schema: Option<&crate::Schema>,
+        read_observer: Option<&LogicalReadObserver>,
     ) -> Result<Self, SemanticError> {
         let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
             &self.state.metadata,
             &self.state.avet_unready,
             std::slice::from_ref(&transaction),
-            |attribute| self.has_attribute_history(attribute),
+            |attribute| self.has_attribute_history(attribute, read_observer),
         )?;
         let metadata = Arc::new(metadata);
         if successor_schema.is_some_and(|schema| metadata.schema.as_ref() != schema) {

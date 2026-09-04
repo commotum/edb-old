@@ -14,7 +14,7 @@ use crate::program::ValidatedProgram;
 use crate::recent::RecentLimits;
 use crate::state_commitment::CommitmentWork;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
-use crate::tiered_assessor::{AssessmentLimits, assess_tiered_with_limits};
+use crate::tiered_assessor::{AssessmentLimits, assess_tiered_with_remaining_limits};
 use crate::{
     CallableRef, Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory,
     PostgresConnectionConfig, Program, ProgramBudget, ProgramCall, ProgramHash, ProgramKind,
@@ -3470,23 +3470,15 @@ impl PostgresStore {
             ));
         }
         let remaining = read_observer.remaining()?;
-        let mut assessed = assess_tiered_with_limits(
-            &db_before,
+        let mut assessed = assess_tiered_with_remaining_limits(
+            &observed_db_before,
             &ops,
             tx_instant,
             AssessmentLimits {
-                // The assessor currently requires positive local limits. A
-                // fully consumed transaction allowance can still assess a
-                // zero-read transaction; any actual excess is rejected when
-                // its exact work is absorbed below.
-                max_read_datoms: remaining.datoms.max(1),
-                max_read_bytes: remaining.retained_bytes.max(1),
+                max_read_datoms: remaining.datoms,
+                max_read_bytes: remaining.retained_bytes,
             },
         )?;
-        read_observer.absorb(LogicalReadWork {
-            datoms: assessed.read_work.datoms,
-            retained_bytes: assessed.read_work.retained_bytes,
-        })?;
         assessed.db_before = assessed
             .db_before
             .with_read_observer(Arc::clone(&read_observer));
@@ -3566,6 +3558,7 @@ impl PostgresStore {
             state_hash,
             envelope.clone(),
             &assessed.successor_schema,
+            read_observer.as_ref(),
         )?;
         if successor.endpoint()
             != (ExactEndpoint {

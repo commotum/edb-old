@@ -18,8 +18,9 @@ type ReadFilter = dyn Fn(&DatabaseValue, &Datom) -> bool + Send + Sync;
 ///
 /// This deliberately does not infer work from persistent-tree node loads:
 /// cache hits still deliver datoms, while one loaded leaf can contain many
-/// datoms outside the requested range. The writer folds the assessor's own
-/// memoized work into the same observer exactly once.
+/// datoms outside the requested range. The writer carries one observer across
+/// generation, assessment, validation, and successor construction; the
+/// assessor's prefix memo prevents repeated database deliveries.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct LogicalReadWork {
     pub(crate) datoms: u64,
@@ -56,14 +57,7 @@ impl LogicalReadObserver {
         })
     }
 
-    /// Fold work performed by the transaction assessor into this observer.
-    /// The assessor has its own prefix memo and therefore remains the source
-    /// of truth for that phase instead of being observed a second time.
-    pub(crate) fn absorb(&self, work: LogicalReadWork) -> Result<(), SemanticError> {
-        self.charge(work)
-    }
-
-    fn charge_datom(&self, datom: &Datom) -> Result<(), SemanticError> {
+    pub(crate) fn charge_datom(&self, datom: &Datom) -> Result<(), SemanticError> {
         self.charge(LogicalReadWork {
             datoms: 1,
             retained_bytes: datom.retained_bytes(),
@@ -471,7 +465,9 @@ impl DatabaseValue {
     pub fn last_tx_instant(&self) -> Result<Option<i64>, SemanticError> {
         match &self.basis {
             ReadBasis::Eager(database) => Ok(database.last_tx_instant()),
-            ReadBasis::Native(snapshot) => snapshot.last_tx_instant(),
+            ReadBasis::Native(snapshot) => {
+                snapshot.last_tx_instant_observed(self.read_observer.as_deref())
+            }
             ReadBasis::TransactionOverlay(overlay) => Ok(Some(overlay.last_tx_instant)),
         }
     }

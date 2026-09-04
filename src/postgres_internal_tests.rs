@@ -2,9 +2,9 @@ use crate::postgres::{CapacityLimits, CommitFault, MIGRATIONS, PostgresStore};
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
     Attribute, Cardinality, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_FN, DB_IDENT, Database,
-    DurableTransaction, EntityRef, ErrorCategory, IndexOrder, Instruction, Keyword, Program,
-    ProgramKind, Schema, Symbol, TxOp, TxValue, Unique, Value, ValueType, View, encode_genesis,
-    encode_transaction, request_digest, sha256, transaction_hash,
+    DurableTransaction, EntityRef, ErrorCategory, IndexOrder, IndexPrefix, Instruction, Keyword,
+    Program, ProgramKind, Schema, Symbol, TxOp, TxValue, Unique, Value, ValueType, View,
+    encode_genesis, encode_transaction, request_digest, sha256, transaction_hash,
 };
 use postgres::{Client, NoTls};
 use std::collections::BTreeMap;
@@ -318,6 +318,118 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
             committed_stats.last_commitment_leaf_changes,
         ),
         "an exact receipt replay performs no new transaction assessment"
+    );
+
+    // Enabling AVET over an attribute with history performs one final
+    // `has-values?` probe while constructing the immutable successor. Compute
+    // every earlier logical datom delivery, leave no allowance for that final
+    // probe, and prove the schema transaction stays invisible.
+    let mut indexed_count = committed
+        .database
+        .schema()
+        .attribute(ITEM_COUNT)
+        .unwrap()
+        .clone();
+    indexed_count.indexed = true;
+    let schema_ops = vec![TxOp::AlterAttribute(indexed_count)];
+    let schema_assessed =
+        crate::tiered_assessor::assess_tiered(&committed.database, &schema_ops, 4_000).unwrap();
+    let mut commitment_prior_reads = 0_u64;
+    for datom in &schema_assessed.tx_data {
+        let prefix = IndexPrefix::Eavt {
+            entity: datom.entity,
+            attribute: Some(datom.attribute),
+            value: Some(datom.value.clone()),
+        };
+        for candidate in committed.database.current_prefix_cursor(&prefix).unwrap() {
+            let candidate = candidate.unwrap();
+            commitment_prior_reads += 1;
+            if candidate.value.stored_eq(&datom.value) {
+                break;
+            }
+        }
+    }
+    let prior_tx = crate::t_to_tx(committed.basis_t).unwrap();
+    let tx_instant_datoms = committed
+        .database
+        .datoms_with_prefix(&IndexPrefix::Eavt {
+            entity: prior_tx,
+            attribute: Some(crate::DB_TX_INSTANT as u32),
+            value: None,
+        })
+        .unwrap();
+    assert_eq!(tx_instant_datoms.len(), 1);
+    // Selection, assessor monotonicity validation, and overlay construction
+    // each read the same resident native EAVT coordinate today. They remain
+    // three real logical reads until txInstant becomes scalar metadata.
+    let tx_instant_reads = u64::try_from(tx_instant_datoms.len()).unwrap() * 3;
+    let binding_role_reads = u64::try_from(
+        committed
+            .database
+            .datoms_with_prefix(&IndexPrefix::Aevt {
+                attribute: DB_ENTITY_PREDS as u32,
+                entity: None,
+                value: None,
+            })
+            .unwrap()
+            .len(),
+    )
+    .unwrap();
+    let before_schema_rejection = store.writer_residency_stats(&database_id);
+    let without_successor_probe = schema_assessed.read_work.datoms
+        + tx_instant_reads
+        + binding_role_reads
+        + commitment_prior_reads;
+    store
+        .set_capacity_limits(CapacityLimits {
+            max_transaction_read_datoms: without_successor_probe,
+            max_transaction_read_bytes: u64::MAX,
+            ..CapacityLimits::default()
+        })
+        .unwrap();
+    let schema_rejected = store
+        .transact_with_fault(
+            &database_id,
+            "schema-successor-read-work",
+            committed.basis_t,
+            &schema_ops,
+            4_000,
+            CommitFault::None,
+        )
+        .unwrap_err();
+    assert_eq!(schema_rejected.code, "transaction/read-capacity");
+    assert_eq!(
+        store.writer_residency_stats(&database_id),
+        before_schema_rejection
+    );
+    assert_eq!(
+        store.recover(&database_id).unwrap().basis_t(),
+        committed.basis_t
+    );
+
+    store
+        .set_capacity_limits(CapacityLimits {
+            max_transaction_read_datoms: without_successor_probe + 1,
+            max_transaction_read_bytes: u64::MAX,
+            ..CapacityLimits::default()
+        })
+        .unwrap();
+    let indexed = store
+        .transact_with_fault(
+            &database_id,
+            "schema-successor-read-work",
+            committed.basis_t,
+            &schema_ops,
+            4_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert_eq!(indexed.basis_t, committed.basis_t + 1);
+    assert_eq!(
+        store
+            .writer_residency_stats(&database_id)
+            .last_transaction_read_datoms,
+        without_successor_probe + 1
     );
 }
 
