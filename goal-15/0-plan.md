@@ -118,12 +118,26 @@ database while offline, blocks a sync, restarts storage, commits through the
 same standby object, and advances the same peer/store/tree/indexer instances;
 the old `Arc` database and snapshot retain their original basis. It passed 1/1
 in 1.29 seconds. A reserved unreachable-host witness passed in 0.05 seconds
-with a 50 ms connection cap. A second brand-new cluster run passed all 97
-nonignored unit tests (including the four migration witnesses) plus background
-indexing, backup/restore, database-value, identity, incremental-tree, and
-kernel suites before stopping at the already-owned Stage 5 obsolete
-legacy-manifest assertion in `operations_excision`; this is partial integrated
-evidence, not a claim that the full Goal 15 suite is green.
+with a 50 ms connection cap. The final fresh-catalog library gate ran with
+`ATOMIC_TEST_POSTGRES_URL` explicitly set and passed 135/135 nonignored tests
+(one subprocess helper is intentionally ignored), including private-publication
+faults, actual process death, and every populated migration witness.
+
+Closing the lifecycle work exposed two additional migration defects rather
+than hiding them behind serial tests. A populated v11 fixture had incorrectly
+called current v14 creation SQL; v6/v11 fixtures now construct their authentic
+generation-zero catalog representation directly. Migration 13 legitimately
+fills the new lineage column, so the administrative migrator suspends only the
+v1 database-immutability trigger around that data migration and re-enables it
+in the same transaction without changing the checksummed historical SQL.
+Repeated `migrate()` calls also used to rebuild complete tree/program ledgers
+and acquire locks opposite live writers. Healthy current catalogs now take a
+read-only discovery fast path, exceptional repair follows generation-owner,
+membership, then legacy-log lock order, and routine search paths are altered
+only when mismatched. A live regression holds the ordinary writer relation
+locks with a 500 ms timeout while an already-current migrator completes; fresh,
+pre-v6, populated-v6, populated-v11, zero-state repair, and current-idempotence
+witnesses all pass.
 
 Role provisioning safely quotes identifiers and requires dedicated roles: it
 rejects elevation or membership, non-system relation/schema or database
@@ -218,7 +232,11 @@ root-retirement/GC evidence rather than weakening this boundary.
 
 ### 3. Differential root-last backup and exact restore
 
-**Status:** Pending.
+**Status:** Complete on PostgreSQL 15.11. Backup unit tests pass 10/10 and the
+normal-parallel live backup/restore suite passes 9/9, including deterministic
+zero-age GC handoff, injected publication/restore faults, ambiguous retry,
+same-basis generations, corrupt/missing content, temporal programs, and
+derived-tree fallback.
 
 **Outcome:** Backups capture a stable database identity and point, reuse
 already-copied immutable content, publish roots last and crash-safely, and
@@ -234,9 +252,45 @@ deep verification detects missing/corrupt reachability; restored log, schema,
 idents, functions, current/history indexes, basis, and commitments are exactly
 equal to the source point.
 
+**Evidence and decisions:** `PortableBackup` captures one Repeatable Read point
+while holding an exact active-generation pin. Its canonical constant-size v4
+root binds lineage, generation, basis, genesis, linked transactions/content,
+requests, state commitments, completed excision, temporal-program closure, and
+optional authenticated tree commitments. A private per-lineage filesystem
+repository serializes writers, reuses immutable objects, publishes a
+no-clobber/fsynced root last, and removes only exact regular temporary files
+without following symlinks. Exact `(generation, basis)` APIs distinguish the
+pre/post-excision points that a basis-only API cannot. Shallow verification
+proves complete reachability; deep verification also hashes, decodes, and
+semantically reconstructs the selected value.
+
+Restore deep-verifies before mutation, stages an invisible database-local
+generation, owns ATLC content and program references atomically with its
+membership, seals the exact completion set, and hands its builder pin directly
+to the activation lock before expected-source publication. Retry resumes only
+the exact unclaimed build or recognizes its committed point. Superseded,
+permanently claimed, unrelated excision, and failed first-restore generations
+cannot be accidentally adopted and are age-gated, boundedly reclaimable.
+
+This preserves the documented live/consistent, per-database, differential,
+selectable-point, same-lineage restore, and shallow/deep behavior
+(`08_operations/01_capacity_and_reliability/02_backup_and_restore.md:18-40,50-118`;
+`01_high_availability.md:82-95`). The recovered claim, immutable-value copy,
+stable capture, values-before-root, restore, and `read-all` split are in
+`backup.clj:264-301,1070-1208,1348-1420,1572-1631,1890-1943`, with filesystem
+publication in `fsbackup.clj:105-179`. ATBK/ATLC, fsync details, and
+database-local generation rebinding are deliberate native formats. Deliberate
+limits are a local filesystem repository, no same-catalog lineage clone,
+writer-quiesced restore, memory-proportional deep verification, and optional
+replaceable tree accelerators rather than tree authority.
+
 ### 4. Safe retirement of superseded physical roots
 
-**Status:** Pending.
+**Status:** Complete on a fresh PostgreSQL 15.11 catalog. The live
+`operations_gc` suite passes 13/13, covering exact dry/apply, pins and grace,
+same-basis/successor publication, shared content, bounded paging, failed
+initial restore cleanup/retry, concurrent consolidation, restart-safe phases,
+and age-policy changes after a durable claim.
 
 **Outcome:** Normal consolidation growth is reclaimable after a declared grace
 boundary while every current, retained, backup-bound, or live-snapshot root
@@ -251,9 +305,33 @@ measurable reclaimable content; dry-run exactly predicts apply; pinned/young/
 reachable content survives; aged unreachable content is removed; concurrent
 consolidation and restart never lose a published value.
 
+**Evidence and decisions:** PostgreSQL now retains exact publication-intent and
+delta ledgers, current/retired root sets, build/retirement/abandonment cursors,
+and exact old-minus-new node marks. Root publication remains content-first and
+root-last. Each collector call performs bounded, restartable work under root,
+generation, peer, builder, or backup advisory pins; raw deletion is driven by
+durable provenance, never an orphan guess. A PostgreSQL restart necessarily
+drops session pins, so the declared age horizon covers the interval until a
+peer reborrows and reacquires them. Claimed work remains collectible if an
+operator later lengthens the age horizon, and a failed unlock discards the
+uncertain session rather than leaking an uncounted permanent pin.
+
+The safety boundary follows the documented delayed collection of garbage made
+by indexing (`00_capacity_planning.md:275-286`) and the recovered publish-then-
+mark and explicit `:older-than` collector (`index.clj:3940-3985,6327,6433-6448`;
+`garbage.clj:318-390,475-603`; `tools/gc_db.clj`; peer `api.clj`'s
+`gc-storage`). PostgreSQL ledgers and advisory coordinates are native
+mechanisms. Remaining debts are throughput/tuning (one globally selected
+root, intent, or generation per call), conservative retention of flat-index
+and pre-ledger content pending an authenticated backfill, age protection for
+disconnected readers, and deployment-owned `VACUUM`; the native versioned-tree
+path itself has exact liveness evidence.
+
 ### 5. Source-faithful excision and synchronization
 
-**Status:** Pending.
+**Status:** Complete in the pure semantic suite and in one end-to-end live
+PostgreSQL fault/restart witness. The broad A=15 test passes 1/1 in 4.04s on a
+fresh catalog; focused predicate, request/replay, and COW tests pass 18/18.
 
 **Outcome:** Excision selects exactly the documented entity/attribute/time
 extent, preserves protected facts by identity, records an immutable audit
@@ -272,9 +350,48 @@ protected identities cannot be removed; failure is atomic; old peer snapshots
 have an explicit validity boundary; acknowledged excision survives restart and
 cannot be bypassed by unrelated corrupt derived state.
 
+**Evidence and decisions:** A=15 remains ordinary immutable transaction data.
+Atomic freezes the request's optional fields at its A=15 assertion rather than
+letting later edits change queued work; this deliberately strengthens the
+documented one-transaction request shape, while recovered Datomic materializes
+the current entity at indexing. The operator rewrites an
+inactive copy-on-write log generation through durable bounded checkpoints,
+catches up transactions committed during the build, stages the corresponding
+tree, conditionally activates the generation, and records root-last completion
+for `sync_excise`. Faults after capture, candidate staging, and activation
+prove that no partial generation is visible and retries resume instead of
+leaking candidates. Unaffected ATLC content is shared, the final receipt binds
+the caught-up source hash, restart recovers the exact rewritten state, old
+immutable peer values remain honest old branches, and refreshed current and
+history indexes no longer contain the selected secret while the A=15 audit fact
+remains queryable.
+
+The selection plan uses the recovered datom-local `keeper?` identity set,
+strict cutoff, selected-attribute behavior, recursive component extent, and
+inbound references from `excise.clj:39-90,139-266,331-428`; it does not revive
+the incorrect `<1000` heuristic. In particular, component discovery now reads
+raw history-as-of, so a pre-request retracted ownership edge still carries its
+child history into the privacy extent, and a protected partition-zero target
+keeps its own facts without falsely protecting unprivileged application facts
+that point to it. This matches the ordinary asynchronous request, protected
+data, permanent predicate, background effect, backup recommendation, and
+synchronization contract in
+`09_optional/02_specialized_operations/02_excision.md:10-15,33-58,103-129`.
+Atomic's copy-on-write SQL generations strengthen atomic visibility without
+turning backup into authorization. The live witness also begins with a
+consolidated `noHistory` retract/reassert pair and proves the active rewritten
+log plus all new current/history tree orders contain no selected value. That is
+a tested native strengthening of Datomic's `noHistory` warning, not a claim
+about old physical copies. PostgreSQL WAL, replicas, exports, logs, retired
+generations before GC, old peer values, and existing backups remain outside
+logical excision and must have matching retention; fulltext is outside Atomic's
+type/index surface.
+
 ### 6. Operational closure
 
-**Status:** Pending.
+**Status:** Complete 2026-09-03. Fresh real-PostgreSQL evidence and the current
+operator contract establish every Goal 15 stage; formatting, `git diff
+--check`, and warning-denying all-target Clippy pass.
 
 **Outcome:** The repaired lifecycle surface is reproducible, observable, and
 ready for Goal 16/17 integration without overstated guarantees.
@@ -288,6 +405,17 @@ live-PostgreSQL suites prove every stage and relevant restart/fault boundary;
 the runbook states exact recovery/privacy/security limits; Goal 9 and Goal 0
 truthfully reflect the established evidence and remaining Goal 16 work.
 
+**Evidence and decisions:** `goal-15/OPERATIONS.md` supersedes the prototype
+Goal 8 runbook where they differ and states the exact authority, TLS, backup,
+restore, GC, excision, WAL, disconnected-reader, and native-format boundaries.
+The final explicitly enabled library run passed 135/135 nonignored tests with
+one intentional subprocess helper ignored. Focused fresh-catalog evidence is
+backup/restore 9/9, GC 13/13, inspection scope 2/2, integrity 2/2, excision
+1/1, and runtime ACL/search-path 1/1, in addition to migration, TLS, restart,
+and fault witnesses recorded above. Goal 17 still owns one reproducible
+cross-goal deployment gate and Goal 16 still owns removal of the eager writer;
+neither is misreported as Goal 15 lifecycle work.
+
 ## Exit condition
 
 Goal 15 completes only when PostgreSQL can be provisioned and operated with
@@ -295,3 +423,6 @@ separate authority, secure/version-checked runtime access, coherent and scoped
 diagnostics, crash-safe differential backup/exact restore, safe bounded
 physical reclamation, and source-faithful auditable excision, all demonstrated
 by non-skipping real-PostgreSQL evidence.
+
+**Status:** Achieved 2026-09-03 with the evidence above. The corrective parent
+continues at Goal 16.

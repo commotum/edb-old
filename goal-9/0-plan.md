@@ -48,11 +48,10 @@ success condition is genuinely established.
   their completion labels are historical rather than current acceptance.
 - `EVIDENCE_LEDGER.md` is the verified repair baseline. It also records prior
   audit claims that were narrowed or refuted during the source cross-check.
-- Goals 10 through 13 close the identity, successor-schema, schema-authority,
-  fragmented-writer, acknowledgement, controlled-behavior, verified-base,
-  persistent-tree, bounded-recent, and lazy-peer defects. The first unfinished
-  risk is exact database-value propagation through query, pull, and entity
-  work, owned by Goal 14.
+- Goals 10 through 15 now close identity/successor validity, schema authority,
+  fragmented writes and acknowledgement, persistent/lazy peer values, exact
+  query-source propagation, and PostgreSQL lifecycle safety. Goal 16 is the
+  first unfinished child.
 - Rechecking Goal 13 against the recovered tiered `Db` exposed a distinct
   production-writer gap: `PostgresStore.current` still retains the complete
   eager oracle even if peers and background publication become lazy. Goal 16
@@ -200,7 +199,11 @@ reference evaluator over generated cases.
 
 ### 6. PostgreSQL lifecycle and operational safety (`goal-15/`)
 
-**Status:** Pending.
+**Status:** Complete 2026-09-03. See `goal-15/0-plan.md` and
+`goal-15/OPERATIONS.md`. An independent source audit found and closed raw
+history-as-of component traversal, datom-local keeper, `noHistory`, migration
+checksum, GC dependency order, active-generation inspection, and runtime ACL
+gaps before acceptance.
 
 **Outcome:** Migration, security, backup/restore, integrity, GC, and excision
 can be operated with truthful durability, privilege, bounded-growth, and
@@ -221,6 +224,16 @@ is race-free, excision tests prove precisely scoped removal/invalidation, and a
 corrupt derived root for database A cannot abort logical maintenance for
 database B or cause shared garbage collection to delete possibly referenced
 content.
+
+**Established evidence:** The final PostgreSQL-enabled library gate passes
+135/135 nonignored tests (one explicit subprocess helper ignored). Fresh
+non-skipping suites pass backup/restore 9/9, GC 13/13, inspection scope 2/2,
+integrity 2/2, excision 1/1, migration/runtime boundary 2/2, and exact runtime
+ACL/search-path 1/1. Historical migrations remain byte-authenticated; runtime
+DDL is separated; portable roots publish last; restore/excision activate exact
+database-local generations; GC follows durable provenance and pins/grace; and
+the operator contract states native-format, encryption, WAL/replica/backup,
+disconnected-reader, request-tombstone, and administrative-authority limits.
 
 ### 7. Tiered production transactor (`goal-16/`)
 

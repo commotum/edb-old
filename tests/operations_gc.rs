@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod common;
 
 const ITEM_VALUE: u32 = 1_000;
+const MAX_TEST_GC_STEPS: usize = 128;
+const MAX_TEST_LOG_GC_STEPS: usize = 128;
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
@@ -309,7 +311,7 @@ fn preview_next_tree_build_intent(
     database_id: &str,
     manifest_hash: Digest,
 ) -> GarbageInventory {
-    for attempt in 0..4_096 {
+    for attempt in 0..MAX_TEST_GC_STEPS {
         let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
         if dry.tree_build_intents.iter().any(|candidate| {
             candidate.database_id == database_id && candidate.manifest_hash == manifest_hash
@@ -325,7 +327,7 @@ fn preview_next_tree_build_intent(
         apply_exact_inventory(operator, &dry);
     }
     panic!(
-        "target build intent did not become collectible after 4096 exact GC steps: \
+        "target build intent did not become collectible after {MAX_TEST_GC_STEPS} exact GC steps: \
          database={database_id}, manifest={manifest_hash:?}"
     );
 }
@@ -335,7 +337,7 @@ fn drain_tree_build_intents_for_database(
     client: &mut Client,
     database_id: &str,
 ) {
-    for attempt in 0..4_096 {
+    for attempt in 0..MAX_TEST_GC_STEPS {
         let remaining: i64 = client
             .query_one(
                 "SELECT count(*) FROM atomic_tree_build_intents WHERE database_id = $1",
@@ -362,7 +364,7 @@ fn drain_tree_build_intents_for_database(
         .unwrap()
         .get(0);
     panic!(
-        "database still has {remaining} build intent(s) after 4096 exact GC steps: \
+        "database still has {remaining} build intent(s) after {MAX_TEST_GC_STEPS} exact GC steps: \
          database={database_id}"
     );
 }
@@ -372,7 +374,7 @@ fn preview_next_tree_retirement(
     database_id: &str,
     publication_revision: u64,
 ) -> GarbageInventory {
-    for _ in 0..4_096 {
+    for _ in 0..MAX_TEST_GC_STEPS {
         let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
         if dry.tree_publications.iter().any(|candidate| {
             candidate.database_id == database_id
@@ -404,7 +406,7 @@ fn preview_next_log_generation_at_age(
     generation: u64,
     minimum_age: Duration,
 ) -> GarbageInventory {
-    for _ in 0..8_192 {
+    for _ in 0..MAX_TEST_LOG_GC_STEPS {
         let dry = operator.garbage_inventory(minimum_age).unwrap();
         if dry.log_generations.iter().any(|candidate| {
             candidate.database_id == database_id && candidate.generation == generation
@@ -1357,6 +1359,21 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
 
     let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
     let baseline_publication = indexer.consolidate().unwrap();
+    let mut baseline_tree = PostgresTreeStore::connect(&connection).unwrap();
+    let mut baseline_sealed = false;
+    for _ in 0..64 {
+        if baseline_tree
+            .advance_publication_work(baseline_publication.manifest_hash)
+            .unwrap()
+        {
+            baseline_sealed = true;
+            break;
+        }
+    }
+    assert!(
+        baseline_sealed,
+        "baseline publication fold did not converge"
+    );
     let value = baseline_value + 1;
     let service = common::start_service(&connection, &database_id);
     common::transact(
@@ -1378,7 +1395,10 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
     let mut raw = Client::connect(&connection, NoTls).unwrap();
     let intent = raw
         .query_one(
-            "SELECT manifest_hash FROM atomic_tree_build_intents WHERE database_id = $1",
+            "SELECT i.manifest_hash FROM atomic_tree_build_intents i \
+              WHERE i.database_id = $1 \
+                AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications p \
+                                 WHERE p.manifest_hash = i.manifest_hash)",
             &[&database_id],
         )
         .unwrap();
@@ -1446,15 +1466,24 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
         baseline_publication.publication_revision + 1
     );
     assert_eq!(retried.manifest_hash, manifest_hash);
-    assert_eq!(
-        raw.query_one(
-            "SELECT count(*) FROM atomic_tree_publications WHERE database_id = $1",
-            &[&database_id],
+    let publication = raw
+        .query_one(
+            "SELECT max(publication_revision), \
+                    count(*) FILTER (WHERE publication_revision = $2 \
+                                      AND manifest_hash = $3) \
+               FROM atomic_tree_publications WHERE database_id = $1",
+            &[
+                &database_id,
+                &(retried.publication_revision as i64),
+                &&retried.manifest_hash[..],
+            ],
         )
-        .unwrap()
-        .get::<_, i64>(0),
-        retried.publication_revision as i64
+        .unwrap();
+    assert_eq!(
+        publication.get::<_, Option<i64>>(0),
+        Some(retried.publication_revision as i64)
     );
+    assert_eq!(publication.get::<_, i64>(1), 1);
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
     assert_eq!(
         peer.db().values(user(42), ITEM_VALUE),
@@ -1845,8 +1874,16 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     // Root metadata can retire before successful build-intent ledgers finish
     // their own bounded cleanup. Those ledgers are deliberate liveness pins;
     // once drained, at least one changed-path value becomes exact garbage.
-    let mut deleted_nodes = BTreeSet::new();
-    for _ in 0..4_096 {
+    let mut deleted_nodes = changed
+        .tree_node_hashes
+        .iter()
+        .copied()
+        .filter(|hash| retired_nodes.contains(hash))
+        .collect::<BTreeSet<_>>();
+    for attempt in 0..MAX_TEST_GC_STEPS {
+        if !deleted_nodes.is_empty() {
+            break;
+        }
         let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
         deleted_nodes.extend(
             dry.tree_node_hashes
@@ -1854,12 +1891,14 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
                 .copied()
                 .filter(|hash| retired_nodes.contains(hash)),
         );
-        let mut expected = dry.clone();
-        expected.applied = true;
-        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
-        if !deleted_nodes.is_empty() {
-            break;
-        }
+        assert!(
+            !deleted_nodes.is_empty() || inventory_has_work(&dry),
+            "retired nodes were neither collected with their retirement nor reachable by later \
+             exact GC work: database={database_id}, revision={}, attempt={attempt}, \
+             retired_nodes={retired_nodes:?}, inventory={dry:?}",
+            publication_two.publication_revision
+        );
+        apply_exact_inventory(&mut operator, &dry);
     }
     assert!(
         !deleted_nodes.is_empty(),

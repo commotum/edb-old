@@ -575,17 +575,20 @@ impl PortableBackup {
             })?;
             return Ok(point);
         }
+        let tree_log = TreeCaptureLog {
+            start_basis,
+            backup_basis: basis,
+            source_transaction_hashes: &captured.source_transaction_hashes,
+            portable_transaction_hashes: &captured.portable_transaction_hashes,
+            portable_frontiers: &captured.portable_frontiers,
+            state_hashes: &captured.state_hashes,
+        };
         let tree = capture_tree_backup(
             &mut transaction,
             database_id,
             &manifest.lineage_id,
             log_generation,
-            start_basis,
-            basis,
-            &captured.source_transaction_hashes,
-            &captured.portable_transaction_hashes,
-            &captured.portable_frontiers,
-            &captured.state_hashes,
+            &tree_log,
             &mut publisher,
         )?;
         manifest.tree = tree;
@@ -886,6 +889,7 @@ impl PortableBackup {
             None,
             target_database_id,
             RestoreFault::None,
+            None,
         )
     }
 
@@ -904,6 +908,7 @@ impl PortableBackup {
             Some(log_generation),
             target_database_id,
             RestoreFault::None,
+            None,
         )
     }
 
@@ -915,7 +920,31 @@ impl PortableBackup {
         target_database_id: &str,
         fault_at: RestoreFault,
     ) -> Result<Database, SemanticError> {
-        self.restore_backup_selected(directory, basis, None, target_database_id, fault_at)
+        self.restore_backup_selected(directory, basis, None, target_database_id, fault_at, None)
+    }
+
+    /// Test seam at the dangerous builder-to-publication lock handoff. The
+    /// callback runs after the restore serialization lock is held and the
+    /// shared builder pin has been released, but before root publication.
+    #[doc(hidden)]
+    pub fn restore_backup_with_activation_probe<F>(
+        &mut self,
+        directory: &Path,
+        basis: u64,
+        target_database_id: &str,
+        mut probe: F,
+    ) -> Result<Database, SemanticError>
+    where
+        F: FnMut(),
+    {
+        self.restore_backup_selected(
+            directory,
+            basis,
+            None,
+            target_database_id,
+            RestoreFault::None,
+            Some(&mut probe),
+        )
     }
 
     fn restore_backup_selected(
@@ -925,6 +954,7 @@ impl PortableBackup {
         log_generation: Option<u64>,
         target_database_id: &str,
         fault_at: RestoreFault,
+        activation_probe: Option<&mut dyn FnMut()>,
     ) -> Result<Database, SemanticError> {
         if target_database_id.is_empty() {
             return Err(SemanticError::incorrect(
@@ -1026,13 +1056,17 @@ impl PortableBackup {
             )?;
             Ok((candidate, restored))
         })();
-        let released = release_restore_build_pin(&mut self.client, build_pin);
-        let (candidate, restored) = match (staged, released) {
-            (Ok(value), Ok(())) => value,
-            (Ok(_), Err(error)) => return Err(error),
-            (Err(error), _) => return Err(error),
+        let (candidate, restored) = match staged {
+            Ok(value) => value,
+            Err(error) => {
+                // The staging error remains primary, but the release helper
+                // performs ambiguity-safe session cleanup before we return.
+                let _ = release_restore_build_pin(&mut self.client, build_pin);
+                return Err(error);
+            }
         };
         if fault_at == RestoreFault::BeforeCommit {
+            release_restore_build_pin(&mut self.client, build_pin)?;
             return Err(injected("backup/restore-before-activation"));
         }
         activate_restore_candidate(
@@ -1041,6 +1075,8 @@ impl PortableBackup {
             target_database_id,
             candidate,
             &restored,
+            build_pin,
+            activation_probe,
         )?;
         if fault_at == RestoreFault::AfterCommitBeforeResponse {
             return Err(injected("backup/restore-after-activation"));
@@ -1524,7 +1560,18 @@ fn ensure_restore_candidate(
             &[&target_database_id],
         )
         .map_err(|error| crate::postgres::postgres_error("backup/restore-existing-build", error))?;
-    if let Some(build) = builds.first() {
+    let mut matching_build = None;
+    let mut conflicting_restore = false;
+    for build in &builds {
+        let kind = build.get::<_, i16>(1);
+        // An inactive excision build is independent work. A restore can
+        // supersede its captured source atomically; afterward the loser is a
+        // legitimate abandonment candidate. Treating it as a global mutex
+        // needlessly wedges recovery. Restore builds are different: two
+        // requested points must not race under one database alias.
+        if current_coordinate.is_some() && kind == 1 {
+            continue;
+        }
         let frozen_plan = build
             .get::<_, Option<Vec<u8>>>(5)
             .map(|hash| digest(hash, "initial restore manifest"))
@@ -1537,7 +1584,6 @@ fn ensure_restore_candidate(
             .get::<_, Option<Vec<u8>>>(8)
             .map(|hash| digest(hash, "restore build head"))
             .transpose()?;
-        let kind = build.get::<_, i16>(1);
         let initial_matches = current_coordinate.is_none()
             && kind == 0
             && build.get::<_, Option<i64>>(2).is_none()
@@ -1560,20 +1606,33 @@ fn ensure_restore_candidate(
                         == sql_u64(manifest.basis, "restore build basis").ok()
                     && build_head == Some(manifest.head_transaction_hash)
             });
-        if builds.len() != 1 || (!initial_matches && !existing_matches) {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "backup/restore-build-exists",
-                "another or stale log-generation build must be completed or collected before restore",
-            ));
+        if initial_matches || existing_matches {
+            if matching_build.replace(build).is_some() {
+                conflicting_restore = true;
+            }
+        } else {
+            // Headless catalogs admit only their one authenticated kind-zero
+            // build. With an active head, any other unclaimed restore build
+            // represents a competing requested point and must be resolved or
+            // permanently claimed before another restore starts.
+            conflicting_restore = true;
         }
+    }
+    if conflicting_restore {
+        return Err(SemanticError::new(
+            ErrorCategory::Busy,
+            "backup/restore-build-exists",
+            "another restore build must be completed or collected before this point can restore",
+        ));
+    }
+    if let Some(build) = matching_build {
         let generation = unsigned(build.get(0), "existing restore generation")?;
         transaction.commit().map_err(|error| {
             crate::postgres::postgres_error("backup/restore-candidate-commit", error)
         })?;
         return Ok(RestoreCandidate {
             generation,
-            initial: initial_matches,
+            initial: current_coordinate.is_none(),
         });
     }
     let initial = current_coordinate.is_none();
@@ -2111,50 +2170,95 @@ fn activate_restore_candidate(
     target_database_id: &str,
     candidate: RestoreCandidate,
     restored: &RestoredGenerationHead,
+    build_pin: i64,
+    activation_probe: Option<&mut dyn FnMut()>,
 ) -> Result<(), SemanticError> {
-    let mut transaction = client.transaction().map_err(|error| {
-        crate::postgres::postgres_error("backup/restore-activation-begin", error)
-    })?;
-    transaction
-        .query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended('atomic/restore/' || $1, 0))",
-            &[&target_database_id],
-        )
-        .map_err(|error| crate::postgres::postgres_error("backup/restore-lock", error))?;
-    let generation_sql = sql_u64(candidate.generation, "restore activation generation")?;
-    let basis_sql = sql_u64(manifest.basis, "restore activation basis")?;
-    if candidate.initial {
+    // The builder pin and the restore serialization lock form an atomic
+    // handoff. GC first needs the builder lock and then this restore lock. We
+    // therefore acquire the latter while still holding the former, release
+    // the session pin inside the transaction, and publish before the xact
+    // lock can be released. There is no instant at which a live, fully staged
+    // restore is eligible for a permanent abandonment claim.
+    let mut build_pin_released = false;
+    let activation = (|| {
+        let mut transaction = client.transaction().map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-activation-begin", error)
+        })?;
         transaction
             .query_one(
-                "SELECT atomic_activate_initial_log_generation($1, $2, $3, $4, $5)",
-                &[
-                    &target_database_id,
-                    &generation_sql,
-                    &basis_sql,
-                    &&restored.head_hash[..],
-                    &&restored.state_hash[..],
-                ],
+                "SELECT pg_advisory_xact_lock(hashtextextended('atomic/restore/' || $1, 0))",
+                &[&target_database_id],
             )
+            .map_err(|error| crate::postgres::postgres_error("backup/restore-lock", error))?;
+        let unlocked: bool = transaction
+            .query_one("SELECT pg_advisory_unlock_shared($1)", &[&build_pin])
             .map_err(|error| {
-                crate::postgres::postgres_error("backup/restore-initial-activate", error)
-            })?;
+                crate::postgres::postgres_error("backup/restore-build-pin-handoff", error)
+            })?
+            .get(0);
+        // A false result proves the session pin is already absent. Record
+        // that fact before reporting the invariant failure so cleanup does
+        // not mask the more useful error.
+        build_pin_released = true;
+        if !unlocked {
+            return Err(fault(
+                "backup/restore-build-pin-handoff",
+                "restore builder pin disappeared before activation handoff",
+            ));
+        }
+        if let Some(probe) = activation_probe {
+            probe();
+        }
+        let generation_sql = sql_u64(candidate.generation, "restore activation generation")?;
+        let basis_sql = sql_u64(manifest.basis, "restore activation basis")?;
+        if candidate.initial {
+            transaction
+                .query_one(
+                    "SELECT atomic_activate_initial_log_generation($1, $2, $3, $4, $5)",
+                    &[
+                        &target_database_id,
+                        &generation_sql,
+                        &basis_sql,
+                        &&restored.head_hash[..],
+                        &&restored.state_hash[..],
+                    ],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-initial-activate", error)
+                })?;
+        } else {
+            transaction
+                .query_one(
+                    "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, NULL)",
+                    &[
+                        &target_database_id,
+                        &generation_sql,
+                        &basis_sql,
+                        &&restored.head_hash[..],
+                        &&restored.state_hash[..],
+                    ],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-activate", error)
+                })?;
+        }
+        transaction.commit().map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-activation-commit", error)
+        })
+    })();
+    if !build_pin_released {
+        // The restore transaction failed before the server confirmed the
+        // session unlock. Once it has dropped, resolve either side of an
+        // ambiguous unlock acknowledgement before this client is reused.
+        let release = release_restore_build_pin(client, build_pin);
+        match (activation, release) {
+            (Ok(()), Ok(())) => {}
+            (Ok(()), Err(error)) => return Err(error),
+            (Err(error), _) => return Err(error),
+        }
     } else {
-        transaction
-            .query_one(
-                "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, NULL)",
-                &[
-                    &target_database_id,
-                    &generation_sql,
-                    &basis_sql,
-                    &&restored.head_hash[..],
-                    &&restored.state_hash[..],
-                ],
-            )
-            .map_err(|error| crate::postgres::postgres_error("backup/restore-activate", error))?;
+        activation?;
     }
-    transaction.commit().map_err(|error| {
-        crate::postgres::postgres_error("backup/restore-activation-commit", error)
-    })?;
     cleanup_restore_build(client, target_database_id, candidate.generation)
 }
 
@@ -2857,26 +2961,34 @@ fn restore_tree_backup(
     }
 }
 
+/// Captured-log coordinates needed to authenticate a replaceable tree root.
+/// Keeping them together makes the invariant visible: every selected tree is
+/// checked against one immutable snapshot tail, never against independently
+/// sampled arrays.
+struct TreeCaptureLog<'a> {
+    start_basis: u64,
+    backup_basis: u64,
+    source_transaction_hashes: &'a [Digest],
+    portable_transaction_hashes: &'a [Digest],
+    portable_frontiers: &'a [u64],
+    state_hashes: &'a [Digest],
+}
+
 fn capture_tree_backup<C: postgres::GenericClient>(
     client: &mut C,
     database_id: &str,
     lineage_id: &str,
     log_generation: u64,
-    start_basis: u64,
-    backup_basis: u64,
-    source_transaction_hashes: &[Digest],
-    portable_transaction_hashes: &[Digest],
-    portable_frontiers: &[u64],
-    state_hashes: &[Digest],
+    log: &TreeCaptureLog<'_>,
     publisher: &mut ObjectPublisher<'_>,
 ) -> Result<Option<TreeBackup>, SemanticError> {
-    let backup_basis_sql = i64::try_from(backup_basis).map_err(|_| {
+    let backup_basis_sql = i64::try_from(log.backup_basis).map_err(|_| {
         SemanticError::incorrect(
             "backup/basis-overflow",
             "backup basis exceeds PostgreSQL bigint",
         )
     })?;
-    let start_basis_sql = i64::try_from(start_basis).map_err(|_| {
+    let start_basis_sql = i64::try_from(log.start_basis).map_err(|_| {
         SemanticError::incorrect(
             "backup/basis-overflow",
             "tree start basis exceeds PostgreSQL bigint",
@@ -2926,11 +3038,7 @@ fn capture_tree_backup<C: postgres::GenericClient>(
             database_id,
             lineage_id,
             log_generation,
-            start_basis,
-            source_transaction_hashes,
-            portable_transaction_hashes,
-            portable_frontiers,
-            state_hashes,
+            log,
             publisher,
         )? {
             return Ok(Some(tree));
@@ -2939,18 +3047,13 @@ fn capture_tree_backup<C: postgres::GenericClient>(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_tree_candidate<C: postgres::GenericClient>(
     client: &mut C,
     row: &postgres::Row,
     database_id: &str,
     lineage_id: &str,
     log_generation: u64,
-    start_basis: u64,
-    source_transaction_hashes: &[Digest],
-    portable_transaction_hashes: &[Digest],
-    portable_frontiers: &[u64],
-    state_hashes: &[Digest],
+    log: &TreeCaptureLog<'_>,
     publisher: &mut ObjectPublisher<'_>,
 ) -> Result<Option<TreeBackup>, SemanticError> {
     let Ok(publication_revision) = unsigned(row.get(0), "tree publication revision") else {
@@ -2976,17 +3079,17 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
     };
     let payload: Vec<u8> = row.get(7);
     let Some(offset) = basis_t
-        .checked_sub(start_basis)
+        .checked_sub(log.start_basis)
         .and_then(|offset| usize::try_from(offset).ok())
     else {
         return Ok(None);
     };
-    let Some(&portable_tx_hash) = portable_transaction_hashes.get(offset) else {
+    let Some(&portable_tx_hash) = log.portable_transaction_hashes.get(offset) else {
         return Ok(None);
     };
-    if source_transaction_hashes.get(offset) != Some(&tx_hash)
-        || state_hashes.get(offset) != Some(&state_hash)
-        || portable_frontiers.get(offset) != Some(&eidx_frontier)
+    if log.source_transaction_hashes.get(offset) != Some(&tx_hash)
+        || log.state_hashes.get(offset) != Some(&state_hash)
+        || log.portable_frontiers.get(offset) != Some(&eidx_frontier)
         || sha256(&payload) != manifest_hash
     {
         return Ok(None);
@@ -4965,7 +5068,7 @@ fn manifest_is_canonical(manifest: &Manifest) -> bool {
                         && manifest.request_head_hash != manifest.genesis_hash
                 }
         }
-        _ => return false,
+        _ => false,
     }
 }
 

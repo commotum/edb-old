@@ -743,6 +743,48 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
         .unwrap();
     assert_same_information(&committed.db_after, &batch_retried);
 
+    // Exercise the exact lock-handoff instant without a timing sleep. The
+    // restore has dropped its shared builder pin, but still owns the restore
+    // serialization lock in the publication transaction. A zero-age GC on a
+    // separate session must be unable to install its permanent abandonment
+    // claim, and the same transaction must then publish normally.
+    let handoff_connection = isolated_catalog(&connection, "restore_handoff_catalog");
+    let handoff_target = unique("restore_handoff_target");
+    let mut handoff_restore = PortableBackup::connect(&handoff_connection).unwrap();
+    let mut handoff_operator = PostgresOperator::connect(&handoff_connection).unwrap();
+    let mut probed = false;
+    let handoff_restored = handoff_restore
+        .restore_backup_with_activation_probe(
+            &directory,
+            committed.basis_t,
+            &handoff_target,
+            || {
+                probed = true;
+                let collection = handoff_operator.collect_garbage(Duration::ZERO).unwrap();
+                assert!(
+                    collection
+                        .log_generations
+                        .iter()
+                        .all(|candidate| candidate.database_id != handoff_target),
+                    "GC admitted the live restore during its activation handoff"
+                );
+                let mut catalog = Client::connect(&handoff_connection, NoTls).unwrap();
+                let claimed: bool = catalog
+                    .query_one(
+                        "SELECT EXISTS (SELECT 1 \
+                           FROM atomic_log_generation_abandonment_progress \
+                          WHERE database_id = $1)",
+                        &[&handoff_target],
+                    )
+                    .unwrap()
+                    .get(0);
+                assert!(!claimed, "GC permanently claimed the live restore");
+            },
+        )
+        .unwrap();
+    assert!(probed);
+    assert_same_information(&committed.db_after, &handoff_restored);
+
     let before_connection = isolated_catalog(&connection, "restore_before_catalog");
     let mut before_restore = PortableBackup::connect(&before_connection).unwrap();
     let before_commit = unique("restore_before_commit");

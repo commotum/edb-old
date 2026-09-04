@@ -287,6 +287,7 @@ impl LineageTransactionContent {
         Ok(content)
     }
 
+    #[cfg(test)]
     pub(crate) fn hash(&self) -> Result<Digest, SemanticError> {
         Ok(sha256(&self.encode()?))
     }

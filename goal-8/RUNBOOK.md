@@ -1,5 +1,10 @@
 # Atomic operator runbook
 
+> Historical prototype record. The current contract is
+> [`goal-15/OPERATIONS.md`](../goal-15/OPERATIONS.md); in particular, the
+> restore, generation-GC, and ordinary A=15 excision procedures below have
+> been superseded and must not be operated from this file.
+
 This runbook covers the PostgreSQL-only Rust library. The embedding process
 owns authentication, transport and scheduling; the named Rust methods are the
 stable operator boundary. Substitute real paths, roles, database names and

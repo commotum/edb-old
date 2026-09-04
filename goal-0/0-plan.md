@@ -25,13 +25,12 @@ below remain useful records of what was built, but every stage status is
 reopened until the matching `goal-9` repair stage and the final integrated
 acceptance gate demonstrate the original outcome without narrowing it.
 
-Goals 10 through 12 have since closed identity/successor validity,
-schema/ident authority, the competing write paths, transaction time,
-acknowledgement, controlled behavior, and verified-base adoption with real
-PostgreSQL/restart evidence. Goal 13 is now the first unfinished corrective
-child; the eager peer/index, query, lifecycle, and eager production-transactor
-findings remain open. Goal 16 owns the latter after Goal 14 establishes the
-shared lazy access seam, and Goal 17 owns integrated acceptance.
+Goals 10 through 15 have since closed identity/successor validity,
+schema/ident authority, competing write paths, transaction time,
+acknowledgement, controlled behavior, verified durable bases, lazy peer/index
+values, exact query-source propagation, and PostgreSQL lifecycle safety with
+real fault/restart evidence. Goal 16's tiered production transactor is now the
+first unfinished corrective child; Goal 17 owns integrated acceptance.
 
 ## Constraints
 
@@ -182,9 +181,12 @@ pass without an unfenced application publication API.
 
 ### 8. Lifecycle and operational completion
 
-**Status:** Reopened via `goal-9/`. Migration/startup privilege separation,
-TLS configurability, superseded-index collection, backup publication/restore,
-coherent inspection, and excision identity/privacy behavior remain unfinished.
+**Status:** Corrective acceptance established 2026-09-03 by Goal 15. Explicit
+migration/runtime authority, verified connection policy, coherent scoped
+inspection, differential root-last backup/exact restore, exact derived-root and
+generation collection, and source-faithful A=15 excision pass real PostgreSQL
+fault/restart tests. `goal-15/OPERATIONS.md` records the native and deployment
+limits. Goal 17 still owns the one production-shaped all-system gate.
 
 **Outcome:** The system can be operated, protected, upgraded, diagnosed, and retired responsibly in production.
 

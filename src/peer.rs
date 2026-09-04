@@ -2188,22 +2188,22 @@ impl RootPinManager {
         let manifest_hash = tree.manifest.hash()?;
         let mut state = lock(&self.state);
         self.ensure_locked(&mut state)?;
-        if !state.counts.contains_key(&manifest_hash) {
-            if let Err(error) = acquire_root_pin(
+        if !state.counts.contains_key(&manifest_hash)
+            && let Err(error) = acquire_root_pin(
                 state.client.as_mut().expect("root pin session was ensured"),
                 manifest_hash,
-            ) {
-                // The server may have accepted the session lock before a
-                // later verification statement failed. Discarding the whole
-                // session is the only unconditional way to release an
-                // advisory lock whose stack depth is now uncertain.
-                state.client = None;
-                // Existing immutable values may already own counted pins on
-                // this manager. Re-establish those locks before returning the
-                // new acquisition error whenever PostgreSQL is reachable.
-                let _ = self.reconnect_locked(&mut state);
-                return Err(error);
-            }
+            )
+        {
+            // The server may have accepted the session lock before a later
+            // verification statement failed. Discarding the whole session
+            // is the only unconditional way to release an advisory lock
+            // whose stack depth is now uncertain.
+            state.client = None;
+            // Existing immutable values may already own counted pins on
+            // this manager. Re-establish those locks before returning the
+            // new acquisition error whenever PostgreSQL is reachable.
+            let _ = self.reconnect_locked(&mut state);
+            return Err(error);
         }
         *state.counts.entry(manifest_hash).or_default() += 1;
         drop(state);
@@ -2219,16 +2219,16 @@ impl RootPinManager {
     ) -> Result<Arc<GenerationPin>, SemanticError> {
         let mut state = lock(&self.state);
         self.ensure_locked(&mut state)?;
-        if !state.generation_counts.contains_key(&generation) {
-            if let Err(error) = acquire_generation_pin(
+        if !state.generation_counts.contains_key(&generation)
+            && let Err(error) = acquire_generation_pin(
                 state.client.as_mut().expect("root pin session was ensured"),
                 &self.database_id,
                 generation,
-            ) {
-                state.client = None;
-                let _ = self.reconnect_locked(&mut state);
-                return Err(error);
-            }
+            )
+        {
+            state.client = None;
+            let _ = self.reconnect_locked(&mut state);
+            return Err(error);
         }
         *state.generation_counts.entry(generation).or_default() += 1;
         drop(state);
@@ -2307,15 +2307,20 @@ impl RootPinManager {
             return;
         }
         state.counts.remove(&manifest_hash);
-        // Drop cannot report an unlock failure. A closed connection has
-        // already released every lock; any other failure leaves the shared
-        // lock held until this one manager session eventually closes, which is
-        // conservative retention rather than unsafe reclamation.
-        if let Some(client) = state.client.as_mut() {
-            let _ = client.query_one(
-                "SELECT pg_advisory_unlock_shared($1)",
-                &[&tree_manifest_advisory_key(&manifest_hash)],
-            );
+        // Drop cannot report an unlock failure. Discard an uncertain session
+        // instead of leaking one uncounted advisory-lock depth forever, then
+        // best-effort restore every pin that still has a live local owner.
+        let unlocked = state.client.as_mut().is_none_or(|client| {
+            client
+                .query_one(
+                    "SELECT pg_advisory_unlock_shared($1)",
+                    &[&tree_manifest_advisory_key(&manifest_hash)],
+                )
+                .is_ok_and(|row| row.get(0))
+        });
+        if !unlocked {
+            state.client = None;
+            let _ = self.reconnect_locked(&mut state);
         }
     }
 
@@ -2329,18 +2334,25 @@ impl RootPinManager {
             return;
         }
         state.generation_counts.remove(&generation);
-        if let Some(client) = state.client.as_mut()
-            && let Ok(row) = client.query_opt(
-                "SELECT atomic_log_generation_pin_key($1, $2)",
-                &[
-                    &self.database_id,
-                    &sql_basis(generation).unwrap_or(i64::MAX),
-                ],
-            )
-            && let Some(row) = row
-        {
-            let key: i64 = row.get(0);
-            let _ = client.query_one("SELECT pg_advisory_unlock_shared($1)", &[&key]);
+        let generation_sql = sql_basis(generation).expect("a pinned generation fit PostgreSQL");
+        let unlocked = state.client.as_mut().is_none_or(|client| {
+            client
+                .query_opt(
+                    "SELECT atomic_log_generation_pin_key($1, $2)",
+                    &[&self.database_id, &generation_sql],
+                )
+                .ok()
+                .flatten()
+                .and_then(|row| row.get::<_, Option<i64>>(0))
+                .is_some_and(|key| {
+                    client
+                        .query_one("SELECT pg_advisory_unlock_shared($1)", &[&key])
+                        .is_ok_and(|row| row.get(0))
+                })
+        });
+        if !unlocked {
+            state.client = None;
+            let _ = self.reconnect_locked(&mut state);
         }
     }
 }
@@ -2610,10 +2622,12 @@ impl Peer {
                 &mut client,
                 &database_id,
                 excision_generation,
-                base.manifest.basis_t,
-                base.manifest.tx_hash,
-                base.manifest.state_hash,
-                base.manifest.eidx_frontier,
+                TailBase {
+                    basis_t: base.manifest.basis_t,
+                    tx_hash: base.manifest.tx_hash,
+                    state_hash: base.manifest.state_hash,
+                    eidx_frontier: base.manifest.eidx_frontier,
+                },
                 head_basis,
             )?;
             if tail.end_hash != head_hash {
@@ -3091,10 +3105,12 @@ impl Peer {
             &mut io.client,
             &self.core.database_id,
             state.excision_generation,
-            tree_base.manifest.basis_t,
-            tree_base.manifest.tx_hash,
-            tree_base.manifest.state_hash,
-            tree_base.manifest.eidx_frontier,
+            TailBase {
+                basis_t: tree_base.manifest.basis_t,
+                tx_hash: tree_base.manifest.tx_hash,
+                state_hash: tree_base.manifest.state_hash,
+                eidx_frontier: tree_base.manifest.eidx_frontier,
+            },
             through,
         )?;
         if tail.end_hash != state.current_hash
@@ -3147,10 +3163,12 @@ impl Peer {
             &mut io.client,
             &self.core.database_id,
             state.excision_generation,
-            state.basis_t,
-            state.current_hash,
-            state.current_state_hash,
-            state.eidx_frontier,
+            TailBase {
+                basis_t: state.basis_t,
+                tx_hash: state.current_hash,
+                state_hash: state.current_state_hash,
+                eidx_frontier: state.eidx_frontier,
+            },
             target,
         )?;
         let metadata = Arc::new(state.metadata.apply(&tail.transactions)?);
@@ -3338,10 +3356,12 @@ impl Peer {
                 &mut io.client,
                 &self.core.database_id,
                 generation,
-                base.manifest.basis_t,
-                base.manifest.tx_hash,
-                base.manifest.state_hash,
-                base.manifest.eidx_frontier,
+                TailBase {
+                    basis_t: base.manifest.basis_t,
+                    tx_hash: base.manifest.tx_hash,
+                    state_hash: base.manifest.state_hash,
+                    eidx_frontier: base.manifest.eidx_frontier,
+                },
                 basis,
             )?;
             if tail.end_hash != hash {
@@ -4482,6 +4502,14 @@ struct AuthenticatedTail {
     eidx_frontier: u64,
 }
 
+#[derive(Clone, Copy)]
+struct TailBase {
+    basis_t: u64,
+    tx_hash: Digest,
+    state_hash: Digest,
+    eidx_frontier: u64,
+}
+
 /// Authenticate the canonical transaction chain without constructing the
 /// kernel's full current/history indexes. `state_hash` is carried as an
 /// endpoint assertion and is verified when compatibility materialization is
@@ -4493,28 +4521,25 @@ fn read_authenticated_tail<C: GenericClient>(
     client: &mut C,
     database_id: &str,
     log_generation: u64,
-    base_t: u64,
-    base_hash: Digest,
-    base_state_hash: Digest,
-    base_eidx_frontier: u64,
+    base: TailBase,
     target_t: u64,
 ) -> Result<AuthenticatedTail, SemanticError> {
-    if target_t < base_t {
+    if target_t < base.basis_t {
         return Err(fault(
             "peer/tail-target-before-base",
             "requested tail endpoint precedes its native base",
         ));
     }
-    let mut end_hash = base_hash;
-    let mut end_state_hash = base_state_hash;
-    let mut eidx_frontier = base_eidx_frontier;
+    let mut end_hash = base.tx_hash;
+    let mut end_state_hash = base.state_hash;
+    let mut eidx_frontier = base.eidx_frontier;
     let rows = read_authenticated_log_range(
         client,
         database_id,
         log_generation,
-        base_t,
+        base.basis_t,
         target_t,
-        base_hash,
+        base.tx_hash,
     )?;
     let mut transactions = Vec::with_capacity(rows.len());
     let mut transaction_hashes = Vec::with_capacity(rows.len());

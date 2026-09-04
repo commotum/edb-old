@@ -1,9 +1,12 @@
 use crate::postgres::{CommitFault, MIGRATIONS, PostgresStore};
+use crate::state_commitment::checkpoint_state_hash;
 use crate::{
-    Attribute, Cardinality, Database, EntityRef, ErrorCategory, IndexOrder, Keyword, Schema, TxOp,
-    TxValue, Unique, Value, ValueType, View,
+    Attribute, Cardinality, Database, DurableTransaction, EntityRef, ErrorCategory, IndexOrder,
+    Keyword, Schema, TxOp, TxValue, Unique, Value, ValueType, View, encode_genesis,
+    encode_transaction, request_digest, sha256, transaction_hash,
 };
 use postgres::{Client, NoTls};
+use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -123,6 +126,103 @@ fn install_migration_prefix(client: &mut Client, through: i64) {
     }
 }
 
+/// Provision the alias-bound generation-zero representation implemented by
+/// the v9-v11 catalog. Upgrade fixtures must write that historical shape
+/// directly; routing them through the current store would test v14 creation
+/// SQL against columns and generation tables that intentionally do not exist.
+fn provision_legacy_generation_zero_database(
+    client: &mut Client,
+    database_id: &str,
+    schema: Schema,
+) -> Database {
+    let schema_ops = schema
+        .attributes()
+        .cloned()
+        .map(TxOp::InstallAttribute)
+        .collect::<Vec<_>>();
+    let database = Database::new(schema).unwrap();
+    let bootstrap = Database::bootstrap().unwrap();
+    let genesis = encode_genesis(bootstrap.genesis_datoms()).unwrap();
+    let genesis_hash = sha256(&genesis);
+    let initial = if schema_ops.is_empty() {
+        None
+    } else {
+        assert_eq!(database.basis_t(), 1);
+        let tx = crate::t_to_tx(1).unwrap();
+        let envelope = DurableTransaction {
+            database_id: database_id.to_owned(),
+            basis_t: 1,
+            previous_hash: genesis_hash,
+            eidx_frontier: database.eidx_frontier(),
+            tempids: BTreeMap::new(),
+            tx_data: database
+                .datoms(View::History, IndexOrder::Eavt)
+                .into_iter()
+                .filter(|datom| datom.tx == tx)
+                .collect(),
+        };
+        let payload = encode_transaction(&envelope).unwrap();
+        let tx_hash = transaction_hash(&payload);
+        let state_hash = checkpoint_state_hash(&database).unwrap();
+        let request_hash = request_digest(&schema_ops, 0, 0).unwrap();
+        Some((payload, tx_hash, state_hash, request_hash))
+    };
+
+    let mut transaction = client.transaction().unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) \
+             VALUES ($1, $2, $3)",
+            &[&database_id, &&genesis[..], &&genesis_hash[..]],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_heads (database_id, basis_t, tx_hash) VALUES ($1, 0, $2)",
+            &[&database_id, &&genesis_hash[..]],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO atomic_database_generations (database_id, excision_generation) \
+             VALUES ($1, 0)",
+            &[&database_id],
+        )
+        .unwrap();
+    if let Some((payload, tx_hash, state_hash, request_hash)) = initial {
+        transaction
+            .execute(
+                "INSERT INTO atomic_transactions \
+                     (database_id, basis_t, previous_hash, tx_hash, payload, state_hash) \
+                 VALUES ($1, 1, $2, $3, $4, $5)",
+                &[
+                    &database_id,
+                    &&genesis_hash[..],
+                    &&tx_hash[..],
+                    &payload,
+                    &&state_hash[..],
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO atomic_requests \
+                     (database_id, request_key, request_digest, basis_t, tx_hash) \
+                 VALUES ($1, '__atomic/create-schema/v1', $2, 1, $3)",
+                &[&database_id, &&request_hash[..], &&tx_hash[..]],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "UPDATE atomic_heads SET basis_t = 1, tx_hash = $2 WHERE database_id = $1",
+                &[&database_id, &&tx_hash[..]],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    database
+}
+
 fn authoritative_rows(client: &mut Client, database_id: &str) -> Vec<(i64, Vec<u8>, Vec<u8>)> {
     client
         .query(
@@ -155,6 +255,40 @@ fn fresh_administrative_install_is_complete_and_idempotent() {
     assert_eq!(versions, crate::POSTGRES_SCHEMA_VERSION);
     drop(client);
     drop(migrator);
+    drop_isolated_schema(&connection, &isolated);
+}
+
+#[test]
+fn already_current_migrate_does_not_lock_live_log_tables_for_repair() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let isolated = create_isolated_schema(&connection, "migration_current_concurrent");
+    let client = client_in_schema(&connection, &isolated);
+    let mut migrator = crate::PostgresMigrator::from_client(client);
+    migrator.migrate().unwrap();
+    drop(migrator);
+
+    // These are the relation lock modes held by ordinary legacy/native log
+    // writers. Before the current-schema fast path became conditional, the
+    // program-reference repair requested SHARE in the opposite order and a
+    // harmless startup migrate either blocked or deadlocked the writer.
+    let mut writer = client_in_schema(&connection, &isolated);
+    let mut writer_transaction = writer.transaction().unwrap();
+    writer_transaction
+        .batch_execute(
+            "LOCK TABLE atomic_log_generations IN ROW EXCLUSIVE MODE; \
+             LOCK TABLE atomic_generation_transactions IN ROW EXCLUSIVE MODE; \
+             LOCK TABLE atomic_transactions IN ROW EXCLUSIVE MODE",
+        )
+        .unwrap();
+
+    let mut client = client_in_schema(&connection, &isolated);
+    client.batch_execute("SET lock_timeout TO '500ms'").unwrap();
+    let mut concurrent_migrator = crate::PostgresMigrator::from_client(client);
+    concurrent_migrator.migrate().unwrap();
+    drop(concurrent_migrator);
+    writer_transaction.rollback().unwrap();
     drop_isolated_schema(&connection, &isolated);
 }
 
@@ -217,9 +351,7 @@ fn populated_v6_log_is_replayed_for_commitments_and_upgrades_without_loss() {
     // the commitment column, then faithfully remove migrations 7--9. This is
     // the exact v6 authoritative catalog; migrations 7/8 add no log fields.
     install_migration_prefix(&mut client, 9);
-    let mut store = PostgresStore::from_client(client);
-    let before = store.create_database(database_id, schema()).unwrap();
-    drop(store);
+    let before = provision_legacy_generation_zero_database(&mut client, database_id, schema());
 
     let mut client = client_in_schema(&connection, &isolated);
     let rows_before = authoritative_rows(&mut client, database_id);
@@ -284,9 +416,7 @@ fn populated_v11_to_v12_preserves_authoritative_bytes_and_exact_state() {
     let database_id = "canonical-v11";
     let mut client = client_in_schema(&connection, &isolated);
     install_migration_prefix(&mut client, 11);
-    let mut store = PostgresStore::from_client(client);
-    let before = store.create_database(database_id, schema()).unwrap();
-    drop(store);
+    let before = provision_legacy_generation_zero_database(&mut client, database_id, schema());
     let mut client = client_in_schema(&connection, &isolated);
     let rows_before = authoritative_rows(&mut client, database_id);
     let mut migrator = crate::PostgresMigrator::from_client(client);

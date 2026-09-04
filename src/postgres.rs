@@ -244,6 +244,9 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
 
 const WRITER_RUNTIME_TABLES: &[&str] = &[
     "atomic_transactor_leases",
+    // The invoker tree-manifest validation trigger authenticates a positive
+    // generation's endpoint against its immutable completion checkpoint.
+    "atomic_log_generation_checkpoints",
     "atomic_tree_build_intents",
     "atomic_tree_build_intent_nodes",
     "atomic_tree_delta_headers",
@@ -361,9 +364,31 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     }
 
     for (version, sql) in MIGRATIONS.iter().skip(installed.len()) {
+        // Migration 13 assigns the first durable lineage identity to every
+        // pre-lineage catalog row.  `atomic_databases` has been immutable
+        // since migration 1, so this one administrative data migration must
+        // suspend that guard while it fills the new column.  Keep the
+        // historical migration bytes unchanged: deployed catalogs authenticate
+        // them by checksum, and ordinary runtime mutation remains forbidden.
+        if *version == 13 {
+            transaction
+                .batch_execute(
+                    "ALTER TABLE atomic_databases \
+                     DISABLE TRIGGER atomic_databases_immutable",
+                )
+                .map_err(|error| postgres_error("postgres/migration-lineage-guard", error))?;
+        }
         transaction
             .batch_execute(sql)
             .map_err(|error| postgres_error("postgres/migration-ddl", error))?;
+        if *version == 13 {
+            transaction
+                .batch_execute(
+                    "ALTER TABLE atomic_databases \
+                     ENABLE TRIGGER atomic_databases_immutable",
+                )
+                .map_err(|error| postgres_error("postgres/migration-lineage-guard", error))?;
+        }
         if *version == 9 {
             backfill_state_commitments(&mut transaction).map_err(upgrade_rebuild_required)?;
         }
@@ -375,21 +400,64 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
             )
             .map_err(|error| postgres_error("postgres/migration-record", error))?;
     }
-    // Explicit migration is also the repair boundary for derived closure
-    // metadata written by an older/buggy v13 binary. Reauthenticate every
-    // published graph even when the schema version is already current; valid
-    // closures are rebuilt exactly and corrupt graphs retain an incomplete
-    // marker that makes GC fail closed without hiding the authoritative log.
-    if installed_version <= POSTGRES_SCHEMA_VERSION && POSTGRES_SCHEMA_VERSION >= 13 {
+    // Migration is also the repair boundary for derived closure metadata, but
+    // an already-current healthy catalog must be a read-only verification.
+    // Unconditionally rebuilding these ledgers takes table/row locks in the
+    // inverse direction of live generation and tree writers and made harmless
+    // concurrent `migrate` calls capable of deadlocking runtime work.
+    if POSTGRES_SCHEMA_VERSION >= 13 && tree_live_set_backfill_required(&mut transaction)? {
         backfill_tree_live_sets(&mut transaction)?;
     }
-    if POSTGRES_SCHEMA_VERSION >= 14 {
+    if POSTGRES_SCHEMA_VERSION >= 14 && program_generation_ref_backfill_required(&mut transaction)?
+    {
         backfill_program_generation_refs(&mut transaction)?;
     }
     repair_atomic_routine_paths(&mut transaction, &schema)?;
     transaction
         .commit()
         .map_err(|error| postgres_error("postgres/migration-commit", error))
+}
+
+/// True only when no live publication fold already owns the missing/current
+/// tree membership and the durable derived marker needs administrative repair.
+fn tree_live_set_backfill_required<C: GenericClient>(
+    client: &mut C,
+) -> Result<bool, SemanticError> {
+    client
+        .query_one(
+            "SELECT EXISTS ( \
+                 WITH latest AS ( \
+                     SELECT DISTINCT ON (database_id) database_id, manifest_hash \
+                       FROM atomic_tree_publications \
+                      ORDER BY database_id, publication_revision DESC \
+                 ) \
+                 SELECT 1 FROM latest p \
+                 LEFT JOIN atomic_tree_live_sets l USING (database_id) \
+                  WHERE (l.database_id IS NULL \
+                         OR l.manifest_hash <> p.manifest_hash \
+                         OR NOT l.complete) \
+                    AND NOT EXISTS ( \
+                        SELECT 1 FROM atomic_tree_delta_headers h \
+                         WHERE h.manifest_hash = p.manifest_hash \
+                           AND h.delta_state = 2 \
+                    ) \
+             )",
+            &[],
+        )
+        .map(|row| row.get(0))
+        .map_err(|error| postgres_error("postgres/tree-live-repair-discovery", error))
+}
+
+fn program_generation_ref_backfill_required<C: GenericClient>(
+    client: &mut C,
+) -> Result<bool, SemanticError> {
+    client
+        .query_opt(
+            "SELECT complete FROM atomic_program_reference_state WHERE singleton",
+            &[],
+        )
+        .map(|row| row.is_none_or(|row| !row.get::<_, bool>(0)))
+        .map_err(|error| postgres_error("postgres/program-ref-repair-discovery", error))
 }
 
 /// Rebuild the exact per-generation temporal program roots and their fixed
@@ -399,9 +467,12 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
 fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
     client
         .batch_execute(
-            "LOCK TABLE atomic_transactions IN SHARE MODE; \
+            // Builders allocate/lock their generation owner before writing a
+            // membership. Keep the exceptional offline repair in that same
+            // order so it cannot form the old generation<->membership cycle.
+            "LOCK TABLE atomic_log_generations IN SHARE MODE; \
              LOCK TABLE atomic_generation_transactions IN SHARE MODE; \
-             LOCK TABLE atomic_log_generations IN SHARE MODE",
+             LOCK TABLE atomic_transactions IN SHARE MODE",
         )
         .map_err(|error| postgres_error("postgres/program-ref-lock", error))?;
     client
@@ -1337,10 +1408,14 @@ fn repair_atomic_routine_paths<C: GenericClient>(
     schema: &str,
 ) -> Result<(), SemanticError> {
     let schema_ident = quote_identifier(schema)?;
+    let expected_path = format!("{schema_ident}, pg_catalog, pg_temp");
     let routines = client
         .query(
             "SELECT p.proname::text, pg_get_function_identity_arguments(p.oid), \
-                    p.prokind::text \
+                    p.prokind::text, \
+                    (SELECT option_value \
+                       FROM pg_options_to_table(p.proconfig) \
+                      WHERE option_name = 'search_path') \
                FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
               WHERE n.nspname = $1 \
                 AND p.proname LIKE 'atomic\\_%' ESCAPE '\\' \
@@ -1349,6 +1424,9 @@ fn repair_atomic_routine_paths<C: GenericClient>(
         )
         .map_err(|error| postgres_error("postgres/routine-path-discovery", error))?;
     for row in routines {
+        if row.get::<_, Option<String>>(3).as_deref() == Some(expected_path.as_str()) {
+            continue;
+        }
         let function = quote_identifier(&row.get::<_, String>(0))?;
         let arguments: String = row.get(1);
         let routine_kind = match row.get::<_, String>(2).as_str() {
@@ -3254,7 +3332,6 @@ pub(crate) struct Recovered {
     pub(crate) database: Database,
     pub(crate) final_transaction: Option<DurableTransaction>,
     pub(crate) final_hash: Digest,
-    pub(crate) log_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -3435,7 +3512,7 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
             ));
         }
         if (generation == 0
-            && (legacy_request_key.as_deref().map_or(true, str::is_empty)
+            && (legacy_request_key.as_deref().is_none_or(str::is_empty)
                 || stored_request_key_hash.is_some()))
             || (generation > 0
                 && (legacy_request_key.is_some() || stored_request_key_hash.is_none()))
@@ -3670,7 +3747,6 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
         database,
         final_transaction,
         final_hash: previous_hash,
-        log_generation: generation,
     })
 }
 
@@ -3717,10 +3793,6 @@ fn receipt_with_tempids(
         tx_data: transaction.tx_data,
         replayed,
     }
-}
-
-fn receipt(recovered: Recovered, db_before: Database, replayed: bool) -> CommitReceipt {
-    receipt_with_tempids(recovered, db_before, replayed, None)
 }
 
 fn postgres_now_millis<C: GenericClient>(client: &mut C) -> Result<i64, SemanticError> {

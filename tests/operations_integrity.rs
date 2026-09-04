@@ -50,6 +50,37 @@ fn add(value: &str) -> TxOp {
     }
 }
 
+fn replace_immutable_transaction_content(client: &mut Client, content_hash: &[u8], payload: &[u8]) {
+    // Corruption tests must bypass the immutable-value guard, but must never
+    // leave that guard disabled for another session. PostgreSQL makes ALTER
+    // TABLE transactional, so the payload replacement and trigger restoration
+    // become visible together or not at all.
+    let mut transaction = client.transaction().unwrap();
+    transaction
+        .batch_execute(
+            "ALTER TABLE atomic_transaction_contents \
+             DISABLE TRIGGER atomic_transaction_contents_immutable",
+        )
+        .unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE atomic_transaction_contents SET payload = $2 \
+                 WHERE content_hash = $1",
+                &[&content_hash, &payload],
+            )
+            .unwrap(),
+        1
+    );
+    transaction
+        .batch_execute(
+            "ALTER TABLE atomic_transaction_contents \
+             ENABLE TRIGGER atomic_transaction_contents_immutable",
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn inspector_crosschecks_authoritative_and_derived_state_and_metrics() {
     let Some(connection) = connection() else {
@@ -81,27 +112,44 @@ fn inspector_crosschecks_authoritative_and_derived_state_and_metrics() {
 
     let mut client = Client::connect(&connection, NoTls).unwrap();
     let corrupt_basis = i64::try_from(first.basis_t).unwrap();
-    let original: Vec<u8> = client
+    let authoritative = client
         .query_one(
-            "SELECT payload FROM atomic_transactions WHERE database_id = $1 AND basis_t = $2",
-            &[&database_id, &corrupt_basis],
-        )
-        .unwrap()
-        .get(0);
-    client
-        .batch_execute("ALTER TABLE atomic_transactions DISABLE TRIGGER USER")
-        .unwrap();
-    client
-        .execute(
-            "UPDATE atomic_transactions SET payload = set_byte(payload, 16, \
-             get_byte(payload, 16) # 1) WHERE database_id = $1 AND basis_t = $2",
+            "SELECT h.log_generation, t.content_hash, c.payload, \
+                    (SELECT count(*) FROM atomic_generation_transactions referenced \
+                      WHERE referenced.content_hash = t.content_hash) \
+               FROM atomic_heads h \
+               JOIN atomic_generation_transactions t \
+                 ON t.database_id = h.database_id \
+                AND t.generation = h.log_generation AND t.basis_t = $2 \
+               JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
+              WHERE h.database_id = $1 AND h.log_generation > 0",
             &[&database_id, &corrupt_basis],
         )
         .unwrap();
-    client
-        .batch_execute("ALTER TABLE atomic_transactions ENABLE TRIGGER USER")
-        .unwrap();
-    let corrupt = operator.inspect_database(&database_id, true).unwrap();
+    let generation: i64 = authoritative.get(0);
+    let content_hash: Vec<u8> = authoritative.get(1);
+    let original: Vec<u8> = authoritative.get(2);
+    let references: i64 = authoritative.get(3);
+    assert!(
+        generation > 0,
+        "the current log must use native generations"
+    );
+    assert_eq!(
+        references, 1,
+        "the test must not corrupt ATLC content shared by another generation"
+    );
+    let mut damaged = original.clone();
+    damaged[16] ^= 1;
+    replace_immutable_transaction_content(&mut client, &content_hash, &damaged);
+
+    // Capture the result, restore the immutable value, and prove recovery
+    // before asserting on the expected failure. A changed diagnostic cannot
+    // strand corrupt shared storage in the test cluster.
+    let corrupt = operator.inspect_database(&database_id, true);
+    replace_immutable_transaction_content(&mut client, &content_hash, &original);
+    let restored = operator.inspect_database(&database_id, true);
+
+    let corrupt = corrupt.unwrap();
     assert!(!corrupt.healthy());
     assert!(
         corrupt
@@ -109,24 +157,8 @@ fn inspector_crosschecks_authoritative_and_derived_state_and_metrics() {
             .iter()
             .any(|problem| problem.code.contains("hash") || problem.code.contains("checksum"))
     );
-    client
-        .batch_execute("ALTER TABLE atomic_transactions DISABLE TRIGGER USER")
-        .unwrap();
-    client
-        .execute(
-            "UPDATE atomic_transactions SET payload = $2 WHERE database_id = $1 AND basis_t = $3",
-            &[&database_id, &&original[..], &corrupt_basis],
-        )
-        .unwrap();
-    client
-        .batch_execute("ALTER TABLE atomic_transactions ENABLE TRIGGER USER")
-        .unwrap();
-    assert!(
-        operator
-            .inspect_database(&database_id, true)
-            .unwrap()
-            .healthy()
-    );
+    let restored = restored.unwrap();
+    assert!(restored.healthy(), "{:?}", restored.problems);
 }
 
 #[test]

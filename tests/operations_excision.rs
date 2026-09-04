@@ -1,7 +1,7 @@
 use atomic_core::{
     Attribute, Cardinality, DB_EXCISE, EntityRef, ErrorCategory, ExcisionFault, IndexOrder,
-    Keyword, Peer, PostgresOperator, PostgresStore, Schema, TxOp, TxValue, USER_PARTITION, Value,
-    ValueType, View, make_eid,
+    Keyword, Peer, PostgresIndexer, PostgresOperator, PostgresStore, Schema, TxOp, TxValue,
+    USER_PARTITION, Value, ValueType, View, make_eid,
 };
 use postgres::NoTls;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,14 +33,14 @@ fn unique(prefix: &str) -> String {
 
 fn schema() -> Schema {
     let mut schema = Schema::new();
-    schema
-        .install(Attribute::new(
-            SECRET,
-            Keyword::new("person", "secret"),
-            ValueType::String,
-            Cardinality::Many,
-        ))
-        .unwrap();
+    let mut secret = Attribute::new(
+        SECRET,
+        Keyword::new("person", "secret"),
+        ValueType::String,
+        Cardinality::Many,
+    );
+    secret.no_history = true;
+    schema.install(secret).unwrap();
     schema
         .install(Attribute::new(
             RETAINED,
@@ -90,10 +90,58 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         ],
         1_000,
     );
-    let requested = common::transact(
+    let retracted = common::transact(
         &service,
-        "ordinary-a15-request",
+        "retract-no-history-secret",
         seeded.basis_t,
+        &[TxOp::Retract {
+            entity: EntityRef::Id(user(42)),
+            attribute: SECRET,
+            value: Some(TxValue::Scalar(Value::String("erase-this-secret".into()))),
+        }],
+        1_100,
+    );
+    let reasserted = common::transact(
+        &service,
+        "reassert-no-history-secret",
+        retracted.basis_t,
+        &[add(
+            user(42),
+            SECRET,
+            Value::String("erase-this-secret".into()),
+        )],
+        1_200,
+    );
+    service.shutdown();
+
+    // Establish a real persistent base after noHistory has discarded the
+    // adjacent historical retraction/assertion pair. Excision must still
+    // remove the surviving fact from the authoritative COW log and every
+    // newly published current/history tree.
+    let indexed = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .consolidate()
+        .unwrap();
+    assert_eq!(indexed.basis_t, reasserted.basis_t);
+    let consolidated = Peer::connect(&connection, &database_id, 8).unwrap();
+    assert_eq!(consolidated.durable_base_t(), reasserted.basis_t);
+    let consolidated_secret = consolidated
+        .snapshot()
+        .datoms(true, IndexOrder::Eavt)
+        .unwrap()
+        .datoms
+        .into_iter()
+        .filter(|datom| datom.entity == user(42) && datom.attribute == SECRET)
+        .collect::<Vec<_>>();
+    assert_eq!(consolidated_secret.len(), 1);
+    assert!(consolidated_secret[0].added);
+    drop(consolidated);
+
+    let request_service = common::start_service(&connection, &database_id);
+    let requested = common::transact(
+        &request_service,
+        "ordinary-a15-request",
+        reasserted.basis_t,
         &[TxOp::Add {
             entity: EntityRef::Temp("privacy-request".into()),
             attribute: DB_EXCISE as u32,
@@ -102,7 +150,7 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         2_000,
     );
     let request_entity = requested.tempids["privacy-request"];
-    service.shutdown();
+    request_service.shutdown();
 
     let peer = Peer::connect(&connection, &database_id, 8).unwrap();
     let old_value = peer.db();
@@ -218,6 +266,7 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         vec![&Value::String("erase-this-secret".into())]
     );
     let refreshed = peer.sync().unwrap();
+    assert_eq!(peer.durable_base_t(), refreshed.basis_t());
     assert!(refreshed.values(user(42), SECRET).is_empty());
     assert!(refreshed.values(user(42), RETAINED).is_empty());
     assert!(refreshed.values(user(43), RELATED).is_empty());
@@ -228,6 +277,28 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
             .iter()
             .any(|datom| datom.value == Value::String("erase-this-secret".into()))
     );
+    // durable_base_t == basis_t means these direct cursor reads come wholly
+    // from the newly published COW tree, with no recent-log overlay.
+    let refreshed_snapshot = peer.snapshot();
+    for history in [false, true] {
+        for order in [
+            IndexOrder::Eavt,
+            IndexOrder::Aevt,
+            IndexOrder::Avet,
+            IndexOrder::Vaet,
+        ] {
+            assert!(
+                !refreshed_snapshot
+                    .datoms(history, order)
+                    .unwrap()
+                    .datoms
+                    .iter()
+                    .any(|datom| datom.entity == user(42)
+                        && datom.attribute == SECRET
+                        && datom.value == Value::String("erase-this-secret".into()))
+            );
+        }
+    }
     // The ordinary A=15 assertion remains the permanent semantic audit fact.
     assert!(
         refreshed
@@ -242,6 +313,14 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         .unwrap()
         .recover(&database_id)
         .unwrap();
+    assert!(
+        !restarted
+            .datoms(View::History, IndexOrder::Eavt)
+            .iter()
+            .any(|datom| datom.entity == user(42)
+                && datom.attribute == SECRET
+                && datom.value == Value::String("erase-this-secret".into()))
+    );
     assert_eq!(restarted.basis_t(), refreshed.basis_t());
     assert_eq!(
         restarted.datoms(View::History, IndexOrder::Eavt),

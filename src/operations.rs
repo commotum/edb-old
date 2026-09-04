@@ -11,12 +11,10 @@ use crate::postgres::{
     AuthenticatedLogTransaction, insert_program_generation_refs, read_authenticated_log_range,
     recover_generation_to, verify_schema_compatibility,
 };
-use crate::state_commitment::checkpoint_state_hash;
 use crate::{
-    BackupVerification, DB_PARTITION, Database, Digest, MAX_EIDX, PersistentTreeManifest,
-    PostgresConnectionConfig, PostgresTreeStore, SemanticError, Value, View, decode_genesis,
-    decode_index_manifest, decode_index_segment, decode_transaction, eid_to_part, encode_genesis,
-    encode_transaction, sha256, transaction_hash, tx_to_t,
+    Digest, PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore, SemanticError,
+    decode_genesis, decode_index_manifest, decode_index_segment, decode_transaction, sha256,
+    transaction_hash,
 };
 use postgres::{Client, GenericClient, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,8 +132,9 @@ pub struct GarbageInventory {
 pub struct LogGenerationGarbage {
     pub database_id: String,
     pub generation: u64,
-    /// True for a never-activated rewrite whose source was superseded; false
-    /// for an authoritative generation retired by an activation edge.
+    /// True for a never-activated rewrite whose source was superseded or an
+    /// isolated failed initial restore; false for an authoritative generation
+    /// retired by an activation edge.
     pub abandoned: bool,
     /// Phase reported after this call. When an input phase was empty, the SQL
     /// collector advances the cursor and reports the following phase.
@@ -656,6 +655,36 @@ impl PostgresOperator {
             .start()
             .map_err(|error| operation_error("operations/gc-begin", error))?;
         let candidates = garbage_candidates(&mut transaction, millis)?;
+        // A sealed build-intent ledger remains an exact liveness pin after its
+        // publication delta has folded. Drain that bookkeeping before retiring
+        // the matching root: otherwise the retirement can make a legitimately
+        // published state-2 intent look like an unpublished activated build to
+        // the intent owner later in this same transaction.
+        for intent in &candidates.tree_build_intents {
+            let collected: bool = transaction
+                .query_one(
+                    "SELECT atomic_collect_tree_build_intent($1, $2, $3)",
+                    &[
+                        &&intent.manifest_hash[..],
+                        &millis,
+                        &(MAX_TREE_BUILD_INTENT_NODES_PER_GC as i64),
+                    ],
+                )
+                .map_err(|error| operation_error("operations/gc-tree-build-intent", error))?
+                .get(0);
+            require_gc_collected(
+                collected,
+                &format!(
+                    "tree build intent database={} generation={} expected-revision={} \
+                     manifest={} abandoned={}",
+                    intent.database_id,
+                    intent.log_generation,
+                    intent.expected_revision,
+                    hex(&intent.manifest_hash),
+                    intent.abandoned,
+                ),
+            )?;
+        }
         for publication in &candidates.tree_publications {
             let collected: bool = transaction
                 .query_one(
@@ -670,21 +699,15 @@ impl PostgresOperator {
                 )
                 .map_err(|error| operation_error("operations/gc-tree-publication", error))?
                 .get(0);
-            require_gc_collected(collected, "tree publication")?;
-        }
-        for intent in &candidates.tree_build_intents {
-            let collected: bool = transaction
-                .query_one(
-                    "SELECT atomic_collect_tree_build_intent($1, $2, $3)",
-                    &[
-                        &&intent.manifest_hash[..],
-                        &millis,
-                        &(MAX_TREE_BUILD_INTENT_NODES_PER_GC as i64),
-                    ],
-                )
-                .map_err(|error| operation_error("operations/gc-tree-build-intent", error))?
-                .get(0);
-            require_gc_collected(collected, "tree build intent")?;
+            require_gc_collected(
+                collected,
+                &format!(
+                    "tree publication database={} revision={} manifest={}",
+                    publication.database_id,
+                    publication.publication_revision,
+                    hex(&publication.manifest_hash),
+                ),
+            )?;
         }
         // Raw values are selected only from the durable exact-mark ledger by
         // the fixed-path owner function. Replace the dry prediction with the
@@ -2575,22 +2598,6 @@ fn index_order_tag(order: crate::IndexOrder) -> i16 {
     }
 }
 
-fn normalize_t_or_tx(value: u64) -> Result<u64, SemanticError> {
-    if value <= MAX_EIDX {
-        return Ok(value);
-    }
-    tx_to_t(value).map_err(|_| {
-        SemanticError::incorrect(
-            "excision/invalid-before-t",
-            ":before_t must be a logical t or a transaction entity id",
-        )
-    })
-}
-
-fn same_database_information(left: &Database, right: &Database) -> bool {
-    left.same_information_as(right)
-}
-
 fn sql_u64(value: u64, label: &str) -> Result<i64, SemanticError> {
     i64::try_from(value).map_err(|_| {
         SemanticError::new(
@@ -2716,17 +2723,22 @@ fn garbage_candidates<C: postgres::GenericClient>(
                     (SELECT count(*) FROM atomic_tree_delta_nodes d \
                       WHERE d.manifest_hash = i.manifest_hash) \
                FROM atomic_tree_build_intents i \
-              WHERE (i.intent_state = 2 \
-                     AND NOT EXISTS (SELECT 1 FROM atomic_tree_delta_headers h \
-                                     WHERE h.manifest_hash = i.manifest_hash)) \
-                 OR i.intent_state = 3 \
-                 OR (i.intent_state IN (0, 1) \
-                     AND i.heartbeat_at < clock_timestamp() - \
-                                          $1::bigint * interval '1 millisecond' \
-                     AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications p \
-                                     WHERE p.manifest_hash = i.manifest_hash) \
-                     AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
-                                     WHERE a.manifest_hash = i.manifest_hash)) \
+              WHERE ((i.intent_state = 2 \
+                      AND NOT EXISTS (SELECT 1 FROM atomic_tree_delta_headers h \
+                                      WHERE h.manifest_hash = i.manifest_hash)) \
+                  OR i.intent_state = 3 \
+                  OR (i.intent_state IN (0, 1) \
+                      AND i.heartbeat_at < clock_timestamp() - \
+                                           $1::bigint * interval '1 millisecond' \
+                      AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications p \
+                                      WHERE p.manifest_hash = i.manifest_hash) \
+                      AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                                      WHERE a.manifest_hash = i.manifest_hash))) \
+                AND NOT (i.intent_state <> 2 \
+                         AND EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                                     WHERE a.manifest_hash = i.manifest_hash) \
+                         AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications p \
+                                         WHERE p.manifest_hash = i.manifest_hash)) \
               ORDER BY CASE WHEN i.intent_state IN (2, 3) THEN 0 ELSE 1 END, \
                        i.heartbeat_at, i.manifest_hash \
               LIMIT 64 OFFSET $2",

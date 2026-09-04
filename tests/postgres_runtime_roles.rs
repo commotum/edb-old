@@ -45,6 +45,7 @@ const PEER_TABLES: &[&str] = &[
 ];
 const WRITER_SELECT_TABLES: &[&str] = &[
     "atomic_transactor_leases",
+    "atomic_log_generation_checkpoints",
     "atomic_tree_build_intents",
     "atomic_tree_build_intent_nodes",
     "atomic_tree_delta_headers",

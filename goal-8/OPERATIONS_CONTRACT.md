@@ -1,5 +1,11 @@
 # Goal 8 operations contract
 
+> Historical prototype record. Use
+> [`goal-15/OPERATIONS.md`](../goal-15/OPERATIONS.md) for the current
+> source-backed lifecycle contract. Its same-lineage restore, physical
+> generation collection, and ordinary A=15 excision rules supersede this
+> document.
+
 ## State classes
 
 Authoritative state is `atomic_databases`, the contiguous

@@ -24,8 +24,9 @@ production outcome.
 - [`goal-1/0-plan.md`](goal-1/0-plan.md) is the semantic-foundation milestone.
 - [`goal-1/SEMANTICS.md`](goal-1/SEMANTICS.md) is the native semantic contract now implemented by the kernel in [`src/`](src/) and checked in [`tests/`](tests/).
 - [`goal-2/0-plan.md`](goal-2/0-plan.md) records the completed single-process Rust transactional kernel and its deliberate boundaries.
-- [`goal-8/RUNBOOK.md`](goal-8/RUNBOOK.md) is the deployment, recovery, GC,
-  excision, incident and retirement runbook.
+- [`goal-15/OPERATIONS.md`](goal-15/OPERATIONS.md) is the current deployment,
+  backup/restore, GC, security, and excision contract. The Goal 8 runbook is a
+  historical prototype record.
 - [`goal-8/COMPATIBILITY_AND_SECURITY.md`](goal-8/COMPATIBILITY_AND_SECURITY.md)
   states the durable compatibility and authority boundaries.
 - [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and

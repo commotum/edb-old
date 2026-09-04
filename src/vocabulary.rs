@@ -449,10 +449,10 @@ pub(crate) fn pre_excision_genesis_datoms() -> Vec<Datom> {
     canonical_genesis_datoms()
         .into_iter()
         .filter(|datom| {
-            !matches!(
+            !(matches!(
                 datom.entity,
                 DB_EXCISE | DB_EXCISE_ATTRS | DB_EXCISE_BEFORE_T | DB_EXCISE_BEFORE
-            ) && !(datom.entity == DB_PART_DB
+            ) || datom.entity == DB_PART_DB
                 && u64::from(datom.attribute) == DB_INSTALL_ATTRIBUTE
                 && matches!(
                     datom.value,

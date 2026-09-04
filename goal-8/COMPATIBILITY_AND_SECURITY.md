@@ -1,5 +1,9 @@
 # Compatibility and security policy
 
+> Compatibility baseline retained from Goal 8. For current lifecycle authority
+> and privacy behavior, [`goal-15/OPERATIONS.md`](../goal-15/OPERATIONS.md)
+> controls where this file differs.
+
 ## Compatibility
 
 - Rust public types and canonical formats are native Atomic contracts, not
@@ -54,8 +58,12 @@ work have explicit limits. PostgreSQL statement/lock timeouts, connection
 limits and storage/WAL alarms remain deployment responsibilities. Integrity
 and backup decoding cap lengths and reject malformed or noncanonical data.
 
-Excision and restore require PostgreSQL trigger-bypass authority because they
-rewrite otherwise immutable rows. They must run only in the audited operator
-process after target resolution and backup verification. Exported immutable
-snapshots, replicas, backups and logs are outside the live cache invalidation
-boundary and require explicit inventory/retention handling.
+Restore and excision do not grant the operator arbitrary trigger bypass.
+Owner-installed routines stage immutable copy-on-write generations and expose
+them through a conditional root publication; their narrowly scoped internal
+mutation markers are pinned to the trusted installation schema. Restore is a
+stopped-world operator action. Excision begins as ordinary A=15 transaction
+information and is completed by an operator/background worker; a verified
+backup is strongly recommended but is not semantic authorization. Exported
+immutable snapshots, replicas, backups, WAL, and logs remain outside the live
+generation boundary and require explicit inventory/retention handling.

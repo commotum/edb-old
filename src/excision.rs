@@ -211,7 +211,7 @@ impl ExcisionPredicate {
             .filter(|attribute| attribute.value_type == crate::ValueType::Ref)
             .map(|attribute| attribute.id)
             .collect();
-        let extent = if kind == ExcisionTargetKind::Entity && !protected_entity_target {
+        let extent = if kind == ExcisionTargetKind::Entity {
             component_extent_as_of(database, &request)?
         } else {
             BTreeSet::from([request.target])
@@ -282,7 +282,6 @@ impl ExcisionPredicate {
         }
         match self.kind {
             ExcisionTargetKind::Attribute => u64::from(datom.attribute) == self.request.target,
-            ExcisionTargetKind::Entity if self.protected_entity_target => false,
             ExcisionTargetKind::Entity => {
                 let reference = self.reference_attributes.contains(&datom.attribute)
                     && matches!(datom.value, Value::Ref(_));
@@ -316,11 +315,21 @@ fn component_extent_as_of(
     database: &Database,
     request: &FrozenExcisionRequest,
 ) -> Result<BTreeSet<u64>, SemanticError> {
-    let as_of = database.datoms(View::AsOf(request.request_t), IndexOrder::Eavt);
-    // Db.asOf windows data, but recovered `component-attr?` and `ref?` call
-    // the database's current attribute projection. Value type is immutable;
-    // component ownership may have changed since the request and therefore
-    // deliberately uses the current schema (`excise.clj:39-90,175-201`).
+    // Recovered `(.asOf (.history db) t)` windows the raw history without
+    // collapsing retractions (`excise.clj:174-192`; `db.clj:1811-1825,5100`).
+    // A component edge asserted and later retracted before the request still
+    // establishes historical ownership and must therefore contribute to the
+    // privacy extent.
+    let mut as_of_history = Vec::new();
+    for datom in database.datoms(View::History, IndexOrder::Eavt) {
+        if tx_to_t(datom.tx)? <= request.request_t {
+            as_of_history.push(datom);
+        }
+    }
+    // The temporal window applies to data, but recovered `component-attr?`
+    // and `ref?` call the current database's attribute projection. Value type
+    // is immutable; component ownership may have changed since the request
+    // and therefore deliberately uses current-basis schema.
     let component_attributes: BTreeSet<_> = database
         .schema()
         .attributes()
@@ -337,7 +346,7 @@ fn component_extent_as_of(
     let mut extent = BTreeSet::from([request.target]);
     let mut queue = VecDeque::from([(request.target, true)]);
     while let Some((entity, first_hop)) = queue.pop_front() {
-        for datom in as_of.iter().filter(|datom| datom.entity == entity) {
+        for datom in as_of_history.iter().filter(|datom| datom.entity == entity) {
             if !component_attributes.contains(&datom.attribute)
                 || !reference_attributes.contains(&datom.attribute)
                 || (first_hop
@@ -583,6 +592,71 @@ mod tests {
     }
 
     #[test]
+    fn component_extent_retains_retracted_ownership_edges_from_history_as_of_request() {
+        let database = Database::new(schema()).unwrap();
+        let asserted = database
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("root".into()),
+                        attribute: COMPONENT,
+                        value: TxValue::Entity(EntityRef::Temp("child".into())),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("child".into()),
+                        attribute: SECRET,
+                        value: Value::String("historically owned secret".into()).into(),
+                    },
+                ],
+                100,
+            )
+            .unwrap();
+        let root = asserted.tempids["root"];
+        let child = asserted.tempids["child"];
+        let retracted = asserted
+            .db_after
+            .with(
+                &[TxOp::Retract {
+                    entity: EntityRef::Id(root),
+                    attribute: COMPONENT,
+                    value: Some(TxValue::Entity(EntityRef::Id(child))),
+                }],
+                200,
+            )
+            .unwrap()
+            .db_after;
+        assert!(retracted.values(root, COMPONENT).is_empty());
+
+        let requested = retracted
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("request".into()),
+                    attribute: DB_EXCISE as u32,
+                    value: TxValue::Entity(EntityRef::Id(root)),
+                }],
+                300,
+            )
+            .unwrap()
+            .db_after;
+        let plan = ExcisionPlan::pending_after(&requested, 0).unwrap();
+        let frozen = plan.frozen_predicates();
+        assert_eq!(frozen.len(), 1);
+        assert!(frozen[0].extent.contains(&child));
+
+        let child_secret = requested
+            .datoms(View::History, IndexOrder::Eavt)
+            .into_iter()
+            .find(|datom| {
+                datom.entity == child
+                    && datom.attribute == SECRET
+                    && datom.value == Value::String("historically owned secret".into())
+                    && datom.added
+            })
+            .unwrap();
+        assert!(plan.removes(&child_secret));
+    }
+
+    #[test]
     fn component_extent_windows_edges_at_request_but_uses_current_schema() {
         let database = Database::new(schema()).unwrap();
         let data = database
@@ -651,9 +725,21 @@ mod tests {
     }
 
     #[test]
-    fn protected_entity_request_is_recorded_but_removes_nothing() {
-        let database = Database::bootstrap().unwrap();
-        let request = database
+    fn protected_entity_keeps_own_facts_but_not_unprotected_inbound_references() {
+        let database = Database::new(schema()).unwrap();
+        let linked = database
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("application".into()),
+                    attribute: LINK,
+                    value: TxValue::Entity(EntityRef::Id(crate::DB_PART_DB)),
+                }],
+                100,
+            )
+            .unwrap();
+        let application = linked.tempids["application"];
+        let request = linked
+            .db_after
             .with(
                 &[TxOp::Add {
                     entity: EntityRef::Temp("request".into()),
@@ -666,10 +752,25 @@ mod tests {
             .db_after;
         let plan = ExcisionPlan::pending_after(&request, 0).unwrap();
         assert!(!plan.is_empty());
-        assert_eq!(
-            plan.removed_count(request.datoms(View::History, IndexOrder::Eavt).iter()),
-            0
-        );
+        let history = request.datoms(View::History, IndexOrder::Eavt);
+        let protected_own_fact = history
+            .iter()
+            .find(|datom| datom.entity == crate::DB_PART_DB)
+            .unwrap();
+        assert!(is_excision_keeper(protected_own_fact));
+        assert!(!plan.removes(protected_own_fact));
+
+        let inbound = history
+            .iter()
+            .find(|datom| {
+                datom.entity == application
+                    && datom.attribute == LINK
+                    && datom.value == Value::Ref(crate::DB_PART_DB)
+                    && datom.added
+            })
+            .unwrap();
+        assert!(!is_excision_keeper(inbound));
+        assert!(plan.removes(inbound));
     }
 
     #[test]
