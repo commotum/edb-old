@@ -992,7 +992,7 @@ fn coherent_forged_base_with_recomputed_hashes_cannot_replace_published_root() {
 }
 
 #[test]
-fn self_consistent_manifest_with_the_wrong_log_hash_falls_back_to_the_log() {
+fn self_consistent_legacy_manifest_falls_back_but_invalid_native_authority_fails_closed() {
     let Some(connection) = connection() else {
         return;
     };
@@ -1026,9 +1026,10 @@ fn self_consistent_manifest_with_the_wrong_log_hash_falls_back_to_the_log() {
         client
             .batch_execute("ALTER TABLE atomic_tree_manifests ENABLE TRIGGER USER")
             .unwrap();
-        let peer = Peer::connect(&connection, &database_id, 32).unwrap();
-        assert_eq!(peer.durable_base_t(), 0);
-        assert_current_eq(&peer.db(), &expected);
+        let error = Peer::connect(&connection, &database_id, 32)
+            .err()
+            .expect("corrupt native authority must fail closed");
+        assert_eq!(error.code, "peer/all-native-publications-invalid");
         return;
     };
     let payload: Vec<u8> = flat_row.get(0);

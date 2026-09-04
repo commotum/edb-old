@@ -5983,6 +5983,7 @@ mod tests {
     use crate::{
         Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, Value, ValueType,
     };
+    use postgres::NoTls;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_database(prefix: &str) -> String {
@@ -6162,6 +6163,178 @@ mod tests {
         .err()
         .expect("a generation without a publication must fail");
         assert_eq!(no_publication.code, "peer/exact-no-native-publication");
+    }
+
+    #[test]
+    fn corrupt_required_manifest_is_distinct_from_an_absent_manifest() {
+        let Some(connection) = std::env::var("ATOMIC_POSTGRES_URL").ok() else {
+            return;
+        };
+        let mut migrator = crate::PostgresMigrator::connect(&connection).unwrap();
+        migrator.migrate().unwrap();
+
+        let database_id = unique_database("exact_required_corrupt");
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("exact", "value"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        let mut store = crate::PostgresStore::connect(&connection).unwrap();
+        store.create_database(&database_id, schema).unwrap();
+        let receipt = PostgresIndexer::connect(&connection, &database_id)
+            .unwrap()
+            .consolidate()
+            .unwrap();
+        let endpoint = Peer::connect(&connection, &database_id, 64)
+            .unwrap()
+            .tiered_snapshot()
+            .endpoint();
+
+        let mut client = Client::connect(&connection, NoTls).unwrap();
+        let mut fault = client.transaction().unwrap();
+        fault
+            .batch_execute("ALTER TABLE atomic_tree_manifests DISABLE TRIGGER USER")
+            .unwrap();
+        assert_eq!(
+            fault
+                .execute(
+                    "UPDATE atomic_tree_manifests \
+                        SET payload = set_byte(payload, 16, get_byte(payload, 16) # 1) \
+                      WHERE manifest_hash = $1",
+                    &[&&receipt.manifest_hash[..]],
+                )
+                .unwrap(),
+            1
+        );
+        fault
+            .batch_execute("ALTER TABLE atomic_tree_manifests ENABLE TRIGGER USER")
+            .unwrap();
+        fault.commit().unwrap();
+
+        let error = TieredSnapshot::open_exact_configured(
+            &PostgresConnectionConfig::plaintext(&connection),
+            &database_id,
+            endpoint,
+            Some(receipt.manifest_hash),
+            64,
+            8 * 1024 * 1024,
+            RecentLimits::default(),
+        )
+        .err()
+        .expect("a corrupt required manifest must not be reported absent");
+        assert_eq!(error.code, "peer/exact-manifest-corrupt");
+    }
+
+    #[test]
+    fn exact_rebase_pins_old_and_new_manifests_until_each_value_drops() {
+        let Some(connection) = std::env::var("ATOMIC_POSTGRES_URL").ok() else {
+            return;
+        };
+        let mut migrator = crate::PostgresMigrator::connect(&connection).unwrap();
+        migrator.migrate().unwrap();
+
+        let database_id = unique_database("exact_rebase_distinct_roots");
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("exact", "value"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        let mut store = crate::PostgresStore::connect(&connection).unwrap();
+        let created = store.create_database(&database_id, schema).unwrap();
+        let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+        let old_publication = indexer.consolidate().unwrap();
+        let endpoint = Peer::connect(&connection, &database_id, 64)
+            .unwrap()
+            .tiered_snapshot()
+            .endpoint();
+        let (old, _) = TieredSnapshot::open_exact_configured(
+            &PostgresConnectionConfig::plaintext(&connection),
+            &database_id,
+            endpoint,
+            Some(old_publication.manifest_hash),
+            64,
+            8 * 1024 * 1024,
+            RecentLimits::default(),
+        )
+        .unwrap();
+
+        // Publish a physically distinct but semantically identical root at
+        // the same logical endpoint. This isolates rebase/pin ownership from
+        // transaction processing and from a background-index timing race.
+        let build = build_initial_native(&created, &TreeConfig::default()).unwrap();
+        let manifest = PersistentTreeManifest {
+            database_id: database_id.clone(),
+            publication_revision: old_publication.publication_revision + 1,
+            basis_t: endpoint.basis_t,
+            tx_hash: endpoint.tx_hash,
+            state_hash: endpoint.state_hash,
+            excision_generation: endpoint.generation,
+            eidx_frontier: endpoint.eidx_frontier,
+            trees: build.trees,
+        };
+        let payload = manifest.encode().unwrap();
+        let new_manifest_hash = sha256(&payload);
+        let record = TreeManifestRecord {
+            database_id: database_id.clone(),
+            publication_revision: manifest.publication_revision,
+            basis_t: manifest.basis_t,
+            tx_hash: manifest.tx_hash,
+            state_hash: manifest.state_hash,
+            excision_generation: manifest.excision_generation,
+            eidx_frontier: manifest.eidx_frontier,
+            manifest_hash: new_manifest_hash,
+            payload,
+            roots: manifest
+                .trees
+                .iter()
+                .map(|tree| TreeRootBinding {
+                    order: tree.descriptor.order,
+                    history: tree.descriptor.history,
+                    root_hash: tree.descriptor.root_hash,
+                    datom_count: tree.descriptor.count,
+                    encoded_bytes: tree.root_bytes,
+                })
+                .collect(),
+        };
+        let mut tree_store = PostgresTreeStore::connect(&connection).unwrap();
+        for (hash, bytes) in build.nodes.iter() {
+            tree_store.insert_node(*hash, bytes).unwrap();
+        }
+        assert_eq!(
+            tree_store
+                .publish_manifest(&record, old_publication.publication_revision)
+                .unwrap(),
+            TreePublishOutcome::Published
+        );
+        assert_ne!(new_manifest_hash, old_publication.manifest_hash);
+        let (new, _) = old.rebase_exact(Some(new_manifest_hash)).unwrap();
+        assert_eq!(old.endpoint(), endpoint);
+        assert_eq!(new.endpoint(), endpoint);
+        assert_eq!(
+            old.durable_manifest_hash(),
+            Some(old_publication.manifest_hash)
+        );
+        assert_eq!(new.durable_manifest_hash(), Some(new_manifest_hash));
+
+        let pins = Arc::clone(&old.core.root_pins);
+        let mut hashes = pins.hashes();
+        hashes.sort_unstable();
+        let mut expected = vec![old_publication.manifest_hash, new_manifest_hash];
+        expected.sort_unstable();
+        assert_eq!(hashes, expected);
+
+        drop(new);
+        assert_eq!(pins.hashes(), vec![old_publication.manifest_hash]);
+        drop(old);
+        assert!(pins.hashes().is_empty());
     }
 
     #[test]
