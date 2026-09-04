@@ -1,9 +1,9 @@
 use atomic_core::{
     Attribute, BackupFault, CallableRef, Cardinality, DB_EXCISE, DB_FN, DB_IDENT, EntityRef,
-    ErrorCategory, IndexOrder, Instruction, Keyword, Peer, PersistentTreeManifest, PortableBackup,
+    ErrorCategory, Instruction, Keyword, Peer, PersistentTreeManifest, PortableBackup,
     PostgresIndexer, PostgresOperator, PostgresStore, PostgresTreeStore, Program, ProgramCall,
     ProgramKind, RestoreFault, Schema, TransactionRequest, TreeManifestRecord, TxOp, TxValue,
-    USER_PARTITION, Value, ValueType, View, make_eid, sha256,
+    USER_PARTITION, Value, ValueType, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
 use std::collections::BTreeSet;
@@ -109,18 +109,11 @@ fn add(value: &str) -> TxOp {
     }
 }
 
-fn assert_same_information(left: &atomic_core::Database, right: &atomic_core::Database) {
-    assert_eq!(left.basis_t(), right.basis_t());
-    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
-    assert_eq!(left.schema(), right.schema());
-    assert_eq!(
-        left.datoms(View::Current, IndexOrder::Eavt),
-        right.datoms(View::Current, IndexOrder::Eavt)
-    );
-    assert_eq!(
-        left.datoms(View::History, IndexOrder::Eavt),
-        right.datoms(View::History, IndexOrder::Eavt)
-    );
+fn assert_same_information(
+    left: &impl common::InformationSource,
+    right: &impl common::InformationSource,
+) {
+    common::assert_same_information(left, right);
 }
 
 #[test]
@@ -688,6 +681,9 @@ fn live_backup_generation_pin_blocks_point_restore_cutover_and_retry_converges()
         &[add("one")],
         20_000,
     );
+    // Keep an explicit eager verification value: native transaction reports
+    // now correctly pin their immutable source generation until dropped.
+    let first_expected = store.recover_basis(&source, first.basis_t).unwrap();
     let mut backup = PortableBackup::connect(&connection).unwrap();
     let old_point = backup.backup_database(&source, &directory).unwrap();
     let second = common::transact(
@@ -718,6 +714,12 @@ fn live_backup_generation_pin_blocks_point_restore_cutover_and_retry_converges()
     let still_current = store.recover(&source).unwrap();
     assert_same_information(&second.db_after, &still_current);
 
+    // The failed restore above was caused by the backup pin. Retained native
+    // report values are independent legitimate generation pins, so release
+    // them before proving that the backup-pin retry itself converges.
+    drop(first);
+    drop(second);
+
     let retried = competing_restore
         .restore_backup_point(
             &directory,
@@ -726,7 +728,7 @@ fn live_backup_generation_pin_blocks_point_restore_cutover_and_retry_converges()
             &source,
         )
         .unwrap();
-    assert_same_information(&first.db_after, &retried);
+    assert_same_information(&first_expected, &retried);
     fs::remove_dir_all(&directory).unwrap();
 }
 
@@ -1540,8 +1542,8 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
         )
         .unwrap();
     assert_eq!(
-        report.db_after.values(user(42), ITEM_VALUE),
-        vec![&Value::String("current".into())]
+        report.db_after.values(user(42), ITEM_VALUE).unwrap(),
+        vec![Value::String("current".into())]
     );
     target_service.shutdown();
 
