@@ -1947,6 +1947,313 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
 }
 
 #[test]
+fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("gc_request_base");
+    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    let created = store.create_database(&database_id, Schema::new()).unwrap();
+    assert_eq!(created.basis_t(), 0);
+
+    // Every new positive generation has an authenticated semantic root at
+    // genesis.  Publish that t0 value so the later request can name its exact
+    // db-before base without depending on an ordinary-writer implementation
+    // that this migration slice deliberately does not change yet.
+    let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
+    let genesis_publication = indexer.consolidate().unwrap();
+    assert_eq!(genesis_publication.basis_t, 0);
+
+    let service = common::start_service(&connection, &database_id);
+    let schema_ops = schema()
+        .attributes()
+        .cloned()
+        .map(TxOp::InstallAttribute)
+        .collect::<Vec<_>>();
+    let installed = common::transact(&service, "request-base-schema", 0, &schema_ops, 500);
+    let committed = common::transact(
+        &service,
+        "request-base-native",
+        installed.basis_t,
+        &[add(unique_long())],
+        1_000,
+    );
+    service.shutdown();
+
+    let mut raw = Client::connect(&connection, NoTls).unwrap();
+    let request = raw
+        .query_one(
+            "SELECT generation, request_key_hash FROM atomic_generation_requests \
+              WHERE database_id = $1 AND basis_t = $2",
+            &[&database_id, &(committed.basis_t as i64)],
+        )
+        .unwrap();
+    let source_generation: i64 = request.get(0);
+    let request_key_hash: Vec<u8> = request.get(1);
+    assert_eq!(source_generation, 1);
+
+    // Kind 1 is the explicitly unbound compatibility shape.  The new table
+    // rejects attaching a root to it rather than silently changing its
+    // durability promise.
+    let unbound_error = raw
+        .execute(
+            "INSERT INTO atomic_generation_request_bases \
+                 (database_id, generation, request_key_hash, base_manifest_hash) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &database_id,
+                &source_generation,
+                &request_key_hash,
+                &&genesis_publication.manifest_hash[..],
+            ],
+        )
+        .unwrap_err();
+    assert_eq!(unbound_error.code().unwrap().code(), "23503");
+
+    // Test-only promotion models the later writer's atomic kind-2 insert.  It
+    // is done under a transactional trigger disable so a failed fixture can
+    // never leave the shared catalog's immutability guard disabled.
+    let mut fixture = raw.transaction().unwrap();
+    fixture
+        .batch_execute(
+            "ALTER TABLE atomic_generation_requests \
+             DISABLE TRIGGER atomic_generation_requests_immutable",
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .execute(
+                "UPDATE atomic_generation_requests SET request_kind = 2 \
+                  WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3",
+                &[&database_id, &source_generation, &request_key_hash],
+            )
+            .unwrap(),
+        1
+    );
+    fixture
+        .batch_execute(
+            "ALTER TABLE atomic_generation_requests \
+             ENABLE TRIGGER atomic_generation_requests_immutable",
+        )
+        .unwrap();
+    fixture.commit().unwrap();
+
+    let transaction = raw
+        .query_one(
+            "SELECT previous_hash, tx_hash FROM atomic_generation_transactions \
+              WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
+            &[
+                &database_id,
+                &source_generation,
+                &(committed.basis_t as i64),
+            ],
+        )
+        .unwrap();
+    let previous_hash: Vec<u8> = transaction.get(0);
+    let committed_hash: Vec<u8> = transaction.get(1);
+
+    // Rewind only the fixture head, with the validation trigger disabled in
+    // one owner transaction, so the replacement validator itself is tested:
+    // kind 2 cannot become visible until its exact base binding exists.
+    let mut rewind = raw.transaction().unwrap();
+    rewind
+        .batch_execute("ALTER TABLE atomic_heads DISABLE TRIGGER atomic_heads_validate_advance")
+        .unwrap();
+    assert_eq!(
+        rewind
+            .execute(
+                "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
+                  WHERE database_id = $1 AND log_generation = $4",
+                &[
+                    &database_id,
+                    &((committed.basis_t - 1) as i64),
+                    &previous_hash,
+                    &source_generation,
+                ],
+            )
+            .unwrap(),
+        1
+    );
+    rewind
+        .batch_execute("ALTER TABLE atomic_heads ENABLE TRIGGER atomic_heads_validate_advance")
+        .unwrap();
+    rewind.commit().unwrap();
+
+    let incomplete_publication = raw
+        .execute(
+            "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
+              WHERE database_id = $1 AND log_generation = $4",
+            &[
+                &database_id,
+                &(committed.basis_t as i64),
+                &committed_hash,
+                &source_generation,
+            ],
+        )
+        .unwrap_err();
+    assert_eq!(incomplete_publication.code().unwrap().code(), "23503");
+
+    let mut operator = PostgresOperator::connect(&connection).unwrap();
+    let missing = operator.inspect_database(&database_id, false).unwrap();
+    assert!(
+        missing
+            .problems
+            .iter()
+            .any(|problem| problem.code == "integrity/invalid-request-base"),
+        "kind-2 request without a base was not reported: {:?}",
+        missing.problems
+    );
+
+    raw.execute(
+        "INSERT INTO atomic_generation_request_bases \
+             (database_id, generation, request_key_hash, base_manifest_hash) \
+         VALUES ($1, $2, $3, $4)",
+        &[
+            &database_id,
+            &source_generation,
+            &request_key_hash,
+            &&genesis_publication.manifest_hash[..],
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        raw.execute(
+            "UPDATE atomic_heads SET basis_t = $2, tx_hash = $3 \
+              WHERE database_id = $1 AND log_generation = $4",
+            &[
+                &database_id,
+                &(committed.basis_t as i64),
+                &committed_hash,
+                &source_generation,
+            ],
+        )
+        .unwrap(),
+        1
+    );
+    let repaired = operator.inspect_database(&database_id, false).unwrap();
+    assert!(
+        repaired
+            .problems
+            .iter()
+            .all(|problem| problem.code != "integrity/invalid-request-base"),
+        "valid request base was rejected: {:?}",
+        repaired.problems
+    );
+
+    // Authenticated recovery must treat kind 2 as an ordinary transaction,
+    // never as an excision replay marker.
+    assert_same_information(&store.recover(&database_id).unwrap(), &committed.db_after);
+
+    let successor_publication = indexer.consolidate().unwrap();
+    assert!(successor_publication.basis_t >= committed.basis_t);
+    let mut publication_work = PostgresTreeStore::connect(&connection).unwrap();
+    let mut folded = false;
+    for _ in 0..64 {
+        if publication_work
+            .advance_publication_work(successor_publication.manifest_hash)
+            .unwrap()
+        {
+            folded = true;
+            break;
+        }
+    }
+    assert!(folded);
+
+    // The durable association is a real root pin even without a connected
+    // Peer session.  Preview and the owner SQL function agree that the active
+    // generation's oldest root cannot be claimed.
+    let active_inventory = operator.garbage_inventory(Duration::ZERO).unwrap();
+    assert!(active_inventory.tree_publications.iter().all(|candidate| {
+        candidate.database_id != database_id
+            || candidate.manifest_hash != genesis_publication.manifest_hash
+    }));
+    let collected: bool = raw
+        .query_one(
+            "SELECT atomic_collect_tree_retirement($1, $2, $3, 0, 512)",
+            &[
+                &database_id,
+                &(genesis_publication.publication_revision as i64),
+                &&genesis_publication.manifest_hash[..],
+            ],
+        )
+        .unwrap()
+        .get(0);
+    assert!(!collected);
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_tree_retirement_progress \
+              WHERE manifest_hash = $1",
+            &[&&genesis_publication.manifest_hash[..]],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+
+    // A real excision activation retires generation one.  Its kind-2 request
+    // is authenticated as ordinary source information and rewritten as a
+    // tombstone in the successor; no binding is copied to that tombstone.
+    let service = common::start_service(&connection, &database_id);
+    let requested = common::transact(
+        &service,
+        "request-base-excision",
+        committed.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("request-base-excision".into()),
+            attribute: DB_EXCISE as u32,
+            value: TxValue::Entity(EntityRef::Id(user(42))),
+        }],
+        2_000,
+    );
+    service.shutdown();
+    let activated = operator.process_excision_requests(&database_id).unwrap();
+    assert_eq!(activated.source_generation, source_generation as u64);
+    assert_eq!(activated.basis_t, requested.basis_t);
+
+    // While the tree dependency remains, the retired log generation is not a
+    // generation-GC candidate.  Root GC releases the now-unresolvable request
+    // binding at publication deletion, after which the existing phased log
+    // collector can become eligible without a dependency cycle.
+    assert!(
+        operator
+            .garbage_inventory(Duration::ZERO)
+            .unwrap()
+            .log_generations
+            .iter()
+            .all(|candidate| candidate.database_id != database_id
+                || candidate.generation != source_generation as u64)
+    );
+    let mut generation_became_collectible = false;
+    for _ in 0..MAX_TEST_GC_STEPS {
+        let inventory = operator.garbage_inventory(Duration::ZERO).unwrap();
+        if inventory.log_generations.iter().any(|candidate| {
+            candidate.database_id == database_id && candidate.generation == source_generation as u64
+        }) {
+            generation_became_collectible = true;
+            break;
+        }
+        assert!(
+            inventory_has_work(&inventory),
+            "request-base retirement made no progress before generation GC: {inventory:?}"
+        );
+        apply_exact_inventory(&mut operator, &inventory);
+    }
+    assert!(generation_became_collectible);
+    assert_eq!(
+        raw.query_one(
+            "SELECT count(*) FROM atomic_generation_request_bases \
+              WHERE database_id = $1 AND generation = $2",
+            &[&database_id, &source_generation],
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+}
+
+#[test]
 fn large_replacement_publishes_root_before_bounded_membership_fold() {
     let Some(connection) = connection() else {
         return;

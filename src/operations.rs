@@ -414,6 +414,64 @@ impl PostgresOperator {
                 format!("{dangling} durable requests do not identify a transaction"),
             );
         }
+        if log_generation > 0 {
+            let invalid_native_bases: i64 = transaction
+                .query_one(
+                    "SELECT count(*) \
+                       FROM atomic_generation_requests request \
+                       LEFT JOIN atomic_generation_request_bases base \
+                         ON base.database_id = request.database_id \
+                        AND base.generation = request.generation \
+                        AND base.request_key_hash = request.request_key_hash \
+                       LEFT JOIN atomic_tree_publications publication \
+                         ON publication.manifest_hash = base.base_manifest_hash \
+                        AND publication.database_id = request.database_id \
+                        AND publication.log_generation = request.generation \
+                       LEFT JOIN atomic_tree_manifests manifest \
+                         ON manifest.manifest_hash = publication.manifest_hash \
+                        AND manifest.database_id = publication.database_id \
+                        AND manifest.publication_revision = publication.publication_revision \
+                        AND manifest.basis_t = publication.basis_t \
+                        AND manifest.tx_hash = publication.tx_hash \
+                        AND manifest.log_generation = publication.log_generation \
+                       LEFT JOIN atomic_semantic_commitment_roots semantic \
+                         ON semantic.database_id = manifest.database_id \
+                        AND semantic.generation = manifest.log_generation \
+                        AND semantic.basis_t = manifest.basis_t \
+                        AND semantic.tx_hash = manifest.tx_hash \
+                        AND semantic.state_hash = manifest.state_hash \
+                        AND semantic.eidx_frontier = manifest.eidx_frontier \
+                        AND semantic.commitment_version = 2 \
+                      WHERE request.database_id = $1 AND request.generation = $2 \
+                        AND ( \
+                             (request.request_kind = 2 AND ( \
+                                  base.base_manifest_hash IS NULL \
+                                  OR publication.manifest_hash IS NULL \
+                                  OR manifest.manifest_hash IS NULL \
+                                  OR semantic.database_id IS NULL \
+                                  OR publication.basis_t > request.basis_t - 1 \
+                                  OR EXISTS ( \
+                                       SELECT 1 FROM atomic_tree_retirement_progress progress \
+                                        WHERE progress.manifest_hash = base.base_manifest_hash \
+                                  ) \
+                             )) \
+                             OR (request.request_kind <> 2 \
+                                 AND base.base_manifest_hash IS NOT NULL) \
+                        )",
+                    &[&database_id, &sql_u64(log_generation, "log generation")?],
+                )
+                .map_err(|error| operation_error("operations/request-bases", error))?
+                .get(0);
+            if invalid_native_bases != 0 {
+                problem(
+                    &mut problems,
+                    "integrity/invalid-request-base",
+                    format!(
+                        "{invalid_native_bases} native requests lack one exact authenticated db-before base"
+                    ),
+                );
+            }
+        }
 
         metrics.manifests = count(
             &mut transaction,
@@ -2126,6 +2184,10 @@ fn inspect_native_trees<C: postgres::GenericClient>(
                      SELECT tx_hash, state_hash FROM atomic_generation_transactions \
                       WHERE $3::bigint>0 AND database_id=$1 AND generation=$3 \
                         AND basis_t=$2 \
+                     UNION ALL \
+                     SELECT tx_hash, state_hash FROM atomic_semantic_commitment_roots \
+                      WHERE $3::bigint>0 AND $2::bigint=0 AND database_id=$1 \
+                        AND generation=$3 AND basis_t=0 AND commitment_version=2 \
                  ) authoritative",
                 &[
                     &database_id,
@@ -2667,6 +2729,14 @@ fn garbage_candidates<C: postgres::GenericClient>(
                 AND NOT EXISTS (SELECT 1 FROM atomic_tree_publications older \
                                 WHERE older.database_id = r.database_id \
                                   AND older.publication_revision < r.publication_revision) \
+                AND NOT EXISTS ( \
+                    SELECT 1 \
+                      FROM atomic_generation_request_bases base \
+                      JOIN atomic_heads head \
+                        ON head.database_id = r.database_id \
+                       AND head.log_generation = p.log_generation \
+                     WHERE base.base_manifest_hash = r.manifest_hash \
+                ) \
               ORDER BY r.retired_at, r.database_id, r.publication_revision \
               LIMIT 64 OFFSET $2",
                 &[&older_than_millis, &retirement_offset],
@@ -2928,6 +2998,9 @@ fn log_generation_candidates<C: postgres::GenericClient>(
                     AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_retirements successor \
                                      WHERE successor.database_id = r.database_id \
                                        AND successor.successor_generation = r.generation) \
+                    AND NOT EXISTS (SELECT 1 FROM atomic_generation_request_bases base \
+                                     WHERE base.database_id = r.database_id \
+                                       AND base.generation = r.generation) \
                   ORDER BY progress.generation IS NULL, \
                            COALESCE(progress.updated_at, r.retired_at), \
                            r.database_id, r.generation \
@@ -3039,6 +3112,9 @@ fn abandoned_log_generation_candidates<C: postgres::GenericClient>(
                                      WHERE dependent.database_id = g.database_id \
                                        AND dependent.source_generation = g.generation \
                                        AND dependent.generation <> g.generation) \
+                    AND NOT EXISTS (SELECT 1 FROM atomic_generation_request_bases base \
+                                     WHERE base.database_id = g.database_id \
+                                       AND base.generation = g.generation) \
                   ORDER BY progress.generation IS NULL, \
                            COALESCE(progress.updated_at, g.created_at), \
                            g.database_id, g.generation \

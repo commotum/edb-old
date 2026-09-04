@@ -27,6 +27,7 @@ const PEER_TABLES: &[&str] = &[
     "atomic_transaction_contents",
     "atomic_generation_transactions",
     "atomic_generation_requests",
+    "atomic_generation_request_bases",
     "atomic_log_generation_activations",
     "atomic_completed_excision_requests",
     "atomic_log_generation_completions",
@@ -42,6 +43,8 @@ const PEER_TABLES: &[&str] = &[
     "atomic_tree_retirements",
     "atomic_tree_retired_nodes",
     "atomic_tree_retirement_progress",
+    "atomic_semantic_commitment_nodes",
+    "atomic_semantic_commitment_roots",
 ];
 const WRITER_SELECT_TABLES: &[&str] = &[
     "atomic_transactor_leases",
@@ -51,7 +54,10 @@ const WRITER_SELECT_TABLES: &[&str] = &[
     "atomic_tree_delta_headers",
     "atomic_tree_delta_nodes",
     "atomic_generation_request_tempids",
+    "atomic_generation_request_bases",
     "atomic_program_generation_refs",
+    "atomic_semantic_commitment_nodes",
+    "atomic_semantic_commitment_roots",
 ];
 const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_transactions",
@@ -68,8 +74,11 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_transaction_contents",
     "atomic_generation_transactions",
     "atomic_generation_requests",
+    "atomic_generation_request_bases",
     "atomic_generation_request_tempids",
     "atomic_program_generation_refs",
+    "atomic_semantic_commitment_nodes",
+    "atomic_semantic_commitment_roots",
 ];
 const WRITER_UPDATE_TABLES: &[&str] = &[
     "atomic_databases",

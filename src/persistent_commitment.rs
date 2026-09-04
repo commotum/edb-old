@@ -1283,7 +1283,22 @@ mod codec_tests {
         let mut client = client_in_schema(&connection, &schema_name);
         client
             .batch_execute(
-                "DROP TRIGGER atomic_log_generation_activations_semantic_root \
+                "DROP TRIGGER atomic_tree_publications_release_request_bases \
+                    ON atomic_tree_publications; \
+                 DROP TABLE atomic_generation_request_bases; \
+                 DROP FUNCTION atomic_validate_generation_request_base_insert(); \
+                 DROP FUNCTION atomic_reject_generation_request_base_mutation(); \
+                 DROP FUNCTION atomic_release_inactive_request_bases(); \
+                 DROP FUNCTION atomic_collect_tree_retirement( \
+                    TEXT, BIGINT, BYTEA, BIGINT, BIGINT); \
+                 ALTER FUNCTION atomic_collect_tree_retirement_unbound_v13( \
+                    TEXT, BIGINT, BYTEA, BIGINT, BIGINT) \
+                    RENAME TO atomic_collect_tree_retirement; \
+                 ALTER TABLE atomic_generation_requests \
+                    DROP CONSTRAINT atomic_generation_requests_request_kind_check, \
+                    ADD CONSTRAINT atomic_generation_requests_request_kind_check \
+                        CHECK (request_kind IN (0, 1)); \
+                 DROP TRIGGER atomic_log_generation_activations_semantic_root \
                     ON atomic_log_generation_activations; \
                  DROP TABLE atomic_semantic_commitment_roots; \
                  DROP TABLE atomic_semantic_commitment_nodes; \

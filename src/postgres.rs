@@ -202,12 +202,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         16,
         include_str!("../migrations/0016_activation_semantic_roots.sql"),
     ),
+    (
+        17,
+        include_str!("../migrations/0017_request_snapshot_bases.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 16;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 17;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -233,6 +237,7 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_transaction_contents",
     "atomic_generation_transactions",
     "atomic_generation_requests",
+    "atomic_generation_request_bases",
     "atomic_log_generation_activations",
     "atomic_completed_excision_requests",
     "atomic_log_generation_completions",
@@ -262,6 +267,7 @@ const WRITER_RUNTIME_TABLES: &[&str] = &[
     "atomic_tree_delta_headers",
     "atomic_tree_delta_nodes",
     "atomic_generation_request_tempids",
+    "atomic_generation_request_bases",
     "atomic_program_generation_refs",
     "atomic_semantic_commitment_nodes",
     "atomic_semantic_commitment_roots",
@@ -282,6 +288,7 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_transaction_contents",
     "atomic_generation_transactions",
     "atomic_generation_requests",
+    "atomic_generation_request_bases",
     "atomic_generation_request_tempids",
     "atomic_program_generation_refs",
     "atomic_semantic_commitment_nodes",
@@ -3585,7 +3592,7 @@ pub(crate) fn read_authenticated_log_range<C: GenericClient>(
             transaction.database_id = database_id.to_owned();
             transaction
         };
-        if !matches!(request_kind, 0 | 1) || (generation == 0 && request_kind != 1) {
+        if !matches!(request_kind, 0 | 1 | 2) || (generation == 0 && request_kind != 1) {
             return Err(fault(
                 "recovery/request-kind",
                 "transaction request record has an invalid kind",
@@ -3788,7 +3795,7 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
             content.to_transaction(previous_hash)
         };
         let request_kind: i16 = row.get(8);
-        database = if generation == 0 || request_kind == 1 {
+        database = if generation == 0 || matches!(request_kind, 1 | 2) {
             database.apply_committed(&envelope)?
         } else if request_kind == 0 {
             database.apply_excised_committed(&envelope)?
