@@ -12,6 +12,7 @@ use crate::postgres::{
 };
 use crate::recent::{
     EndpointProjection, RecentCursor, RecentCursorStats, RecentLimits, RecentRange, RecentTier,
+    retained_entry_stats,
 };
 use crate::state_commitment::{checkpoint_information, verify_checkpoint_state_hash};
 use crate::{
@@ -4169,12 +4170,60 @@ impl TieredSnapshot {
         cache_bytes: usize,
         recent_limits: RecentLimits,
     ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        Self::open_exact_configured_for(
+            connection,
+            database_id.into(),
+            endpoint,
+            required_manifest,
+            ExactOpenConfiguration {
+                cache_entries,
+                cache_bytes,
+                recent_limits,
+                purpose: ExactOpenPurpose::ImmutableRead,
+            },
+        )
+    }
+
+    /// Open the exact value used to activate a writer. Unlike an immutable
+    /// peer/database-value open, writer admission has a hard recent-memory
+    /// ceiling: reject an uncovered tail as soon as its retained account
+    /// crosses that ceiling, before constructing its indexes in memory.
+    pub(crate) fn open_writer_exact_configured(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+        cache_entries: usize,
+        cache_bytes: usize,
+        recent_limits: RecentLimits,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        Self::open_exact_configured_for(
+            connection,
+            database_id.into(),
+            endpoint,
+            required_manifest,
+            ExactOpenConfiguration {
+                cache_entries,
+                cache_bytes,
+                recent_limits,
+                purpose: ExactOpenPurpose::WriterActivation,
+            },
+        )
+    }
+
+    fn open_exact_configured_for(
+        connection: &PostgresConnectionConfig,
+        database_id: String,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+        configuration: ExactOpenConfiguration,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
         let endpoint = endpoint.validate()?;
-        let database_id = database_id.into();
         let mut client = connection.connect_for("peer/exact-open")?;
         verify_schema_compatibility(&mut client)?;
         let counters = PeerLoadCounters::default();
-        let mut tree_cache = TreeNodeCache::new(cache_entries, cache_bytes);
+        let mut tree_cache =
+            TreeNodeCache::new(configuration.cache_entries, configuration.cache_bytes);
         let (base, scan_stats) = exact_tree_selection(
             scan_latest_tree_base(
                 &mut client,
@@ -4195,6 +4244,21 @@ impl TieredSnapshot {
         let root_pin = root_pins
             .acquire(Some(&base))
             .map_err(|error| exact_pin_error(error, required_manifest))?;
+        if configuration.purpose == ExactOpenPurpose::WriterActivation {
+            preflight_writer_tail_capacity(
+                &mut client,
+                &database_id,
+                endpoint.generation,
+                TailBase {
+                    basis_t: base.manifest.basis_t,
+                    tx_hash: base.manifest.tx_hash,
+                    state_hash: base.manifest.state_hash,
+                    eidx_frontier: base.manifest.eidx_frontier,
+                },
+                endpoint,
+                configuration.recent_limits,
+            )?;
+        }
         let (state, tail_transactions) = build_exact_tiered_state(
             &mut client,
             ExactTieredBuild {
@@ -4203,7 +4267,7 @@ impl TieredSnapshot {
                 base,
                 generation_pin,
                 root_pin,
-                recent_limits,
+                recent_limits: configuration.recent_limits,
                 local_generation: 0,
                 counters: &counters,
             },
@@ -4213,7 +4277,7 @@ impl TieredSnapshot {
         let core = Arc::new(TieredReadCore {
             database_id,
             connection: connection.clone(),
-            recent_limits,
+            recent_limits: configuration.recent_limits,
             load_counters: counters,
             root_pins,
             io: Mutex::new(PeerIo { client, tree_cache }),
@@ -6214,6 +6278,20 @@ struct ExactTieredBuild<'a> {
     counters: &'a PeerLoadCounters,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactOpenPurpose {
+    ImmutableRead,
+    WriterActivation,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExactOpenConfiguration {
+    cache_entries: usize,
+    cache_bytes: usize,
+    recent_limits: RecentLimits,
+    purpose: ExactOpenPurpose,
+}
+
 fn build_exact_tiered_state<C: GenericClient>(
     client: &mut C,
     build: ExactTieredBuild<'_>,
@@ -6324,6 +6402,93 @@ struct TailBase {
     tx_hash: Digest,
     state_hash: Digest,
     eidx_frontier: u64,
+}
+
+/// Bound the rejecting writer-startup path independently of the total tail.
+/// A one-transaction page is intentional: startup is already above its hard
+/// admission limit, so throughput no longer matters and fetching a larger
+/// page would let a rejected database consume memory proportional to that
+/// page before backpressure is reported.
+fn preflight_writer_tail_capacity<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    log_generation: u64,
+    base: TailBase,
+    endpoint: ExactEndpoint,
+    limits: RecentLimits,
+) -> Result<(), SemanticError> {
+    let tail_transactions = endpoint.basis_t.checked_sub(base.basis_t).ok_or_else(|| {
+        fault(
+            "peer/tail-target-before-base",
+            "requested writer tail endpoint precedes its native base",
+        )
+    })?;
+    let mut through_basis = base.basis_t;
+    let mut predecessor_hash = base.tx_hash;
+    let mut scanned_transactions = 0_u64;
+    let mut datoms = 0_u64;
+    let mut accounted_bytes = 0_u64;
+
+    while through_basis < endpoint.basis_t {
+        let after_basis = through_basis;
+        through_basis = through_basis
+            .checked_add(1)
+            .ok_or_else(|| fault("peer/tail-basis-overflow", "writer tail basis overflow"))?;
+        let row = read_authenticated_log_range(
+            client,
+            database_id,
+            log_generation,
+            after_basis,
+            through_basis,
+            predecessor_hash,
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            fault(
+                "peer/writer-preflight-empty-page",
+                "authenticated writer-tail preflight returned an empty exact page",
+            )
+        })?;
+        let retained = retained_entry_stats(&row.transaction)?;
+        scanned_transactions = scanned_transactions.checked_add(1).ok_or_else(|| {
+            fault(
+                "peer/writer-preflight-count-overflow",
+                "writer-tail preflight transaction count overflow",
+            )
+        })?;
+        datoms = datoms.checked_add(retained.datoms).ok_or_else(|| {
+            fault(
+                "peer/writer-preflight-count-overflow",
+                "writer-tail preflight datom count overflow",
+            )
+        })?;
+        accounted_bytes = accounted_bytes
+            .checked_add(retained.accounted_bytes)
+            .ok_or_else(|| {
+                fault(
+                    "peer/writer-preflight-count-overflow",
+                    "writer-tail preflight resident-byte count overflow",
+                )
+            })?;
+        if datoms > limits.hard_datoms || accounted_bytes > limits.hard_bytes {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "recent/hard-capacity",
+                format!(
+                    "writer startup recent tail crosses hard capacity after {scanned_transactions} of {tail_transactions} transactions ({datoms} datoms/{accounted_bytes} accounted resident bytes, limits {}/{})",
+                    limits.hard_datoms, limits.hard_bytes
+                ),
+            )
+            .detail("preflight_transactions", scanned_transactions.to_string())
+            .detail("preflight_datoms", datoms.to_string())
+            .detail("preflight_accounted_bytes", accounted_bytes.to_string())
+            .detail("tail_transactions", tail_transactions.to_string())
+            .detail("preflight_stopped_basis_t", through_basis.to_string()));
+        }
+        predecessor_hash = row.tx_hash;
+    }
+    Ok(())
 }
 
 /// Authenticate the canonical transaction chain without constructing the

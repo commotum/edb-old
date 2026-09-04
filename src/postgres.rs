@@ -2408,7 +2408,7 @@ impl PostgresStore {
             ));
         }
         let endpoint = exact_endpoint(&commitment);
-        let (database, opened) = TieredSnapshot::open_exact_configured(
+        let (database, opened) = TieredSnapshot::open_writer_exact_configured(
             &connection,
             database_id.clone(),
             endpoint,

@@ -1357,13 +1357,17 @@ impl TransactionService {
 }
 
 fn native_index_required(cause: &SemanticError) -> SemanticError {
-    SemanticError::new(
+    let mut error = SemanticError::new(
         ErrorCategory::Unavailable,
         "service/native-index-required",
         "ordinary transactor startup cannot rebuild or overrun the native index; run \
          PostgresIndexer::consolidate in an explicit offline/admin step, then retry startup",
     )
-    .detail("cause", cause.code)
+    .detail("cause", cause.code);
+    for (key, value) in &cause.details {
+        error.details.insert(format!("cause_{key}"), value.clone());
+    }
+    error
 }
 
 impl Drop for TransactionService {

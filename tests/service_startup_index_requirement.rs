@@ -235,6 +235,18 @@ fn over_hard_startup_tail_requires_explicit_admin_consolidation() {
     assert_eq!(error.code, "service/native-index-required");
     assert_eq!(error.details["cause"], "recent/hard-capacity");
     assert_eq!(
+        error.details["cause_preflight_transactions"], "3",
+        "writer startup must stop at the first prefix above the hard limit, including its configured one-transaction overshoot allowance"
+    );
+    assert_eq!(error.details["cause_tail_transactions"], "32");
+    assert!(
+        error.details["cause_preflight_accounted_bytes"]
+            .parse::<u64>()
+            .unwrap()
+            > 1,
+        "writer startup must reject on the first over-hard retained prefix"
+    );
+    assert_eq!(
         publication_count(&mut sql, &database_id),
         publications_before,
         "failed ordinary activation performed hidden catch-up indexing"
