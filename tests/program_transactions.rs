@@ -992,18 +992,53 @@ fn broken_or_wrong_role_predicate_bindings_fail_their_source_transaction() {
     .unwrap_err();
     assert_eq!(wrong_rebind.code, "program/not-attribute-predicate");
 
+    let renamed = common::transact(
+        &service,
+        "rename-predicate-function",
+        installed.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Id(function_eid),
+            attribute: DB_IDENT as u32,
+            value: Value::Keyword(Keyword::new("atomic.predicates", "renamed-valid")).into(),
+        }],
+        2_100,
+    );
+    assert_eq!(
+        renamed
+            .db_after
+            .entid(&Keyword::new("atomic.predicates", "valid")),
+        Some(function_eid),
+        "the prior predicate name remains a resolvable ident alias"
+    );
+    let wrong_alias_rebind = common::try_transact(
+        &service,
+        "wrong-role-rebind-through-old-alias",
+        renamed.basis_t,
+        &[TxOp::Add {
+            entity: EntityRef::Id(function_eid),
+            attribute: DB_FN as u32,
+            value: Value::Function(transaction_hash).into(),
+        }],
+        2_200,
+    )
+    .unwrap_err();
+    assert_eq!(
+        wrong_alias_rebind.code, "program/not-attribute-predicate",
+        "changing :db/fn must validate roles reached through historical aliases"
+    );
+
     // Every rejected candidate leaves its expected basis available.
     let accepted = common::transact(
         &service,
         "after-rejected-bindings",
-        installed.basis_t,
+        renamed.basis_t,
         &[TxOp::Add {
             entity: EntityRef::Id(user(42)),
             attribute: SNAPSHOT,
             value: Value::Long(1).into(),
         }],
-        2_000,
+        2_300,
     );
-    assert_eq!(accepted.basis_t, installed.basis_t + 1);
+    assert_eq!(accepted.basis_t, renamed.basis_t + 1);
     service.shutdown();
 }

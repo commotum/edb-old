@@ -1940,12 +1940,14 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
         return Ok(());
     }
     let mut changed_function_entities = BTreeSet::new();
+    let mut changed_function_bindings = BTreeSet::new();
     let mut changed_predicate_names = BTreeSet::new();
 
     for datom in tx_data {
         match u64::from(datom.attribute) {
             crate::DB_FN => {
                 changed_function_entities.insert(datom.entity);
+                changed_function_bindings.insert(datom.entity);
             }
             crate::DB_IDENT => {
                 changed_function_entities.insert(datom.entity);
@@ -1992,22 +1994,22 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
         resolve_program_in(client, cache, *hash)?;
     }
 
-    // Ordinary data transactions cannot affect persisted program bindings.
-    // Do not scan all schema predicates or the unqualified
-    // :db.entity/preds AEVT range merely to rediscover an empty dependency
-    // set.
-    if changed_predicate_names.is_empty() {
-        return Ok(());
-    }
-
     // Validate only dependency names whose binding/reference changed. An old
     // unused bad binding is not transaction input and must not become a
     // global availability gate for unrelated writes.
-    let changed_roles = predicate_roles_in(db_after, &changed_predicate_names)?;
-    for name in changed_predicate_names {
-        let Some(role) = changed_roles.get(&name).copied() else {
-            continue;
-        };
+    // `:db/ident` renames preserve the old name as an alias. A later :db/fn
+    // change therefore affects every active predicate name that resolves to
+    // the function entity, not merely the entity's current :db/ident datom.
+    // Resolve operative names through the immutable db-after dictionary so
+    // repurposed aliases follow their new entity. This dependency scan occurs
+    // only for a function-binding change; the outer attribute gate keeps
+    // ordinary data transactions off this path entirely.
+    let changed_roles = predicate_roles_in(
+        db_after,
+        &changed_predicate_names,
+        &changed_function_bindings,
+    )?;
+    for (name, role) in changed_roles {
         let ident = qualified_program_ident(&name)?;
         let hash = bound_program_hash(db_after, &ident)?;
         let program = resolve_program_in(client, cache, hash)?;
@@ -2069,15 +2071,22 @@ pub(crate) fn insert_program_generation_refs<C: GenericClient>(
 fn predicate_roles_in(
     database: &DatabaseValue,
     names: &BTreeSet<String>,
+    function_entities: &BTreeSet<u64>,
 ) -> Result<BTreeMap<String, PredicateRole>, SemanticError> {
     let mut roles = BTreeMap::<String, (bool, bool)>::new();
     for name in database
         .schema()
         .attributes()
         .flat_map(|attribute| &attribute.predicates)
-        .filter(|name| names.contains(*name))
     {
-        roles.entry(name.clone()).or_default().0 = true;
+        let affected = names.contains(name)
+            || (!function_entities.is_empty()
+                && database
+                    .entid(&qualified_program_ident(name)?)
+                    .is_some_and(|entity| function_entities.contains(&entity)));
+        if affected {
+            roles.entry(name.clone()).or_default().0 = true;
+        }
     }
     for datom in database.datoms_with_prefix(&crate::IndexPrefix::Aevt {
         attribute: crate::DB_ENTITY_PREDS as u32,
@@ -2091,7 +2100,12 @@ fn predicate_roles_in(
             ));
         };
         let name = symbol.qualified_name();
-        if names.contains(&name) {
+        let affected = names.contains(&name)
+            || (!function_entities.is_empty()
+                && database
+                    .entid(&qualified_program_ident(&name)?)
+                    .is_some_and(|entity| function_entities.contains(&entity)));
+        if affected {
             roles.entry(name).or_default().1 = true;
         }
     }
