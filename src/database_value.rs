@@ -1067,9 +1067,12 @@ impl TransactionOverlay {
                 if datom.added {
                     // Repeated schema-hook assertions are transaction events
                     // even when the same stored E/A/V is already current.
-                    // They enter history but do not replace the current fact's
-                    // original transaction coordinate.
-                    if !datoms.iter().any(|current| same_stored_eav(current, datom)) {
+                    // History retains both, while the proposed current value
+                    // exposes the newest hook transaction coordinate.
+                    if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
+                        datoms.retain(|current| !same_stored_eav(current, datom));
+                        datoms.push(datom.clone());
+                    } else if !datoms.iter().any(|current| same_stored_eav(current, datom)) {
                         datoms.push(datom.clone());
                     }
                 } else {
@@ -1133,10 +1136,15 @@ impl TransactionOverlayScanCursor<'_> {
             (Some(_), None) => Ok(self.base_next.take()),
             (None, Some(_)) => Ok(self.delta_next.take()),
             (Some(base), Some(delta)) if !self.history && same_stored_eav(base, delta) => {
-                // A repeated assertion is a transaction event in history but
-                // leaves the original assertion coordinate current.
-                self.delta_next = None;
-                Ok(self.base_next.take())
+                if u64::from(delta.attribute) == crate::DB_ALTER_ATTRIBUTE {
+                    // Repeated alter hooks are distinct immutable history
+                    // events, and the newest one is the current coordinate.
+                    self.base_next = None;
+                    Ok(self.delta_next.take())
+                } else {
+                    self.delta_next = None;
+                    Ok(self.base_next.take())
+                }
             }
             (Some(base), Some(delta)) => match base.cmp_in(delta, self.order) {
                 std::cmp::Ordering::Less => Ok(self.base_next.take()),
@@ -1295,7 +1303,7 @@ mod tests {
     use crate::{
         Attribute, Cardinality, Clause, DB_IDENT, DataPattern, EntityRef, FindElement, FindSpec,
         Query, QueryControl, Term, TxOp, TxReport, TxValue, USER_PARTITION, ValueType, Variable,
-        make_eid,
+        make_eid, t_to_tx,
     };
     use bigdecimal::BigDecimal;
     use std::cell::Cell;
@@ -1630,6 +1638,45 @@ mod tests {
         let unindexed_overlay = overlay_for(&unindexed_report, 5_000);
         let unindexed_eager = unindexed_report.db_after.database_value();
         assert_prefix_matches_eager(&unindexed_overlay, &unindexed_eager, &amount_avet);
+
+        // This is the second material alteration of AMOUNT. Both overlay read
+        // shapes must replace the first hook's current transaction coordinate
+        // while retaining both immutable events in history.
+        let alter_hook = IndexPrefix::Eavt {
+            entity: crate::DB_PART_DB,
+            attribute: Some(crate::DB_ALTER_ATTRIBUTE as u32),
+            value: Some(Value::Ref(u64::from(AMOUNT))),
+        };
+        let current_hook = unindexed_overlay.datoms_with_prefix(&alter_hook).unwrap();
+        assert_eq!(current_hook.len(), 1);
+        assert_eq!(
+            current_hook[0].tx,
+            t_to_tx(unindexed_report.db_after.basis_t()).unwrap()
+        );
+        let scanned_hook = unindexed_overlay
+            .datoms(IndexOrder::Eavt)
+            .unwrap()
+            .into_iter()
+            .filter(|datom| {
+                datom.entity == crate::DB_PART_DB
+                    && datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32
+                    && datom.value == Value::Ref(u64::from(AMOUNT))
+            })
+            .collect::<Vec<_>>();
+        assert_same_stored_datoms(&scanned_hook, &current_hook);
+        assert_same_stored_datoms(
+            &current_hook,
+            &unindexed_eager.datoms_with_prefix(&alter_hook).unwrap(),
+        );
+        assert_eq!(
+            unindexed_overlay
+                .clone()
+                .history()
+                .datoms_with_prefix(&alter_hook)
+                .unwrap()
+                .len(),
+            2
+        );
         assert!(
             unindexed_overlay
                 .datoms_with_prefix(&amount_avet)

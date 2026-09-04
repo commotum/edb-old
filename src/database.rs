@@ -893,6 +893,14 @@ impl Database {
                 "schema or ident cache diverged from ordinary database information",
             ));
         }
+        let expected_semantic_state = SemanticStateCommitment::from_current(&current)?;
+        if expected_semantic_state.metadata() != self.semantic_state.metadata() {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "kernel/semantic-commitment-divergence",
+                "incremental semantic commitment diverged from current datoms",
+            ));
+        }
         let expected_current = IndexRoots::build(&self.schema, current);
         let history: Vec<_> = self.history_datoms().cloned().collect();
         let expected_history = IndexRoots::build(&self.schema, history);
@@ -2866,11 +2874,18 @@ fn apply_logical(current: &[CurrentFact], datoms: &[LogicalDatom], tx: u64) -> V
         });
     }
     for datom in datoms.iter().filter(|datom| datom.added) {
-        if !result.iter().any(|fact| {
+        if let Some(current) = result.iter_mut().find(|fact| {
             fact.entity == datom.entity
                 && fact.attribute == datom.attribute
                 && fact.value.stored_eq(&datom.value)
         }) {
+            // Attribute-alter hooks are deliberately non-redundant events.
+            // The current logical coordinate follows the newest such event,
+            // while history retains every immutable hook assertion.
+            if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
+                current.tx = tx;
+            }
+        } else {
             result.push(CurrentFact {
                 entity: datom.entity,
                 attribute: datom.attribute,
@@ -3217,10 +3232,18 @@ fn facts_as_datoms(facts: &[CurrentFact]) -> Vec<Datom> {
 }
 
 fn replay<'a>(datoms: impl Iterator<Item = &'a Datom>) -> Vec<CurrentFact> {
-    let mut result = Vec::new();
+    let mut result = Vec::<CurrentFact>::new();
     for datom in datoms {
         if datom.added {
-            if !contains_fact(&result, datom.entity, datom.attribute, &datom.value) {
+            if let Some(current) = result.iter_mut().find(|fact| {
+                fact.entity == datom.entity
+                    && fact.attribute == datom.attribute
+                    && fact.value.stored_eq(&datom.value)
+            }) {
+                if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
+                    current.tx = datom.tx;
+                }
+            } else {
                 result.push(CurrentFact {
                     entity: datom.entity,
                     attribute: datom.attribute,
@@ -3434,6 +3457,21 @@ mod schema_hook_recovery_tests {
         events
     }
 
+    fn current_alter_hook_tx(database: &Database, target: u64) -> u64 {
+        let hooks = database
+            .datoms(View::Current, IndexOrder::Eavt)
+            .into_iter()
+            .filter(|datom| {
+                datom.entity == crate::DB_PART_DB
+                    && datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32
+                    && datom.value == Value::Ref(target)
+                    && datom.added
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hooks.len(), 1, "current value must have one alter hook");
+        hooks[0].tx
+    }
+
     #[test]
     fn pure_assessment_rejects_an_explicit_hook_of_the_wrong_kind() {
         let database = database_with_attribute();
@@ -3575,6 +3613,10 @@ mod schema_hook_recovery_tests {
             hook_events(&first_alter.tx_data, u64::from(ATTRIBUTE)),
             vec![(2, crate::DB_ALTER_ATTRIBUTE as u32)]
         );
+        assert_eq!(
+            current_alter_hook_tx(&first_alter.db_after, u64::from(ATTRIBUTE)),
+            t_to_tx(2).unwrap()
+        );
         let recovered_first = recovered_install
             .apply_committed(&durable(&first_alter))
             .unwrap();
@@ -3599,10 +3641,29 @@ mod schema_hook_recovery_tests {
             hook_events(&second_alter.tx_data, u64::from(ATTRIBUTE)),
             vec![(3, crate::DB_ALTER_ATTRIBUTE as u32)]
         );
+        assert_eq!(
+            current_alter_hook_tx(&second_alter.db_after, u64::from(ATTRIBUTE)),
+            t_to_tx(3).unwrap(),
+            "a second material alter must advance the current hook coordinate"
+        );
+        assert_eq!(
+            second_alter.db_after.semantic_state.metadata(),
+            SemanticStateCommitment::recompute(&second_alter.db_after)
+                .unwrap()
+                .metadata(),
+            "incremental commitment must bind the advanced current coordinate"
+        );
         let recovered_second = recovered_first
             .apply_committed(&durable(&second_alter))
             .unwrap();
         assert!(recovered_second.same_information_as(&second_alter.db_after));
+        assert_eq!(
+            current_alter_hook_tx(&recovered_second, u64::from(ATTRIBUTE)),
+            t_to_tx(3).unwrap(),
+            "durable replay must preserve the newest current hook coordinate"
+        );
+        let rebuilt = recovered_second.rebuild_derived_caches().unwrap();
+        assert!(rebuilt.same_information_as(&recovered_second));
 
         let as_of_one = second_alter
             .db_after

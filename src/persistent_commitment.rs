@@ -597,8 +597,13 @@ pub(crate) fn eager_semantic_changes(
             .iter()
             .find(|candidate| candidate.value.stored_eq(&datom.value));
         if datom.added {
-            if prior.is_none() {
-                changes.push(SemanticSetChange::insert(datom)?);
+            match prior {
+                Some(prior) if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE => {
+                    changes.push(SemanticSetChange::remove(prior)?);
+                    changes.push(SemanticSetChange::insert(datom)?);
+                }
+                None => changes.push(SemanticSetChange::insert(datom)?),
+                Some(_) => {}
             }
         } else if let Some(prior) = prior {
             changes.push(SemanticSetChange::remove(prior)?);
@@ -632,8 +637,13 @@ pub(crate) fn exact_semantic_changes(
             }
         }
         if datom.added {
-            if prior.is_none() {
-                changes.push(SemanticSetChange::insert(datom)?);
+            match prior {
+                Some(prior) if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE => {
+                    changes.push(SemanticSetChange::remove(&prior)?);
+                    changes.push(SemanticSetChange::insert(datom)?);
+                }
+                None => changes.push(SemanticSetChange::insert(datom)?),
+                Some(_) => {}
             }
         } else if let Some(prior) = prior {
             changes.push(SemanticSetChange::remove(&prior)?);
@@ -970,7 +980,8 @@ mod codec_tests {
     use crate::postgres::PostgresStore;
     use crate::state_commitment::{checkpoint_root_metadata, checkpoint_state_hash};
     use crate::{
-        Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, Unique, Value, ValueType,
+        Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, Unique, Value,
+        ValueType, t_to_tx,
     };
     use postgres::{Client, NoTls};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1069,6 +1080,79 @@ mod codec_tests {
             root.state_hash(database.basis_t(), database.eidx_frontier()),
             checkpoint_state_hash(database).unwrap()
         );
+    }
+
+    #[test]
+    fn repeated_alter_replaces_the_durable_current_commitment_coordinate() {
+        let Some(connection) = connection() else {
+            return;
+        };
+        let schema_name = isolated_schema(&connection, "persistent_alter_coordinate");
+        let mut client = client_in_schema(&connection, &schema_name);
+        crate::PostgresMigrator::from_client(client)
+            .migrate()
+            .unwrap();
+        client = client_in_schema(&connection, &schema_name);
+
+        let mut database = Database::new(test_schema()).unwrap();
+        let mut root = persist_eager_snapshot(&mut client, &database).unwrap();
+
+        let mut indexed = database.schema().attribute(ITEM_COUNT).unwrap().clone();
+        indexed.indexed = true;
+        let first = database
+            .with(&[TxOp::AlterAttribute(indexed.clone())], 10)
+            .unwrap();
+        let first_changes = eager_semantic_changes(&database, &first.tx_data).unwrap();
+        assert_eq!(
+            exact_semantic_changes(&database.database_value(), &first.tx_data).unwrap(),
+            first_changes
+        );
+        (root, _) = advance_persistent_commitment(&mut client, root, &first_changes).unwrap();
+        database = first.db_after;
+        assert_matches_eager(root, &database);
+
+        let mut no_history = indexed;
+        no_history.no_history = true;
+        let second = database
+            .with(&[TxOp::AlterAttribute(no_history)], 20)
+            .unwrap();
+        let second_changes = eager_semantic_changes(&database, &second.tx_data).unwrap();
+        assert_eq!(
+            exact_semantic_changes(&database.database_value(), &second.tx_data).unwrap(),
+            second_changes
+        );
+        let hook_changes = second_changes
+            .iter()
+            .filter(|change| match change {
+                SemanticSetChange::Insert(key) | SemanticSetChange::Remove(key) => {
+                    u64::from(key.attribute) == crate::DB_ALTER_ATTRIBUTE
+                }
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                hook_changes.as_slice(),
+                [SemanticSetChange::Remove(_), SemanticSetChange::Insert(_)]
+            ),
+            "a repeated alter must remove the prior semantic key and insert the new one"
+        );
+        (root, _) = advance_persistent_commitment(&mut client, root, &second_changes).unwrap();
+        database = second.db_after;
+        assert_matches_eager(root, &database);
+
+        let current_hooks = database
+            .datoms_with_prefix(&crate::IndexPrefix::Eavt {
+                entity: crate::DB_PART_DB,
+                attribute: Some(crate::DB_ALTER_ATTRIBUTE as u32),
+                value: Some(Value::Ref(u64::from(ITEM_COUNT))),
+            })
+            .unwrap();
+        assert_eq!(current_hooks.len(), 1);
+        assert_eq!(current_hooks[0].tx, t_to_tx(database.basis_t()).unwrap());
+
+        drop(client);
+        drop_schema(&connection, &schema_name);
     }
 
     #[test]

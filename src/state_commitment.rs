@@ -233,8 +233,15 @@ fn apply_current_change(
 ) -> Result<(), SemanticError> {
     let prior = exact_current_datom(before, datom)?;
     if datom.added {
-        if prior.is_none() {
-            set.insert(datom, work)?;
+        match prior {
+            Some(prior) if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE => {
+                set.remove(&prior, work)?;
+                set.insert(datom, work)?;
+            }
+            None => {
+                set.insert(datom, work)?;
+            }
+            Some(_) => {}
         }
     } else if let Some(prior) = prior {
         set.remove(&prior, work)?;
