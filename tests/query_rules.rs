@@ -148,6 +148,11 @@ fn required_bound_recursion_is_demand_driven_per_invocation() {
                 value: TxValue::Entity(EntityRef::Temp(format!("{prefix}-{}", index + 1))),
             });
         }
+        edges.push(TxOp::Add {
+            entity: EntityRef::Temp(format!("{prefix}-{PATH_LENGTH}")),
+            attribute: AGE,
+            value: TxValue::Scalar(Value::Long(PATH_LENGTH as i64)),
+        });
     }
     let report = Database::new(schema())
         .unwrap()
@@ -216,6 +221,11 @@ fn mutually_recursive_required_rules_reach_the_finite_fixed_point() {
             value: TxValue::Entity(EntityRef::Temp(format!("node-{}", index + 1))),
         });
     }
+    edges.push(TxOp::Add {
+        entity: EntityRef::Temp(format!("node-{PATH_LENGTH}")),
+        attribute: AGE,
+        value: TxValue::Scalar(Value::Long(PATH_LENGTH as i64)),
+    });
     let report = Database::new(schema())
         .unwrap()
         .with(&edges, 1_000)
@@ -285,11 +295,18 @@ fn recursive_rule_work_is_still_bounded_by_query_control() {
     let report = Database::new(schema())
         .unwrap()
         .with(
-            &[TxOp::Add {
-                entity: EntityRef::Temp("left".into()),
-                attribute: FRIEND,
-                value: TxValue::Entity(EntityRef::Temp("right".into())),
-            }],
+            &[
+                TxOp::Add {
+                    entity: EntityRef::Temp("left".into()),
+                    attribute: FRIEND,
+                    value: TxValue::Entity(EntityRef::Temp("right".into())),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("right".into()),
+                    attribute: AGE,
+                    value: TxValue::Scalar(Value::Long(1)),
+                },
+            ],
             1_000,
         )
         .unwrap();
