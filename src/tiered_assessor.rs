@@ -39,6 +39,7 @@ pub(crate) struct AssessmentLimits {
 }
 
 impl AssessmentLimits {
+    #[cfg(test)]
     fn unbounded() -> Self {
         Self {
             max_read_datoms: u64::MAX,
@@ -65,6 +66,7 @@ pub(crate) struct TieredAssessment {
     pub(crate) tempids: BTreeMap<String, u64>,
     pub(crate) ensures: Vec<EnsureRequirement>,
     pub(crate) successor_schema: Arc<Schema>,
+    #[cfg(test)]
     pub(crate) read_work: AssessmentReadWork,
 }
 
@@ -355,6 +357,7 @@ impl<'a> Reader<'a> {
 
 /// Assess a complete transaction without retaining or constructing a complete
 /// current/history database.
+#[cfg(test)]
 pub(crate) fn assess_tiered(
     base: &DatabaseValue,
     ops: &[TxOp],
@@ -363,6 +366,7 @@ pub(crate) fn assess_tiered(
     assess_tiered_with_limits(base, ops, tx_instant, AssessmentLimits::unbounded())
 }
 
+#[cfg(test)]
 pub(crate) fn assess_tiered_with_limits(
     base: &DatabaseValue,
     ops: &[TxOp],
@@ -480,6 +484,7 @@ pub(crate) fn assess_tiered_with_remaining_limits(
         tempids,
         ensures,
         successor_schema,
+        #[cfg(test)]
         read_work: reader.work,
     })
 }

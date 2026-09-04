@@ -1294,19 +1294,15 @@ fn evaluate_pattern(
     Ok((next, access))
 }
 
+type FallibleDatomIter<'a> = Box<dyn Iterator<Item = Result<crate::Datom, SemanticError>> + 'a>;
+
 fn select_datoms<'a>(
     database: &'a DatabaseValue,
     entity: Option<u64>,
     attribute: Option<u32>,
     value: Option<&Value>,
     force_scan: bool,
-) -> Result<
-    (
-        Box<dyn Iterator<Item = Result<crate::Datom, SemanticError>> + 'a>,
-        String,
-    ),
-    SemanticError,
-> {
+) -> Result<(FallibleDatomIter<'a>, String), SemanticError> {
     if !force_scan {
         if let Some(entity) = entity {
             let prefix = IndexPrefix::Eavt {

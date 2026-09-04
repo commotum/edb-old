@@ -201,35 +201,6 @@ impl PredicateRole {
 }
 
 impl AssessedTransaction {
-    pub(crate) fn report(&self) -> &TxReport {
-        &self.report
-    }
-
-    /// Return only predicates that this assessed transaction can execute.
-    /// Attribute predicates come from surviving added datoms, while entity
-    /// predicates come only from explicit `:db/ensure` forms.
-    pub(crate) fn predicate_requirements(
-        &self,
-    ) -> Result<BTreeMap<String, PredicateRole>, SemanticError> {
-        // `ensure-entity!` checks required attributes before it resolves or
-        // invokes entity predicate symbols. Preserve that short-circuit so a
-        // missing field does not create an unnecessary code dependency.
-        validate_ensure_attributes(&self.report.db_after, &self.ensures)?;
-        let mut required = BTreeMap::new();
-        for datom in self.report.tx_data.iter().filter(|datom| datom.added) {
-            let attribute = self.report.db_before.schema.attribute(datom.attribute)?;
-            for predicate in &attribute.predicates {
-                insert_predicate_role(&mut required, predicate, PredicateRole::Attribute)?;
-            }
-        }
-        for ensure in &self.ensures {
-            for predicate in &ensure.predicates {
-                insert_predicate_role(&mut required, predicate, PredicateRole::Entity)?;
-            }
-        }
-        Ok(required)
-    }
-
     pub(crate) fn validate(
         self,
         functions: Option<&crate::TxFunctions>,
@@ -242,18 +213,6 @@ impl AssessedTransaction {
         validate_ensures(&self.report.db_after, &self.ensures, functions)?;
         Ok(self.report)
     }
-}
-
-fn insert_predicate_role(
-    required: &mut BTreeMap<String, PredicateRole>,
-    predicate: &str,
-    role: PredicateRole,
-) -> Result<(), SemanticError> {
-    required
-        .entry(predicate.to_owned())
-        .and_modify(|existing| *existing = existing.include(role))
-        .or_insert(role);
-    Ok(())
 }
 
 /// Immutable, single-process database value.
@@ -460,18 +419,6 @@ impl Database {
     /// Exclusive non-negative entity-index issuance frontier.
     pub fn eidx_frontier(&self) -> u64 {
         self.eidx_frontier
-    }
-
-    /// Exact retained fact counts for architecture diagnostics.
-    ///
-    /// These are intentionally crate-private: the eager database is the
-    /// semantic oracle, while production residency is reported by the owner
-    /// that chooses an eager or tiered representation.
-    pub(crate) fn retained_fact_counts(&self) -> (usize, usize) {
-        (
-            self.current.len(),
-            self.history.iter().map(|chunk| chunk.len()).sum(),
-        )
     }
 
     pub(crate) fn semantic_state_commitment(&self) -> &SemanticStateCommitment {
@@ -1512,14 +1459,6 @@ impl Database {
     ) -> Result<TxReport, SemanticError> {
         self.assess_context(ops, tx_instant)?
             .validate(Some(functions))
-    }
-
-    pub(crate) fn assess_with_context(
-        &self,
-        ops: &[TxOp],
-        tx_instant: i64,
-    ) -> Result<AssessedTransaction, SemanticError> {
-        self.assess_context(ops, tx_instant)
     }
 
     fn assess_context(

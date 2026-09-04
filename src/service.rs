@@ -1596,11 +1596,11 @@ fn run_worker(
                     .get("ambiguity_kind")
                     .is_some_and(|kind| kind == "publication"),
             });
-        if let Some(report) = &publish {
-            if let Err(error) = note_report_commit(shared, database_id, report) {
-                shared.indexing.fail_job(error);
-                shared.accepting.store(false, Ordering::Release);
-            }
+        if let Some(report) = &publish
+            && let Err(error) = note_report_commit(shared, database_id, report)
+        {
+            shared.indexing.fail_job(error);
+            shared.accepting.store(false, Ordering::Release);
         }
         *shared
             .writer_residency
