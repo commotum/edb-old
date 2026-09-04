@@ -9,10 +9,120 @@ use crate::{
 use std::fmt;
 use std::iter::Cloned;
 use std::slice::Iter;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::vec::IntoIter;
 
 type ReadFilter = dyn Fn(&DatabaseValue, &Datom) -> bool + Send + Sync;
+
+/// Exact logical database work delivered through transaction read APIs.
+///
+/// This deliberately does not infer work from persistent-tree node loads:
+/// cache hits still deliver datoms, while one loaded leaf can contain many
+/// datoms outside the requested range. The writer folds the assessor's own
+/// memoized work into the same observer exactly once.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LogicalReadWork {
+    pub(crate) datoms: u64,
+    pub(crate) retained_bytes: u64,
+}
+
+pub(crate) struct LogicalReadObserver {
+    max_datoms: u64,
+    max_retained_bytes: u64,
+    work: Mutex<LogicalReadWork>,
+}
+
+impl LogicalReadObserver {
+    pub(crate) fn new(max_datoms: u64, max_retained_bytes: u64) -> Self {
+        Self {
+            max_datoms,
+            max_retained_bytes,
+            work: Mutex::new(LogicalReadWork::default()),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<LogicalReadWork, SemanticError> {
+        self.work
+            .lock()
+            .map(|work| *work)
+            .map_err(|_| read_observer_poisoned())
+    }
+
+    pub(crate) fn remaining(&self) -> Result<LogicalReadWork, SemanticError> {
+        let work = self.snapshot()?;
+        Ok(LogicalReadWork {
+            datoms: self.max_datoms.saturating_sub(work.datoms),
+            retained_bytes: self.max_retained_bytes.saturating_sub(work.retained_bytes),
+        })
+    }
+
+    /// Fold work performed by the transaction assessor into this observer.
+    /// The assessor has its own prefix memo and therefore remains the source
+    /// of truth for that phase instead of being observed a second time.
+    pub(crate) fn absorb(&self, work: LogicalReadWork) -> Result<(), SemanticError> {
+        self.charge(work)
+    }
+
+    fn charge_datom(&self, datom: &Datom) -> Result<(), SemanticError> {
+        self.charge(LogicalReadWork {
+            datoms: 1,
+            retained_bytes: datom.retained_bytes(),
+        })
+    }
+
+    fn charge_datoms(&self, datoms: &[Datom]) -> Result<(), SemanticError> {
+        let mut work = LogicalReadWork::default();
+        for datom in datoms {
+            work.datoms = work.datoms.checked_add(1).ok_or_else(read_work_overflow)?;
+            work.retained_bytes = work
+                .retained_bytes
+                .checked_add(datom.retained_bytes())
+                .ok_or_else(read_work_overflow)?;
+        }
+        self.charge(work)
+    }
+
+    fn charge(&self, additional: LogicalReadWork) -> Result<(), SemanticError> {
+        let mut work = self.work.lock().map_err(|_| read_observer_poisoned())?;
+        let next_datoms = work
+            .datoms
+            .checked_add(additional.datoms)
+            .ok_or_else(read_work_overflow)?;
+        let next_bytes = work
+            .retained_bytes
+            .checked_add(additional.retained_bytes)
+            .ok_or_else(read_work_overflow)?;
+        if next_datoms > self.max_datoms || next_bytes > self.max_retained_bytes {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "transaction/read-capacity",
+                format!(
+                    "transaction reads exceed {} logical datoms or {} retained bytes",
+                    self.max_datoms, self.max_retained_bytes
+                ),
+            ));
+        }
+        work.datoms = next_datoms;
+        work.retained_bytes = next_bytes;
+        Ok(())
+    }
+}
+
+fn read_work_overflow() -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Busy,
+        "transaction/read-capacity",
+        "transaction logical read accounting overflowed",
+    )
+}
+
+fn read_observer_poisoned() -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Fault,
+        "transaction/read-observer-poisoned",
+        "transaction logical read observer mutex was poisoned",
+    )
+}
 
 /// One exact immutable database value used by read-side APIs.
 ///
@@ -28,6 +138,7 @@ pub struct DatabaseValue {
     since_t: Option<u64>,
     history: bool,
     filters: Arc<[Arc<ReadFilter>]>,
+    read_observer: Option<Arc<LogicalReadObserver>>,
 }
 
 #[derive(Clone)]
@@ -60,13 +171,32 @@ struct TransactionOverlay {
 /// complete public raw-index cursor contract (including reverse seeks) lands.
 pub(crate) struct DatabaseValueScanCursor<'a> {
     inner: Box<dyn Iterator<Item = Result<Datom, SemanticError>> + 'a>,
+    observer: Option<Arc<LogicalReadObserver>>,
+    failed: bool,
 }
 
 impl Iterator for DatabaseValueScanCursor<'_> {
     type Item = Result<Datom, SemanticError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        if self.failed {
+            return None;
+        }
+        match self.inner.next()? {
+            Ok(datom) => {
+                if let Some(observer) = &self.observer
+                    && let Err(error) = observer.charge_datom(&datom)
+                {
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+                Some(Ok(datom))
+            }
+            Err(error) => {
+                self.failed = true;
+                Some(Err(error))
+            }
+        }
     }
 }
 
@@ -90,6 +220,8 @@ struct TransactionOverlayScanCursor<'a> {
 /// cache or tree-node borrow across cursor advancement.
 pub struct DatabaseValuePrefixCursor<'a> {
     inner: DatabaseValuePrefixCursorInner<'a>,
+    observer: Option<Arc<LogicalReadObserver>>,
+    failed: bool,
 }
 
 enum DatabaseValuePrefixCursorInner<'a> {
@@ -102,10 +234,28 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
     type Item = Result<Datom, SemanticError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match &mut self.inner {
+        if self.failed {
+            return None;
+        }
+        let item = match &mut self.inner {
             DatabaseValuePrefixCursorInner::Eager(cursor) => cursor.next().map(Ok),
             DatabaseValuePrefixCursorInner::Native(cursor) => cursor.next(),
             DatabaseValuePrefixCursorInner::Owned(cursor) => cursor.next().map(Ok),
+        }?;
+        match item {
+            Ok(datom) => {
+                if let Some(observer) = &self.observer
+                    && let Err(error) = observer.charge_datom(&datom)
+                {
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+                Some(Ok(datom))
+            }
+            Err(error) => {
+                self.failed = true;
+                Some(Err(error))
+            }
         }
     }
 }
@@ -139,6 +289,7 @@ impl DatabaseValue {
             since_t: None,
             history: false,
             filters: Arc::default(),
+            read_observer: None,
         }
     }
 
@@ -153,6 +304,7 @@ impl DatabaseValue {
             since_t: None,
             history: false,
             filters: Arc::default(),
+            read_observer: None,
         }
     }
 
@@ -168,7 +320,7 @@ impl DatabaseValue {
     /// transaction. A committed successor must install a new tiered value;
     /// overlays are deliberately not chainable across commits.
     pub(crate) fn transaction_overlay(
-        base: DatabaseValue,
+        mut base: DatabaseValue,
         tx_data: Arc<[Datom]>,
         schema: Arc<Schema>,
         basis_t: u64,
@@ -257,6 +409,9 @@ impl DatabaseValue {
             ident_assertions.push((ident.clone(), datom.entity));
         }
 
+        // The overlay is the logical read boundary. Keeping an observer on
+        // both it and its wrapped base would charge every base datom twice.
+        base.read_observer = None;
         Ok(Self {
             basis: ReadBasis::TransactionOverlay(Arc::new(TransactionOverlay {
                 base,
@@ -271,7 +426,23 @@ impl DatabaseValue {
             since_t: None,
             history: false,
             filters: Arc::default(),
+            read_observer: None,
         })
+    }
+
+    /// Attach one transaction-scoped logical read observer to this value.
+    ///
+    /// This is intentionally crate-private: ordinary immutable database
+    /// values carry no mutable diagnostics. For an overlay, observation is
+    /// installed only at the outer merged-value boundary.
+    pub(crate) fn with_read_observer(mut self, observer: Arc<LogicalReadObserver>) -> Self {
+        if let ReadBasis::TransactionOverlay(overlay) = &self.basis {
+            let mut overlay = (**overlay).clone();
+            overlay.base.read_observer = None;
+            self.basis = ReadBasis::TransactionOverlay(Arc::new(overlay));
+        }
+        self.read_observer = Some(observer);
+        self
     }
 
     /// The basis remains the basis of the underlying immutable value even
@@ -406,14 +577,16 @@ impl DatabaseValue {
     /// Return datoms in one logical index after applying this value's complete
     /// temporal/custom window.
     pub fn datoms(&self, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-        if self.direct_current() {
-            return self.basis_datoms(false, order);
-        }
-        if self.direct_history() {
-            return self.basis_datoms(true, order);
-        }
-        let datoms = self.basis_datoms(true, order)?;
-        self.window(datoms)
+        let datoms = if self.direct_current() {
+            self.basis_datoms(false, order)?
+        } else if self.direct_history() {
+            self.basis_datoms(true, order)?
+        } else {
+            let datoms = self.basis_datoms(true, order)?;
+            self.window(datoms)?
+        };
+        self.charge_datoms(&datoms)?;
+        Ok(datoms)
     }
 
     /// Stream a complete logical index for query evaluation. Point-current
@@ -427,12 +600,19 @@ impl DatabaseValue {
         order: IndexOrder,
     ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
         if self.direct_current() {
-            self.basis_scan_cursor(false, order)
+            let mut cursor = self.basis_scan_cursor(false, order)?;
+            cursor.observer = self.read_observer.clone();
+            Ok(cursor)
         } else if self.direct_history() {
-            self.basis_scan_cursor(true, order)
+            let mut cursor = self.basis_scan_cursor(true, order)?;
+            cursor.observer = self.read_observer.clone();
+            Ok(cursor)
         } else {
+            // `datoms` already charges the materialized, windowed result.
             Ok(DatabaseValueScanCursor {
                 inner: Box::new(self.datoms(order)?.into_iter().map(Ok)),
+                observer: None,
+                failed: false,
             })
         }
     }
@@ -442,14 +622,16 @@ impl DatabaseValue {
     /// historical point reads do not first materialize an entire index.
     pub fn datoms_with_prefix(&self, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
         prefix.validate()?;
-        if self.direct_current() {
-            return self.basis_prefix(false, prefix);
-        }
-        if self.direct_history() {
-            return self.basis_prefix(true, prefix);
-        }
-        let datoms = self.basis_prefix(true, prefix)?;
-        self.window(datoms)
+        let datoms = if self.direct_current() {
+            self.basis_prefix(false, prefix)?
+        } else if self.direct_history() {
+            self.basis_prefix(true, prefix)?
+        } else {
+            let datoms = self.basis_prefix(true, prefix)?;
+            self.window(datoms)?
+        };
+        self.charge_datoms(&datoms)?;
+        Ok(datoms)
     }
 
     /// Lazily read one left-contiguous prefix of an unfiltered current value.
@@ -480,7 +662,11 @@ impl DatabaseValue {
                 DatabaseValuePrefixCursorInner::Owned(overlay.prefix(false, prefix)?.into_iter())
             }
         };
-        Ok(DatabaseValuePrefixCursor { inner })
+        Ok(DatabaseValuePrefixCursor {
+            inner,
+            observer: self.read_observer.clone(),
+            failed: false,
+        })
     }
 
     /// Return the first historical datom in a prefix without reading the
@@ -492,7 +678,7 @@ impl DatabaseValue {
         prefix: &IndexPrefix,
     ) -> Result<Option<Datom>, SemanticError> {
         prefix.validate()?;
-        match &self.basis {
+        let datom = match &self.basis {
             ReadBasis::Eager(database) => {
                 Ok(database.history_with_prefix(prefix)?.first().cloned())
             }
@@ -500,7 +686,11 @@ impl DatabaseValue {
             ReadBasis::TransactionOverlay(overlay) => {
                 Ok(overlay.prefix(true, prefix)?.into_iter().next())
             }
+        }?;
+        if let Some(datom) = &datom {
+            self.charge_datom(datom)?;
         }
+        Ok(datom)
     }
 
     /// Whether the physical AVET projection for one logically indexed
@@ -642,7 +832,11 @@ impl DatabaseValue {
                 Box::new(overlay.scan_cursor(history, order)?)
             }
         };
-        Ok(DatabaseValueScanCursor { inner })
+        Ok(DatabaseValueScanCursor {
+            inner,
+            observer: None,
+            failed: false,
+        })
     }
 
     fn basis_prefix(
@@ -667,6 +861,20 @@ impl DatabaseValue {
         let mut database = self.clone();
         database.filters = Arc::default();
         database
+    }
+
+    fn charge_datom(&self, datom: &Datom) -> Result<(), SemanticError> {
+        if let Some(observer) = &self.read_observer {
+            observer.charge_datom(datom)?;
+        }
+        Ok(())
+    }
+
+    fn charge_datoms(&self, datoms: &[Datom]) -> Result<(), SemanticError> {
+        if let Some(observer) = &self.read_observer {
+            observer.charge_datoms(datoms)?;
+        }
+        Ok(())
     }
 
     fn window(&self, datoms: Vec<Datom>) -> Result<Vec<Datom>, SemanticError> {

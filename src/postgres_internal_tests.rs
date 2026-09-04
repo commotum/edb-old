@@ -1,8 +1,9 @@
-use crate::postgres::{CommitFault, MIGRATIONS, PostgresStore};
+use crate::postgres::{CapacityLimits, CommitFault, MIGRATIONS, PostgresStore};
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
-    Attribute, Cardinality, Database, DurableTransaction, EntityRef, ErrorCategory, IndexOrder,
-    Keyword, Schema, TxOp, TxValue, Unique, Value, ValueType, View, encode_genesis,
+    Attribute, Cardinality, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_FN, DB_IDENT, Database,
+    DurableTransaction, EntityRef, ErrorCategory, IndexOrder, Instruction, Keyword, Program,
+    ProgramKind, Schema, Symbol, TxOp, TxValue, Unique, Value, ValueType, View, encode_genesis,
     encode_transaction, request_digest, sha256, transaction_hash,
 };
 use postgres::{Client, NoTls};
@@ -133,6 +134,191 @@ fn publish_native_base(connection: &str, database_id: &str) {
         .unwrap()
         .consolidate()
         .unwrap();
+}
+
+fn positive_item_count_predicate() -> Program {
+    Program {
+        kind: ProgramKind::EntityPredicate,
+        arity: 1,
+        instructions: vec![
+            Instruction::PushArgument(0),
+            Instruction::LoadOne(ITEM_COUNT),
+            Instruction::PushConstant(Value::Long(0)),
+            Instruction::GreaterThan,
+            Instruction::Return,
+        ],
+    }
+}
+
+#[test]
+fn transaction_read_work_includes_predicate_and_commitment_reads() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("transaction_wide_read_work");
+    let mut store = migrated_store(&connection);
+    store.create_database(&database_id, schema()).unwrap();
+    publish_native_base(&connection, &database_id);
+
+    let predicate_hash = store
+        .deploy_program_blob(&positive_item_count_predicate())
+        .unwrap();
+    let predicate_ident = Keyword::new("item.predicates", "positive-count");
+    let spec_ident = Keyword::new("item.spec", "counted");
+    let installed = store
+        .transact_with_fault(
+            &database_id,
+            "install-read-work-predicate",
+            1,
+            &[
+                TxOp::Add {
+                    entity: EntityRef::Temp("predicate".into()),
+                    attribute: DB_IDENT as u32,
+                    value: Value::Keyword(predicate_ident.clone()).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("predicate".into()),
+                    attribute: DB_FN as u32,
+                    value: Value::Function(predicate_hash).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_IDENT as u32,
+                    value: Value::Keyword(spec_ident.clone()).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_ENTITY_ATTRS as u32,
+                    value: Value::Keyword(Keyword::new("item", "name")).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_ENTITY_ATTRS as u32,
+                    value: Value::Keyword(Keyword::new("item", "quantity")).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("spec".into()),
+                    attribute: DB_ENTITY_PREDS as u32,
+                    value: Value::Symbol(Symbol::new("item.predicates", "positive-count")).into(),
+                },
+            ],
+            1_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    let seeded = store
+        .transact_with_fault(
+            &database_id,
+            "seed-read-work-entity",
+            installed.basis_t,
+            &add_item("metered", 1),
+            2_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    let entity = seeded.tempids["item"];
+    let update = vec![
+        TxOp::Add {
+            entity: EntityRef::Id(entity),
+            attribute: ITEM_COUNT,
+            value: Value::Long(2).into(),
+        },
+        TxOp::Ensure {
+            entity: EntityRef::Id(entity),
+            spec: EntityRef::Ident(spec_ident),
+        },
+    ];
+    let assessed = crate::tiered_assessor::assess_tiered(&seeded.database, &update, 3_000)
+        .expect("eager-oracle-equivalent assessment");
+    assert!(assessed.read_work.datoms > 0);
+
+    // Exactly the assessor's allowance is insufficient: resolving the
+    // persisted predicate from db-before, checking required attributes and
+    // running it over complete db-after, then recovering the prior assertion
+    // for the commitment all perform real logical reads after assessment.
+    let before_rejection = store.writer_residency_stats(&database_id);
+    store
+        .set_capacity_limits(CapacityLimits {
+            max_transaction_read_datoms: assessed.read_work.datoms,
+            max_transaction_read_bytes: u64::MAX,
+            ..CapacityLimits::default()
+        })
+        .unwrap();
+    let rejected = store
+        .transact_with_fault(
+            &database_id,
+            "transaction-wide-read-work",
+            seeded.basis_t,
+            &update,
+            3_000,
+            CommitFault::None,
+        )
+        .unwrap_err();
+    assert_eq!(
+        (rejected.category, rejected.code),
+        (ErrorCategory::Busy, "transaction/read-capacity")
+    );
+    assert_eq!(
+        store.writer_residency_stats(&database_id),
+        before_rejection,
+        "a rejected attempt cannot replace the last committed work sample"
+    );
+    assert_eq!(
+        store.recover(&database_id).unwrap().basis_t(),
+        seeded.basis_t
+    );
+
+    store
+        .set_capacity_limits(CapacityLimits {
+            max_transaction_read_datoms: assessed.read_work.datoms + 64,
+            max_transaction_read_bytes: u64::MAX,
+            ..CapacityLimits::default()
+        })
+        .unwrap();
+    let committed = store
+        .transact_with_fault(
+            &database_id,
+            "transaction-wide-read-work",
+            seeded.basis_t,
+            &update,
+            3_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    let committed_stats = store.writer_residency_stats(&database_id);
+    assert!(committed_stats.last_transaction_read_datoms > assessed.read_work.datoms);
+    assert!(committed_stats.last_transaction_read_bytes > assessed.read_work.retained_bytes);
+
+    let replay = store
+        .transact_with_fault(
+            &database_id,
+            "transaction-wide-read-work",
+            seeded.basis_t,
+            &update,
+            3_000,
+            CommitFault::None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.basis_t, committed.basis_t);
+    let replay_stats = store.writer_residency_stats(&database_id);
+    assert_eq!(
+        (
+            replay_stats.last_transaction_read_datoms,
+            replay_stats.last_transaction_read_bytes,
+            replay_stats.last_commitment_node_visits,
+            replay_stats.last_commitment_node_hashes,
+            replay_stats.last_commitment_leaf_changes,
+        ),
+        (
+            committed_stats.last_transaction_read_datoms,
+            committed_stats.last_transaction_read_bytes,
+            committed_stats.last_commitment_node_visits,
+            committed_stats.last_commitment_node_hashes,
+            committed_stats.last_commitment_leaf_changes,
+        ),
+        "an exact receipt replay performs no new transaction assessment"
+    );
 }
 
 fn create_isolated_schema(connection: &str, prefix: &str) -> String {
@@ -613,7 +799,11 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
     assert!(replayed.replayed);
     assert_database_values_eq(&replayed.db_before, &resolved.db_before);
     assert_database_values_eq(&replayed.database, &resolved.database);
-    assert!(resolved.database.shares_tiered_read_core(&replayed.database));
+    assert!(
+        resolved
+            .database
+            .shares_tiered_read_core(&replayed.database)
+    );
     assert!(
         replayed
             .db_before

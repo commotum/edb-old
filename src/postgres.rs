@@ -1,4 +1,5 @@
 use crate::database::PredicateRole;
+use crate::database_value::{LogicalReadObserver, LogicalReadWork};
 use crate::encoding::program_call_digest;
 use crate::log_generation::{
     LineageTransactionContent, generation_transaction_hash, request_key_hash,
@@ -13,7 +14,7 @@ use crate::program::ValidatedProgram;
 use crate::recent::RecentLimits;
 use crate::state_commitment::CommitmentWork;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
-use crate::tiered_assessor::{AssessmentLimits, AssessmentReadWork, assess_tiered_with_limits};
+use crate::tiered_assessor::{AssessmentLimits, assess_tiered_with_limits};
 use crate::{
     CallableRef, Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory,
     PostgresConnectionConfig, Program, ProgramBudget, ProgramCall, ProgramHash, ProgramKind,
@@ -2154,7 +2155,12 @@ pub struct WriterResidencyStats {
     pub native_directory_reads: u64,
     pub native_leaf_reads: u64,
     pub publication_revision: u64,
+    /// Logical datoms delivered across the complete last committed
+    /// transaction, from persisted-function expansion through assessment,
+    /// successor validation/predicates, and commitment membership recovery.
+    /// This is not a physical PostgreSQL/tree-node I/O counter.
     pub last_transaction_read_datoms: u64,
+    /// Deterministic retained width of those delivered logical datoms.
     pub last_transaction_read_bytes: u64,
     pub last_commitment_node_visits: u64,
     pub last_commitment_node_hashes: u64,
@@ -2181,7 +2187,7 @@ struct WriterState {
     database: TieredSnapshot,
     commitment: PersistentCommitmentCoordinate,
     publication_revision: u64,
-    last_read_work: AssessmentReadWork,
+    last_read_work: LogicalReadWork,
     last_commitment_work: CommitmentWork,
 }
 
@@ -2438,7 +2444,7 @@ impl PostgresStore {
                 database,
                 commitment,
                 publication_revision: opened.selected_publication_revision,
-                last_read_work: AssessmentReadWork::default(),
+                last_read_work: LogicalReadWork::default(),
                 last_commitment_work: CommitmentWork::default(),
             },
         );
@@ -2974,18 +2980,14 @@ impl PostgresStore {
         let generation = pg_basis(head.get(2), "head log generation")?;
         let lineage_id: String = head.get(3);
         let generation_sql = sql_basis(generation)?;
-        let head_commitment = load_persistent_coordinate(
-            &mut transaction,
-            database_id,
-            generation,
-            head_basis,
-        )?
-        .ok_or_else(|| {
-            fault(
-                "postgres/request-outcome-head-root-missing",
-                "head has no exact v2 semantic commitment coordinate",
-            )
-        })?;
+        let head_commitment =
+            load_persistent_coordinate(&mut transaction, database_id, generation, head_basis)?
+                .ok_or_else(|| {
+                    fault(
+                        "postgres/request-outcome-head-root-missing",
+                        "head has no exact v2 semantic commitment coordinate",
+                    )
+                })?;
         if head_commitment.tx_hash != head_hash {
             return Err(fault(
                 "postgres/request-outcome-head-coordinate",
@@ -3441,12 +3443,25 @@ impl PostgresStore {
         };
         let db_before_snapshot = writer_before.database.clone();
         let db_before = db_before_snapshot.database_value();
+        let read_observer = Arc::new(LogicalReadObserver::new(
+            self.capacity_limits.max_transaction_read_datoms,
+            self.capacity_limits.max_transaction_read_bytes,
+        ));
+        let observed_db_before = db_before
+            .clone()
+            .with_read_observer(Arc::clone(&read_observer));
         let shared_budget = Arc::new(Mutex::new(ProgramBudget::new(
             self.capacity_limits.program.control(),
         )?));
-        let ops = generate(&mut transaction, &db_before, &shared_budget, &program_cache)?;
+        let ops = generate(
+            &mut transaction,
+            &observed_db_before,
+            &shared_budget,
+            &program_cache,
+        )?;
         let server_now = postgres_now_millis(&mut transaction)?;
-        let tx_instant = select_tx_instant(&db_before, server_now, tx_instant_override, &ops)?;
+        let tx_instant =
+            select_tx_instant(&observed_db_before, server_now, tx_instant_override, &ops)?;
         if ops.len() > self.capacity_limits.max_transaction_ops {
             return Err(SemanticError::new(
                 ErrorCategory::Busy,
@@ -3454,15 +3469,30 @@ impl PostgresStore {
                 "transaction exceeds the configured operation limit",
             ));
         }
-        let assessed = assess_tiered_with_limits(
+        let remaining = read_observer.remaining()?;
+        let mut assessed = assess_tiered_with_limits(
             &db_before,
             &ops,
             tx_instant,
             AssessmentLimits {
-                max_read_datoms: self.capacity_limits.max_transaction_read_datoms,
-                max_read_bytes: self.capacity_limits.max_transaction_read_bytes,
+                // The assessor currently requires positive local limits. A
+                // fully consumed transaction allowance can still assess a
+                // zero-read transaction; any actual excess is rejected when
+                // its exact work is absorbed below.
+                max_read_datoms: remaining.datoms.max(1),
+                max_read_bytes: remaining.retained_bytes.max(1),
             },
         )?;
+        read_observer.absorb(LogicalReadWork {
+            datoms: assessed.read_work.datoms,
+            retained_bytes: assessed.read_work.retained_bytes,
+        })?;
+        assessed.db_before = assessed
+            .db_before
+            .with_read_observer(Arc::clone(&read_observer));
+        assessed.db_after = assessed
+            .db_after
+            .with_read_observer(Arc::clone(&read_observer));
         validate_successor_program_bindings_in(
             &mut transaction,
             &program_cache,
@@ -3477,7 +3507,7 @@ impl PostgresStore {
                 persisted_functions = persisted_predicates_in(
                     &mut transaction,
                     &program_cache,
-                    &db_before,
+                    &assessed.db_before,
                     &assessed.predicate_requirements()?,
                     Arc::clone(&shared_budget),
                 )?;
@@ -3485,7 +3515,7 @@ impl PostgresStore {
             }
         };
         assessed.validate_exact(functions)?;
-        let semantic_changes = exact_semantic_changes(&db_before, &assessed.tx_data)?;
+        let semantic_changes = exact_semantic_changes(&assessed.db_before, &assessed.tx_data)?;
         let (next_root, commitment_work) = advance_persistent_commitment(
             &mut transaction,
             head_commitment.root,
@@ -3764,7 +3794,7 @@ impl PostgresStore {
             database: successor,
             commitment: next_commitment,
             publication_revision: writer_before.publication_revision,
-            last_read_work: assessed.read_work,
+            last_read_work: read_observer.snapshot()?,
             last_commitment_work: commitment_work,
         };
         if transaction.commit().is_err() {
@@ -4302,7 +4332,7 @@ fn open_writer_state(
         database,
         commitment,
         publication_revision: opened.selected_publication_revision,
-        last_read_work: AssessmentReadWork::default(),
+        last_read_work: LogicalReadWork::default(),
         last_commitment_work: CommitmentWork::default(),
     })
 }
@@ -4451,7 +4481,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
             database: db_after,
             commitment: committed,
             publication_revision: before_state.publication_revision,
-            last_read_work: AssessmentReadWork::default(),
+            last_read_work: LogicalReadWork::default(),
             last_commitment_work: CommitmentWork::default(),
         },
     ))
