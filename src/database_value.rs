@@ -1,3 +1,5 @@
+use crate::identity::validate_frontier;
+use crate::index::compare_prefix;
 use crate::{
     AttributeName, DB_IDENT, Database, Datom, EntityIdentifier, ErrorCategory, IndexOrder,
     IndexPrefix, Keyword, PeerIndexCursor, PeerSnapshot, Schema, SemanticError, Value, eid_to_eidx,
@@ -7,6 +9,7 @@ use std::fmt;
 use std::iter::Cloned;
 use std::slice::Iter;
 use std::sync::Arc;
+use std::vec::IntoIter;
 
 type ReadFilter = dyn Fn(&DatabaseValue, &Datom) -> bool + Send + Sync;
 
@@ -30,6 +33,24 @@ pub struct DatabaseValue {
 enum ReadBasis {
     Eager(Arc<Database>),
     Native(PeerSnapshot),
+    TransactionOverlay(Arc<TransactionOverlay>),
+}
+
+/// One immutable assessment-local db-after over an exact db-before.
+///
+/// The overlay owns only canonical transaction datoms, transaction-local
+/// ident assertions, and resident successor metadata. Prefix reads merge that
+/// bounded delta with the wrapped value by exact stored E/A/V identity; no
+/// complete durable index is retained or materialized.
+#[derive(Clone)]
+struct TransactionOverlay {
+    base: DatabaseValue,
+    tx_data: Arc<[Datom]>,
+    ident_assertions: Arc<[(Keyword, u64)]>,
+    schema: Arc<Schema>,
+    basis_t: u64,
+    eidx_frontier: u64,
+    last_tx_instant: i64,
 }
 
 /// Lazy current-index cursor over one exact point-in-time database value.
@@ -45,6 +66,7 @@ pub struct DatabaseValuePrefixCursor<'a> {
 enum DatabaseValuePrefixCursorInner<'a> {
     Eager(Cloned<Iter<'a, Datom>>),
     Native(Box<PeerIndexCursor>),
+    Owned(IntoIter<Datom>),
 }
 
 impl Iterator for DatabaseValuePrefixCursor<'_> {
@@ -54,6 +76,7 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
         match &mut self.inner {
             DatabaseValuePrefixCursorInner::Eager(cursor) => cursor.next().map(Ok),
             DatabaseValuePrefixCursorInner::Native(cursor) => cursor.next(),
+            DatabaseValuePrefixCursorInner::Owned(cursor) => cursor.next().map(Ok),
         }
     }
 }
@@ -67,6 +90,7 @@ impl fmt::Debug for DatabaseValue {
                 &match &self.basis {
                     ReadBasis::Eager(_) => "eager",
                     ReadBasis::Native(_) => "native",
+                    ReadBasis::TransactionOverlay(_) => "transaction-overlay",
                 },
             )
             .field("basis_t", &self.basis_t())
@@ -99,12 +123,123 @@ impl DatabaseValue {
         }
     }
 
+    /// Build the ephemeral exact db-after used while validating one assessed
+    /// transaction. A committed successor must install a new tiered value;
+    /// overlays are deliberately not chainable across commits.
+    pub(crate) fn transaction_overlay(
+        base: DatabaseValue,
+        tx_data: Arc<[Datom]>,
+        schema: Arc<Schema>,
+        basis_t: u64,
+        eidx_frontier: u64,
+        last_tx_instant: i64,
+    ) -> Result<Self, SemanticError> {
+        if !base.direct_current() {
+            return Err(SemanticError::incorrect(
+                "database/overlay-requires-current",
+                "a transaction overlay requires an unfiltered point-current db-before",
+            ));
+        }
+        if matches!(&base.basis, ReadBasis::TransactionOverlay(_)) {
+            return Err(SemanticError::incorrect(
+                "database/overlay-cannot-chain",
+                "a committed tiered successor must replace an assessment overlay",
+            ));
+        }
+        let expected_basis = base.basis_t().checked_add(1).ok_or_else(|| {
+            SemanticError::incorrect(
+                "database/overlay-basis-overflow",
+                "a transaction overlay cannot advance the maximum database basis",
+            )
+        })?;
+        if basis_t != expected_basis {
+            return Err(SemanticError::incorrect(
+                "database/overlay-noncontiguous-basis",
+                format!("expected overlay basis {expected_basis}, got {basis_t}"),
+            ));
+        }
+        validate_frontier(eidx_frontier)?;
+        if eidx_frontier < base.eidx_frontier() {
+            return Err(SemanticError::incorrect(
+                "database/overlay-frontier-regression",
+                "a transaction overlay cannot move the entity issuance frontier backward",
+            ));
+        }
+        let expected_tx = crate::t_to_tx(basis_t)?;
+        if tx_data.iter().any(|datom| datom.tx != expected_tx) {
+            return Err(SemanticError::incorrect(
+                "database/overlay-transaction-mismatch",
+                "every overlay datom must name the successor transaction",
+            ));
+        }
+        if tx_data
+            .windows(2)
+            .any(|pair| !pair[0].cmp_in(&pair[1], IndexOrder::Eavt).is_lt())
+        {
+            return Err(SemanticError::incorrect(
+                "database/overlay-noncanonical-datoms",
+                "overlay datoms must be strictly ordered in canonical EAVT order",
+            ));
+        }
+        if base
+            .last_tx_instant()?
+            .is_some_and(|previous| last_tx_instant < previous)
+        {
+            return Err(SemanticError::incorrect(
+                "database/overlay-non-monotonic-instant",
+                "overlay transaction instant precedes its db-before",
+            ));
+        }
+
+        // Recovered ident reconstruction folds assertions only: retractions
+        // do not erase aliases, and a later assertion may repurpose one. Keep
+        // just this transaction's delta and resolve it before the base cache.
+        let mut ident_assertions = Vec::new();
+        for datom in tx_data
+            .iter()
+            .filter(|datom| datom.added && u64::from(datom.attribute) == DB_IDENT)
+        {
+            let Value::Keyword(ident) = &datom.value else {
+                return Err(SemanticError::incorrect(
+                    "database/overlay-invalid-ident",
+                    ":db/ident overlay assertions must contain keywords",
+                ));
+            };
+            if ident_assertions.iter().any(|(prior_ident, prior_entity)| {
+                prior_ident == ident || *prior_entity == datom.entity
+            }) {
+                return Err(SemanticError::incorrect(
+                    "database/overlay-conflicting-ident",
+                    "overlay ident assertions must be unique by ident and entity",
+                ));
+            }
+            ident_assertions.push((ident.clone(), datom.entity));
+        }
+
+        Ok(Self {
+            basis: ReadBasis::TransactionOverlay(Arc::new(TransactionOverlay {
+                base,
+                tx_data,
+                ident_assertions: ident_assertions.into(),
+                schema,
+                basis_t,
+                eidx_frontier,
+                last_tx_instant,
+            })),
+            as_of_t: None,
+            since_t: None,
+            history: false,
+            filters: Arc::default(),
+        })
+    }
+
     /// The basis remains the basis of the underlying immutable value even
     /// when an as-of or since window exposes less information.
     pub fn basis_t(&self) -> u64 {
         match &self.basis {
             ReadBasis::Eager(database) => database.basis_t(),
             ReadBasis::Native(snapshot) => snapshot.basis_t(),
+            ReadBasis::TransactionOverlay(overlay) => overlay.basis_t,
         }
     }
 
@@ -113,6 +248,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.eidx_frontier(),
             ReadBasis::Native(snapshot) => snapshot.eidx_frontier(),
+            ReadBasis::TransactionOverlay(overlay) => overlay.eidx_frontier,
         }
     }
 
@@ -124,6 +260,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => Ok(database.last_tx_instant()),
             ReadBasis::Native(snapshot) => snapshot.last_tx_instant(),
+            ReadBasis::TransactionOverlay(overlay) => Ok(Some(overlay.last_tx_instant)),
         }
     }
 
@@ -131,6 +268,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.schema(),
             ReadBasis::Native(snapshot) => snapshot.schema(),
+            ReadBasis::TransactionOverlay(overlay) => &overlay.schema,
         }
     }
 
@@ -140,6 +278,11 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.entid(ident),
             ReadBasis::Native(snapshot) => snapshot.entid(ident),
+            ReadBasis::TransactionOverlay(overlay) => overlay
+                .ident_assertions
+                .iter()
+                .find_map(|(candidate, entity)| (candidate == ident).then_some(*entity))
+                .or_else(|| overlay.base.entid(ident)),
         }
     }
 
@@ -147,6 +290,11 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.ident(entity),
             ReadBasis::Native(snapshot) => snapshot.ident(entity),
+            ReadBasis::TransactionOverlay(overlay) => overlay
+                .ident_assertions
+                .iter()
+                .find_map(|(ident, candidate)| (*candidate == entity).then_some(ident))
+                .or_else(|| overlay.base.ident(entity)),
         }
     }
 
@@ -266,6 +414,9 @@ impl DatabaseValue {
             ReadBasis::Native(snapshot) => DatabaseValuePrefixCursorInner::Native(Box::new(
                 snapshot.prefix_cursor(false, prefix)?,
             )),
+            ReadBasis::TransactionOverlay(overlay) => DatabaseValuePrefixCursorInner::Owned(
+                overlay.prefix(false, prefix)?.into_iter(),
+            ),
         };
         Ok(DatabaseValuePrefixCursor { inner })
     }
@@ -373,6 +524,11 @@ impl DatabaseValue {
                 order,
             )),
             ReadBasis::Native(snapshot) => Ok(snapshot.datoms(history, order)?.datoms),
+            ReadBasis::TransactionOverlay(_) => Err(SemanticError::new(
+                ErrorCategory::Unsupported,
+                "database/overlay-unbounded-read",
+                "transaction overlays require a bounded index prefix",
+            )),
         }
     }
 
@@ -390,6 +546,7 @@ impl DatabaseValue {
                 }
             }
             ReadBasis::Native(snapshot) => Ok(snapshot.datoms_with_prefix(history, prefix)?.datoms),
+            ReadBasis::TransactionOverlay(overlay) => overlay.prefix(history, prefix),
         }
     }
 
@@ -421,6 +578,74 @@ impl DatabaseValue {
             Ok(collapse_retractions(selected))
         }
     }
+}
+
+impl TransactionOverlay {
+    fn prefix(
+        &self,
+        history: bool,
+        prefix: &IndexPrefix,
+    ) -> Result<Vec<Datom>, SemanticError> {
+        let source_prefix = match prefix {
+            // AVET membership can change when :db/index or :db/unique changes
+            // in this transaction. AEVT is the complete attribute source on
+            // both eager and native bases, so it can populate or suppress the
+            // successor AVET exactly without scanning the whole database.
+            IndexPrefix::Avet { attribute, .. } => IndexPrefix::Aevt {
+                attribute: *attribute,
+                entity: None,
+                value: None,
+            },
+            _ => prefix.clone(),
+        };
+        let mut datoms = self.base.basis_prefix(history, &source_prefix)?;
+        datoms.retain(|datom| {
+            overlay_index_member(&self.schema, datom, prefix.order())
+                && compare_prefix(datom, prefix).is_eq()
+        });
+
+        let delta = self.tx_data.iter().filter(|datom| {
+            overlay_index_member(&self.schema, datom, prefix.order())
+                && compare_prefix(datom, prefix).is_eq()
+        });
+        if history {
+            datoms.extend(delta.cloned());
+        } else {
+            for datom in delta {
+                if datom.added {
+                    // Repeated schema-hook assertions are transaction events
+                    // even when the same stored E/A/V is already current.
+                    // They enter history but do not replace the current fact's
+                    // original transaction coordinate.
+                    if !datoms.iter().any(|current| same_stored_eav(current, datom)) {
+                        datoms.push(datom.clone());
+                    }
+                } else {
+                    datoms.retain(|current| !same_stored_eav(current, datom));
+                }
+            }
+        }
+        datoms.sort_by(|left, right| left.cmp_in(right, prefix.order()));
+        Ok(datoms)
+    }
+}
+
+fn overlay_index_member(schema: &Schema, datom: &Datom, order: IndexOrder) -> bool {
+    match order {
+        IndexOrder::Eavt | IndexOrder::Aevt => true,
+        IndexOrder::Avet => schema
+            .attribute(datom.attribute)
+            .is_ok_and(|attribute| attribute.indexed || attribute.unique.is_some()),
+        IndexOrder::Vaet => schema
+            .attribute(datom.attribute)
+            .is_ok_and(|attribute| attribute.value_type == crate::ValueType::Ref),
+    }
+}
+
+fn same_stored_eav(left: &Datom, right: &Datom) -> bool {
+    left.entity == right.entity
+        && left.attribute == right.attribute
+        && left.value.stored_eq(&right.value)
 }
 
 impl From<Database> for DatabaseValue {

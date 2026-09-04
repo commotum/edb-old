@@ -31,6 +31,7 @@ mod recent_btset;
 mod schema;
 mod service;
 mod state_commitment;
+mod tiered_assessor;
 mod transaction;
 mod tree_manifest;
 mod tree_store;
@@ -69,7 +70,7 @@ pub use peer::{
 };
 pub use postgres::{
     CapacityLimits, POSTGRES_IN_PLACE_UPGRADE_FLOOR, POSTGRES_SCHEMA_VERSION, PostgresMigrator,
-    PostgresStore, ProgramCacheStats,
+    PostgresStore, ProgramCacheStats, WriterResidencyStats,
 };
 pub use postgres_connection::PostgresConnectionConfig;
 pub use program::{

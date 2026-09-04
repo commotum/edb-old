@@ -82,15 +82,15 @@ pub(crate) struct CommitmentWork {
 }
 
 impl CommitmentWork {
-    fn visit(&mut self) {
+    pub(crate) fn visit(&mut self) {
         self.node_visits = self.node_visits.saturating_add(1);
     }
 
-    fn rehash(&mut self) {
+    pub(crate) fn rehash(&mut self) {
         self.node_hashes = self.node_hashes.saturating_add(1);
     }
 
-    fn change_leaf(&mut self) {
+    pub(crate) fn change_leaf(&mut self) {
         self.leaf_changes = self.leaf_changes.saturating_add(1);
     }
 }
@@ -124,20 +124,11 @@ impl Node {
                     "semantic commitment cannot contain more than u64 datoms",
                 )
             })?;
-        let leaf = semantic_leaf_hash(key);
-        let hash = hash_parts(
-            NODE_DOMAIN,
-            &[
-                &count.to_be_bytes(),
-                &link_hash(&left),
-                &leaf,
-                &link_hash(&right),
-            ],
-        );
+        let hash = semantic_node_hash(key, count, link_hash(&left), link_hash(&right));
         work.rehash();
         Ok(Arc::new(Self {
             key,
-            priority: key_priority(key),
+            priority: semantic_key_priority(key),
             left,
             right,
             count,
@@ -230,17 +221,7 @@ impl SemanticStateCommitment {
     }
 
     pub(crate) fn digest(&self, basis_t: u64, eidx_frontier: u64) -> Digest {
-        let metadata = self.metadata();
-        hash_parts(
-            STATE_DOMAIN,
-            &[
-                &metadata.version.to_be_bytes(),
-                &basis_t.to_be_bytes(),
-                &eidx_frontier.to_be_bytes(),
-                &metadata.current_count.to_be_bytes(),
-                &metadata.current_root,
-            ],
-        )
+        semantic_state_digest(self.metadata(), basis_t, eidx_frontier)
     }
 }
 
@@ -403,17 +384,52 @@ fn link_count(link: &Link) -> u64 {
 }
 
 fn link_hash(link: &Link) -> Digest {
-    link.as_ref().map_or_else(empty_hash, |node| node.hash)
+    link.as_ref()
+        .map_or_else(semantic_empty_hash, |node| node.hash)
 }
 
-fn empty_hash() -> Digest {
+pub(crate) fn semantic_empty_hash() -> Digest {
     hash_parts(EMPTY_DOMAIN, &[])
 }
 
-fn key_priority(key: SemanticDatomKey) -> Digest {
+pub(crate) fn semantic_key_priority(key: SemanticDatomKey) -> Digest {
     hash_parts(
         PRIORITY_DOMAIN,
         &[&key.attribute.to_be_bytes(), &key.digest],
+    )
+}
+
+/// Reproduce the exact v2 node digest from a canonical logical node. Durable
+/// implementations use this boundary instead of copying the domain separator
+/// or field ordering and silently creating a second commitment format.
+pub(crate) fn semantic_node_hash(
+    key: SemanticDatomKey,
+    count: u64,
+    left: Digest,
+    right: Digest,
+) -> Digest {
+    let leaf = semantic_leaf_hash(key);
+    hash_parts(
+        NODE_DOMAIN,
+        &[&count.to_be_bytes(), &left, &leaf, &right],
+    )
+}
+
+/// Bind one v2 semantic-set root to the immutable database coordinate.
+pub(crate) fn semantic_state_digest(
+    metadata: SemanticRootMetadata,
+    basis_t: u64,
+    eidx_frontier: u64,
+) -> Digest {
+    hash_parts(
+        STATE_DOMAIN,
+        &[
+            &metadata.version.to_be_bytes(),
+            &basis_t.to_be_bytes(),
+            &eidx_frontier.to_be_bytes(),
+            &metadata.current_count.to_be_bytes(),
+            &metadata.current_root,
+        ],
     )
 }
 
