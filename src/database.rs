@@ -411,6 +411,18 @@ impl Database {
         self.eidx_frontier
     }
 
+    /// Exact retained fact counts for architecture diagnostics.
+    ///
+    /// These are intentionally crate-private: the eager database is the
+    /// semantic oracle, while production residency is reported by the owner
+    /// that chooses an eager or tiered representation.
+    pub(crate) fn retained_fact_counts(&self) -> (usize, usize) {
+        (
+            self.current.len(),
+            self.history.iter().map(|chunk| chunk.len()).sum(),
+        )
+    }
+
     pub(crate) fn semantic_state_commitment(&self) -> &SemanticStateCommitment {
         &self.semantic_state
     }

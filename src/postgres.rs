@@ -7,7 +7,7 @@ use crate::persistent_tree::{TreeNode, decode_tree_node};
 use crate::program::ValidatedProgram;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
 use crate::{
-    CallableRef, Database, Datom, Digest, DurableTransaction, ErrorCategory,
+    CallableRef, Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory,
     PostgresConnectionConfig, Program, ProgramBudget, ProgramCall, ProgramHash, ProgramKind,
     ProgramLimits, ProgramOutput, ProgramRuntime, Schema, SemanticError, TxForm, TxFunctions, TxOp,
     Value, decode_genesis, decode_program, decode_transaction, encode_genesis, encode_program,
@@ -1630,7 +1630,7 @@ fn qualified_program_ident(name: &str) -> Result<crate::Keyword, SemanticError> 
 /// cardinality-one `:db/fn` value. The native value is a content hash rather
 /// than a JVM function object.
 fn bound_program_hash(
-    database: &Database,
+    database: &DatabaseValue,
     ident: &crate::Keyword,
 ) -> Result<ProgramHash, SemanticError> {
     let entity = database.entid(ident).ok_or_else(|| {
@@ -1643,7 +1643,7 @@ fn bound_program_hash(
             ),
         )
     })?;
-    match database.values(entity, crate::DB_FN as u32).as_slice() {
+    match database.values(entity, crate::DB_FN as u32)?.as_slice() {
         [Value::Function(hash)] => Ok(*hash),
         [] => Err(SemanticError::incorrect(
             "program/not-a-database-function",
@@ -1707,7 +1707,7 @@ fn resolve_program_in<C: GenericClient>(
 }
 
 fn database_callable_entity(
-    database: &Database,
+    database: &DatabaseValue,
     reference: &crate::EntityRef,
 ) -> Result<u64, SemanticError> {
     match reference {
@@ -1739,13 +1739,13 @@ fn database_callable_entity(
 }
 
 fn callable_hash(
-    database: &Database,
+    database: &DatabaseValue,
     callable: &CallableRef,
 ) -> Result<ProgramHash, SemanticError> {
     match callable {
         CallableRef::Database(reference) => {
             let entity = database_callable_entity(database, reference)?;
-            match database.values(entity, crate::DB_FN as u32).as_slice() {
+            match database.values(entity, crate::DB_FN as u32)?.as_slice() {
                 [Value::Function(hash)] => Ok(*hash),
                 [] => Err(SemanticError::incorrect(
                     "program/not-a-database-function",
@@ -1772,7 +1772,7 @@ fn callable_hash(
 fn execute_program_calls_in<C: GenericClient>(
     client: &mut C,
     cache: &SharedProgramCache,
-    db_before: &Database,
+    db_before: &DatabaseValue,
     calls: &[ProgramCall],
     budget: &mut ProgramBudget<'_>,
 ) -> Result<Vec<TxForm>, SemanticError> {
@@ -1792,7 +1792,7 @@ fn execute_program_calls_in<C: GenericClient>(
 fn expand_submission_forms_in<C: GenericClient>(
     client: &mut C,
     cache: &SharedProgramCache,
-    db_before: &Database,
+    db_before: &DatabaseValue,
     submitted: &[TxForm],
     budget: &mut ProgramBudget<'_>,
 ) -> Result<Vec<TxForm>, SemanticError> {
@@ -1819,7 +1819,7 @@ fn expand_submission_forms_in<C: GenericClient>(
 fn expand_program_call_in<C: GenericClient>(
     client: &mut C,
     cache: &SharedProgramCache,
-    db_before: &Database,
+    db_before: &DatabaseValue,
     call: &ProgramCall,
     budget: &mut ProgramBudget<'_>,
     depth: usize,
@@ -1840,7 +1840,12 @@ fn expand_program_call_in<C: GenericClient>(
         ));
     }
     let ProgramOutput::Transaction(forms) = ProgramRuntime
-        .execute_prevalidated_runtime_with_budget(&program, db_before, &call.arguments, budget)?
+        .execute_prevalidated_runtime_exact_with_budget(
+            &program,
+            db_before,
+            &call.arguments,
+            budget,
+        )?
     else {
         unreachable!("program kind was checked");
     };
@@ -1875,6 +1880,8 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
     assessed: &AssessedTransaction,
 ) -> Result<(), SemanticError> {
     let report = assessed.report();
+    let db_before = report.db_before.database_value();
+    let db_after = report.db_after.database_value();
     let mut changed_function_entities = BTreeSet::new();
     let mut changed_predicate_names = BTreeSet::new();
 
@@ -1907,15 +1914,15 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
     // ident rename is included only because it can break a symbol-named
     // predicate reference even when the hash itself is unchanged.
     for entity in changed_function_entities {
-        for database in [&report.db_before, &report.db_after] {
-            for value in database.values(entity, crate::DB_IDENT as u32) {
+        for database in [&db_before, &db_after] {
+            for value in database.values(entity, crate::DB_IDENT as u32)? {
                 if let Value::Keyword(ident) = value {
                     changed_predicate_names.insert(ident.qualified_name());
                 }
             }
         }
 
-        let functions = report.db_after.values(entity, crate::DB_FN as u32);
+        let functions = db_after.values(entity, crate::DB_FN as u32)?;
         if functions.is_empty() {
             continue;
         }
@@ -1931,13 +1938,13 @@ fn validate_successor_program_bindings_in<C: GenericClient>(
     // Validate only dependency names whose binding/reference changed. An old
     // unused bad binding is not transaction input and must not become a
     // global availability gate for unrelated writes.
-    let changed_roles = predicate_roles_in(&report.db_after, &changed_predicate_names)?;
+    let changed_roles = predicate_roles_in(&db_after, &changed_predicate_names)?;
     for name in changed_predicate_names {
         let Some(role) = changed_roles.get(&name).copied() else {
             continue;
         };
         let ident = qualified_program_ident(&name)?;
-        let hash = bound_program_hash(&report.db_after, &ident)?;
+        let hash = bound_program_hash(&db_after, &ident)?;
         let program = resolve_program_in(client, cache, hash)?;
         let expected = match role {
             PredicateRole::Attribute => ProgramKind::AttributePredicate,
@@ -1996,7 +2003,7 @@ pub(crate) fn insert_program_generation_refs<C: GenericClient>(
 }
 
 fn predicate_roles_in(
-    database: &Database,
+    database: &DatabaseValue,
     names: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, PredicateRole>, SemanticError> {
     let mut roles = BTreeMap::<String, (bool, bool)>::new();
@@ -2080,6 +2087,24 @@ pub struct CapacityLimits {
     pub max_transaction_bytes: usize,
     pub max_history_transactions: u64,
     pub program: ProgramLimits,
+}
+
+/// Representation-level state retained by one PostgreSQL writer.
+///
+/// Counts deliberately describe semantic objects rather than allocator RSS,
+/// making the bounded-writer acceptance test deterministic.  The eager fields
+/// expose the prototype dependency that Goal 16 removes; they remain in the
+/// metric afterward as a permanent regression guard and must stay zero for a
+/// production tiered writer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WriterResidencyStats {
+    pub eager_database_values: usize,
+    pub eager_current_facts: usize,
+    pub eager_history_datoms: usize,
+    pub recent_datoms: u64,
+    pub recent_accounted_bytes: u64,
+    pub tree_cache_entries: usize,
+    pub tree_cache_bytes: usize,
 }
 
 impl Default for CapacityLimits {
@@ -2178,6 +2203,22 @@ impl PostgresStore {
 
     pub fn program_cache_stats(&self) -> ProgramCacheStats {
         shared_program_cache_stats(&self.program_cache)
+    }
+
+    /// Report deterministic retained writer state for boundedness tests and
+    /// operator diagnostics. This does not walk PostgreSQL or materialize a
+    /// database value.
+    pub fn writer_residency_stats(&self, database_id: &str) -> WriterResidencyStats {
+        let Some((_, database)) = self.current.get(database_id) else {
+            return WriterResidencyStats::default();
+        };
+        let (current, history) = database.retained_fact_counts();
+        WriterResidencyStats {
+            eager_database_values: 1,
+            eager_current_facts: current,
+            eager_history_datoms: history,
+            ..WriterResidencyStats::default()
+        }
     }
 
     pub(crate) fn program_cache_handle(&self) -> SharedProgramCache {
@@ -2866,14 +2907,15 @@ impl PostgresStore {
                         "transaction program budget mutex was poisoned",
                     )
                 })?;
+                let db_before = db_before.database_value();
                 let forms = expand_submission_forms_in(
                     transaction,
                     program_cache,
-                    db_before,
+                    &db_before,
                     forms,
                     &mut budget,
                 )?;
-                db_before.normalize_forms_with_limit(&forms, &TxFunctions::new(), max_primitive_ops)
+                db_before.normalize_persisted_forms_with_limit(&forms, max_primitive_ops)
             },
         )
     }
@@ -3088,7 +3130,7 @@ impl PostgresStore {
                 persisted_functions = persisted_predicates_in(
                     &mut transaction,
                     &program_cache,
-                    &db_before,
+                    &db_before.database_value(),
                     &assessed.predicate_requirements()?,
                     Arc::clone(&shared_budget),
                 )?;
@@ -3808,7 +3850,7 @@ fn postgres_now_millis<C: GenericClient>(client: &mut C) -> Result<i64, Semantic
 fn persisted_predicates_in<C: GenericClient>(
     client: &mut C,
     cache: &SharedProgramCache,
-    database: &Database,
+    database: &DatabaseValue,
     required: &BTreeMap<String, PredicateRole>,
     shared_budget: SharedProgramBudget,
 ) -> Result<TxFunctions, SemanticError> {
@@ -3832,7 +3874,7 @@ fn persisted_predicates_in<C: GenericClient>(
                         "transaction program budget mutex was poisoned",
                     )
                 })?;
-                match ProgramRuntime.execute_prevalidated_with_budget(
+                match ProgramRuntime.execute_prevalidated_exact_with_budget(
                     &program,
                     &predicate_db,
                     std::slice::from_ref(value),
@@ -3857,7 +3899,7 @@ fn persisted_predicates_in<C: GenericClient>(
                         "transaction program budget mutex was poisoned",
                     )
                 })?;
-                match ProgramRuntime.execute_prevalidated_with_budget(
+                match ProgramRuntime.execute_prevalidated_exact_with_budget(
                     &program,
                     db_after,
                     &[Value::Ref(entity)],
