@@ -3,8 +3,8 @@ use crate::index::compare_prefix;
 use crate::peer::TieredSnapshot;
 use crate::{
     AttributeName, DB_IDENT, Database, Datom, EntityIdentifier, ErrorCategory, IndexOrder,
-    IndexPrefix, Keyword, PeerIndexCursor, PeerSnapshot, Schema, SemanticError, Value, eid_to_eidx,
-    schema_eid_to_attr_id, tx_to_t,
+    IndexPrefix, Keyword, PeerCursorStats, PeerIndexCursor, PeerSnapshot, Schema, SemanticError,
+    Value, eid_to_eidx, schema_eid_to_attr_id, tx_to_t,
 };
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -52,6 +52,16 @@ pub(crate) struct TransactionReadWork {
     pub(crate) memo_rejections: u64,
     pub(crate) memo_peak_entries: usize,
     pub(crate) memo_peak_retained_bytes: u64,
+    pub(crate) native_cursor_ranges: u64,
+    pub(crate) native_cache_hits: u64,
+    pub(crate) native_cache_misses: u64,
+    pub(crate) native_sql_root_reads: u64,
+    pub(crate) native_sql_directory_reads: u64,
+    pub(crate) native_sql_leaf_reads: u64,
+    pub(crate) native_sql_reads: u64,
+    pub(crate) native_sql_read_bytes: u64,
+    pub(crate) native_recent_datoms_examined: u64,
+    pub(crate) native_recent_datoms_yielded: u64,
 }
 
 /// Stable identity of one immutable database value/view while it participates
@@ -65,6 +75,25 @@ struct PrefixMemoKey {
     value: Arc<ReadValueIdentity>,
     history: bool,
     prefix: IndexPrefix,
+}
+
+impl PrefixMemoKey {
+    /// Stable retained-memory admission weight for the owned map key.
+    ///
+    /// The enum and its inline fields are covered by `size_of`; owned value
+    /// payloads are charged recursively. B-tree node and allocator overhead
+    /// remain intentionally outside this allocator-independent estimate.
+    fn retained_bytes(&self) -> u64 {
+        let value_heap = match &self.prefix {
+            IndexPrefix::Eavt { value, .. }
+            | IndexPrefix::Aevt { value, .. }
+            | IndexPrefix::Avet { value, .. } => {
+                value.as_ref().map_or(0, Value::retained_heap_bytes)
+            }
+            IndexPrefix::Vaet { value, .. } => value.retained_heap_bytes(),
+        };
+        (std::mem::size_of::<Self>() as u64).saturating_add(value_heap)
+    }
 }
 
 impl PartialEq for PrefixMemoKey {
@@ -105,6 +134,16 @@ struct PrefixMemoState {
     rejections: u64,
     peak_entries: usize,
     peak_retained_bytes: u64,
+    native_cursor_ranges: u64,
+    native_cache_hits: u64,
+    native_cache_misses: u64,
+    native_sql_root_reads: u64,
+    native_sql_directory_reads: u64,
+    native_sql_leaf_reads: u64,
+    native_sql_reads: u64,
+    native_sql_read_bytes: u64,
+    native_recent_datoms_examined: u64,
+    native_recent_datoms_yielded: u64,
 }
 
 /// One bounded exact-prefix memo shared by all phases of a transaction
@@ -149,11 +188,25 @@ impl TransactionReadContext {
             memo_rejections: memo.rejections,
             memo_peak_entries: memo.peak_entries,
             memo_peak_retained_bytes: memo.peak_retained_bytes,
+            native_cursor_ranges: memo.native_cursor_ranges,
+            native_cache_hits: memo.native_cache_hits,
+            native_cache_misses: memo.native_cache_misses,
+            native_sql_root_reads: memo.native_sql_root_reads,
+            native_sql_directory_reads: memo.native_sql_directory_reads,
+            native_sql_leaf_reads: memo.native_sql_leaf_reads,
+            native_sql_reads: memo.native_sql_reads,
+            native_sql_read_bytes: memo.native_sql_read_bytes,
+            native_recent_datoms_examined: memo.native_recent_datoms_examined,
+            native_recent_datoms_yielded: memo.native_recent_datoms_yielded,
         })
     }
 
     pub(crate) fn observer(&self) -> Arc<LogicalReadObserver> {
         Arc::clone(&self.observer)
+    }
+
+    pub(crate) fn observer_ref(&self) -> &LogicalReadObserver {
+        self.observer.as_ref()
     }
 
     fn lookup(&self, key: &PrefixMemoKey) -> Result<Option<Arc<[Datom]>>, SemanticError> {
@@ -173,6 +226,43 @@ impl TransactionReadContext {
         memo.source_retained_bytes = memo
             .source_retained_bytes
             .saturating_add(datom.retained_bytes());
+        Ok(())
+    }
+
+    /// Record the physical work of one native cursor in this transaction
+    /// attempt. Unlike shared peer load counters, this attribution cannot be
+    /// contaminated by concurrent readers using the same immutable core.
+    pub(crate) fn record_native_cursor(&self, stats: PeerCursorStats) -> Result<(), SemanticError> {
+        let mut memo = self.memo.lock().map_err(|_| read_context_poisoned())?;
+        memo.native_cursor_ranges = memo.native_cursor_ranges.saturating_add(1);
+        memo.native_cache_hits = memo.native_cache_hits.saturating_add(stats.tree.cache_hits);
+        memo.native_cache_misses = memo
+            .native_cache_misses
+            .saturating_add(stats.tree.cache_misses);
+        memo.native_sql_root_reads = memo
+            .native_sql_root_reads
+            .saturating_add(stats.tree.root_reads);
+        memo.native_sql_directory_reads = memo
+            .native_sql_directory_reads
+            .saturating_add(stats.tree.directory_reads);
+        memo.native_sql_leaf_reads = memo
+            .native_sql_leaf_reads
+            .saturating_add(stats.tree.leaf_reads);
+        let sql_reads = stats
+            .tree
+            .root_reads
+            .saturating_add(stats.tree.directory_reads)
+            .saturating_add(stats.tree.leaf_reads);
+        memo.native_sql_reads = memo.native_sql_reads.saturating_add(sql_reads);
+        memo.native_sql_read_bytes = memo
+            .native_sql_read_bytes
+            .saturating_add(stats.tree.decoded_bytes);
+        memo.native_recent_datoms_examined = memo
+            .native_recent_datoms_examined
+            .saturating_add(stats.recent.datoms_examined);
+        memo.native_recent_datoms_yielded = memo
+            .native_recent_datoms_yielded
+            .saturating_add(stats.recent.datoms_yielded);
         Ok(())
     }
 
@@ -413,9 +503,32 @@ struct TransactionOverlay {
 /// bounded transaction delta to that stream. This is crate-private until the
 /// complete public raw-index cursor contract (including reverse seeks) lands.
 pub(crate) struct DatabaseValueScanCursor<'a> {
-    inner: Box<dyn Iterator<Item = Result<Datom, SemanticError>> + 'a>,
+    inner: DatabaseValueScanCursorInner<'a>,
     observer: Option<Arc<LogicalReadObserver>>,
+    physical_context: Option<Arc<TransactionReadContext>>,
+    physical_recorded: bool,
     failed: bool,
+}
+
+enum DatabaseValueScanCursorInner<'a> {
+    Native(Box<PeerIndexCursor>),
+    Overlay(Box<TransactionOverlayScanCursor<'a>>),
+    Owned(IntoIter<Datom>),
+}
+
+impl DatabaseValueScanCursor<'_> {
+    fn record_physical_work(&mut self) -> Result<(), SemanticError> {
+        if self.physical_recorded {
+            return Ok(());
+        }
+        self.physical_recorded = true;
+        if let (Some(context), DatabaseValueScanCursorInner::Native(cursor)) =
+            (&self.physical_context, &self.inner)
+        {
+            context.record_native_cursor(cursor.stats())?;
+        }
+        Ok(())
+    }
 }
 
 impl Iterator for DatabaseValueScanCursor<'_> {
@@ -425,21 +538,41 @@ impl Iterator for DatabaseValueScanCursor<'_> {
         if self.failed {
             return None;
         }
-        match self.inner.next()? {
+        let item = match &mut self.inner {
+            DatabaseValueScanCursorInner::Native(cursor) => cursor.next(),
+            DatabaseValueScanCursorInner::Overlay(cursor) => cursor.next(),
+            DatabaseValueScanCursorInner::Owned(cursor) => cursor.next().map(Ok),
+        };
+        let Some(item) = item else {
+            if let Err(error) = self.record_physical_work() {
+                self.failed = true;
+                return Some(Err(error));
+            }
+            return None;
+        };
+        match item {
             Ok(datom) => {
                 if let Some(observer) = &self.observer
                     && let Err(error) = observer.charge_datom(&datom)
                 {
+                    let _ = self.record_physical_work();
                     self.failed = true;
                     return Some(Err(error));
                 }
                 Some(Ok(datom))
             }
             Err(error) => {
+                let _ = self.record_physical_work();
                 self.failed = true;
                 Some(Err(error))
             }
         }
+    }
+}
+
+impl Drop for DatabaseValueScanCursor<'_> {
+    fn drop(&mut self) {
+        let _ = self.record_physical_work();
     }
 }
 
@@ -492,6 +625,8 @@ struct OverlayCursorDatom {
 pub struct DatabaseValuePrefixCursor<'a> {
     inner: DatabaseValuePrefixCursorInner<'a>,
     observer: Option<Arc<LogicalReadObserver>>,
+    physical_context: Option<Arc<TransactionReadContext>>,
+    physical_recorded: bool,
     memo_source: Option<PrefixMemoSource>,
     memo_hit: bool,
     failed: bool,
@@ -509,11 +644,24 @@ impl DatabaseValuePrefixCursor<'_> {
     pub(crate) fn is_memo_hit(&self) -> bool {
         self.memo_hit
     }
+
+    fn record_physical_work(&mut self) -> Result<(), SemanticError> {
+        if self.physical_recorded {
+            return Ok(());
+        }
+        self.physical_recorded = true;
+        if let (Some(context), DatabaseValuePrefixCursorInner::Native(cursor)) =
+            (&self.physical_context, &self.inner)
+        {
+            context.record_native_cursor(cursor.stats())?;
+        }
+        Ok(())
+    }
 }
 
 struct PrefixMemoSource {
     context: Arc<TransactionReadContext>,
-    key: PrefixMemoKey,
+    key: Option<PrefixMemoKey>,
     datoms: Vec<Datom>,
     retained_bytes: u64,
     cacheable: bool,
@@ -539,17 +687,25 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
             }
         };
         let Some(item) = item else {
+            if let Err(error) = self.record_physical_work() {
+                self.failed = true;
+                return Some(Err(error));
+            }
             if let Some(source) = &mut self.memo_source
                 && !source.completed
             {
                 source.completed = true;
                 let result = if source.cacheable {
                     source.context.admit(
-                        source.key.clone(),
+                        source
+                            .key
+                            .take()
+                            .expect("an incomplete memo source retains its key"),
                         std::mem::take(&mut source.datoms),
                         source.retained_bytes,
                     )
                 } else {
+                    source.key.take();
                     source.context.reject()
                 };
                 if let Err(error) = result {
@@ -564,7 +720,9 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
                 if let Some(source) = &mut self.memo_source
                     && let Err(error) = source.context.record_source_datom(&datom)
                 {
+                    source.key.take();
                     source.completed = true;
+                    let _ = self.record_physical_work();
                     self.failed = true;
                     return Some(Err(error));
                 }
@@ -573,8 +731,10 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
                 {
                     if let Some(source) = &mut self.memo_source {
                         let _ = source.context.reject();
+                        source.key.take();
                         source.completed = true;
                     }
+                    let _ = self.record_physical_work();
                     self.failed = true;
                     return Some(Err(error));
                 }
@@ -601,8 +761,10 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
             Err(error) => {
                 if let Some(source) = &mut self.memo_source {
                     let _ = source.context.reject();
+                    source.key.take();
                     source.completed = true;
                 }
+                let _ = self.record_physical_work();
                 self.failed = true;
                 Some(Err(error))
             }
@@ -612,10 +774,12 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
 
 impl Drop for DatabaseValuePrefixCursor<'_> {
     fn drop(&mut self) {
+        let _ = self.record_physical_work();
         if let Some(source) = &mut self.memo_source
             && !source.completed
         {
             let _ = source.context.reject();
+            source.key.take();
             source.completed = true;
         }
     }
@@ -902,9 +1066,10 @@ impl DatabaseValue {
         self.last_tx_instant_memo
             .get_or_try_init(|| match &self.basis {
                 ReadBasis::Eager(database) => Ok(database.last_tx_instant()),
-                ReadBasis::Native(snapshot) => {
-                    snapshot.last_tx_instant_observed(self.read_observer.as_deref())
-                }
+                ReadBasis::Native(snapshot) => snapshot.last_tx_instant_observed(
+                    self.read_observer.as_deref(),
+                    self.read_context.as_deref(),
+                ),
                 ReadBasis::TransactionOverlay(overlay) => Ok(Some(overlay.last_tx_instant)),
             })
     }
@@ -1026,12 +1191,22 @@ impl DatabaseValue {
     pub fn datoms(&self, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
         if self.direct_current() {
             return self
-                .basis_scan_cursor(false, order, self.read_observer.clone())?
+                .basis_scan_cursor(
+                    false,
+                    order,
+                    self.read_observer.clone(),
+                    self.read_context.clone(),
+                )?
                 .collect();
         }
         if self.direct_history() {
             return self
-                .basis_scan_cursor(true, order, self.read_observer.clone())?
+                .basis_scan_cursor(
+                    true,
+                    order,
+                    self.read_observer.clone(),
+                    self.read_context.clone(),
+                )?
                 .collect();
         }
         let datoms = {
@@ -1053,14 +1228,26 @@ impl DatabaseValue {
         order: IndexOrder,
     ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
         if self.direct_current() {
-            self.basis_scan_cursor(false, order, self.read_observer.clone())
+            self.basis_scan_cursor(
+                false,
+                order,
+                self.read_observer.clone(),
+                self.read_context.clone(),
+            )
         } else if self.direct_history() {
-            self.basis_scan_cursor(true, order, self.read_observer.clone())
+            self.basis_scan_cursor(
+                true,
+                order,
+                self.read_observer.clone(),
+                self.read_context.clone(),
+            )
         } else {
             // `datoms` already charges the materialized, windowed result.
             Ok(DatabaseValueScanCursor {
-                inner: Box::new(self.datoms(order)?.into_iter().map(Ok)),
+                inner: DatabaseValueScanCursorInner::Owned(self.datoms(order)?.into_iter()),
                 observer: None,
+                physical_context: None,
+                physical_recorded: false,
                 failed: false,
             })
         }
@@ -1104,6 +1291,8 @@ impl DatabaseValue {
                     self.datoms_with_prefix(prefix)?.into_iter(),
                 ),
                 observer: None,
+                physical_context: None,
+                physical_recorded: false,
                 memo_source: None,
                 memo_hit: false,
                 failed: false,
@@ -1264,7 +1453,8 @@ impl DatabaseValue {
     }
 
     fn basis_datoms(&self, history: bool, order: IndexOrder) -> Result<Vec<Datom>, SemanticError> {
-        self.basis_scan_cursor(history, order, None)?.collect()
+        self.basis_scan_cursor(history, order, None, self.read_context.clone())?
+            .collect()
     }
 
     fn basis_scan_cursor(
@@ -1272,10 +1462,11 @@ impl DatabaseValue {
         history: bool,
         order: IndexOrder,
         observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
     ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
         match &self.basis {
             ReadBasis::Eager(database) => Ok(DatabaseValueScanCursor {
-                inner: Box::new(
+                inner: DatabaseValueScanCursorInner::Owned(
                     database
                         .datoms(
                             if history {
@@ -1285,23 +1476,35 @@ impl DatabaseValue {
                             },
                             order,
                         )
-                        .into_iter()
-                        .map(Ok),
+                        .into_iter(),
                 ),
                 observer,
+                physical_context: None,
+                physical_recorded: false,
                 failed: false,
             }),
             ReadBasis::Native(snapshot) => Ok(DatabaseValueScanCursor {
-                inner: Box::new(snapshot.range_cursor(history, order, None, None)?),
+                inner: DatabaseValueScanCursorInner::Native(Box::new(
+                    snapshot.range_cursor(history, order, None, None)?,
+                )),
                 observer,
+                physical_context,
+                physical_recorded: false,
                 failed: false,
             }),
             ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValueScanCursor {
                 // The overlay owns observation so an AVET-enablement source
                 // range can be charged while it is reordered, without later
                 // double-charging those precharged datoms.
-                inner: Box::new(overlay.scan_cursor(history, order, observer)?),
+                inner: DatabaseValueScanCursorInner::Overlay(Box::new(overlay.scan_cursor(
+                    history,
+                    order,
+                    observer,
+                    physical_context,
+                )?)),
                 observer: None,
+                physical_context: None,
+                physical_recorded: false,
                 failed: false,
             }),
         }
@@ -1312,6 +1515,7 @@ impl DatabaseValue {
         history: bool,
         prefix: &IndexPrefix,
         observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
     ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
         match &self.basis {
             ReadBasis::Eager(database) => {
@@ -1323,6 +1527,8 @@ impl DatabaseValue {
                 Ok(DatabaseValuePrefixCursor {
                     inner: DatabaseValuePrefixCursorInner::Eager(datoms.iter().cloned()),
                     observer,
+                    physical_context: None,
+                    physical_recorded: false,
                     memo_source: None,
                     memo_hit: false,
                     failed: false,
@@ -1333,21 +1539,27 @@ impl DatabaseValue {
                     snapshot.prefix_cursor(history, prefix)?,
                 )),
                 observer,
+                physical_context,
+                physical_recorded: false,
                 memo_source: None,
                 memo_hit: false,
                 failed: false,
             }),
-            ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValuePrefixCursor {
-                // As with full scans, the overlay owns observation so its one
-                // necessarily reordered AVET backfill is bounded at source.
-                inner: DatabaseValuePrefixCursorInner::Overlay(Box::new(
-                    overlay.prefix_cursor(history, prefix, observer)?,
-                )),
-                observer: None,
-                memo_source: None,
-                memo_hit: false,
-                failed: false,
-            }),
+            ReadBasis::TransactionOverlay(overlay) => {
+                Ok(DatabaseValuePrefixCursor {
+                    // As with full scans, the overlay owns observation so its one
+                    // necessarily reordered AVET backfill is bounded at source.
+                    inner: DatabaseValuePrefixCursorInner::Overlay(Box::new(
+                        overlay.prefix_cursor(history, prefix, observer, physical_context)?,
+                    )),
+                    observer: None,
+                    physical_context: None,
+                    physical_recorded: false,
+                    memo_source: None,
+                    memo_hit: false,
+                    failed: false,
+                })
+            }
         }
     }
 
@@ -1357,7 +1569,7 @@ impl DatabaseValue {
         prefix: &IndexPrefix,
     ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
         let Some(context) = &self.read_context else {
-            return self.basis_prefix_cursor(history, prefix, self.read_observer.clone());
+            return self.basis_prefix_cursor(history, prefix, self.read_observer.clone(), None);
         };
         let key = PrefixMemoKey {
             value: Arc::clone(&self.read_identity),
@@ -1368,24 +1580,32 @@ impl DatabaseValue {
             return Ok(DatabaseValuePrefixCursor {
                 inner: DatabaseValuePrefixCursorInner::Memoized { datoms, next: 0 },
                 observer: Some(context.observer()),
+                physical_context: None,
+                physical_recorded: false,
                 memo_source: None,
                 memo_hit: true,
                 failed: false,
             });
         }
-        let mut cursor = match self.basis_prefix_cursor(history, prefix, Some(context.observer())) {
+        let mut cursor = match self.basis_prefix_cursor(
+            history,
+            prefix,
+            Some(context.observer()),
+            Some(Arc::clone(context)),
+        ) {
             Ok(cursor) => cursor,
             Err(error) => {
                 context.reject()?;
                 return Err(error);
             }
         };
+        let retained_bytes = key.retained_bytes();
         cursor.memo_source = Some(PrefixMemoSource {
             context: Arc::clone(context),
-            key,
+            key: Some(key),
             datoms: Vec::new(),
-            retained_bytes: 0,
-            cacheable: true,
+            retained_bytes,
+            cacheable: retained_bytes <= context.max_retained_bytes,
             completed: false,
         });
         Ok(cursor)
@@ -1396,17 +1616,8 @@ impl DatabaseValue {
         history: bool,
         prefix: &IndexPrefix,
     ) -> Result<Vec<Datom>, SemanticError> {
-        match &self.basis {
-            ReadBasis::Eager(database) => {
-                if history {
-                    Ok(database.history_with_prefix(prefix)?.to_vec())
-                } else {
-                    Ok(database.datoms_with_prefix(prefix)?.to_vec())
-                }
-            }
-            ReadBasis::Native(snapshot) => Ok(snapshot.datoms_with_prefix(history, prefix)?.datoms),
-            ReadBasis::TransactionOverlay(overlay) => overlay.prefix(history, prefix),
-        }
+        self.basis_prefix_cursor(history, prefix, None, self.read_context.clone())?
+            .collect()
     }
 
     fn without_filters(&self) -> Self {
@@ -1453,9 +1664,14 @@ impl TransactionOverlay {
         history: bool,
         order: IndexOrder,
         observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
     ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
-        let base =
-            TransactionOverlayBaseCursor::Scan(self.base.basis_scan_cursor(history, order, None)?);
+        let base = TransactionOverlayBaseCursor::Scan(self.base.basis_scan_cursor(
+            history,
+            order,
+            None,
+            physical_context.clone(),
+        )?);
         let removals: Arc<[Datom]> = if history {
             Arc::from([])
         } else {
@@ -1482,6 +1698,7 @@ impl TransactionOverlay {
                         value: None,
                     },
                     None,
+                    physical_context.clone(),
                 )? {
                     let datom = datom?;
                     if let Some(observer) = &observer {
@@ -1538,6 +1755,7 @@ impl TransactionOverlay {
         history: bool,
         prefix: &IndexPrefix,
         observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
     ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
         let source_prefix = self.source_prefix(prefix);
         let removals: Arc<[Datom]> = if history {
@@ -1562,12 +1780,15 @@ impl TransactionOverlay {
                 history,
                 &source_prefix,
                 None,
+                physical_context.clone(),
             )?)
         } else {
-            for datom in self
-                .base
-                .basis_prefix_cursor(history, &source_prefix, None)?
-            {
+            for datom in self.base.basis_prefix_cursor(
+                history,
+                &source_prefix,
+                None,
+                physical_context.clone(),
+            )? {
                 let datom = datom?;
                 if let Some(observer) = &observer {
                     observer.charge_datom(&datom)?;
@@ -1622,42 +1843,6 @@ impl TransactionOverlay {
             delta_next: None,
             failed: false,
         })
-    }
-
-    fn prefix(&self, history: bool, prefix: &IndexPrefix) -> Result<Vec<Datom>, SemanticError> {
-        let source_prefix = self.source_prefix(prefix);
-        let mut datoms = self.base.basis_prefix(history, &source_prefix)?;
-        datoms.retain(|datom| {
-            overlay_index_member(&self.schema, datom, prefix.order())
-                && compare_prefix(datom, prefix).is_eq()
-        });
-
-        let delta = self.tx_data.iter().filter(|datom| {
-            overlay_index_member(&self.schema, datom, prefix.order())
-                && compare_prefix(datom, prefix).is_eq()
-        });
-        if history {
-            datoms.extend(delta.cloned());
-        } else {
-            for datom in delta {
-                if datom.added {
-                    // Repeated schema-hook assertions are transaction events
-                    // even when the same stored E/A/V is already current.
-                    // History retains both, while the proposed current value
-                    // exposes the newest hook transaction coordinate.
-                    if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
-                        datoms.retain(|current| !same_stored_eav(current, datom));
-                        datoms.push(datom.clone());
-                    } else if !datoms.iter().any(|current| same_stored_eav(current, datom)) {
-                        datoms.push(datom.clone());
-                    }
-                } else {
-                    datoms.retain(|current| !same_stored_eav(current, datom));
-                }
-            }
-        }
-        datoms.sort_by(|left, right| left.cmp_in(right, prefix.order()));
-        Ok(datoms)
     }
 
     fn source_prefix(&self, prefix: &IndexPrefix) -> IndexPrefix {
@@ -2173,11 +2358,18 @@ mod tests {
         assert_eq!(partial_work.memo_rejections, 1);
         assert_eq!(partial_work.prefix_misses, 1);
 
-        let complete = value
-            .current_prefix_cursor(&prefix)
-            .unwrap()
+        let mut complete_cursor = value.current_prefix_cursor(&prefix).unwrap();
+        let complete = complete_cursor
+            .by_ref()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        assert!(
+            complete_cursor
+                .memo_source
+                .as_ref()
+                .is_some_and(|source| source.completed && source.key.is_none()),
+            "successful admission must move the owned key into the memo"
+        );
         assert_eq!(complete.len(), 1);
         let admitted = context.snapshot().unwrap();
         assert_eq!(admitted.memo_admissions, 1);
@@ -2240,6 +2432,35 @@ mod tests {
         assert_eq!(work.memo_admissions, 2);
         assert_eq!(work.memo_rejections, 1);
         assert_eq!(work.memo_peak_entries, 2);
+        assert_eq!(
+            work.memo_peak_retained_bytes,
+            2 * std::mem::size_of::<PrefixMemoKey>() as u64
+        );
+    }
+
+    #[test]
+    fn oversized_empty_prefix_key_is_not_retained_by_the_memo() {
+        let context = Arc::new(TransactionReadContext::new(8, 1_024));
+        let value = Database::bootstrap()
+            .unwrap()
+            .database_value()
+            .with_transaction_read_context(Arc::clone(&context));
+        let prefix = IndexPrefix::Eavt {
+            entity: 10_000,
+            attribute: Some(DB_IDENT as u32),
+            value: Some(Value::String("x".repeat(4_096))),
+        };
+
+        for _ in 0..2 {
+            assert!(value.datoms_with_prefix(&prefix).unwrap().is_empty());
+        }
+
+        let work = context.snapshot().unwrap();
+        assert_eq!(work.prefix_misses, 2);
+        assert_eq!(work.prefix_hits, 0);
+        assert_eq!(work.memo_admissions, 0);
+        assert_eq!(work.memo_rejections, 2);
+        assert_eq!(work.memo_peak_entries, 0);
         assert_eq!(work.memo_peak_retained_bytes, 0);
     }
 

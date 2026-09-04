@@ -218,6 +218,7 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
                 )
             })?;
         let payload: Vec<u8> = row.get(0);
+        self.work.read_sql_node(payload.len());
         let node = StoredNode::decode(&payload)?;
         let left = optional_digest(row.get(1), "semantic commitment left child")?;
         let right = optional_digest(row.get(2), "semantic commitment right child")?;
@@ -364,7 +365,8 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
         let left_bytes = node.left.map(|value| value.to_vec());
         let right_bytes = node.right.map(|value| value.to_vec());
         let count_sql = to_sql_u64(node.count, "semantic commitment subtree count")?;
-        self.client
+        let inserted = self
+            .client
             .execute(
                 "INSERT INTO atomic_semantic_commitment_nodes \
                      (node_hash, payload, left_hash, right_hash, subtree_count) \
@@ -372,6 +374,9 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
                 &[&&hash[..], &payload, &left_bytes, &right_bytes, &count_sql],
             )
             .map_err(|error| pg_error("persistent-commitment/node-insert", error))?;
+        if inserted == 1 {
+            self.work.write_sql_node(payload.len());
+        }
         let stored = self
             .client
             .query_one(
@@ -380,7 +385,9 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
                 &[&&hash[..]],
             )
             .map_err(|error| pg_error("persistent-commitment/node-verify", error))?;
-        if stored.get::<_, Vec<u8>>(0) != payload
+        let stored_payload: Vec<u8> = stored.get(0);
+        self.work.read_sql_node(stored_payload.len());
+        if stored_payload != payload
             || optional_digest(stored.get(1), "semantic commitment left child")? != node.left
             || optional_digest(stored.get(2), "semantic commitment right child")? != node.right
             || from_sql_u64(stored.get(3), "semantic commitment subtree count")? != node.count
@@ -655,9 +662,12 @@ pub(crate) fn exact_semantic_changes(
 pub(crate) fn record_persistent_coordinate<C: GenericClient>(
     client: &mut C,
     coordinate: &PersistentCommitmentCoordinate,
-) -> Result<(), SemanticError> {
-    let mut store = NodeStore::new(client);
-    store.verify_root(coordinate.root)?;
+) -> Result<CommitmentWork, SemanticError> {
+    let mut work = {
+        let mut store = NodeStore::new(client);
+        store.verify_root(coordinate.root)?;
+        store.work
+    };
     if coordinate
         .root
         .state_hash(coordinate.basis_t, coordinate.eidx_frontier)
@@ -676,7 +686,7 @@ pub(crate) fn record_persistent_coordinate<C: GenericClient>(
     )?;
     let count = to_sql_u64(coordinate.root.count, "semantic commitment member count")?;
     let root = coordinate.root.root.map(|hash| hash.to_vec());
-    client
+    let inserted = client
         .execute(
             "INSERT INTO atomic_semantic_commitment_roots \
                  (database_id, generation, basis_t, tx_hash, state_hash, eidx_frontier, \
@@ -695,13 +705,17 @@ pub(crate) fn record_persistent_coordinate<C: GenericClient>(
             ],
         )
         .map_err(|error| pg_error("persistent-commitment/root-insert", error))?;
-    let stored = load_persistent_coordinate(
+    if inserted == 1 {
+        work.write_sql_coordinate(coordinate_write_payload_bytes(coordinate));
+    }
+    let (stored, verification_work) = load_persistent_coordinate_with_work(
         client,
         &coordinate.database_id,
         coordinate.generation,
         coordinate.basis_t,
-    )?
-    .ok_or_else(|| {
+    )?;
+    work.absorb(verification_work);
+    let stored = stored.ok_or_else(|| {
         corrupt(
             "persistent-commitment/root-missing",
             "inserted semantic commitment coordinate is missing",
@@ -713,7 +727,7 @@ pub(crate) fn record_persistent_coordinate<C: GenericClient>(
             "semantic commitment coordinate already names different content",
         ));
     }
-    Ok(())
+    Ok(work)
 }
 
 /// Seed one endpoint already materialized by a broad administrative workflow.
@@ -757,6 +771,16 @@ pub(crate) fn load_persistent_coordinate<C: GenericClient>(
     generation: u64,
     basis_t: u64,
 ) -> Result<Option<PersistentCommitmentCoordinate>, SemanticError> {
+    load_persistent_coordinate_with_work(client, database_id, generation, basis_t)
+        .map(|(coordinate, _)| coordinate)
+}
+
+fn load_persistent_coordinate_with_work<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    basis_t: u64,
+) -> Result<(Option<PersistentCommitmentCoordinate>, CommitmentWork), SemanticError> {
     let generation_sql = to_sql_u64(generation, "semantic commitment generation")?;
     let basis_sql = to_sql_u64(basis_t, "semantic commitment basis")?;
     let Some(row) = client
@@ -769,7 +793,7 @@ pub(crate) fn load_persistent_coordinate<C: GenericClient>(
         )
         .map_err(|error| pg_error("persistent-commitment/root-read", error))?
     else {
-        return Ok(None);
+        return Ok((None, CommitmentWork::default()));
     };
     let version: i16 = row.get(3);
     if version != i16::try_from(SEMANTIC_STATE_VERSION).expect("v2 fits i16") {
@@ -792,6 +816,9 @@ pub(crate) fn load_persistent_coordinate<C: GenericClient>(
         root,
     };
     let mut store = NodeStore::new(client);
+    store
+        .work
+        .read_sql_coordinate(coordinate_read_payload_bytes(&coordinate));
     store.verify_root(root)?;
     if root.state_hash(basis_t, coordinate.eidx_frontier) != coordinate.state_hash {
         return Err(corrupt(
@@ -799,7 +826,33 @@ pub(crate) fn load_persistent_coordinate<C: GenericClient>(
             "stored semantic root does not reproduce its state digest",
         ));
     }
-    Ok(Some(coordinate))
+    Ok((Some(coordinate), store.work))
+}
+
+fn coordinate_read_payload_bytes(coordinate: &PersistentCommitmentCoordinate) -> u64 {
+    // Exact semantic field payload selected from PostgreSQL, excluding tuple
+    // and wire-protocol overhead. The WHERE-key fields are inputs rather than
+    // returned bytes, and a NULL root contributes no field payload.
+    32_u64 // transaction hash
+        .saturating_add(32) // state hash
+        .saturating_add(8) // entity frontier
+        .saturating_add(2) // SMALLINT commitment version
+        .saturating_add(if coordinate.root.root.is_some() {
+            32
+        } else {
+            0
+        })
+        .saturating_add(8) // member count
+}
+
+fn coordinate_write_payload_bytes(coordinate: &PersistentCommitmentCoordinate) -> u64 {
+    // All field payload inserted into the coordinate row. As above this is a
+    // stable SQL-column payload account, not PostgreSQL tuple/page overhead.
+    u64::try_from(coordinate.database_id.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(8) // generation
+        .saturating_add(8) // basis
+        .saturating_add(coordinate_read_payload_bytes(coordinate))
 }
 
 /// Offline migration/repair for every generation that can still receive
@@ -1009,6 +1062,31 @@ mod codec_tests {
             StoredNode::decode(&trailing).unwrap_err().code,
             "persistent-commitment/node-codec"
         );
+    }
+
+    #[test]
+    fn coordinate_io_weights_match_selected_and_inserted_columns() {
+        let coordinate = PersistentCommitmentCoordinate {
+            database_id: "coordinate-weight".into(),
+            generation: 7,
+            basis_t: 11,
+            tx_hash: [1; 32],
+            state_hash: [2; 32],
+            eidx_frontier: 13,
+            root: PersistentSemanticRoot {
+                root: Some([3; 32]),
+                count: 17,
+            },
+        };
+        assert_eq!(coordinate_read_payload_bytes(&coordinate), 114);
+        assert_eq!(
+            coordinate_write_payload_bytes(&coordinate),
+            coordinate_read_payload_bytes(&coordinate) + coordinate.database_id.len() as u64 + 16
+        );
+
+        let mut empty = coordinate;
+        empty.root.root = None;
+        assert_eq!(coordinate_read_payload_bytes(&empty), 82);
     }
 
     fn connection() -> Option<String> {
@@ -1281,6 +1359,12 @@ mod codec_tests {
         let members_before = root.count();
         let (next, work) = advance_persistent_commitment(&mut client, root, &changes).unwrap();
         assert_eq!(work.leaf_changes, changes.len() as u64);
+        assert!(work.sql_node_reads > 0);
+        assert!(work.sql_node_read_bytes > 0);
+        assert!(work.sql_node_writes > 0);
+        assert!(work.sql_node_write_bytes > 0);
+        assert_eq!(work.sql_coordinate_reads, 0);
+        assert_eq!(work.sql_coordinate_writes, 0);
         assert!(
             work.node_visits < members_before,
             "a three-datom update inspected {} of {members_before} members",
@@ -1453,10 +1537,20 @@ mod codec_tests {
                 .unwrap();
             let generation = u64::try_from(head.get::<_, i64>(0)).unwrap();
             let basis = u64::try_from(head.get::<_, i64>(1)).unwrap();
-            let coordinate =
-                load_persistent_coordinate(&mut client, database_id, generation, basis)
-                    .unwrap()
-                    .expect("created head requires its semantic coordinate");
+            let (coordinate, work) =
+                load_persistent_coordinate_with_work(&mut client, database_id, generation, basis)
+                    .unwrap();
+            let coordinate = coordinate.expect("created head requires its semantic coordinate");
+            assert_eq!(work.sql_coordinate_reads, 1);
+            assert_eq!(
+                work.sql_coordinate_read_bytes,
+                coordinate_read_payload_bytes(&coordinate)
+            );
+            assert_eq!(work.sql_coordinate_writes, 0);
+            if coordinate.root.count() > 0 {
+                assert!(work.sql_node_reads > 0);
+                assert!(work.sql_node_read_bytes > 0);
+            }
             assert_eq!(
                 coordinate.root.metadata(),
                 checkpoint_root_metadata(expected)

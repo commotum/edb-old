@@ -81,6 +81,27 @@ pub(crate) struct CommitmentWork {
     pub(crate) node_hashes: u64,
     /// Set members actually inserted or removed.
     pub(crate) leaf_changes: u64,
+    /// Durable commitment-node rows returned by PostgreSQL. A node fetched
+    /// once and then served from the transaction-local cache is counted once.
+    pub(crate) sql_node_reads: u64,
+    /// Canonical node payload bytes returned by those reads. PostgreSQL tuple
+    /// and wire-protocol overhead is deliberately outside this stable metric.
+    pub(crate) sql_node_read_bytes: u64,
+    /// Newly inserted immutable commitment-node rows. Conflict/no-op inserts
+    /// are not writes, although their mandatory verification reads are.
+    pub(crate) sql_node_writes: u64,
+    /// Canonical node payload bytes inserted by those writes.
+    pub(crate) sql_node_write_bytes: u64,
+    /// Semantic-coordinate rows returned while publishing/verifying a root.
+    pub(crate) sql_coordinate_reads: u64,
+    /// Semantic SQL-column payload bytes returned by those reads; WHERE-key,
+    /// tuple, page, and wire overhead are excluded.
+    pub(crate) sql_coordinate_read_bytes: u64,
+    /// Newly inserted semantic-coordinate rows.
+    pub(crate) sql_coordinate_writes: u64,
+    /// Semantic SQL-column payload bytes inserted by those writes; tuple,
+    /// page, and wire overhead are excluded.
+    pub(crate) sql_coordinate_write_bytes: u64,
 }
 
 impl CommitmentWork {
@@ -94,6 +115,59 @@ impl CommitmentWork {
 
     pub(crate) fn change_leaf(&mut self) {
         self.leaf_changes = self.leaf_changes.saturating_add(1);
+    }
+
+    pub(crate) fn read_sql_node(&mut self, payload_bytes: usize) {
+        self.sql_node_reads = self.sql_node_reads.saturating_add(1);
+        self.sql_node_read_bytes = self
+            .sql_node_read_bytes
+            .saturating_add(u64::try_from(payload_bytes).unwrap_or(u64::MAX));
+    }
+
+    pub(crate) fn write_sql_node(&mut self, payload_bytes: usize) {
+        self.sql_node_writes = self.sql_node_writes.saturating_add(1);
+        self.sql_node_write_bytes = self
+            .sql_node_write_bytes
+            .saturating_add(u64::try_from(payload_bytes).unwrap_or(u64::MAX));
+    }
+
+    pub(crate) fn read_sql_coordinate(&mut self, payload_bytes: u64) {
+        self.sql_coordinate_reads = self.sql_coordinate_reads.saturating_add(1);
+        self.sql_coordinate_read_bytes =
+            self.sql_coordinate_read_bytes.saturating_add(payload_bytes);
+    }
+
+    pub(crate) fn write_sql_coordinate(&mut self, payload_bytes: u64) {
+        self.sql_coordinate_writes = self.sql_coordinate_writes.saturating_add(1);
+        self.sql_coordinate_write_bytes = self
+            .sql_coordinate_write_bytes
+            .saturating_add(payload_bytes);
+    }
+
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.node_visits = self.node_visits.saturating_add(other.node_visits);
+        self.node_hashes = self.node_hashes.saturating_add(other.node_hashes);
+        self.leaf_changes = self.leaf_changes.saturating_add(other.leaf_changes);
+        self.sql_node_reads = self.sql_node_reads.saturating_add(other.sql_node_reads);
+        self.sql_node_read_bytes = self
+            .sql_node_read_bytes
+            .saturating_add(other.sql_node_read_bytes);
+        self.sql_node_writes = self.sql_node_writes.saturating_add(other.sql_node_writes);
+        self.sql_node_write_bytes = self
+            .sql_node_write_bytes
+            .saturating_add(other.sql_node_write_bytes);
+        self.sql_coordinate_reads = self
+            .sql_coordinate_reads
+            .saturating_add(other.sql_coordinate_reads);
+        self.sql_coordinate_read_bytes = self
+            .sql_coordinate_read_bytes
+            .saturating_add(other.sql_coordinate_read_bytes);
+        self.sql_coordinate_writes = self
+            .sql_coordinate_writes
+            .saturating_add(other.sql_coordinate_writes);
+        self.sql_coordinate_write_bytes = self
+            .sql_coordinate_write_bytes
+            .saturating_add(other.sql_coordinate_write_bytes);
     }
 }
 

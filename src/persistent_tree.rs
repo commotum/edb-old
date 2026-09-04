@@ -1529,9 +1529,15 @@ impl TreeNode {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TreeReadStats {
+    /// Immutable node lookups satisfied by the process-local cache.
+    pub cache_hits: u64,
+    /// Immutable node lookups requiring a PostgreSQL fetch.
+    pub cache_misses: u64,
     pub root_reads: u64,
     pub directory_reads: u64,
     pub leaf_reads: u64,
+    /// Canonical node payload bytes fetched from PostgreSQL. Cache hits add no
+    /// bytes even though they still perform logical index work.
     pub decoded_bytes: u64,
 }
 

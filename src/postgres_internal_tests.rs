@@ -282,11 +282,20 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
         )
         .unwrap();
     let entity = seeded.tempids["item"];
+    // Commitment nodes are globally content-addressed, so make this leaf
+    // unique per run; otherwise a correct idempotent INSERT can report zero
+    // physical writes after an earlier test produced the same semantic node.
+    let update_count = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % (i64::MAX as u128)) as i64
+        + 1;
     let update = vec![
         TxOp::Add {
             entity: EntityRef::Id(entity),
             attribute: ITEM_COUNT,
-            value: Value::Long(2).into(),
+            value: Value::Long(update_count).into(),
         },
         TxOp::Ensure {
             entity: EntityRef::Id(entity),
@@ -363,6 +372,23 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
             < committed_stats.last_transaction_read_datoms,
         "memo replays remain logical reads but cannot repeat source deliveries"
     );
+    assert!(committed_stats.last_native_cursor_ranges > 0);
+    assert!(
+        committed_stats.last_native_cursor_ranges
+            >= committed_stats.last_transaction_prefix_memo_misses
+    );
+    assert_eq!(
+        committed_stats.last_native_cache_misses,
+        committed_stats.last_native_sql_reads
+    );
+    assert!(committed_stats.last_native_recent_datoms_examined > 0);
+    assert!(committed_stats.last_native_recent_datoms_yielded > 0);
+    assert!(committed_stats.last_commitment_sql_node_reads > 0);
+    assert!(committed_stats.last_commitment_sql_node_read_bytes > 0);
+    assert!(committed_stats.last_commitment_sql_node_writes > 0);
+    assert!(committed_stats.last_commitment_sql_node_write_bytes > 0);
+    assert_eq!(committed_stats.last_commitment_sql_coordinate_reads, 1);
+    assert_eq!(committed_stats.last_commitment_sql_coordinate_writes, 1);
     assert!(committed.db_before.transaction_read_context().is_none());
     assert!(committed.database.transaction_read_context().is_none());
 

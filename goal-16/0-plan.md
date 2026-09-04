@@ -115,7 +115,14 @@ passed (one subprocess helper ignored) and warning-denying all-target Clippy.
 
 ### 2. Lazy transaction assessment with eager-oracle equivalence
 
-**Status:** Pending.
+**Status:** In progress. The exact prefix-driven assessor and bounded
+transaction overlay are implemented in `bc4bcd1`/`ed0dc5d`; focused eager
+oracle fixtures cover ordinary updates/upserts, CAS/conflict rejection,
+recursive retract-entity, schema install/alter, all four indexes, ident alias
+repurposing, stored numeric identity, and AVET enable/disable. Persisted
+program execution now accepts the same exact value (`5239920`). Production
+wiring and a generated native-PostgreSQL differential remain open, so this is
+not yet the completion signal.
 
 **Outcome:** Transaction expansion and complete successor validation operate
 over exact lazy ranges plus a bounded overlay representing db-after.
@@ -133,7 +140,12 @@ persisted behavior, without whole-index reads.
 
 ### 3. Durable incremental semantic commitment and publication
 
-**Status:** Pending.
+**Status:** In progress. Migration 15 and a PostgreSQL-resident version-2
+semantic treap are under focused verification. Integration must remove the
+old asserted datom named by each retraction (the commitment key includes the
+original transaction coordinate), publish its successor coordinate in the
+same SQL transaction as the log/head CAS, and prove rollback, corruption, and
+bounded path work before this stage can close.
 
 **Outcome:** The writer derives the authoritative successor commitment and
 durable transaction from changed facts/ranges without retaining the eager
@@ -152,7 +164,13 @@ or missing-node cases.
 
 ### 4. Bounded tiered writer state and handoff
 
-**Status:** Pending.
+**Status:** Pending. A concrete restart defect is now reproduced against the
+unchanged Goal 15 baseline: `PostgresIndexer` publishes native
+`atomic_tree_manifests`, while `recover_transactor_state` considers only
+legacy `atomic_index_manifests`. Consequently failover after native
+consolidation falls back to genesis replay (`RecoveryStats.base_t == 0`). The
+repair must activate the same authenticated native root-plus-tail value used
+by peers and must not route through the eager compatibility cell.
 
 **Outcome:** One writer database value owns resident schema/idents, a bounded
 recent tier, indexing handoff state, lazy durable roots/cache, log endpoint,

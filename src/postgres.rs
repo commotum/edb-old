@@ -2180,6 +2180,15 @@ pub struct WriterResidencyStats {
     pub recent_accounted_bytes: u64,
     pub tree_cache_entries: usize,
     pub tree_cache_bytes: usize,
+    /// Resident authenticated schema/ident projections. These are expected to
+    /// scale with metadata cardinality, so their size is explicit rather than
+    /// hidden inside the database-size-independent writer claim.
+    pub resident_schema_attributes: usize,
+    pub resident_schema_information_datoms: usize,
+    pub resident_schema_estimated_bytes: u64,
+    pub resident_ident_names: usize,
+    pub resident_ident_entities: usize,
+    pub resident_ident_estimated_bytes: u64,
     pub native_manifest_candidates: u64,
     pub native_root_reads: u64,
     pub native_directory_reads: u64,
@@ -2202,9 +2211,30 @@ pub struct WriterResidencyStats {
     pub last_transaction_prefix_memo_rejections: u64,
     pub last_transaction_prefix_memo_peak_entries: usize,
     pub last_transaction_prefix_memo_peak_bytes: u64,
+    /// Exact native cursor source work during the last committed operation.
+    /// SQL counts are successful immutable-node rows, and byte counts are
+    /// canonical node payloads rather than PostgreSQL/wire overhead.
+    pub last_native_cursor_ranges: u64,
+    pub last_native_cache_hits: u64,
+    pub last_native_cache_misses: u64,
+    pub last_native_sql_root_reads: u64,
+    pub last_native_sql_directory_reads: u64,
+    pub last_native_sql_leaf_reads: u64,
+    pub last_native_sql_reads: u64,
+    pub last_native_sql_read_bytes: u64,
+    pub last_native_recent_datoms_examined: u64,
+    pub last_native_recent_datoms_yielded: u64,
     pub last_commitment_node_visits: u64,
     pub last_commitment_node_hashes: u64,
     pub last_commitment_leaf_changes: u64,
+    pub last_commitment_sql_node_reads: u64,
+    pub last_commitment_sql_node_read_bytes: u64,
+    pub last_commitment_sql_node_writes: u64,
+    pub last_commitment_sql_node_write_bytes: u64,
+    pub last_commitment_sql_coordinate_reads: u64,
+    pub last_commitment_sql_coordinate_read_bytes: u64,
+    pub last_commitment_sql_coordinate_writes: u64,
+    pub last_commitment_sql_coordinate_write_bytes: u64,
 }
 
 impl Default for CapacityLimits {
@@ -2353,6 +2383,7 @@ impl PostgresStore {
         let recent = state.database.recent_stats();
         let cache = state.database.tree_cache_stats();
         let load = state.database.load_stats();
+        let metadata = state.database.resident_metadata_stats();
         WriterResidencyStats {
             eager_database_values: 0,
             eager_current_facts: 0,
@@ -2361,6 +2392,12 @@ impl PostgresStore {
             recent_accounted_bytes: recent.accounted_bytes,
             tree_cache_entries: cache.current_entries,
             tree_cache_bytes: cache.current_bytes,
+            resident_schema_attributes: metadata.schema_attributes,
+            resident_schema_information_datoms: metadata.schema_information_datoms,
+            resident_schema_estimated_bytes: metadata.schema_estimated_bytes,
+            resident_ident_names: metadata.ident_names,
+            resident_ident_entities: metadata.ident_entities,
+            resident_ident_estimated_bytes: metadata.ident_estimated_bytes,
             native_manifest_candidates: load.manifest_candidates,
             native_root_reads: load.root_reads,
             native_directory_reads: load.directory_reads,
@@ -2376,9 +2413,31 @@ impl PostgresStore {
             last_transaction_prefix_memo_rejections: state.last_read_work.memo_rejections,
             last_transaction_prefix_memo_peak_entries: state.last_read_work.memo_peak_entries,
             last_transaction_prefix_memo_peak_bytes: state.last_read_work.memo_peak_retained_bytes,
+            last_native_cursor_ranges: state.last_read_work.native_cursor_ranges,
+            last_native_cache_hits: state.last_read_work.native_cache_hits,
+            last_native_cache_misses: state.last_read_work.native_cache_misses,
+            last_native_sql_root_reads: state.last_read_work.native_sql_root_reads,
+            last_native_sql_directory_reads: state.last_read_work.native_sql_directory_reads,
+            last_native_sql_leaf_reads: state.last_read_work.native_sql_leaf_reads,
+            last_native_sql_reads: state.last_read_work.native_sql_reads,
+            last_native_sql_read_bytes: state.last_read_work.native_sql_read_bytes,
+            last_native_recent_datoms_examined: state.last_read_work.native_recent_datoms_examined,
+            last_native_recent_datoms_yielded: state.last_read_work.native_recent_datoms_yielded,
             last_commitment_node_visits: state.last_commitment_work.node_visits,
             last_commitment_node_hashes: state.last_commitment_work.node_hashes,
             last_commitment_leaf_changes: state.last_commitment_work.leaf_changes,
+            last_commitment_sql_node_reads: state.last_commitment_work.sql_node_reads,
+            last_commitment_sql_node_read_bytes: state.last_commitment_work.sql_node_read_bytes,
+            last_commitment_sql_node_writes: state.last_commitment_work.sql_node_writes,
+            last_commitment_sql_node_write_bytes: state.last_commitment_work.sql_node_write_bytes,
+            last_commitment_sql_coordinate_reads: state.last_commitment_work.sql_coordinate_reads,
+            last_commitment_sql_coordinate_read_bytes: state
+                .last_commitment_work
+                .sql_coordinate_read_bytes,
+            last_commitment_sql_coordinate_writes: state.last_commitment_work.sql_coordinate_writes,
+            last_commitment_sql_coordinate_write_bytes: state
+                .last_commitment_work
+                .sql_coordinate_write_bytes,
         }
     }
 
@@ -3557,7 +3616,7 @@ impl PostgresStore {
         };
         assessed.validate_exact(functions)?;
         let semantic_changes = exact_semantic_changes(&assessed.db_before, &assessed.tx_data)?;
-        let (next_root, commitment_work) = advance_persistent_commitment(
+        let (next_root, mut commitment_work) = advance_persistent_commitment(
             &mut transaction,
             head_commitment.root,
             &semantic_changes,
@@ -3607,7 +3666,7 @@ impl PostgresStore {
             state_hash,
             envelope.clone(),
             &assessed.successor_schema,
-            read_context.observer().as_ref(),
+            read_context.as_ref(),
         )?;
         if successor.endpoint()
             != (ExactEndpoint {
@@ -3791,7 +3850,8 @@ impl PostgresStore {
                 &envelope.tx_data,
             )?;
         }
-        record_persistent_coordinate(&mut transaction, &next_commitment)?;
+        let coordinate_work = record_persistent_coordinate(&mut transaction, &next_commitment)?;
+        commitment_work.absorb(coordinate_work);
         let updated = transaction
             .execute(
                 "UPDATE atomic_heads SET basis_t = $1, tx_hash = $2 \

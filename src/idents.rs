@@ -1,6 +1,7 @@
 use crate::{Datom, ErrorCategory, Keyword, SemanticError, Value};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::mem::size_of;
 
 /// Discardable bidirectional index derived from ordinary `:db/ident`
 /// assertions.
@@ -82,6 +83,45 @@ impl IdentIndex {
 
     pub(crate) fn aliases(&self) -> impl Iterator<Item = (&Keyword, u64)> {
         self.by_ident.iter().map(|(ident, entity)| (ident, *entity))
+    }
+
+    pub(crate) fn name_count(&self) -> usize {
+        self.by_ident.len()
+    }
+
+    pub(crate) fn entity_count(&self) -> usize {
+        self.by_entity.len()
+    }
+
+    /// Allocator-independent account of retained map keys/values and owned
+    /// keyword buffers. B-tree node headers and allocator metadata are
+    /// intentionally excluded, so callers label this an estimate rather than
+    /// process RSS.
+    pub(crate) fn estimated_retained_bytes(&self) -> u64 {
+        fn keyword_bytes(keyword: &Keyword) -> u64 {
+            (size_of::<Keyword>() as u64)
+                .saturating_add(
+                    keyword
+                        .namespace
+                        .as_ref()
+                        .map_or(0, |namespace| namespace.capacity() as u64),
+                )
+                .saturating_add(keyword.name.capacity() as u64)
+        }
+
+        let by_ident = self.by_ident.keys().fold(0_u64, |bytes, ident| {
+            bytes
+                .saturating_add(keyword_bytes(ident))
+                .saturating_add(size_of::<u64>() as u64)
+        });
+        let by_entity = self.by_entity.values().fold(0_u64, |bytes, ident| {
+            bytes
+                .saturating_add(size_of::<u64>() as u64)
+                .saturating_add(keyword_bytes(ident))
+        });
+        (size_of::<Self>() as u64)
+            .saturating_add(by_ident)
+            .saturating_add(by_entity)
     }
 
     pub(crate) fn cmp_observation(&self, other: &Self) -> Ordering {

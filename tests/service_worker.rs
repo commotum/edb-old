@@ -262,6 +262,17 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
     assert_eq!(reports.pending_reports(), REPORTS as usize);
     assert_eq!(retained.queued_reports, REPORTS as usize);
     assert_eq!(retained.max_queued_reports, REPORTS as usize);
+    assert!(retained.queued_report_payload_bytes > 0);
+    assert_eq!(
+        retained.max_queued_report_payload_bytes,
+        retained.queued_report_payload_bytes
+    );
+    assert_eq!(
+        retained.oldest_queued_report_basis_t,
+        Some(initial_basis + 1)
+    );
+    assert_eq!(retained.distinct_pinned_roots, 1);
+    assert_eq!(retained.distinct_pinned_generations, 1);
 
     for ordinal in 0..REPORTS {
         assert_eq!(
@@ -274,8 +285,14 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
     }
     assert!(reports.try_recv().is_err());
     assert_eq!(reports.pending_reports(), 0);
-    assert_eq!(client.stats().queued_reports, 0);
-    assert_eq!(client.stats().max_queued_reports, REPORTS as usize);
+    let drained = client.stats();
+    assert_eq!(drained.queued_reports, 0);
+    assert_eq!(drained.max_queued_reports, REPORTS as usize);
+    assert_eq!(drained.queued_report_payload_bytes, 0);
+    assert!(drained.max_queued_report_payload_bytes > 0);
+    assert_eq!(drained.oldest_queued_report_basis_t, None);
+    assert_eq!(drained.distinct_pinned_roots, 0);
+    assert_eq!(drained.distinct_pinned_generations, 0);
 
     drop(reports);
     let abandoned = client.subscribe_reports();
@@ -286,9 +303,22 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
         )
         .unwrap();
     assert_eq!(abandoned.pending_reports(), 1);
-    assert_eq!(client.stats().queued_reports, 1);
+    let retained = client.stats();
+    assert_eq!(retained.queued_reports, 1);
+    assert!(retained.queued_report_payload_bytes > 0);
+    assert_eq!(
+        retained.oldest_queued_report_basis_t,
+        Some(initial_basis + REPORTS + 1)
+    );
+    assert_eq!(retained.distinct_pinned_roots, 1);
+    assert_eq!(retained.distinct_pinned_generations, 1);
     drop(abandoned);
-    assert_eq!(client.stats().queued_reports, 0);
+    let abandoned = client.stats();
+    assert_eq!(abandoned.queued_reports, 0);
+    assert_eq!(abandoned.queued_report_payload_bytes, 0);
+    assert_eq!(abandoned.oldest_queued_report_basis_t, None);
+    assert_eq!(abandoned.distinct_pinned_roots, 0);
+    assert_eq!(abandoned.distinct_pinned_generations, 0);
     service.shutdown();
 }
 

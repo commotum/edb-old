@@ -1,17 +1,59 @@
-# Goal 16 source map and transaction access contract
+# Goal 16 final architecture and source map
 
-This is a dependency map, not evidence that Goal 16 is complete. The current
-production transactor still retains and reconstructs eager `Database` values.
-The Stage 1 residency counter and long-history witness make that failure
-measurable; they do not repair it.
+Goal 16 replaced the production transactor's eager database cache with an
+immutable native root-plus-tail value. `Database` remains the pure semantic
+oracle and the explicit administrative reconstruction type; an ordinary
+service activation, transaction, retry, report, or failover neither retains
+nor reconstructs it. This document keeps the original dependency audit below
+because it explains why the replacement boundary is as broad as it is.
+
+## Implemented production shape
+
+| Boundary | Native Rust implementation | Recovered/default blueprint |
+|---|---|---|
+| Writer value | `postgres::WriterState` owns a `TieredSnapshot`, persistent semantic-commitment coordinate, physical publication revision, and last-operation work. The snapshot pins one authenticated native root, a persistent bounded recent tail, resident schema/idents, and a bounded node cache. | `Db` separates `memidx`, `indexing`, `mid-index`, durable `index`/`history`, `memlog`, metadata, and endpoint coordinates (`1.0.7705/peer/src-clj/datomic/db.clj:4719-4744`). |
+| Assessment | `tiered_assessor` normalizes and resolves against one exact `DatabaseValue`, memoizes repeated prefixes, groups identity/uniqueness/cardinality work with ordered maps/sorts, and reads only touched schema/entity/value ranges except documented broad schema operations. | `ProcessInpoint`, `get-ids`, `filter-assess-tx-datoms`, and keyed deduplication separate expansion from whole-information assessment (`db.clj:4118-4490,6525-6819,7051-7473`). |
+| Proposed value | A transaction-local immutable overlay merges the complete tx data with db-before for successor checks and entity predicates. It streams point-current and history reads and is discarded after publication. | Transaction functions run against db-before; `addData` forms the complete db-after before hooks/spec checks (`db.clj:4807-4965,7451-7925`; transaction-model docs). |
+| Metadata | Schema and ident projections are derived from ordinary datoms. Unchanged transactions share their `Arc`s; actual schema/ident changes derive one replacement projection. Repeated `:db.alter/attribute` events remain distinct history even when the hook value repeats. | `Db.acceptDataCheck` shares persistent values; recovered redundancy deliberately exempts attribute 19 (`db.clj:4748-4806,4854-4905`). |
+| State commitment | A versioned content-addressed semantic treap is read and path-copied in PostgreSQL. Retractions remove the original asserted coordinate; changed leaves and proofs, not the complete set, determine the successor root. | This digest is Atomic-specific, while immutable content-first/root-last publication follows the recovered persistent-index discipline. |
+| Durable publication | Transaction content, request outcome, commitment nodes/root, and head/epoch CAS share one PostgreSQL transaction. Installed writer state changes only after commit acknowledgement; ambiguity is resolved by durable request identity exactly once. | Datomic serializes transactions and publishes immutable content through a conditional root update; time has no order inside one transaction. |
+| Recovery/failover | Activation opens the newest usable authenticated native root and reduces only its exact log tail. Missing late roots or tails above the configured hard bound return `service/native-index-required`; explicit `PostgresIndexer::consolidate` performs repair. | Startup adopts a durable root and catches up from the log; indexing is a separate bounded activity (`transactor/src-clj/datomic/update.clj:2793-2857`; `log.clj:1406-1520`). |
+| Indexing pressure | Recent live bytes, frozen/publication backlog, and report-queue pressure are separately observable. Threshold crossing requests index work; hard pressure attempts index-first progress before rejecting new novelty. Existing authenticated tails remain readable after a configuration decrease. | `IndexerImpl` accounts per-database memory/indexing bytes and a process hard limit (`transactor/src-clj/datomic/indexer.clj:262-329`). |
+| Reports | Service reports hold exact immutable native db-before/db-after values, tx data, and tempids. They may pin roots/generations, and queue/pin pressure is observable rather than disguised as eager database residency. | Transaction reports intentionally contain immutable before/after values and an opt-in queue may grow if not drained (`datomic_pro_docs/04_transactions/03_processing_transactions.md:25-59`). |
+
+The logical read budget covers persisted-function expansion, normalization,
+assessment, successor validation and predicates, and commitment predecessor
+lookups. A shared immutable txInstant memo makes that coordinate one charged
+read across clones and wrappers. Cache hits and transaction-local prefix hits
+are reported distinctly; cache effectiveness never changes semantics.
+
+Physical AVET readiness is separate from logical schema. A new
+`:db/index`/`:db/unique` fact does not make old values magically present in an
+older AVET root. The writer uses a correct AEVT fallback while the affected
+root is not ready, and publication records when AVET becomes usable. This
+matches the recovered forced-indexing boundary (`db.clj:3382-3642`) without
+making a transient physical state part of database semantics.
+
+Full reconstruction remains deliberately confined to explicit broad work:
+initial root creation, migration/backfill, deep verification, excision, and
+backup/restore. In particular, if every derived request-base tree is corrupt,
+backup rebuilds the exact portable tree from the authenticated immutable log.
+That is not a writer fallback: the docs explicitly say backup memory is
+proportional to database size, while the introduction makes the log
+authoritative and index trees replaceable
+(`datomic_pro_docs/08_operations/01_capacity_and_reliability/02_backup_and_restore.md:18-31`;
+`00_start_here/00_introduction.md:79-109`).
 
 ## Semantic constraints
 
 - A database is an immutable value and a transaction is a declarative,
   unordered, atomic function from db-before to db-after
   (`datomic_pro_docs/04_transactions/01_transaction_model.md:13-48`).
-- Transaction functions see db-before; entity predicates see the complete
-  db-after. Neither may observe an intermediate transaction state
+- Transaction functions see db-before; attribute predicates receive the
+  asserted value under the predicate definition installed in db-before; entity
+  predicates see the complete db-after while their spec definition is selected
+  from db-before. Newly installed predicate/spec definitions take effect on a
+  later transaction. None may observe an intermediate transaction state
   (`04_transactions/01_transaction_model.md:44-48`,
   `04_transactions/05_acid.md:31-35`).
 - A database and its indexes may exceed memory. Durable immutable tree
@@ -31,7 +73,11 @@ measurable; they do not repair it.
   (`06_indexes/02_background_indexing.md:27-36`, recovered
   `db.clj:3457-3606`).
 
-## Where eager `Database` exists in production
+## Pre-repair eager dependency audit
+
+The following table records the state found at the start of Goal 16. Its
+“current Rust behavior” column is historical; the final disposition is the
+implemented shape above.
 
 | Boundary | Current Rust behavior | Consequence | 1.0.7705/default correction |
 |---|---|---|---|
@@ -79,7 +125,7 @@ and predicates.
 | Redundancy | Exact current membership of each proposed E/A/V | `database.rs:3043-3068` | Compare base plus transaction-local logical delta. |
 | Cardinality / uniqueness | Touched `(e,a)` successor values; touched unique `(a,v)` owners | `database.rs:2830-2867` currently scans all successor facts | A previously valid base permits delta-local validation. Adding/changing a constraint remains the broad attribute-range exception below. |
 | Schema alteration | All current facts for the altered attribute when enabling cardinality-one or uniqueness/AVET over extant data | `database.rs:1032-1160` | Use bounded-stream AEVT/AVET attribute ranges. Enabling AVET with extant values must trigger/await a covering publication or use a correct AEVT fallback. |
-| Attribute predicates | Arbitrary exact reads from db-before | `postgres.rs:3808-3843`; `program.rs:999-1125` | Persisted runtime uses the same range interface; opaque programs justify prefetch hints/budgets, not semantic restriction. |
+| Attribute predicates | Asserted value plus the predicate binding installed in db-before | Docs schema reference `:db.attr/preds`; recovered `db.clj:7794-7854`; `postgres.rs:3808-3843` | Invoke the value predicate selected from db-before. Do not grant a database argument or let a predicate installed by this same transaction govern its assertions. |
 | Entity predicates | Arbitrary exact reads from the complete db-after | `database.rs:2976-3029`; `postgres.rs:3845-3873` | Overlay must expose current and history as base merged with the entire assessed transaction. |
 | Persisted tx functions | Arbitrary exact reads from db-before; nested emitted forms repeat normalization/expansion | `postgres.rs:1772-1870`; `program.rs:1131-1225` | One locked basis throughout recursion, with program work/recursion/output limits preserved. |
 | Commitment | For each changed current E/A/V, prior membership plus authenticated commitment path | `state_commitment.rs:210-277` | Verify proof, apply insert/delete path-copy, persist nodes, obtain successor root. No complete semantic treap. |
@@ -208,49 +254,46 @@ or ambiguous result cannot mutate the installed writer value.
    build is acceptable. Thereafter activation must use a covering root+tail or
    fail/repair explicitly; silently replaying genesis is a regression.
 
-## Stage-plan corrections and proof obligations
+## Completed proof obligations
 
-1. Add `src/program.rs`, `src/transaction.rs`, service report queues,
+1. Added `src/program.rs`, `src/transaction.rs`, service report queues,
    idempotent outcome reconstruction, and generation lifecycle paths to the
-   formal eager-dependency audit. Replacing only `PostgresStore.current` is
-   insufficient.
-2. Extract/generalize the exact persisted-program read path before or with the
-   assessor. Otherwise transaction functions and predicates force eager
-   materialization back in.
-3. Add a transaction read-planning/prefetch phase with coalesced ranges and
-   I/O stats. One PostgreSQL/tree lookup per datom is semantically correct but
-   violates the recovered performance design and transaction-hints evidence.
-4. Make schema constraint changes and AVET backfill explicit broad streamed
-   operations. Ordinary validation must be delta-local against a previously
-   valid base.
-5. Build the durable incremental commitment before switching production
-   assessment. A lazy fact overlay followed by full commitment
-   materialization is not a bounded writer.
-6. Factor `TreeBase`, metadata, cursors, cache, and pins beneath both peer and
-   writer. Do not make `PeerSnapshot` the writer state.
-7. Model indexing handoff explicitly: freeze recent, open a new active tier,
-   publish for the captured endpoint, adopt only an exact matching result, and
-   retain the newer tail. Unify service backlog metrics with actual writer
-   recent/indexing bytes.
-8. Change receipts/reports and idempotent replay to tiered values sharing
-   roots. Test slow subscribers and retained old reports, not only immediate
-   transaction responses.
-9. Test activation, reconnect, cache miss, retry outcome, standby takeover,
+   formal eager-dependency audit; the repair was not limited to the old writer
+   cache.
+2. Generalized the exact persisted-program read path before switching the
+   assessor, so functions and predicates do not force eager materialization.
+3. Added transaction-local coalescing/memoization with exact I/O stats.
+   Repeated semantic reads no longer repeat cursor/SQL work.
+4. Made schema constraint changes and AVET backfill explicit broad streamed
+   operations; ordinary validation is delta-local against a valid base.
+5. Built the durable incremental commitment before switching production
+   assessment; ordinary publication never materializes the complete set.
+6. Factored tree base, metadata, cursors, cache, and pins beneath both peer and
+   writer without putting live peer coordination in writer state.
+7. Made indexing handoff an exact endpoint publication: new transactions stay
+   in the newer tail, only the captured endpoint is adopted, and backlog
+   metrics follow actual recent/publication work.
+8. Changed service receipts/reports and idempotent replay to tiered values sharing
+   roots; retained reports pin explicit immutable generations rather than full
+   eager databases.
+9. Tested activation, reconnect, cache miss, retry outcome, standby takeover,
    generation replacement, and no-native-root behavior with a counter that
    proves `recover_to`, compatibility materialization, and eager-value
    residency remain zero on normal paths.
-10. Measure representation-level counts rather than RSS: eager database
+10. Measured representation-level counts rather than RSS: eager database
     values/current/history/index/semantic nodes, active and frozen recent
     datoms/bytes, cache entries/bytes, cursor node reads/bytes, commitment
     proof nodes, and pinned roots/generations.
 
-Stage 1 has a measured baseline in
-`tests/transactor_residency.rs`: after 64 commits and cold eager recovery it
-asserts one eager writer value and history/current counts that grow with the
-database. The PostgreSQL witness is configuration-gated and is evidence only
-when `ATOMIC_POSTGRES_URL` is set and the test actually runs. Stage 1 remains
-complete because the exact access seam now has eager and native executable
-implementations and both PostgreSQL witnesses actually ran on PostgreSQL
-15.11. The eager-count assertion is a historical baseline and will be inverted
-to the permanent zero-eager regression gate when the production writer swaps
-representations in Stage 4.
+`tests/transactor_residency.rs` is now the permanent inverse of the historical
+baseline. After 128 commits it requires zero eager writer values/facts/history,
+an empty recent tier after consolidation, cache residency within configured
+bounds, cold root-only activation, and localized read/commitment work below
+the total history size. `tests/transactor_differential.rs` drives the real
+service through generated accepted and rejected transitions and compares the
+complete outcome against `Database::with`; restart, failover, ambiguity,
+backpressure, physical AVET readiness, corruption, and repeated schema-event
+witnesses cover the remaining risky boundaries. These tests count as evidence
+only when the PostgreSQL environment is explicitly present and the work
+actually executes; Goal 20 owns a non-skipping harness for the integrated
+suite.

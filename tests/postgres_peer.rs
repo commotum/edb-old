@@ -237,6 +237,49 @@ fn native_database_value_prefix_cursor_matches_eager_with_bounded_tree_reads() {
         .directory_reads
         .saturating_sub(before.directory_reads)
         .saturating_add(after.leaf_reads.saturating_sub(before.leaf_reads));
+    assert_eq!(after.cursor_ranges.saturating_sub(before.cursor_ranges), 1);
+    assert_eq!(
+        after
+            .cursor_directory_reads
+            .saturating_sub(before.cursor_directory_reads)
+            .saturating_add(
+                after
+                    .cursor_leaf_reads
+                    .saturating_sub(before.cursor_leaf_reads)
+            ),
+        path_reads
+    );
+    assert_eq!(
+        after
+            .cursor_cache_misses
+            .saturating_sub(before.cursor_cache_misses),
+        path_reads
+    );
+    assert_eq!(
+        after
+            .cursor_sql_reads
+            .saturating_sub(before.cursor_sql_reads),
+        path_reads
+    );
+    assert_eq!(
+        after
+            .cursor_cache_hits
+            .saturating_sub(before.cursor_cache_hits),
+        0
+    );
+    assert!(
+        after
+            .cursor_sql_read_bytes
+            .saturating_sub(before.cursor_sql_read_bytes)
+            > 0
+    );
+    assert_eq!(
+        after
+            .cursor_recent_datoms_examined
+            .saturating_sub(before.cursor_recent_datoms_examined),
+        0,
+        "the covering durable root leaves no recent overlay to examine"
+    );
     assert!(path_reads > 0);
     assert!(
         path_reads <= 4,
@@ -327,6 +370,9 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
     assert_eq!(cached_seek.datom, Some(key.clone()));
     assert_eq!(cached_seek.stats.directory_reads, 0);
     assert_eq!(cached_seek.stats.leaf_reads, 0);
+    assert!(cached_seek.stats.cache_hits > 0);
+    assert_eq!(cached_seek.stats.cache_misses, 0);
+    assert_eq!(cached_seek.stats.decoded_bytes, 0);
 
     // The cursor owns immutable node handles. Force the tiny shared cache to
     // visit unrelated trees, then prove eviction cannot invalidate the open

@@ -8,6 +8,7 @@ use crate::vocabulary::{
 };
 use crate::{Datom, ErrorCategory, IndexOrder, Keyword, SemanticError, Symbol, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 
 pub type AttrId = u32;
 
@@ -285,6 +286,69 @@ impl Schema {
 
     pub fn attributes(&self) -> impl Iterator<Item = &Attribute> {
         self.attributes.values()
+    }
+
+    pub(crate) fn estimated_retained_bytes(&self) -> u64 {
+        fn keyword_heap_bytes(keyword: &Keyword) -> u64 {
+            keyword
+                .namespace
+                .as_ref()
+                .map_or(0, |namespace| namespace.capacity() as u64)
+                .saturating_add(keyword.name.capacity() as u64)
+        }
+
+        fn keyword_bytes(keyword: &Keyword) -> u64 {
+            (size_of::<Keyword>() as u64).saturating_add(keyword_heap_bytes(keyword))
+        }
+
+        fn attribute_bytes(attribute: &Attribute) -> u64 {
+            let tuple = match &attribute.tuple {
+                Some(TupleSpec::Heterogeneous(types)) => {
+                    (types.capacity() as u64).saturating_mul(size_of::<ValueType>() as u64)
+                }
+                Some(TupleSpec::Composite(attributes)) => {
+                    (attributes.capacity() as u64).saturating_mul(size_of::<AttrId>() as u64)
+                }
+                Some(TupleSpec::Homogeneous(_)) | None => 0,
+            };
+            let predicates = (attribute.predicates.capacity() as u64)
+                .saturating_mul(size_of::<String>() as u64)
+                .saturating_add(attribute.predicates.iter().fold(0_u64, |bytes, predicate| {
+                    bytes.saturating_add(predicate.capacity() as u64)
+                }));
+            (size_of::<Attribute>() as u64)
+                .saturating_add(keyword_heap_bytes(&attribute.ident))
+                .saturating_add(tuple)
+                .saturating_add(predicates)
+        }
+
+        let attributes = self.attributes.values().fold(0_u64, |bytes, attribute| {
+            bytes
+                .saturating_add(size_of::<AttrId>() as u64)
+                .saturating_add(attribute_bytes(attribute))
+        });
+        let current_idents = self.current_idents.keys().fold(0_u64, |bytes, ident| {
+            bytes
+                .saturating_add(keyword_bytes(ident))
+                .saturating_add(size_of::<AttrId>() as u64)
+        });
+        let ident_aliases = self.ident_aliases.keys().fold(0_u64, |bytes, ident| {
+            bytes
+                .saturating_add(keyword_bytes(ident))
+                .saturating_add(size_of::<AttrId>() as u64)
+        });
+        let constituents = self.constituents.values().fold(0_u64, |bytes, composites| {
+            bytes
+                .saturating_add(size_of::<AttrId>() as u64)
+                .saturating_add(
+                    (composites.len() as u64).saturating_mul(size_of::<AttrId>() as u64),
+                )
+        });
+        (size_of::<Self>() as u64)
+            .saturating_add(attributes)
+            .saturating_add(current_idents)
+            .saturating_add(ident_aliases)
+            .saturating_add(constituents)
     }
 
     /// Active composite attributes that depend on `constituent`.

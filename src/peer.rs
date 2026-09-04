@@ -1,4 +1,4 @@
-use crate::database_value::LogicalReadObserver;
+use crate::database_value::{LogicalReadObserver, TransactionReadContext};
 use crate::idents::IdentIndex;
 use crate::operations::tree_manifest_advisory_key;
 use crate::persistent_tree::{
@@ -113,9 +113,33 @@ pub struct PeerLoadStats {
     pub root_reads: u64,
     pub directory_reads: u64,
     pub leaf_reads: u64,
+    /// Completed or dropped native cursors. This is the exact source-range
+    /// count; memo replays do not open another cursor.
+    pub cursor_ranges: u64,
+    pub cursor_cache_hits: u64,
+    pub cursor_cache_misses: u64,
+    pub cursor_root_reads: u64,
+    pub cursor_directory_reads: u64,
+    pub cursor_leaf_reads: u64,
+    pub cursor_sql_reads: u64,
+    /// Canonical durable-node payload bytes fetched from PostgreSQL by those
+    /// cursors. Cache hits correctly contribute zero bytes.
+    pub cursor_sql_read_bytes: u64,
+    pub cursor_recent_datoms_examined: u64,
+    pub cursor_recent_datoms_yielded: u64,
     pub compatibility_materializations: u64,
     pub compatibility_hits: u64,
     pub compatibility_failures: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResidentMetadataStats {
+    pub(crate) schema_attributes: usize,
+    pub(crate) schema_information_datoms: usize,
+    pub(crate) schema_estimated_bytes: u64,
+    pub(crate) ident_names: usize,
+    pub(crate) ident_entities: usize,
+    pub(crate) ident_estimated_bytes: u64,
 }
 
 /// Complete logical coordinate of one immutable value in one authoritative
@@ -163,6 +187,16 @@ struct PeerLoadCounters {
     root_reads: AtomicU64,
     directory_reads: AtomicU64,
     leaf_reads: AtomicU64,
+    cursor_ranges: AtomicU64,
+    cursor_cache_hits: AtomicU64,
+    cursor_cache_misses: AtomicU64,
+    cursor_root_reads: AtomicU64,
+    cursor_directory_reads: AtomicU64,
+    cursor_leaf_reads: AtomicU64,
+    cursor_sql_reads: AtomicU64,
+    cursor_sql_read_bytes: AtomicU64,
+    cursor_recent_datoms_examined: AtomicU64,
+    cursor_recent_datoms_yielded: AtomicU64,
     compatibility_materializations: AtomicU64,
     compatibility_hits: AtomicU64,
     compatibility_failures: AtomicU64,
@@ -175,12 +209,52 @@ impl PeerLoadCounters {
             root_reads: self.root_reads.load(Ordering::Relaxed),
             directory_reads: self.directory_reads.load(Ordering::Relaxed),
             leaf_reads: self.leaf_reads.load(Ordering::Relaxed),
+            cursor_ranges: self.cursor_ranges.load(Ordering::Relaxed),
+            cursor_cache_hits: self.cursor_cache_hits.load(Ordering::Relaxed),
+            cursor_cache_misses: self.cursor_cache_misses.load(Ordering::Relaxed),
+            cursor_root_reads: self.cursor_root_reads.load(Ordering::Relaxed),
+            cursor_directory_reads: self.cursor_directory_reads.load(Ordering::Relaxed),
+            cursor_leaf_reads: self.cursor_leaf_reads.load(Ordering::Relaxed),
+            cursor_sql_reads: self.cursor_sql_reads.load(Ordering::Relaxed),
+            cursor_sql_read_bytes: self.cursor_sql_read_bytes.load(Ordering::Relaxed),
+            cursor_recent_datoms_examined: self
+                .cursor_recent_datoms_examined
+                .load(Ordering::Relaxed),
+            cursor_recent_datoms_yielded: self.cursor_recent_datoms_yielded.load(Ordering::Relaxed),
             compatibility_materializations: self
                 .compatibility_materializations
                 .load(Ordering::Relaxed),
             compatibility_hits: self.compatibility_hits.load(Ordering::Relaxed),
             compatibility_failures: self.compatibility_failures.load(Ordering::Relaxed),
         }
+    }
+
+    fn record_cursor(&self, stats: PeerCursorStats) {
+        self.cursor_ranges.fetch_add(1, Ordering::Relaxed);
+        self.cursor_cache_hits
+            .fetch_add(stats.tree.cache_hits, Ordering::Relaxed);
+        self.cursor_cache_misses
+            .fetch_add(stats.tree.cache_misses, Ordering::Relaxed);
+        self.cursor_root_reads
+            .fetch_add(stats.tree.root_reads, Ordering::Relaxed);
+        self.cursor_directory_reads
+            .fetch_add(stats.tree.directory_reads, Ordering::Relaxed);
+        self.cursor_leaf_reads
+            .fetch_add(stats.tree.leaf_reads, Ordering::Relaxed);
+        self.cursor_sql_reads.fetch_add(
+            stats
+                .tree
+                .root_reads
+                .saturating_add(stats.tree.directory_reads)
+                .saturating_add(stats.tree.leaf_reads),
+            Ordering::Relaxed,
+        );
+        self.cursor_sql_read_bytes
+            .fetch_add(stats.tree.decoded_bytes, Ordering::Relaxed);
+        self.cursor_recent_datoms_examined
+            .fetch_add(stats.recent.datoms_examined, Ordering::Relaxed);
+        self.cursor_recent_datoms_yielded
+            .fetch_add(stats.recent.datoms_yielded, Ordering::Relaxed);
     }
 }
 
@@ -428,6 +502,23 @@ impl MetadataProjection {
     fn endpoint(&self) -> EndpointProjection {
         EndpointProjection::from_schema(Arc::clone(&self.schema))
     }
+
+    fn resident_stats(&self) -> ResidentMetadataStats {
+        let schema_information_bytes = self.schema_current.iter().fold(0_u64, |bytes, datom| {
+            bytes.saturating_add(datom.retained_bytes())
+        });
+        ResidentMetadataStats {
+            schema_attributes: self.schema.attributes().count(),
+            schema_information_datoms: self.schema_current.len(),
+            schema_estimated_bytes: self
+                .schema
+                .estimated_retained_bytes()
+                .saturating_add(schema_information_bytes),
+            ident_names: self.idents.name_count(),
+            ident_entities: self.idents.entity_count(),
+            ident_estimated_bytes: self.idents.estimated_retained_bytes(),
+        }
+    }
 }
 
 /// Fold the recovered `storageHasAVET`/`needsAVET` state alongside ordinary
@@ -455,9 +546,16 @@ where
 
     for transaction in transactions {
         let endpoint = metadata.apply(std::slice::from_ref(transaction))?;
-        for (attribute, before, after) in
+        // MetadataProjection::apply retains all three Arcs for ordinary data
+        // transactions. Pointer identity is therefore a proof that no schema
+        // transition exists; avoid walking every resident attribute merely to
+        // rediscover that fact on every commit.
+        let changed_avet = if Arc::ptr_eq(&metadata.schema, &endpoint.schema) {
+            Vec::new()
+        } else {
             changed_avet_attributes(&metadata.schema, &endpoint.schema)
-        {
+        };
+        for (attribute, before, after) in changed_avet {
             if !after {
                 // Dropping AVET also drops any pending backfill. This matters
                 // to an unqualified AVET scan, which must not be poisoned by
@@ -3851,7 +3949,7 @@ impl Peer {
             &state.metadata,
             &state.avet_unready,
             &tail.transactions,
-            |attribute| before.has_attribute_history(attribute, None),
+            |attribute| before.has_attribute_history(attribute, None, None),
         )?;
         let metadata = Arc::new(metadata);
         let recent = state.recent.extend_authenticated_existing(
@@ -4127,6 +4225,7 @@ pub struct PeerIndexCursor {
     durable_next: Option<Datom>,
     recent_next: Option<Datom>,
     failed: bool,
+    work_recorded: bool,
 }
 
 struct DurableTreeCursor {
@@ -4390,6 +4489,21 @@ impl Iterator for PeerIndexCursor {
     }
 }
 
+impl Drop for PeerIndexCursor {
+    fn drop(&mut self) {
+        if self.work_recorded {
+            return;
+        }
+        self.work_recorded = true;
+        let stats = self.stats();
+        self.durable
+            .snapshot
+            .core
+            .load_counters
+            .record_cursor(stats);
+    }
+}
+
 impl TieredSnapshot {
     /// Open one generation-qualified immutable value strictly from an
     /// authenticated native publication plus its authenticated log tail.
@@ -4637,12 +4751,13 @@ impl TieredSnapshot {
     /// Transaction instant at this exact basis, read through the native index
     /// rather than by materializing the compatibility `Database`.
     pub fn last_tx_instant(&self) -> Result<Option<i64>, SemanticError> {
-        self.last_tx_instant_observed(None)
+        self.last_tx_instant_observed(None, None)
     }
 
     pub(crate) fn last_tx_instant_observed(
         &self,
         read_observer: Option<&LogicalReadObserver>,
+        read_context: Option<&TransactionReadContext>,
     ) -> Result<Option<i64>, SemanticError> {
         if self.state.basis_t == 0 {
             return Ok(None);
@@ -4656,11 +4771,35 @@ impl TieredSnapshot {
                 value: None,
             },
         )?;
-        let first = datoms.next().transpose()?;
-        if let (Some(observer), Some(datom)) = (read_observer, &first) {
-            observer.charge_datom(datom)?;
+        let first = match datoms.next().transpose() {
+            Ok(datom) => datom,
+            Err(error) => {
+                if let Some(context) = read_context {
+                    context.record_native_cursor(datoms.stats())?;
+                }
+                return Err(error);
+            }
+        };
+        if let (Some(observer), Some(datom)) = (read_observer, &first)
+            && let Err(error) = observer.charge_datom(datom)
+        {
+            if let Some(context) = read_context {
+                context.record_native_cursor(datoms.stats())?;
+            }
+            return Err(error);
         }
-        let second = datoms.next().transpose()?;
+        let second = match datoms.next().transpose() {
+            Ok(datom) => datom,
+            Err(error) => {
+                if let Some(context) = read_context {
+                    context.record_native_cursor(datoms.stats())?;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(context) = read_context {
+            context.record_native_cursor(datoms.stats())?;
+        }
         if let (Some(observer), Some(datom)) = (read_observer, &second) {
             observer.charge_datom(datom)?;
         }
@@ -4706,6 +4845,7 @@ impl TieredSnapshot {
         &self,
         attribute: u32,
         read_observer: Option<&LogicalReadObserver>,
+        read_context: Option<&TransactionReadContext>,
     ) -> Result<bool, SemanticError> {
         let mut cursor = self.prefix_cursor(
             true,
@@ -4715,7 +4855,18 @@ impl TieredSnapshot {
                 value: None,
             },
         )?;
-        let datom = cursor.next().transpose()?;
+        let datom = match cursor.next().transpose() {
+            Ok(datom) => datom,
+            Err(error) => {
+                if let Some(context) = read_context {
+                    context.record_native_cursor(cursor.stats())?;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(context) = read_context {
+            context.record_native_cursor(cursor.stats())?;
+        }
         if let (Some(observer), Some(datom)) = (read_observer, &datom) {
             observer.charge_datom(datom)?;
         }
@@ -4732,14 +4883,15 @@ impl TieredSnapshot {
         state_hash: Digest,
         transaction: DurableTransaction,
         successor_schema: &crate::Schema,
-        read_observer: &LogicalReadObserver,
+        read_context: &TransactionReadContext,
     ) -> Result<Self, SemanticError> {
         self.authenticated_successor_checked(
             tx_hash,
             state_hash,
             transaction,
             Some(successor_schema),
-            Some(read_observer),
+            Some(read_context.observer_ref()),
+            Some(read_context),
         )
     }
 
@@ -4753,7 +4905,7 @@ impl TieredSnapshot {
         state_hash: Digest,
         transaction: DurableTransaction,
     ) -> Result<Self, SemanticError> {
-        self.authenticated_successor_checked(tx_hash, state_hash, transaction, None, None)
+        self.authenticated_successor_checked(tx_hash, state_hash, transaction, None, None, None)
     }
 
     fn authenticated_successor_checked(
@@ -4763,12 +4915,13 @@ impl TieredSnapshot {
         transaction: DurableTransaction,
         successor_schema: Option<&crate::Schema>,
         read_observer: Option<&LogicalReadObserver>,
+        read_context: Option<&TransactionReadContext>,
     ) -> Result<Self, SemanticError> {
         let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
             &self.state.metadata,
             &self.state.avet_unready,
             std::slice::from_ref(&transaction),
-            |attribute| self.has_attribute_history(attribute, read_observer),
+            |attribute| self.has_attribute_history(attribute, read_observer, read_context),
         )?;
         let metadata = Arc::new(metadata);
         if successor_schema.is_some_and(|schema| metadata.schema.as_ref() != schema) {
@@ -4808,6 +4961,10 @@ impl TieredSnapshot {
 
     pub(crate) fn recent_stats(&self) -> crate::recent::RecentStats {
         self.state.recent.stats()
+    }
+
+    pub(crate) fn resident_metadata_stats(&self) -> ResidentMetadataStats {
+        self.state.metadata.resident_stats()
     }
 
     pub(crate) fn durable_manifest_hash(&self) -> Option<Digest> {
@@ -4949,6 +5106,7 @@ impl TieredSnapshot {
             durable_next: None,
             recent_next: None,
             failed: false,
+            work_recorded: false,
         })
     }
 
@@ -4979,6 +5137,7 @@ impl TieredSnapshot {
             durable_next: None,
             recent_next: None,
             failed: false,
+            work_recorded: false,
         })
     }
 
@@ -5207,8 +5366,10 @@ impl TieredSnapshot {
     ) -> Result<Arc<TreeNode>, SemanticError> {
         let mut io = lock(&self.core.io);
         if let Some(node) = io.tree_cache.get(&hash) {
+            stats.cache_hits = stats.cache_hits.saturating_add(1);
             return Ok(node);
         }
+        stats.cache_misses = stats.cache_misses.saturating_add(1);
         let query = io
             .client
             .query_opt(
@@ -7357,6 +7518,63 @@ mod tests {
             .code,
             "peer/exact-endpoint-zero-state"
         );
+    }
+
+    #[test]
+    fn ordinary_wide_schema_metadata_transition_reuses_the_projection() {
+        let mut schema = Schema::new();
+        for attribute in 1_000..1_128 {
+            schema
+                .install(Attribute::new(
+                    attribute,
+                    Keyword::new("wide", format!("attribute-{attribute}")),
+                    ValueType::Long,
+                    Cardinality::One,
+                ))
+                .unwrap();
+        }
+        let database = Database::new(schema).unwrap();
+        let assessed = database
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("entity".into()),
+                    attribute: 1_000,
+                    value: TxValue::Scalar(Value::Long(1)),
+                }],
+                10,
+            )
+            .unwrap();
+        let metadata = MetadataProjection::from_database(&database).unwrap();
+        let transaction = DurableTransaction {
+            database_id: "wide-schema".into(),
+            basis_t: assessed.db_after.basis_t(),
+            previous_hash: [7; 32],
+            eidx_frontier: assessed.db_after.eidx_frontier(),
+            tempids: assessed.tempids,
+            tx_data: assessed.tx_data,
+        };
+        let (endpoint, unready) =
+            apply_metadata_and_avet_readiness(&metadata, &BTreeSet::new(), &[transaction], |_| {
+                panic!("ordinary data must not perform an AVET history probe")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&metadata.schema, &endpoint.schema));
+        assert!(Arc::ptr_eq(&metadata.idents, &endpoint.idents));
+        assert!(Arc::ptr_eq(
+            &metadata.schema_current,
+            &endpoint.schema_current
+        ));
+        assert!(unready.is_empty());
+        let resident = endpoint.resident_stats();
+        assert_eq!(
+            resident.schema_attributes,
+            database.schema().attributes().count()
+        );
+        assert!(resident.schema_information_datoms >= 128);
+        assert!(resident.schema_estimated_bytes > 0);
+        assert!(resident.ident_names >= 128);
+        assert!(resident.ident_entities >= 128);
+        assert!(resident.ident_estimated_bytes > 0);
     }
 
     #[test]

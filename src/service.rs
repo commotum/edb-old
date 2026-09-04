@@ -8,7 +8,7 @@ use crate::{
     DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, PostgresConnectionConfig,
     PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
@@ -598,6 +598,45 @@ fn should_index(backlog: &IndexingBacklog, config: BackgroundIndexingConfig) -> 
 struct ReportSubscriber {
     sender: mpsc::Sender<ServiceTransactionReport>,
     pending: Arc<AtomicUsize>,
+    retention: Arc<Mutex<VecDeque<ReportRetention>>>,
+}
+
+#[derive(Clone, Debug)]
+struct ReportRetention {
+    basis_t: u64,
+    payload_bytes: u64,
+    roots: [Option<Digest>; 2],
+    generations: [Option<u64>; 2],
+}
+
+impl ReportRetention {
+    fn from_report(report: &ServiceTransactionReport) -> Self {
+        let before = report.db_before.native_retention_coordinate();
+        let after = report.db_after.native_retention_coordinate();
+        let tx_data_bytes = report.tx_data.iter().fold(0_u64, |bytes, datom| {
+            bytes.saturating_add(datom.retained_bytes())
+        });
+        let tempid_bytes = report.tempids.keys().fold(0_u64, |bytes, tempid| {
+            bytes
+                .saturating_add(std::mem::size_of::<String>() as u64)
+                .saturating_add(tempid.capacity() as u64)
+                .saturating_add(std::mem::size_of::<u64>() as u64)
+        });
+        Self {
+            basis_t: report.basis_t,
+            // Stable owned-payload account. Shared immutable database trees
+            // are represented separately by distinct root/generation counts;
+            // allocator and mpsc-node overhead are intentionally excluded.
+            payload_bytes: (std::mem::size_of::<ServiceTransactionReport>() as u64)
+                .saturating_add(tx_data_bytes)
+                .saturating_add(tempid_bytes),
+            roots: [
+                before.and_then(|value| value.1),
+                after.and_then(|value| value.1),
+            ],
+            generations: [before.map(|value| value.0), after.map(|value| value.0)],
+        }
+    }
 }
 
 struct Shared {
@@ -611,6 +650,8 @@ struct Shared {
     subscribers: Mutex<BTreeMap<u64, ReportSubscriber>>,
     queued_reports: AtomicUsize,
     max_queued_reports: AtomicUsize,
+    queued_report_payload_bytes: AtomicU64,
+    max_queued_report_payload_bytes: AtomicU64,
     writer_residency: Mutex<WriterResidencyStats>,
     max_request_bytes: usize,
     indexing: Arc<BackgroundIndexing>,
@@ -639,6 +680,8 @@ impl Shared {
             subscribers: Mutex::new(BTreeMap::new()),
             queued_reports: AtomicUsize::new(0),
             max_queued_reports: AtomicUsize::new(0),
+            queued_report_payload_bytes: AtomicU64::new(0),
+            max_queued_report_payload_bytes: AtomicU64::new(0),
             writer_residency: Mutex::new(writer_residency),
             max_request_bytes,
             indexing,
@@ -657,16 +700,36 @@ impl Shared {
     }
 
     fn publish(&self, report: &ServiceTransactionReport) {
+        let retention = ReportRetention::from_report(report);
         let mut subscribers = self.subscribers.lock().expect("subscriber mutex poisoned");
         subscribers.retain(|_, subscriber| {
             subscriber.pending.fetch_add(1, Ordering::AcqRel);
             let queued = self.queued_reports.fetch_add(1, Ordering::AcqRel) + 1;
             self.max_queued_reports.fetch_max(queued, Ordering::Relaxed);
+            let payload_bytes = self
+                .queued_report_payload_bytes
+                .fetch_add(retention.payload_bytes, Ordering::AcqRel)
+                .saturating_add(retention.payload_bytes);
+            self.max_queued_report_payload_bytes
+                .fetch_max(payload_bytes, Ordering::Relaxed);
+            subscriber
+                .retention
+                .lock()
+                .expect("report retention mutex poisoned")
+                .push_back(retention.clone());
             if subscriber.sender.send(report.clone()).is_ok() {
                 true
             } else {
+                let removed = subscriber
+                    .retention
+                    .lock()
+                    .expect("report retention mutex poisoned")
+                    .pop_back()
+                    .expect("failed report send has queued retention");
                 subscriber.pending.fetch_sub(1, Ordering::AcqRel);
                 self.queued_reports.fetch_sub(1, Ordering::AcqRel);
+                self.queued_report_payload_bytes
+                    .fetch_sub(removed.payload_bytes, Ordering::AcqRel);
                 false
             }
         });
@@ -829,6 +892,7 @@ impl TransactionClient {
         let id = self.shared.next_subscriber.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         let pending = Arc::new(AtomicUsize::new(0));
+        let retention = Arc::new(Mutex::new(VecDeque::new()));
         self.shared
             .subscribers
             .lock()
@@ -838,30 +902,62 @@ impl TransactionClient {
                 ReportSubscriber {
                     sender,
                     pending: Arc::clone(&pending),
+                    retention: Arc::clone(&retention),
                 },
             );
         ReportSubscription {
             id,
-            receiver,
+            receiver: Some(receiver),
             pending,
+            retention,
             shared: Arc::downgrade(&self.shared),
         }
     }
 
     pub fn stats(&self) -> ServiceStats {
+        let subscribers = self
+            .shared
+            .subscribers
+            .lock()
+            .expect("subscriber mutex poisoned");
+        let mut oldest_queued_report_basis_t = None;
+        let mut pinned_roots = BTreeSet::new();
+        let mut pinned_generations = BTreeSet::new();
+        let mut queued_reports = 0_usize;
+        let mut queued_report_payload_bytes = 0_u64;
+        for subscriber in subscribers.values() {
+            let retention = subscriber
+                .retention
+                .lock()
+                .expect("report retention mutex poisoned");
+            for retained in retention.iter() {
+                queued_reports = queued_reports.saturating_add(1);
+                queued_report_payload_bytes =
+                    queued_report_payload_bytes.saturating_add(retained.payload_bytes);
+                oldest_queued_report_basis_t = Some(
+                    oldest_queued_report_basis_t
+                        .map_or(retained.basis_t, |oldest: u64| oldest.min(retained.basis_t)),
+                );
+                pinned_roots.extend(retained.roots.into_iter().flatten());
+                pinned_generations.extend(retained.generations.into_iter().flatten());
+            }
+        }
         ServiceStats {
             queued: self.shared.queued.load(Ordering::Relaxed),
             max_queued: self.shared.max_queued.load(Ordering::Relaxed),
             processed: self.shared.processed.load(Ordering::Relaxed),
             rejected_full: self.shared.rejected_full.load(Ordering::Relaxed),
-            subscribers: self
-                .shared
-                .subscribers
-                .lock()
-                .expect("subscriber mutex poisoned")
-                .len(),
-            queued_reports: self.shared.queued_reports.load(Ordering::Acquire),
+            subscribers: subscribers.len(),
+            queued_reports,
             max_queued_reports: self.shared.max_queued_reports.load(Ordering::Relaxed),
+            queued_report_payload_bytes,
+            max_queued_report_payload_bytes: self
+                .shared
+                .max_queued_report_payload_bytes
+                .load(Ordering::Relaxed),
+            oldest_queued_report_basis_t,
+            distinct_pinned_roots: pinned_roots.len(),
+            distinct_pinned_generations: pinned_generations.len(),
         }
     }
 
@@ -915,8 +1011,9 @@ impl TransactionTicket {
 
 pub struct ReportSubscription {
     id: u64,
-    receiver: mpsc::Receiver<ServiceTransactionReport>,
+    receiver: Option<mpsc::Receiver<ServiceTransactionReport>>,
     pending: Arc<AtomicUsize>,
+    retention: Arc<Mutex<VecDeque<ReportRetention>>>,
     shared: Weak<Shared>,
 }
 
@@ -925,7 +1022,11 @@ impl ReportSubscription {
         &self,
         timeout: Duration,
     ) -> Result<ServiceTransactionReport, mpsc::RecvTimeoutError> {
-        let result = self.receiver.recv_timeout(timeout);
+        let result = self
+            .receiver
+            .as_ref()
+            .expect("live report subscription retains its receiver")
+            .recv_timeout(timeout);
         if result.is_ok() {
             self.note_received();
         }
@@ -933,7 +1034,11 @@ impl ReportSubscription {
     }
 
     pub fn try_recv(&self) -> Result<ServiceTransactionReport, mpsc::TryRecvError> {
-        let result = self.receiver.try_recv();
+        let result = self
+            .receiver
+            .as_ref()
+            .expect("live report subscription retains its receiver")
+            .try_recv();
         if result.is_ok() {
             self.note_received();
         }
@@ -948,11 +1053,24 @@ impl ReportSubscription {
     }
 
     fn note_received(&self) {
+        let retained = self
+            .retention
+            .lock()
+            .expect("report retention mutex poisoned")
+            .pop_front()
+            .expect("received report has queued retention");
         let pending = self.pending.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(pending > 0, "received report was not accounted as pending");
         if let Some(shared) = self.shared.upgrade() {
             let queued = shared.queued_reports.fetch_sub(1, Ordering::AcqRel);
             debug_assert!(queued > 0, "received report was not globally accounted");
+            let payload = shared
+                .queued_report_payload_bytes
+                .fetch_sub(retained.payload_bytes, Ordering::AcqRel);
+            debug_assert!(
+                payload >= retained.payload_bytes,
+                "report payload accounting underflow"
+            );
         }
     }
 }
@@ -960,16 +1078,50 @@ impl ReportSubscription {
 impl Drop for ReportSubscription {
     fn drop(&mut self) {
         if let Some(shared) = self.shared.upgrade() {
-            shared
+            // Match publish/stats lock order. Removing the subscriber while
+            // holding this mutex waits for any in-flight publication and
+            // prevents a later one from enqueueing after we drain its exact
+            // retention ledger.
+            let mut subscribers = shared
                 .subscribers
                 .lock()
-                .expect("subscriber mutex poisoned")
-                .remove(&self.id);
+                .expect("subscriber mutex poisoned");
+            subscribers.remove(&self.id);
+            // Drop the channel's queued report objects before removing their
+            // mirrored retention ledger. Concurrent stats may briefly
+            // over-report pins, but can never claim zero while reports still
+            // retain immutable database roots.
+            drop(self.receiver.take());
+            let abandoned_payload_bytes = {
+                let mut retention = self
+                    .retention
+                    .lock()
+                    .expect("report retention mutex poisoned");
+                let bytes = retention.iter().fold(0_u64, |bytes, retained| {
+                    bytes.saturating_add(retained.payload_bytes)
+                });
+                retention.clear();
+                bytes
+            };
             let abandoned = self.pending.swap(0, Ordering::AcqRel);
             if abandoned > 0 {
                 let queued = shared.queued_reports.fetch_sub(abandoned, Ordering::AcqRel);
                 debug_assert!(queued >= abandoned, "report queue accounting underflow");
+                let payload = shared
+                    .queued_report_payload_bytes
+                    .fetch_sub(abandoned_payload_bytes, Ordering::AcqRel);
+                debug_assert!(
+                    payload >= abandoned_payload_bytes,
+                    "report payload accounting underflow"
+                );
             }
+        } else {
+            drop(self.receiver.take());
+            self.pending.store(0, Ordering::Release);
+            self.retention
+                .lock()
+                .expect("report retention mutex poisoned")
+                .clear();
         }
     }
 }
@@ -986,6 +1138,18 @@ pub struct ServiceStats {
     pub queued_reports: usize,
     /// High-water mark for `queued_reports` during this service lifetime.
     pub max_queued_reports: usize,
+    /// Stable owned report payload currently retained across subscriber
+    /// queues. Shared immutable tree/cache memory is not multiplied here.
+    pub queued_report_payload_bytes: u64,
+    /// High-water mark for `queued_report_payload_bytes`.
+    pub max_queued_report_payload_bytes: u64,
+    /// Oldest committed basis still awaiting delivery to any subscriber.
+    pub oldest_queued_report_basis_t: Option<u64>,
+    /// Distinct durable native roots pinned by queued db-before/db-after
+    /// values, rather than the number of report clones referencing them.
+    pub distinct_pinned_roots: usize,
+    /// Distinct authoritative log generations pinned by queued reports.
+    pub distinct_pinned_generations: usize,
 }
 
 pub struct TransactionService {
