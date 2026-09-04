@@ -39,6 +39,15 @@ pub(crate) struct AssessmentReadWork {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AssessmentLimits {
+    /// Native writer admission controls, not Datomic transaction semantics.
+    ///
+    /// Datomic documents db-before reads as part of invariant enforcement and
+    /// therefore a lower bound on transaction latency (`transaction_hints`),
+    /// but 1.0.7705 has no equivalent per-transaction semantic cutoff.  The
+    /// PostgreSQL writer configures these limits explicitly so one transaction
+    /// cannot monopolize its finite resources.  Streaming validators must
+    /// still charge every db-before datom they consume; they must not turn the
+    /// limit into a reason to retain the complete range in memory.
     pub(crate) max_read_datoms: u64,
     pub(crate) max_read_bytes: u64,
 }
@@ -995,17 +1004,7 @@ fn validate_schema_transition(
                 if current.cardinality == Cardinality::Many
                     && proposed.cardinality == Cardinality::One
                 {
-                    let facts = successor_attribute_datoms(reader, logical, proposed.id)?;
-                    let mut counts = BTreeMap::<u64, usize>::new();
-                    for fact in facts {
-                        *counts.entry(fact.entity).or_default() += 1;
-                    }
-                    if counts.values().any(|count| *count > 1) {
-                        return Err(SemanticError::conflict(
-                            "schema/cardinality-change-conflict",
-                            "current data contains multiple values for one entity",
-                        ));
-                    }
+                    validate_many_to_one_successor(reader, logical, proposed.id)?;
                 }
                 if current.unique.is_none() && proposed.unique.is_some() {
                     // `:db/index true` is only the logical schema fact. The
@@ -1022,11 +1021,7 @@ fn validate_schema_transition(
                             "adding uniqueness to an attribute with historical values requires a physically ready AVET index",
                         ));
                     }
-                    validate_attribute_uniqueness(&successor_attribute_datoms(
-                        reader,
-                        logical,
-                        proposed.id,
-                    )?)?;
+                    validate_unique_successor(reader, logical, proposed.id)?;
                 }
             }
             Err(_) => {
@@ -1054,109 +1049,217 @@ fn validate_schema_transition(
     successor.validate_tuple_installations(&installed)
 }
 
-fn successor_attribute_datoms(
+/// Visit the complete successor value of one attribute in a physical index
+/// order without constructing that value.
+///
+/// The base prefix remains lazy; only references to this transaction's delta
+/// are sorted and retained.  Exact stored E/A/V identity decides whether an
+/// assertion is redundant or a retraction removes a base fact.  This is the
+/// native equivalent of reducing the immutable db-after index in recovered
+/// `card-one-violator` and `unique-violator` (`datomic/db.clj:3212-3243`).
+fn visit_successor_attribute(
     reader: &mut Reader<'_>,
     logical: &[LogicalDatom],
     attribute: u32,
-) -> Result<Vec<Datom>, SemanticError> {
-    let mut facts = reader.prefix(&IndexPrefix::Aevt {
-        attribute,
-        entity: None,
-        value: None,
-    })?;
-    for datom in logical.iter().filter(|datom| datom.attribute == attribute) {
+    order: IndexOrder,
+    mut visit: impl FnMut(u64, &Value) -> Result<(), SemanticError>,
+) -> Result<(), SemanticError> {
+    debug_assert!(matches!(order, IndexOrder::Aevt | IndexOrder::Avet));
+    let delta = ordered_attribute_delta(logical, attribute, order);
+    let prefix = match order {
+        IndexOrder::Aevt => IndexPrefix::Aevt {
+            attribute,
+            entity: None,
+            value: None,
+        },
+        IndexOrder::Avet => IndexPrefix::Avet {
+            attribute,
+            value: None,
+            entity: None,
+        },
+        _ => unreachable!("successor attribute validation uses AEVT or AVET"),
+    };
+
+    // Own a cheap immutable-value clone so the cursor's borrow is independent
+    // of `reader`; `Reader::charge` can then account each item as it is pulled.
+    let base = reader.base.clone();
+    let mut cursor = base.current_prefix_cursor(&prefix)?;
+    if cursor.is_memo_hit() {
+        reader.work.prefix_hits = reader.work.prefix_hits.saturating_add(1);
+    } else {
+        reader.work.prefixes = reader.work.prefixes.saturating_add(1);
+    }
+    let mut base_next = next_charged(reader, &mut cursor)?;
+    let mut delta_next = 0;
+
+    loop {
+        match (base_next.as_ref(), delta.get(delta_next).copied()) {
+            (None, None) => return Ok(()),
+            (Some(base_datom), None) => {
+                visit(base_datom.entity, &base_datom.value)?;
+                base_next = next_charged(reader, &mut cursor)?;
+            }
+            (None, Some(delta_datom)) => {
+                if delta_datom.added {
+                    visit(delta_datom.entity, &delta_datom.value)?;
+                }
+                delta_next += 1;
+            }
+            (Some(base_datom), Some(delta_datom)) => {
+                match compare_attribute_eav(
+                    base_datom.entity,
+                    &base_datom.value,
+                    delta_datom.entity,
+                    &delta_datom.value,
+                    order,
+                ) {
+                    Ordering::Less => {
+                        visit(base_datom.entity, &base_datom.value)?;
+                        base_next = next_charged(reader, &mut cursor)?;
+                    }
+                    Ordering::Greater => {
+                        if delta_datom.added {
+                            visit(delta_datom.entity, &delta_datom.value)?;
+                        }
+                        delta_next += 1;
+                    }
+                    Ordering::Equal => {
+                        // One exact base fact plus an assertion is still one
+                        // successor fact; a retraction suppresses it.
+                        if delta_datom.added {
+                            visit(base_datom.entity, &base_datom.value)?;
+                        }
+                        base_next = next_charged(reader, &mut cursor)?;
+                        delta_next += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Visit an attribute delta in the requested successor order when an AEVT
+/// history probe has established that the immutable base has no values.
+fn visit_empty_base_attribute(
+    logical: &[LogicalDatom],
+    attribute: u32,
+    order: IndexOrder,
+    mut visit: impl FnMut(u64, &Value) -> Result<(), SemanticError>,
+) -> Result<(), SemanticError> {
+    for datom in ordered_attribute_delta(logical, attribute, order) {
         if datom.added {
-            if !facts
-                .iter()
-                .any(|fact| fact.entity == datom.entity && fact.value.stored_eq(&datom.value))
-            {
-                facts.push(Datom {
-                    entity: datom.entity,
-                    attribute,
-                    value: datom.value.clone(),
-                    tx: 0,
-                    added: true,
-                });
-            }
-        } else {
-            facts.retain(|fact| {
-                !(fact.entity == datom.entity && fact.value.stored_eq(&datom.value))
-            });
+            visit(datom.entity, &datom.value)?;
         }
     }
-    Ok(facts)
+    Ok(())
 }
 
-fn validate_attribute_uniqueness(facts: &[Datom]) -> Result<(), SemanticError> {
-    validate_attribute_uniqueness_with_work(facts).map(|_| ())
-}
-
-/// Validate one newly unique attribute with the same logical comparator used
-/// by AVET, while retaining physically distinct representations such as
-/// BigDecimals with different scales as separate facts. Sorting makes the
-/// work O(n log n), instead of comparing every fact with every later fact.
-/// The returned count is a direct scaling witness for unit tests; optimized
-/// builds compile the counter increments away.
-fn validate_attribute_uniqueness_with_work(facts: &[Datom]) -> Result<usize, SemanticError> {
-    let earliest_nan = facts.iter().position(|fact| fact.value.is_nan());
-    let mut ordered = facts
+fn ordered_attribute_delta(
+    logical: &[LogicalDatom],
+    attribute: u32,
+    order: IndexOrder,
+) -> Vec<&LogicalDatom> {
+    let mut delta = logical
         .iter()
-        .enumerate()
-        .filter(|(_, fact)| !fact.value.is_nan())
+        .filter(|datom| datom.attribute == attribute)
         .collect::<Vec<_>>();
-    let mut comparisons = 0_usize;
-    ordered.sort_by(|left, right| {
-        count_comparison(&mut comparisons);
-        left.1
-            .value
-            .index_cmp(&right.1.value)
-            .then(left.1.entity.cmp(&right.1.entity))
-            .then_with(|| left.1.value.stored_cmp(&right.1.value))
+    delta.sort_unstable_by(|left, right| {
+        compare_attribute_eav(left.entity, &left.value, right.entity, &right.value, order)
+            .then_with(|| right.added.cmp(&left.added))
     });
-    let mut group_start = 0;
-    let mut earliest_conflict = None;
-    while group_start < ordered.len() {
-        let mut group_end = group_start + 1;
-        while group_end < ordered.len() {
-            count_comparison(&mut comparisons);
-            if ordered[group_start]
-                .1
-                .value
-                .index_cmp(&ordered[group_end].1.value)
-                .is_ne()
+    delta
+}
+
+fn compare_attribute_eav(
+    left_entity: u64,
+    left_value: &Value,
+    right_entity: u64,
+    right_value: &Value,
+    order: IndexOrder,
+) -> Ordering {
+    match order {
+        IndexOrder::Aevt => left_entity
+            .cmp(&right_entity)
+            .then_with(|| left_value.stored_cmp(right_value)),
+        IndexOrder::Avet => left_value
+            .stored_cmp(right_value)
+            .then(left_entity.cmp(&right_entity)),
+        _ => unreachable!("successor attribute validation uses AEVT or AVET"),
+    }
+}
+
+fn next_charged(
+    reader: &mut Reader<'_>,
+    cursor: &mut impl Iterator<Item = Result<Datom, SemanticError>>,
+) -> Result<Option<Datom>, SemanticError> {
+    let next = cursor.next().transpose()?;
+    if let Some(datom) = &next {
+        reader.charge(datom)?;
+    }
+    Ok(next)
+}
+
+fn validate_many_to_one_successor(
+    reader: &mut Reader<'_>,
+    logical: &[LogicalDatom],
+    attribute: u32,
+) -> Result<(), SemanticError> {
+    // Recovered `card-one-violator` reduces AEVT and compares adjacent entity
+    // ids.  AEVT makes the complete group contiguous, so one prior id is the
+    // entire retained validation state.
+    let mut prior_entity = None;
+    visit_successor_attribute(reader, logical, attribute, IndexOrder::Aevt, |entity, _| {
+        if prior_entity == Some(entity) {
+            return Err(SemanticError::conflict(
+                "schema/cardinality-change-conflict",
+                "current data contains multiple values for one entity",
+            ));
+        }
+        prior_entity = Some(entity);
+        Ok(())
+    })
+}
+
+fn validate_unique_successor(
+    reader: &mut Reader<'_>,
+    logical: &[LogicalDatom],
+    attribute: u32,
+) -> Result<(), SemanticError> {
+    // `Value::stored_cmp` refines `index_cmp`, so all physically distinct
+    // representations of one logical value (notably BigDecimal scales) stay
+    // adjacent in AVET.  Retaining one value and owner is therefore enough.
+    let mut prior: Option<(Value, u64)> = None;
+    let mut validate = |entity: u64, value: &Value| {
+        if value.is_nan() {
+            return Err(SemanticError::incorrect(
+                "transaction/nan-cannot-identify",
+                "NaN cannot participate in uniqueness",
+            ));
+        }
+        match &prior {
+            Some((prior_value, prior_entity))
+                if prior_value.index_cmp(value).is_eq() && *prior_entity != entity =>
             {
-                break;
+                return Err(SemanticError::conflict(
+                    "schema/unique-change-conflict",
+                    "current values must be unique before adding uniqueness",
+                ));
             }
-            group_end += 1;
+            Some((prior_value, _)) if prior_value.index_cmp(value).is_eq() => {}
+            _ => prior = Some((value.clone(), entity)),
         }
-        let group = &ordered[group_start..group_end];
-        if group
-            .windows(2)
-            .any(|pair| pair[0].1.entity != pair[1].1.entity)
-        {
-            let first = group
-                .iter()
-                .map(|(original, _)| *original)
-                .min()
-                .expect("a uniqueness group is nonempty");
-            earliest_conflict =
-                Some(earliest_conflict.map_or(first, |prior: usize| prior.min(first)));
-        }
-        group_start = group_end;
+        Ok(())
+    };
+
+    if reader.base.physical_avet_ready(attribute) {
+        // This is the exact recovered `unique-violator` access path.
+        visit_successor_attribute(reader, logical, attribute, IndexOrder::Avet, &mut validate)
+    } else {
+        // The caller's complete history-AEVT probe established that this
+        // immutable base never held a value.  There is no missing AVET range;
+        // sorting only the bounded transaction delta is sufficient.
+        visit_empty_base_attribute(logical, attribute, IndexOrder::Avet, &mut validate)
     }
-    if earliest_nan.is_some_and(|nan| earliest_conflict.is_none_or(|conflict| nan <= conflict)) {
-        return Err(SemanticError::incorrect(
-            "transaction/nan-cannot-identify",
-            "NaN cannot participate in uniqueness",
-        ));
-    }
-    if earliest_conflict.is_some() {
-        return Err(SemanticError::conflict(
-            "schema/unique-change-conflict",
-            "current values must be unique before adding uniqueness",
-        ));
-    }
-    Ok(comparisons)
 }
 
 fn schema_information_attribute(attribute: u32) -> bool {

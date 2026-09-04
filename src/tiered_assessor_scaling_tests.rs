@@ -264,76 +264,362 @@ fn identity_grouping_is_n_log_n_and_unions_transitively() {
 }
 
 #[test]
-fn sorted_uniqueness_validation_preserves_index_and_storage_semantics() {
-    const FACTS: usize = 8_192;
-    let facts = (0..FACTS)
-        .rev()
-        .map(|ordinal| Datom {
-            entity: u64::try_from(ordinal + 1).unwrap(),
-            attribute: 1_000,
-            value: Value::Long(i64::try_from(ordinal).unwrap()),
-            tx: 1,
-            added: true,
+fn successor_schema_validation_early_reduces_ordered_base_ranges() {
+    const ATTRIBUTE: u32 = 1_000;
+    const BASE_FACTS: usize = 512;
+    const SMALL_READ_CAP: u64 = 64;
+
+    let mut many_schema = Schema::new();
+    many_schema
+        .install(Attribute::new(
+            ATTRIBUTE,
+            Keyword::new("stream", "many"),
+            ValueType::String,
+            Cardinality::Many,
+        ))
+        .unwrap();
+    let mut many_ops = Vec::with_capacity(BASE_FACTS + 1);
+    many_ops.push(TxOp::Add {
+        entity: EntityRef::Temp("e-0000".into()),
+        attribute: ATTRIBUTE,
+        value: Value::String("a".into()).into(),
+    });
+    many_ops.push(TxOp::Add {
+        entity: EntityRef::Temp("e-0000".into()),
+        attribute: ATTRIBUTE,
+        value: Value::String("b".into()).into(),
+    });
+    for ordinal in 1..BASE_FACTS {
+        many_ops.push(TxOp::Add {
+            entity: EntityRef::Temp(format!("e-{ordinal:04}")),
+            attribute: ATTRIBUTE,
+            value: Value::String(format!("v-{ordinal:04}")).into(),
+        });
+    }
+    let many = Database::new(many_schema)
+        .unwrap()
+        .with(&many_ops, 10)
+        .unwrap()
+        .db_after;
+    let mut cardinality_one = many.schema().attribute(ATTRIBUTE).unwrap().clone();
+    cardinality_one.cardinality = Cardinality::One;
+    let alter_cardinality = [TxOp::AlterAttribute(cardinality_one)];
+    let eager = many.with(&alter_cardinality, 11).unwrap_err();
+    let tiered = assess_tiered_with_limits(
+        &DatabaseValue::eager(Arc::new(many)),
+        &alter_cardinality,
+        11,
+        AssessmentLimits {
+            max_read_datoms: SMALL_READ_CAP,
+            max_read_bytes: u64::MAX,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(eager.code, "schema/cardinality-change-conflict");
+    assert_eq!(tiered.category, eager.category);
+    assert_eq!(tiered.code, eager.code);
+
+    // AVET's stored order keeps different BigDecimal scales adjacent under
+    // the logical comparator. The first two values conflict, so recovered
+    // source-order reduction reaches the semantic error without reading the
+    // hundreds of later values or exhausting the explicit admission cap.
+    let mut decimal = Attribute::new(
+        ATTRIBUTE,
+        Keyword::new("stream", "decimal"),
+        ValueType::BigDec,
+        Cardinality::One,
+    );
+    decimal.indexed = true;
+    let mut decimal_schema = Schema::new();
+    decimal_schema.install(decimal).unwrap();
+    let mut decimal_ops = Vec::with_capacity(BASE_FACTS);
+    decimal_ops.push(TxOp::Add {
+        entity: EntityRef::Temp("e-0000".into()),
+        attribute: ATTRIBUTE,
+        value: Value::BigDec(BigDecimal::from_str("0.0").unwrap()).into(),
+    });
+    decimal_ops.push(TxOp::Add {
+        entity: EntityRef::Temp("e-0001".into()),
+        attribute: ATTRIBUTE,
+        value: Value::BigDec(BigDecimal::from_str("0.00").unwrap()).into(),
+    });
+    for ordinal in 2..BASE_FACTS {
+        decimal_ops.push(TxOp::Add {
+            entity: EntityRef::Temp(format!("e-{ordinal:04}")),
+            attribute: ATTRIBUTE,
+            value: Value::BigDec(BigDecimal::from(i64::try_from(ordinal).unwrap())).into(),
+        });
+    }
+    let decimals = Database::new(decimal_schema)
+        .unwrap()
+        .with(&decimal_ops, 10)
+        .unwrap()
+        .db_after;
+    let mut unique = decimals.schema().attribute(ATTRIBUTE).unwrap().clone();
+    unique.unique = Some(Unique::Value);
+    let alter_unique = [TxOp::AlterAttribute(unique)];
+    let eager = decimals.with(&alter_unique, 11).unwrap_err();
+    let tiered = assess_tiered_with_limits(
+        &DatabaseValue::eager(Arc::new(decimals)),
+        &alter_unique,
+        11,
+        AssessmentLimits {
+            max_read_datoms: SMALL_READ_CAP,
+            max_read_bytes: u64::MAX,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(eager.code, "schema/unique-change-conflict");
+    assert_eq!(tiered.category, eager.category);
+    assert_eq!(tiered.code, eager.code);
+}
+
+#[test]
+fn successor_schema_stream_charges_each_base_datom_and_retains_the_read_cap() {
+    const ATTRIBUTE: u32 = 1_000;
+    const BASE_FACTS: usize = 128;
+    let mut schema = Schema::new();
+    schema
+        .install(Attribute::new(
+            ATTRIBUTE,
+            Keyword::new("stream", "bounded"),
+            ValueType::Long,
+            Cardinality::Many,
+        ))
+        .unwrap();
+    let ops = (0..BASE_FACTS)
+        .map(|ordinal| TxOp::Add {
+            entity: EntityRef::Temp(format!("e-{ordinal:04}")),
+            attribute: ATTRIBUTE,
+            value: Value::Long(i64::try_from(ordinal).unwrap()).into(),
         })
         .collect::<Vec<_>>();
-    let comparisons = validate_attribute_uniqueness_with_work(&facts).unwrap();
-    assert!(
-        comparisons < FACTS * 32,
-        "uniqueness validation used {comparisons} comparisons"
+    let database = Database::new(schema)
+        .unwrap()
+        .with(&ops, 10)
+        .unwrap()
+        .db_after;
+    let value = DatabaseValue::eager(Arc::new(database.clone()));
+    let mut reader = Reader::new(
+        &value,
+        AssessmentLimits {
+            max_read_datoms: u64::MAX,
+            max_read_bytes: u64::MAX,
+        },
+    );
+    validate_many_to_one_successor(&mut reader, &[], ATTRIBUTE).unwrap();
+    assert_eq!(reader.work.prefixes, 1);
+    assert_eq!(reader.work.prefix_hits, 0);
+    assert_eq!(reader.work.datoms, BASE_FACTS as u64);
+
+    let mut one = database.schema().attribute(ATTRIBUTE).unwrap().clone();
+    one.cardinality = Cardinality::One;
+    let error = assess_tiered_with_limits(
+        &DatabaseValue::eager(Arc::new(database)),
+        &[TxOp::AlterAttribute(one)],
+        11,
+        AssessmentLimits {
+            max_read_datoms: 32,
+            max_read_bytes: u64::MAX,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Busy);
+    assert_eq!(error.code, "transaction/read-capacity");
+}
+
+#[test]
+fn successor_delta_retractions_make_schema_changes_valid_over_an_overlay() {
+    const TAG: u32 = 1_000;
+    const EXTERNAL_ID: u32 = 1_001;
+    let mut schema = Schema::new();
+    schema
+        .install(Attribute::new(
+            TAG,
+            Keyword::new("stream", "tag"),
+            ValueType::String,
+            Cardinality::Many,
+        ))
+        .unwrap();
+    let mut external_id = Attribute::new(
+        EXTERNAL_ID,
+        Keyword::new("stream", "external-id"),
+        ValueType::BigDec,
+        Cardinality::One,
+    );
+    external_id.indexed = true;
+    schema.install(external_id).unwrap();
+    let initial = Database::new(schema).unwrap();
+    let seed_ops = vec![
+        TxOp::Add {
+            entity: EntityRef::Temp("left".into()),
+            attribute: TAG,
+            value: Value::String("red".into()).into(),
+        },
+        TxOp::Add {
+            entity: EntityRef::Temp("left".into()),
+            attribute: TAG,
+            value: Value::String("blue".into()).into(),
+        },
+        TxOp::Add {
+            entity: EntityRef::Temp("left".into()),
+            attribute: EXTERNAL_ID,
+            value: Value::BigDec(BigDecimal::from_str("1.0").unwrap()).into(),
+        },
+        TxOp::Add {
+            entity: EntityRef::Temp("right".into()),
+            attribute: EXTERNAL_ID,
+            value: Value::BigDec(BigDecimal::from_str("1.00").unwrap()).into(),
+        },
+    ];
+    let eager_seed = initial.with(&seed_ops, 10).unwrap();
+    let tiered_seed =
+        assess_tiered(&DatabaseValue::eager(Arc::new(initial)), &seed_ops, 10).unwrap();
+    assert_eq!(tiered_seed.tx_data, eager_seed.tx_data);
+    let left = eager_seed.tempids["left"];
+    let right = eager_seed.tempids["right"];
+    let mut tag_one = eager_seed.db_after.schema().attribute(TAG).unwrap().clone();
+    tag_one.cardinality = Cardinality::One;
+    let mut unique = eager_seed
+        .db_after
+        .schema()
+        .attribute(EXTERNAL_ID)
+        .unwrap()
+        .clone();
+    unique.unique = Some(Unique::Value);
+    let repair = vec![
+        TxOp::Retract {
+            entity: EntityRef::Id(left),
+            attribute: TAG,
+            value: Some(Value::String("blue".into()).into()),
+        },
+        TxOp::Retract {
+            entity: EntityRef::Id(right),
+            attribute: EXTERNAL_ID,
+            value: Some(Value::BigDec(BigDecimal::from_str("1.00").unwrap()).into()),
+        },
+        TxOp::AlterAttribute(tag_one),
+        TxOp::AlterAttribute(unique),
+    ];
+    let eager = eager_seed.db_after.with(&repair, 11).unwrap();
+    assert_eq!(
+        eager
+            .db_after
+            .values(left, TAG)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![Value::String("red".into())]
     );
 
-    let decimal = |entity, spelling: &str| Datom {
-        entity,
-        attribute: 1_000,
-        value: Value::BigDec(BigDecimal::from_str(spelling).unwrap()),
-        tx: 1,
-        added: true,
-    };
-    let conflict =
-        validate_attribute_uniqueness(&[decimal(1, "1.0"), decimal(2, "1.00")]).unwrap_err();
-    assert_eq!(conflict.code, "schema/unique-change-conflict");
-
-    // The physical representations remain distinct facts, but one owner does
-    // not violate uniqueness under the logical index comparator.
-    validate_attribute_uniqueness(&[decimal(1, "1.0"), decimal(1, "1.00")]).unwrap();
-    let nan = validate_attribute_uniqueness(&[Datom {
-        entity: 1,
-        attribute: 1_000,
-        value: Value::Double(f64::NAN),
-        tx: 1,
-        added: true,
-    }])
-    .unwrap_err();
-    assert_eq!(nan.code, "transaction/nan-cannot-identify");
-
-    // Preserve the old source-shaped left-to-right error precedence without
-    // preserving its all-pairs implementation.
-    let duplicate_before_nan = validate_attribute_uniqueness(&[
-        decimal(1, "2.0"),
-        Datom {
-            entity: 9,
-            attribute: 1_000,
-            value: Value::Double(f64::NAN),
-            tx: 1,
-            added: true,
+    // `tiered_seed.db_after` is a bounded transaction overlay. This second
+    // validation therefore exercises the production overlay prefix cursor,
+    // then merges the new repair delta without recovering an eager Database.
+    // A completed assessment cannot itself publish another assessment overlay;
+    // the committed writer normally replaces it with a fresh native value.
+    let logical = vec![
+        LogicalDatom {
+            entity: left,
+            attribute: TAG,
+            value: Value::String("blue".into()),
+            added: false,
         },
-        decimal(2, "2.00"),
-    ])
-    .unwrap_err();
-    assert_eq!(duplicate_before_nan.code, "schema/unique-change-conflict");
-    let nan_before_duplicate = validate_attribute_uniqueness(&[
-        Datom {
-            entity: 9,
-            attribute: 1_000,
-            value: Value::Double(f64::NAN),
-            tx: 1,
-            added: true,
+        LogicalDatom {
+            entity: right,
+            attribute: EXTERNAL_ID,
+            value: Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+            added: false,
         },
-        decimal(1, "2.0"),
-        decimal(2, "2.00"),
-    ])
-    .unwrap_err();
-    assert_eq!(nan_before_duplicate.code, "transaction/nan-cannot-identify");
+    ];
+    let mut reader = Reader::new(
+        &tiered_seed.db_after,
+        AssessmentLimits {
+            max_read_datoms: u64::MAX,
+            max_read_bytes: u64::MAX,
+        },
+    );
+    validate_many_to_one_successor(&mut reader, &logical, TAG).unwrap();
+    validate_unique_successor(&mut reader, &logical, EXTERNAL_ID).unwrap();
+    assert_eq!(reader.work.prefixes, 2);
+}
+
+#[test]
+fn successor_unique_stream_preserves_nan_rejection() {
+    const ATTRIBUTE: u32 = 1_000;
+    let mut score = Attribute::new(
+        ATTRIBUTE,
+        Keyword::new("stream", "score"),
+        ValueType::Double,
+        Cardinality::One,
+    );
+    score.indexed = true;
+    let mut schema = Schema::new();
+    schema.install(score).unwrap();
+    let database = Database::new(schema)
+        .unwrap()
+        .with(
+            &[TxOp::Add {
+                entity: EntityRef::Temp("score".into()),
+                attribute: ATTRIBUTE,
+                value: Value::Double(f64::NAN).into(),
+            }],
+            10,
+        )
+        .unwrap()
+        .db_after;
+    let mut unique = database.schema().attribute(ATTRIBUTE).unwrap().clone();
+    unique.unique = Some(Unique::Value);
+    let ops = [TxOp::AlterAttribute(unique)];
+    let eager = database.with(&ops, 11).unwrap_err();
+    let tiered = assess_tiered(&DatabaseValue::eager(Arc::new(database)), &ops, 11).unwrap_err();
+    assert_eq!(eager.code, "transaction/nan-cannot-identify");
+    assert_eq!(tiered.category, eager.category);
+    assert_eq!(tiered.code, eager.code);
+
+    // A real uniqueness conflict is the schema-transition error even when a
+    // later AVET value is NaN. This locks the ordered streaming path to the
+    // eager oracle's phase/error precedence.
+    let mut score = Attribute::new(
+        ATTRIBUTE,
+        Keyword::new("stream", "mixed-score"),
+        ValueType::Double,
+        Cardinality::One,
+    );
+    score.indexed = true;
+    let mut schema = Schema::new();
+    schema.install(score).unwrap();
+    let mixed = Database::new(schema)
+        .unwrap()
+        .with(
+            &[
+                TxOp::Add {
+                    entity: EntityRef::Temp("a-nan".into()),
+                    attribute: ATTRIBUTE,
+                    value: Value::Double(f64::NAN).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("b-duplicate-left".into()),
+                    attribute: ATTRIBUTE,
+                    value: Value::Double(1.0).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("c-duplicate-right".into()),
+                    attribute: ATTRIBUTE,
+                    value: Value::Double(1.0).into(),
+                },
+            ],
+            10,
+        )
+        .unwrap()
+        .db_after;
+    let mut unique = mixed.schema().attribute(ATTRIBUTE).unwrap().clone();
+    unique.unique = Some(Unique::Value);
+    let ops = [TxOp::AlterAttribute(unique)];
+    let eager = mixed.with(&ops, 11).unwrap_err();
+    let tiered = assess_tiered(&DatabaseValue::eager(Arc::new(mixed)), &ops, 11).unwrap_err();
+    assert_eq!(eager.code, "schema/unique-change-conflict");
+    assert_eq!(tiered.category, eager.category);
+    assert_eq!(tiered.code, eager.code);
 }
 
 #[test]
