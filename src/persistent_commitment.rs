@@ -1030,7 +1030,7 @@ fn pg_error(code: &'static str, error: postgres::Error) -> SemanticError {
 #[cfg(test)]
 mod codec_tests {
     use super::*;
-    use crate::postgres::PostgresStore;
+    use crate::postgres::{MIGRATIONS, PostgresStore};
     use crate::state_commitment::{checkpoint_root_metadata, checkpoint_state_hash};
     use crate::{
         Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, Unique, Value,
@@ -1474,11 +1474,29 @@ mod codec_tests {
                  DELETE FROM atomic_schema_migrations WHERE version >= 15",
             )
             .unwrap();
-        drop(client);
-        let client = client_in_schema(&connection, &schema_name);
-        crate::PostgresMigrator::from_client(client)
-            .migrate()
+        // Exercise the historical v14 -> v15 boundary itself. Re-running the
+        // entire current migration chain after selectively recreating v14 is
+        // not a valid downgrade: later migrations rename helper routines and
+        // intentionally have no reverse migration, so a second v18 would try
+        // to create its `_v14` aliases again. Apply the authenticated v15 SQL
+        // and its Rust data hook atomically, exactly as `apply_migrations`
+        // does at that boundary.
+        let (version, sql) = MIGRATIONS
+            .iter()
+            .find(|(version, _)| *version == 15)
+            .copied()
+            .expect("migration 15 is part of the current catalog");
+        let mut migration = client.transaction().unwrap();
+        migration.batch_execute(sql).unwrap();
+        backfill_terminal_persistent_commitments(&mut migration).unwrap();
+        let checksum = crate::sha256(sql.as_bytes());
+        migration
+            .execute(
+                "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
+                &[&version, &&checksum[..]],
+            )
             .unwrap();
+        migration.commit().unwrap();
         let mut client = client_in_schema(&connection, &schema_name);
         let head = client
             .query_one(
