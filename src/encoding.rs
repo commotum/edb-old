@@ -1,4 +1,5 @@
 use crate::identity::{validate_frontier, validate_supported_eid};
+use crate::program::DUAL_PREDICATE_PROGRAM_ABI_VERSION;
 use crate::{
     Attribute, AttributeRef, CallableRef, Cardinality, Datom, EntityMap, EntityRef, ErrorCategory,
     IndexOrder, Instruction, Keyword, MAX_EIDX, MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, MapValue,
@@ -84,12 +85,20 @@ pub fn sha256(bytes: &[u8]) -> Digest {
 pub fn encode_program(program: &Program) -> Result<Vec<u8>, SemanticError> {
     program.validate()?;
     let mut body = Vec::new();
-    body.extend_from_slice(&PROGRAM_ABI_VERSION.to_be_bytes());
+    let abi_version = if program.kind == ProgramKind::DualPredicate {
+        DUAL_PREDICATE_PROGRAM_ABI_VERSION
+    } else {
+        // Existing kinds remain byte-for-byte ABI 4, preserving their
+        // content identities as well as their decodability.
+        PROGRAM_ABI_VERSION
+    };
+    body.extend_from_slice(&abi_version.to_be_bytes());
     body.push(match program.kind {
         ProgramKind::Transaction => 0,
         ProgramKind::AttributePredicate => 1,
         ProgramKind::Query => 2,
         ProgramKind::EntityPredicate => 3,
+        ProgramKind::DualPredicate => 4,
     });
     body.push(program.arity);
     put_len(&mut body, program.instructions.len())?;
@@ -118,10 +127,15 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
     let body = decode_blob(bytes, KIND_PROGRAM)?;
     let mut cursor = Cursor::new(body);
     let abi_version = cursor.u16()?;
-    if abi_version != PROGRAM_ABI_VERSION {
+    if !matches!(
+        abi_version,
+        PROGRAM_ABI_VERSION | DUAL_PREDICATE_PROGRAM_ABI_VERSION
+    ) {
         return Err(fault(
             "encoding/unsupported-program-abi",
-            format!("program ABI {abi_version} is unsupported; expected {PROGRAM_ABI_VERSION}"),
+            format!(
+                "program ABI {abi_version} is unsupported; expected {PROGRAM_ABI_VERSION} or {DUAL_PREDICATE_PROGRAM_ABI_VERSION}"
+            ),
         ));
     }
     let kind = match cursor.u8()? {
@@ -129,6 +143,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
         1 => ProgramKind::AttributePredicate,
         2 => ProgramKind::Query,
         3 => ProgramKind::EntityPredicate,
+        4 if abi_version == DUAL_PREDICATE_PROGRAM_ABI_VERSION => ProgramKind::DualPredicate,
         tag => return Err(invalid_tag("program kind", tag)),
     };
     let arity = cursor.u8()?;
@@ -1080,6 +1095,11 @@ fn encode_instruction(
             encode_instruction_block(output, then_branch)?;
             encode_instruction_block(output, else_branch)?;
         }
+        Instruction::PredicateDispatch { attribute, entity } => {
+            output.push(41);
+            encode_instruction_block(output, attribute)?;
+            encode_instruction_block(output, entity)?;
+        }
         Instruction::ForEach { body } => {
             output.push(32);
             encode_instruction_block(output, body)?;
@@ -1248,6 +1268,10 @@ fn decode_instruction(
         31 => Instruction::If {
             then_branch: decode_instruction_block(cursor, block_depth + 1, instruction_count)?,
             else_branch: decode_instruction_block(cursor, block_depth + 1, instruction_count)?,
+        },
+        41 => Instruction::PredicateDispatch {
+            attribute: decode_instruction_block(cursor, block_depth, instruction_count)?,
+            entity: decode_instruction_block(cursor, block_depth, instruction_count)?,
         },
         32 => Instruction::ForEach {
             body: decode_instruction_block(cursor, block_depth + 1, instruction_count)?,

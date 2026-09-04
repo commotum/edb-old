@@ -14,9 +14,11 @@ const MAX_ARITY: u8 = 10;
 const MAX_INSTRUCTIONS: usize = 4_096;
 const MAX_BLOCK_DEPTH: usize = 32;
 // ABI 4 adds full persisted transaction-data emitters and structured cancel
-// anomalies. Older blobs fail closed instead of assigning the new tags an
-// accidental meaning.
+// anomalies.  Existing program kinds continue to encode as ABI 4 so their
+// bytes and content identities never change.  ABI 5 is used only by the
+// explicit dual-predicate representation below.
 pub const PROGRAM_ABI_VERSION: u16 = 4;
+pub(crate) const DUAL_PREDICATE_PROGRAM_ABI_VERSION: u16 = 5;
 pub const QUERY_TEMPLATE_VERSION: u16 = 1;
 pub const MAX_QUERY_PATTERNS: usize = 64;
 pub const MAX_QUERY_VARIABLES: usize = 32;
@@ -353,6 +355,11 @@ pub enum ProgramKind {
     AttributePredicate,
     EntityPredicate,
     Query,
+    /// One immutable symbol that is callable in both documented predicate
+    /// positions. The two roles intentionally have separate bodies: an
+    /// attribute predicate receives only its value, while an entity predicate
+    /// receives the exact db-after capability plus its entity id.
+    DualPredicate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -373,6 +380,14 @@ pub enum Instruction {
     If {
         then_branch: Vec<Instruction>,
         else_branch: Vec<Instruction>,
+    },
+    /// Canonical bodies for [`ProgramKind::DualPredicate`]. This instruction
+    /// is legal only as the first instruction of the exact top-level shape
+    /// `[PredicateDispatch, Return]`; it can never be reached as ordinary
+    /// bytecode without an explicit predicate-role invocation.
+    PredicateDispatch {
+        attribute: Vec<Instruction>,
+        entity: Vec<Instruction>,
     },
     /// Consume a finite vector/map and run the body once per item. Each body
     /// invocation starts with only the current item on its stack and must
@@ -745,6 +760,7 @@ pub struct ProgramRuntime;
 /// already one concrete database value.
 #[derive(Clone, Copy)]
 enum ProgramRead<'a> {
+    AttributePredicate,
     Eager(&'a Database),
     Exact(&'a DatabaseValue),
 }
@@ -752,6 +768,9 @@ enum ProgramRead<'a> {
 impl<'a> ProgramRead<'a> {
     fn schema(self) -> &'a crate::Schema {
         match self {
+            Self::AttributePredicate => {
+                unreachable!("validated attribute predicate attempted a database read")
+            }
             Self::Eager(database) => database.schema(),
             Self::Exact(database) => database.schema(),
         }
@@ -759,6 +778,9 @@ impl<'a> ProgramRead<'a> {
 
     fn entid(self, ident: &Keyword) -> Option<u64> {
         match self {
+            Self::AttributePredicate => {
+                unreachable!("validated attribute predicate attempted a database read")
+            }
             Self::Eager(database) => database.entid(ident),
             Self::Exact(database) => database.entid(ident),
         }
@@ -766,6 +788,9 @@ impl<'a> ProgramRead<'a> {
 
     fn lookup(self, attribute: u32, value: &Value) -> Result<Option<u64>, SemanticError> {
         match self {
+            Self::AttributePredicate => {
+                unreachable!("validated attribute predicate attempted a database read")
+            }
             Self::Eager(database) => database.lookup(attribute, value),
             Self::Exact(database) => database.lookup(attribute, value),
         }
@@ -776,6 +801,9 @@ impl<'a> ProgramRead<'a> {
         prefix: &IndexPrefix,
     ) -> Result<Cow<'a, [crate::Datom]>, SemanticError> {
         match self {
+            Self::AttributePredicate => {
+                unreachable!("validated attribute predicate attempted a database read")
+            }
             Self::Eager(database) => Ok(Cow::Borrowed(database.datoms_with_prefix(prefix)?)),
             Self::Exact(database) => Ok(Cow::Owned(database.datoms_with_prefix(prefix)?)),
         }
@@ -807,6 +835,10 @@ impl Program {
             ));
         }
 
+        if self.kind == ProgramKind::DualPredicate {
+            return self.validate_dual_predicate();
+        }
+
         let mut validation = Validation {
             kind: self.kind,
             arity: self.arity,
@@ -820,6 +852,7 @@ impl Program {
                 self.arity == 1 && depth == 1
             }
             ProgramKind::Query => depth > 0 || validation.emits_rows,
+            ProgramKind::DualPredicate => unreachable!("validated by the role-specific path"),
         };
         if !valid_result {
             return Err(incorrect(
@@ -829,6 +862,108 @@ impl Program {
         }
         Ok(())
     }
+
+    fn validate_dual_predicate(&self) -> Result<(), SemanticError> {
+        if self.arity != 1 {
+            return Err(incorrect(
+                "program/result-shape",
+                "dual predicates must have one explicit argument in each role",
+            ));
+        }
+        let [
+            Instruction::PredicateDispatch { attribute, entity },
+            Instruction::Return,
+        ] = self.instructions.as_slice()
+        else {
+            return Err(incorrect(
+                "program/dual-predicate-shape",
+                "dual predicates must contain exactly one predicate dispatch and a final return",
+            ));
+        };
+
+        // Count the dispatch and final return once, then both bodies. Sharing
+        // one counter prevents a dual program from doubling every structural
+        // resource ceiling merely by splitting code across roles.
+        let mut attribute_validation = Validation {
+            kind: ProgramKind::AttributePredicate,
+            arity: 1,
+            instruction_count: 2,
+            emits_rows: false,
+        };
+        if attribute_validation.block(attribute, 0, 0, false)? != 1 {
+            return Err(incorrect(
+                "program/result-shape",
+                "dual predicate attribute body must leave exactly one result",
+            ));
+        }
+        let mut entity_validation = Validation {
+            kind: ProgramKind::EntityPredicate,
+            arity: 1,
+            instruction_count: attribute_validation.instruction_count,
+            emits_rows: false,
+        };
+        if entity_validation.block(entity, 0, 0, false)? != 1 {
+            return Err(incorrect(
+                "program/result-shape",
+                "dual predicate entity body must leave exactly one result",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn supports_attribute_predicate(&self) -> bool {
+        matches!(
+            self.kind,
+            ProgramKind::AttributePredicate | ProgramKind::DualPredicate
+        )
+    }
+
+    pub(crate) fn supports_entity_predicate(&self) -> bool {
+        matches!(
+            self.kind,
+            ProgramKind::EntityPredicate | ProgramKind::DualPredicate
+        )
+    }
+
+    fn predicate_body(
+        &self,
+        role: PredicateExecutionRole,
+    ) -> Result<&[Instruction], SemanticError> {
+        match (self.kind, role) {
+            (ProgramKind::AttributePredicate, PredicateExecutionRole::Attribute)
+            | (ProgramKind::EntityPredicate, PredicateExecutionRole::Entity) => {
+                Ok(&self.instructions)
+            }
+            (ProgramKind::DualPredicate, role) => {
+                let Some(Instruction::PredicateDispatch { attribute, entity }) =
+                    self.instructions.first()
+                else {
+                    return Err(incorrect(
+                        "program/dual-predicate-shape",
+                        "validated dual predicate has no dispatch",
+                    ));
+                };
+                Ok(match role {
+                    PredicateExecutionRole::Attribute => attribute,
+                    PredicateExecutionRole::Entity => entity,
+                })
+            }
+            (_, PredicateExecutionRole::Attribute) => Err(incorrect(
+                "program/not-attribute-predicate",
+                "program does not declare an attribute-predicate body",
+            )),
+            (_, PredicateExecutionRole::Entity) => Err(incorrect(
+                "program/not-entity-predicate",
+                "program does not declare an entity-predicate body",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PredicateExecutionRole {
+    Attribute,
+    Entity,
 }
 
 struct Validation {
@@ -915,6 +1050,12 @@ impl Validation {
     }
 
     fn validate_instruction(&mut self, instruction: &Instruction) -> Result<(), SemanticError> {
+        if matches!(instruction, Instruction::PredicateDispatch { .. }) {
+            return Err(incorrect(
+                "program/dual-predicate-shape",
+                "predicate dispatch is permitted only at the top level of a dual predicate",
+            ));
+        }
         if let Instruction::PushArgument(index) = instruction
             && *index >= self.arity
         {
@@ -1131,6 +1272,49 @@ impl ProgramRuntime {
         self.execute_prevalidated_runtime_exact_with_budget(program, database, &arguments, budget)
     }
 
+    /// Invoke an attribute predicate with only its documented value argument.
+    /// No db-before or db-after capability exists on this execution path.
+    pub(crate) fn execute_prevalidated_attribute_predicate_with_budget(
+        &self,
+        program: &ValidatedProgram,
+        value: &Value,
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<RuntimeValue, SemanticError> {
+        contain_runtime_panic(|| {
+            let body = program
+                .program()
+                .predicate_body(PredicateExecutionRole::Attribute)?;
+            self.execute_predicate_body_with_budget(
+                body,
+                ProgramRead::AttributePredicate,
+                &[RuntimeValue::Scalar(value.clone())],
+                budget,
+            )
+        })
+    }
+
+    /// Invoke an entity predicate with the exact proposed db-after. The
+    /// program identity itself remains selected from db-before by the caller.
+    pub(crate) fn execute_prevalidated_entity_predicate_exact_with_budget(
+        &self,
+        program: &ValidatedProgram,
+        db_after: &DatabaseValue,
+        entity: u64,
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<RuntimeValue, SemanticError> {
+        contain_runtime_panic(|| {
+            let body = program
+                .program()
+                .predicate_body(PredicateExecutionRole::Entity)?;
+            self.execute_predicate_body_with_budget(
+                body,
+                ProgramRead::Exact(db_after),
+                &[RuntimeValue::Scalar(Value::Ref(entity))],
+                budget,
+            )
+        })
+    }
+
     #[allow(dead_code)] // retained as the eager semantic-oracle adapter
     pub(crate) fn execute_prevalidated_runtime_with_budget(
         &self,
@@ -1212,7 +1396,34 @@ impl ProgramRuntime {
                 }
                 Ok(ProgramOutput::Query(evaluation.query_rows))
             }
+            ProgramKind::DualPredicate => Err(incorrect(
+                "program/predicate-role-required",
+                "dual predicates require an explicit attribute or entity invocation role",
+            )),
         }
+    }
+
+    fn execute_predicate_body_with_budget(
+        &self,
+        body: &[Instruction],
+        database: ProgramRead<'_>,
+        arguments: &[RuntimeValue],
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<RuntimeValue, SemanticError> {
+        budget.begin_call()?;
+        for argument in arguments {
+            budget.charge_runtime_value(argument)?;
+        }
+        let mut stack = Vec::new();
+        let mut evaluation = Evaluation {
+            database,
+            arguments,
+            budget,
+            forms: Vec::new(),
+            query_rows: Vec::new(),
+        };
+        evaluation.block(body, &mut stack, 0)?;
+        pop(&mut stack)
     }
 }
 
@@ -1369,6 +1580,12 @@ impl Evaluation<'_, '_, '_, '_> {
                         stack,
                         block_depth + 1,
                     )?;
+                }
+                Instruction::PredicateDispatch { .. } => {
+                    return Err(incorrect(
+                        "program/predicate-role-required",
+                        "predicate dispatch requires an explicit invocation role",
+                    ));
                 }
                 Instruction::ForEach { body } => {
                     let items = finite_items(pop(stack)?)?;
@@ -1691,7 +1908,9 @@ fn stack_effect(instruction: &Instruction) -> (isize, isize) {
         }
         Instruction::EmitRow(width) => (isize::from(*width), -isize::from(*width)),
         Instruction::Return => (0, 0),
-        Instruction::If { .. } | Instruction::ForEach { .. } => {
+        Instruction::If { .. }
+        | Instruction::PredicateDispatch { .. }
+        | Instruction::ForEach { .. } => {
             unreachable!("structured instructions are validated separately")
         }
     }
@@ -3161,5 +3380,80 @@ mod tests {
                 ProgramOutput::AttributePredicate(right)
             ) if left == right && left == RuntimeValue::Scalar(Value::Bool(true))
         ));
+    }
+
+    #[test]
+    fn dual_predicate_selects_role_body_and_denies_attribute_database_access() {
+        let (database, entity) = query_database();
+        let exact_database = database.database_value();
+        let program = Program {
+            kind: ProgramKind::DualPredicate,
+            arity: 1,
+            instructions: vec![
+                Instruction::PredicateDispatch {
+                    attribute: vec![
+                        Instruction::PushArgument(0),
+                        Instruction::PushConstant(Value::Long(0)),
+                        Instruction::GreaterThan,
+                    ],
+                    entity: vec![
+                        Instruction::PushArgument(0),
+                        Instruction::LoadOne(NAME),
+                        Instruction::PushConstant(Value::String("new".into())),
+                        Instruction::Equal,
+                    ],
+                },
+                Instruction::Return,
+            ],
+        };
+        program.validate().unwrap();
+        assert!(program.supports_attribute_predicate());
+        assert!(program.supports_entity_predicate());
+        let encoded = crate::encode_program(&program).unwrap();
+        assert_eq!(
+            &encoded[16..18],
+            &DUAL_PREDICATE_PROGRAM_ABI_VERSION.to_be_bytes()
+        );
+        assert_eq!(crate::decode_program(&encoded).unwrap(), program);
+
+        let program = ValidatedProgram::from_canonical(program);
+        let mut budget = ProgramBudget::new(ProgramControl::default()).unwrap();
+        assert_eq!(
+            ProgramRuntime
+                .execute_prevalidated_attribute_predicate_with_budget(
+                    &program,
+                    &Value::Long(7),
+                    &mut budget,
+                )
+                .unwrap(),
+            RuntimeValue::Scalar(Value::Bool(true))
+        );
+        assert_eq!(
+            ProgramRuntime
+                .execute_prevalidated_entity_predicate_exact_with_budget(
+                    &program,
+                    &exact_database,
+                    entity,
+                    &mut budget,
+                )
+                .unwrap(),
+            RuntimeValue::Scalar(Value::Bool(true))
+        );
+
+        let illegal_attribute_read = Program {
+            kind: ProgramKind::DualPredicate,
+            arity: 1,
+            instructions: vec![
+                Instruction::PredicateDispatch {
+                    attribute: vec![Instruction::PushArgument(0), Instruction::LoadOne(NAME)],
+                    entity: vec![Instruction::PushConstant(Value::Bool(true))],
+                },
+                Instruction::Return,
+            ],
+        };
+        assert_eq!(
+            illegal_attribute_read.validate().unwrap_err().code,
+            "program/predicate-database-read"
+        );
     }
 }

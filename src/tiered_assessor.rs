@@ -187,14 +187,10 @@ fn insert_predicate_role(
     predicate: &str,
     role: crate::database::PredicateRole,
 ) -> Result<(), SemanticError> {
-    if let Some(existing) = required.insert(predicate.to_owned(), role)
-        && existing != role
-    {
-        return Err(SemanticError::incorrect(
-            "program/predicate-role-conflict",
-            format!("predicate {predicate} is required as both an attribute and entity predicate"),
-        ));
-    }
+    required
+        .entry(predicate.to_owned())
+        .and_modify(|existing| *existing = existing.include(role))
+        .or_insert(role);
     Ok(())
 }
 
@@ -2263,5 +2259,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(invalid.code, "transaction/invalid-read-capacity");
+    }
+
+    #[test]
+    fn predicate_requirements_union_roles_for_one_symbol() {
+        let mut required = BTreeMap::new();
+        insert_predicate_role(
+            &mut required,
+            "test.predicates/shared",
+            crate::database::PredicateRole::Attribute,
+        )
+        .unwrap();
+        insert_predicate_role(
+            &mut required,
+            "test.predicates/shared",
+            crate::database::PredicateRole::Entity,
+        )
+        .unwrap();
+        assert_eq!(
+            required["test.predicates/shared"],
+            crate::database::PredicateRole::Both
+        );
     }
 }

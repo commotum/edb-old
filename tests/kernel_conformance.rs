@@ -638,6 +638,100 @@ fn attribute_predicates_start_on_the_transaction_after_installation() {
 }
 
 #[test]
+fn one_symbol_can_serve_both_predicate_roles_from_db_before() {
+    let db = database();
+    let predicate_name = "test.predicates/shared";
+    let predicate_symbol = atomic_core::Symbol::new("test.predicates", "shared");
+    let guard_ident = Keyword::new("test", "guard");
+    let mut guarded_balance = db.schema().attribute(BALANCE).unwrap().clone();
+    guarded_balance.predicates.push(predicate_name.into());
+
+    // Recovered create-attr-pred and ensure-entity! select definitions from
+    // db-before. Installing both uses of the same symbol alongside data and
+    // an ensure therefore does not make either definition take effect early.
+    let installed = db
+        .with(
+            &[
+                TxOp::AlterAttribute(guarded_balance.clone()),
+                add(
+                    EntityRef::Temp("guard".into()),
+                    atomic_core::DB_IDENT as u32,
+                    scalar(Value::Keyword(guard_ident)),
+                ),
+                add(
+                    EntityRef::Temp("guard".into()),
+                    atomic_core::DB_ENTITY_PREDS as u32,
+                    scalar(Value::Symbol(predicate_symbol.clone())),
+                ),
+                add(EntityRef::Id(7), BALANCE, scalar(Value::Long(-1))),
+                TxOp::Ensure {
+                    entity: EntityRef::Id(7),
+                    spec: EntityRef::Temp("guard".into()),
+                },
+            ],
+            1_000,
+        )
+        .unwrap();
+    let guard = installed.tempids["guard"];
+
+    let attribute_calls = Arc::new(AtomicUsize::new(0));
+    let entity_calls = Arc::new(AtomicUsize::new(0));
+    let mut functions = TxFunctions::new();
+    let observed_attribute_calls = Arc::clone(&attribute_calls);
+    functions.register_attribute_predicate(predicate_name, move |value| {
+        observed_attribute_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        Ok(matches!(value, Value::Long(value) if *value >= 0))
+    });
+    let observed_entity_calls = Arc::clone(&entity_calls);
+    functions.register_entity_predicate(predicate_name, move |db_after, entity| {
+        observed_entity_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        Ok(db_after.values(entity, BALANCE) == vec![&Value::Long(7)])
+    });
+
+    // Removing both declarations in this transaction must not suppress their
+    // invocation: the selected symbol/binding is the one in db-before, while
+    // the entity predicate observes this transaction's complete db-after.
+    guarded_balance.predicates.clear();
+    let removed = installed
+        .db_after
+        .with_forms(
+            &[
+                TxForm::Op(TxOp::AlterAttribute(guarded_balance)),
+                TxForm::Op(TxOp::Retract {
+                    entity: EntityRef::Id(guard),
+                    attribute: atomic_core::DB_ENTITY_PREDS as u32,
+                    value: Some(scalar(Value::Symbol(predicate_symbol))),
+                }),
+                TxForm::Op(add(EntityRef::Id(7), BALANCE, scalar(Value::Long(7)))),
+                TxForm::Op(TxOp::Ensure {
+                    entity: EntityRef::Id(7),
+                    spec: EntityRef::Id(guard),
+                }),
+            ],
+            &functions,
+            2_000,
+        )
+        .unwrap();
+    assert_eq!(attribute_calls.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(entity_calls.load(AtomicOrdering::SeqCst), 1);
+
+    // The removals become visible only now. No predicate context is needed.
+    removed
+        .db_after
+        .with(
+            &[
+                add(EntityRef::Id(7), BALANCE, scalar(Value::Long(-2))),
+                TxOp::Ensure {
+                    entity: EntityRef::Id(7),
+                    spec: EntityRef::Id(guard),
+                },
+            ],
+            3_000,
+        )
+        .unwrap();
+}
+
+#[test]
 fn component_nested_maps_create_owned_entities() {
     let db = database();
     let mut link = db.schema().attribute(LINK).unwrap().clone();

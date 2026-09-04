@@ -150,6 +150,21 @@ pub(crate) struct AssessedTransaction {
 pub(crate) enum PredicateRole {
     Attribute,
     Entity,
+    Both,
+}
+
+impl PredicateRole {
+    pub(crate) fn include(self, role: Self) -> Self {
+        if self == role { self } else { Self::Both }
+    }
+
+    pub(crate) fn requires_attribute(self) -> bool {
+        matches!(self, Self::Attribute | Self::Both)
+    }
+
+    pub(crate) fn requires_entity(self) -> bool {
+        matches!(self, Self::Entity | Self::Both)
+    }
 }
 
 impl AssessedTransaction {
@@ -201,14 +216,10 @@ fn insert_predicate_role(
     predicate: &str,
     role: PredicateRole,
 ) -> Result<(), SemanticError> {
-    if let Some(existing) = required.insert(predicate.to_owned(), role)
-        && existing != role
-    {
-        return Err(SemanticError::incorrect(
-            "program/predicate-role-conflict",
-            format!("predicate {predicate} is required as both an attribute and entity predicate"),
-        ));
-    }
+    required
+        .entry(predicate.to_owned())
+        .and_modify(|existing| *existing = existing.include(role))
+        .or_insert(role);
     Ok(())
 }
 
