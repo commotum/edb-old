@@ -1,8 +1,8 @@
 use crate::log_generation::request_key_hash;
 use crate::postgres::{
-    CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
-    WriterResidencyStats, is_postgres_connection_error, postgres_error,
-    read_authenticated_log_range, shared_program_cache_stats,
+    is_postgres_connection_error, postgres_error, read_authenticated_log_range,
+    shared_program_cache_stats, CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache,
+    TransactorLease, WriterResidencyStats,
 };
 use crate::{
     DatabaseValue, Datom, Digest, ErrorCategory, IndexBuildFault, PostgresConnectionConfig,
@@ -11,7 +11,7 @@ use crate::{
 use std::collections::{BTreeMap, VecDeque};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -215,6 +215,47 @@ struct Work {
     response: mpsc::SyncSender<Result<ServiceTransactionReport, SemanticError>>,
 }
 
+/// A deterministic seam around the response-observation boundary. Production
+/// contains no injectable path; crate tests key one fault to one database and
+/// request so parallel tests cannot alter ordinary work.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommitObservationFault {
+    AbsentUnknownOutcome,
+    RollbackAfterHeadUpdate,
+    AfterCommitBeforeResponse,
+}
+
+#[cfg(test)]
+fn observation_faults() -> &'static Mutex<BTreeMap<(String, String), CommitObservationFault>> {
+    static FAULTS: std::sync::OnceLock<Mutex<BTreeMap<(String, String), CommitObservationFault>>> =
+        std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn arm_observation_fault(database_id: &str, request_key: &str, fault: CommitObservationFault) {
+    observation_faults()
+        .lock()
+        .expect("observation fault mutex poisoned")
+        .insert((database_id.to_owned(), request_key.to_owned()), fault);
+}
+
+#[cfg(test)]
+fn take_observation_fault(database_id: &str, request_key: &str) -> Option<CommitObservationFault> {
+    observation_faults()
+        .lock()
+        .expect("observation fault mutex poisoned")
+        .remove(&(database_id.to_owned(), request_key.to_owned()))
+}
+
+#[derive(Debug)]
+struct AmbiguousOutcome {
+    request_key: String,
+    reconnect_required: bool,
+    notify_if_durable: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Novelty {
     basis_t: u64,
@@ -359,18 +400,6 @@ impl BackgroundIndexing {
             Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
-    }
-
-    /// A lost COMMIT acknowledgement may or may not have advanced the log.
-    /// Do not guess or replay transaction data; force the indexer to read the
-    /// authoritative head and publish/adopt whatever endpoint PostgreSQL made
-    /// visible.
-    fn note_unknown_outcome(&self) {
-        self.backlog
-            .lock()
-            .expect("index backlog mutex poisoned")
-            .needs_publication = true;
-        self.wake();
     }
 
     fn shutdown(&self) {
@@ -1237,6 +1266,7 @@ fn run_worker(
     let mut last_renewal = Instant::now();
     let mut pending: Option<Work> = None;
     let mut pending_was_stalled = false;
+    let mut ambiguous_outcome: Option<AmbiguousOutcome> = None;
     loop {
         if !shared.accepting.load(Ordering::Acquire) {
             if let Some(work) = pending.take() {
@@ -1248,6 +1278,70 @@ fn run_worker(
         }
         if shared.indexing.has_failure() {
             shared.accepting.store(false, Ordering::Release);
+            continue;
+        }
+        if let Some(mut ambiguous) = ambiguous_outcome.take() {
+            // The connection which returned an ambiguous COMMIT result is not
+            // safe to reuse. Reconnect first, then renew the exact lease epoch
+            // before observing the durable decision. This never resubmits or
+            // re-evaluates transaction data.
+            if ambiguous.reconnect_required {
+                match store.reconnect() {
+                    Ok(()) => {
+                        if store.renew_lease(lease, lease_millis).is_err() {
+                            shared.accepting.store(false, Ordering::Release);
+                            continue;
+                        }
+                        last_renewal = Instant::now();
+                        ambiguous.reconnect_required = false;
+                    }
+                    Err(error) if is_postgres_connection_error(&error) => {
+                        ambiguous_outcome = Some(ambiguous);
+                        thread::park_timeout(renew_interval.min(Duration::from_millis(100)));
+                        continue;
+                    }
+                    Err(_) => {
+                        shared.accepting.store(false, Ordering::Release);
+                        continue;
+                    }
+                }
+            }
+            match store.resolve_request_outcome(database_id, &ambiguous.request_key) {
+                Ok(Some(commit)) => {
+                    if ambiguous.notify_if_durable {
+                        let mut report = ServiceTransactionReport::from_commit(commit);
+                        debug_assert!(report.replayed);
+                        // Reconstruction is an idempotent read, but this is the
+                        // first and only live notification for the original
+                        // durable transaction.
+                        report.replayed = false;
+                        shared.indexing.note_commit(report.basis_t, &report.tx_data);
+                        shared.publish(&report);
+                    }
+                    *shared
+                        .writer_residency
+                        .lock()
+                        .expect("writer residency mutex poisoned") =
+                        store.writer_residency_stats(database_id);
+                }
+                Ok(None) => {
+                    *shared
+                        .writer_residency
+                        .lock()
+                        .expect("writer residency mutex poisoned") =
+                        store.writer_residency_stats(database_id);
+                }
+                Err(error) if is_postgres_connection_error(&error) => {
+                    ambiguous.reconnect_required = true;
+                    ambiguous_outcome = Some(ambiguous);
+                    thread::park_timeout(renew_interval.min(Duration::from_millis(100)));
+                }
+                Err(_) => {
+                    // Continuing would either lose a committed notification
+                    // or permit later work to overtake an unresolved decision.
+                    shared.accepting.store(false, Ordering::Release);
+                }
+            }
             continue;
         }
         if last_renewal.elapsed() >= renew_interval {
@@ -1312,6 +1406,7 @@ fn run_worker(
         }
         decrement_queued(shared);
         pending_was_stalled = false;
+        let request_key = work.request.request_key.clone();
         let result = match gate {
             Ok(()) => {
                 let published_revision = shared.indexing.stats().published_revision;
@@ -1345,13 +1440,24 @@ fn run_worker(
         {
             shared.accepting.store(false, Ordering::Release);
         }
+        let reconcile = result
+            .as_ref()
+            .err()
+            .filter(|error| error.category == ErrorCategory::UnknownOutcome)
+            .map(|error| AmbiguousOutcome {
+                request_key,
+                reconnect_required: true,
+                // An acknowledgement-lost idempotent outcome read names an
+                // already-observed transaction. Resolve it to restore the
+                // connection/writer, but never duplicate its report or
+                // indexing novelty.
+                notify_if_durable: error
+                    .details
+                    .get("ambiguity_kind")
+                    .is_some_and(|kind| kind == "publication"),
+            });
         if let Some(report) = &publish {
             shared.indexing.note_commit(report.basis_t, &report.tx_data);
-        } else if result
-            .as_ref()
-            .is_err_and(|error| error.category == ErrorCategory::UnknownOutcome)
-        {
-            shared.indexing.note_unknown_outcome();
         }
         *shared
             .writer_residency
@@ -1361,6 +1467,10 @@ fn run_worker(
         if let Some(report) = publish {
             shared.publish(&report);
         }
+        // Future/result delivery precedes report notification, matching the
+        // recovered peer. Reconciliation therefore begins only after the
+        // originating caller has received the honest UnknownOutcome.
+        ambiguous_outcome = reconcile;
     }
     let _ = store.release_lease(lease);
     shared.accepting.store(false, Ordering::Release);
@@ -1461,6 +1571,7 @@ fn process_work(
     request: TransactionRequest,
     request_hash: Digest,
 ) -> Result<ServiceTransactionReport, SemanticError> {
+    #[cfg(not(test))]
     let commit = store.transact_authoritative_fenced(
         lease,
         database_id,
@@ -1470,6 +1581,39 @@ fn process_work(
         request.tx_instant_override,
         request_hash,
     )?;
+    #[cfg(test)]
+    let commit = {
+        let observation_fault = take_observation_fault(database_id, &request.request_key);
+        if observation_fault == Some(CommitObservationFault::AbsentUnknownOutcome) {
+            return Err(unknown_outcome(
+                request_hash,
+                "injected acknowledgement loss before a durable decision",
+            )
+            .detail("ambiguity_kind", "publication"));
+        }
+        let fault = match observation_fault {
+            None => crate::postgres::CommitFault::None,
+            Some(CommitObservationFault::RollbackAfterHeadUpdate) => {
+                crate::postgres::CommitFault::AfterHeadUpdate
+            }
+            Some(CommitObservationFault::AfterCommitBeforeResponse) => {
+                crate::postgres::CommitFault::AfterCommitBeforeResponse
+            }
+            Some(CommitObservationFault::AbsentUnknownOutcome) => {
+                unreachable!("the absent-outcome test fault returns before PostgreSQL publication")
+            }
+        };
+        store.transact_authoritative_fenced_with_fault(
+            lease,
+            database_id,
+            &request.request_key,
+            request.compare_basis_t,
+            &request.forms,
+            request.tx_instant_override,
+            request_hash,
+            fault,
+        )?
+    };
     Ok(ServiceTransactionReport::from_commit(commit))
 }
 
@@ -1687,7 +1831,67 @@ fn hex_digest(digest: &Digest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Value;
+    use crate::{
+        make_eid, Attribute, Cardinality, EntityRef, Keyword, PostgresMigrator, Schema, TxValue,
+        Value, ValueType, USER_PARTITION,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const OBSERVED_ITEM_COUNT: u32 = 1_000;
+
+    fn postgres_connection() -> Option<String> {
+        std::env::var("ATOMIC_POSTGRES_URL").ok()
+    }
+
+    fn unique_database(prefix: &str) -> String {
+        format!(
+            "{prefix}_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock precedes Unix epoch")
+                .as_nanos()
+        )
+    }
+
+    fn observation_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                OBSERVED_ITEM_COUNT,
+                Keyword::new("item", "count"),
+                ValueType::Long,
+                Cardinality::One,
+            ))
+            .unwrap();
+        schema
+    }
+
+    fn observation_request(key: &str, value: i64) -> TransactionRequest {
+        TransactionRequest::new(
+            key,
+            vec![TxOp::Add {
+                entity: EntityRef::Id(make_eid(USER_PARTITION, 42).unwrap()),
+                attribute: OBSERVED_ITEM_COUNT,
+                value: TxValue::Scalar(Value::Long(value)),
+            }],
+        )
+    }
+
+    fn observation_service_config(
+        connection: &str,
+        database_id: String,
+    ) -> TransactionServiceConfig {
+        TransactionServiceConfig {
+            connection: connection.to_owned(),
+            database_id,
+            holder_id: unique_database("unknown-observer"),
+            lease_duration: Duration::from_secs(2),
+            renew_interval: Duration::from_millis(100),
+            queue_capacity: 4,
+            capacity_limits: CapacityLimits::default(),
+        }
+    }
 
     fn test_config() -> BackgroundIndexingConfig {
         BackgroundIndexingConfig {
@@ -1922,5 +2126,210 @@ mod tests {
             .expect("retained tuple slots must cross the hard byte limit");
         assert_eq!(limit.code, "service/index-backpressure");
         assert_eq!(indexing.stats().total_bytes, retained_account);
+    }
+
+    #[test]
+    fn unknown_outcome_reconciliation_notifies_once_only_for_a_durable_decision() {
+        let Some(connection) = postgres_connection() else {
+            return;
+        };
+        let database_id = unique_database("unknown_outcome_observer");
+        let mut migrator = PostgresMigrator::connect(&connection).unwrap();
+        migrator.migrate().unwrap();
+        let mut setup = PostgresStore::connect(&connection).unwrap();
+        let initial_basis = setup
+            .create_database(&database_id, observation_schema())
+            .unwrap()
+            .basis_t();
+        drop(setup);
+
+        // Keep committed novelty resident so the accounting assertions cannot
+        // race a background publication which legitimately drains it.
+        let service = TransactionService::start_with_indexing(
+            observation_service_config(&connection, database_id.clone()),
+            BackgroundIndexingConfig {
+                memory_index_threshold_bytes: 1 << 30,
+                memory_index_max_bytes: 2 << 30,
+            },
+        )
+        .unwrap();
+        let client = service.client();
+        let reports = client.subscribe_reports();
+
+        let committed_request = observation_request("committed-unknown", 11);
+        arm_observation_fault(
+            &database_id,
+            "committed-unknown",
+            CommitObservationFault::AfterCommitBeforeResponse,
+        );
+        let committed_error = client
+            .submit(committed_request.clone())
+            .unwrap()
+            .wait(Duration::from_secs(2))
+            .unwrap_err();
+        assert_eq!(committed_error.category, ErrorCategory::UnknownOutcome);
+        assert_eq!(committed_error.details["ambiguity_kind"], "publication");
+
+        // The origin observes Unknown first. The worker then reconnects,
+        // renews its fenced lease, resolves without resubmission, and emits
+        // the notification which authoritative peer data delivery would have
+        // produced even though the request acknowledgement was lost.
+        let committed_report = reports.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(committed_report.basis_t, initial_basis + 1);
+        assert!(!committed_report.replayed);
+        assert_eq!(
+            committed_report
+                .db_after
+                .values(make_eid(USER_PARTITION, 42).unwrap(), OBSERVED_ITEM_COUNT)
+                .unwrap(),
+            vec![Value::Long(11)]
+        );
+        let committed_datoms = committed_report.tx_data.len() as u64;
+        let after_commit = client.background_indexing_stats();
+        assert_eq!(after_commit.target_basis_t, initial_basis + 1);
+        assert_eq!(after_commit.total_transactions, 1);
+        assert_eq!(after_commit.total_datoms, committed_datoms);
+
+        let replay = client
+            .transact(committed_request.clone(), Duration::from_secs(2))
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.tx_hash, committed_report.tx_hash);
+        assert!(
+            replay
+                .db_after
+                .shares_tiered_read_core(&committed_report.db_after),
+            "outcome reconciliation must install and reuse the report's native read core"
+        );
+        assert!(
+            matches!(
+                reports.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "an ordinary idempotent retry must not duplicate the live report"
+        );
+        assert_eq!(
+            client.background_indexing_stats().total_transactions,
+            1,
+            "an ordinary replay must not charge indexing novelty twice"
+        );
+
+        arm_observation_fault(
+            &database_id,
+            "committed-unknown",
+            CommitObservationFault::AfterCommitBeforeResponse,
+        );
+        let replay_read_error = client
+            .submit(committed_request.clone())
+            .unwrap()
+            .wait(Duration::from_secs(2))
+            .unwrap_err();
+        assert_eq!(replay_read_error.category, ErrorCategory::UnknownOutcome);
+        assert_eq!(replay_read_error.details["ambiguity_kind"], "outcome-read");
+        assert!(
+            matches!(
+                reports.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "acknowledgement loss while reading a replay must not duplicate its original report"
+        );
+
+        let replay_after_read_ambiguity = client
+            .transact(committed_request, Duration::from_secs(2))
+            .unwrap();
+        assert!(replay_after_read_ambiguity.replayed);
+        assert_eq!(
+            replay_after_read_ambiguity.tx_hash,
+            committed_report.tx_hash
+        );
+        assert!(
+            matches!(
+                reports.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "reconciling an ambiguous replay read must remain report-suppressed"
+        );
+        assert_eq!(
+            client.background_indexing_stats().total_transactions,
+            1,
+            "an ordinary replay must not charge indexing novelty twice"
+        );
+
+        arm_observation_fault(
+            &database_id,
+            "absent-unknown",
+            CommitObservationFault::AbsentUnknownOutcome,
+        );
+        let absent_error = client
+            .submit(observation_request("absent-unknown", 22))
+            .unwrap()
+            .wait(Duration::from_secs(2))
+            .unwrap_err();
+        assert_eq!(absent_error.category, ErrorCategory::UnknownOutcome);
+
+        // The next ordinary request cannot overtake reconciliation. A locked,
+        // successful absence decision produces no report and no novelty; only
+        // this genuinely committed successor is observed.
+        let successor = client
+            .transact(
+                observation_request("after-absent", 33),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(successor.basis_t, initial_basis + 2);
+        let successor_report = reports.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(successor_report.tx_hash, successor.tx_hash);
+        assert!(matches!(
+            reports.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        arm_observation_fault(
+            &database_id,
+            "rolled-back",
+            CommitObservationFault::RollbackAfterHeadUpdate,
+        );
+        let rollback_error = client
+            .submit(observation_request("rolled-back", 44))
+            .unwrap()
+            .wait(Duration::from_secs(2))
+            .unwrap_err();
+        assert_eq!(
+            (rollback_error.category, rollback_error.code),
+            (ErrorCategory::Interrupted, "postgres/injected-failure")
+        );
+        assert!(
+            matches!(
+                reports.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "rolled-back publication work must remain invisible"
+        );
+        let final_stats = client.background_indexing_stats();
+        assert_eq!(final_stats.target_basis_t, initial_basis + 2);
+        assert_eq!(final_stats.total_transactions, 2);
+        assert_eq!(
+            final_stats.total_datoms,
+            committed_datoms + successor_report.tx_data.len() as u64
+        );
+
+        service.shutdown();
+        let mut verifier = PostgresStore::connect(&connection).unwrap();
+        assert_eq!(
+            verifier.recover(&database_id).unwrap().basis_t(),
+            initial_basis + 2
+        );
+        assert!(verifier
+            .resolve_request_outcome(&database_id, "committed-unknown")
+            .unwrap()
+            .is_some());
+        assert!(verifier
+            .resolve_request_outcome(&database_id, "absent-unknown")
+            .unwrap()
+            .is_none());
+        assert!(verifier
+            .resolve_request_outcome(&database_id, "rolled-back")
+            .unwrap()
+            .is_none());
     }
 }
