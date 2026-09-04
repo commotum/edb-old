@@ -14,7 +14,7 @@ use crate::state_commitment::{
 use crate::{Database, Datom, Digest, ErrorCategory, IndexOrder, SemanticError, View};
 use postgres::GenericClient;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const PAYLOAD_MAGIC: &[u8; 4] = b"ATSC";
 const PAYLOAD_VERSION: u8 = 1;
@@ -180,6 +180,11 @@ impl StoredNode {
 struct NodeStore<'a, C: GenericClient> {
     client: &'a mut C,
     cache: BTreeMap<Digest, StoredNode>,
+    /// Nodes constructed by this update but not yet known durable. Multiple
+    /// logical changes can replace an earlier path again before a coordinate
+    /// is published; keeping those versions local lets the final flush omit
+    /// content that was never reachable from the transaction's final root.
+    pending: BTreeMap<Digest, StoredNode>,
     work: CommitmentWork,
 }
 
@@ -188,6 +193,7 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
         Self {
             client,
             cache: BTreeMap::new(),
+            pending: BTreeMap::new(),
             work: CommitmentWork::default(),
         }
     }
@@ -290,10 +296,73 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
             count,
         };
         let hash = node.hash();
+        self.work.rehash();
+        if let Some(stored) = self.cache.get(&hash) {
+            if stored != &node {
+                return Err(corrupt(
+                    "persistent-commitment/node-collision",
+                    "semantic commitment node hash resolves to different canonical content",
+                ));
+            }
+            // A cached node is either already authenticated durable content or
+            // is already pending. In either case, do not turn it into a new
+            // write merely because another transient path rebuilt it.
+            return Ok(NodeRef { hash, count });
+        }
+        self.cache.insert(hash, node.clone());
+        self.pending.insert(hash, node);
+        Ok(NodeRef { hash, count })
+    }
+
+    /// Persist only newly constructed nodes reachable from `root`. Children
+    /// are flushed before parents because PostgreSQL's immutable node links
+    /// are foreign keys. Existing children are already authenticated by the
+    /// read path; an existing hash encountered during insert is authenticated
+    /// again rather than treated as permission to accept a collision.
+    fn flush_reachable(&mut self, root: Option<Digest>) -> Result<(), SemanticError> {
+        let mut visiting = BTreeSet::new();
+        let mut flushed = BTreeSet::new();
+        if let Some(root) = root {
+            self.flush_pending(root, &mut visiting, &mut flushed)?;
+        }
+        Ok(())
+    }
+
+    fn flush_pending(
+        &mut self,
+        hash: Digest,
+        visiting: &mut BTreeSet<Digest>,
+        flushed: &mut BTreeSet<Digest>,
+    ) -> Result<(), SemanticError> {
+        if flushed.contains(&hash) {
+            return Ok(());
+        }
+        let Some(node) = self.pending.get(&hash).cloned() else {
+            return Ok(());
+        };
+        if !visiting.insert(hash) {
+            return Err(corrupt(
+                "persistent-commitment/pending-cycle",
+                "new semantic commitment nodes contain a cycle",
+            ));
+        }
+        if let Some(left) = node.left {
+            self.flush_pending(left, visiting, flushed)?;
+        }
+        if let Some(right) = node.right {
+            self.flush_pending(right, visiting, flushed)?;
+        }
+        self.persist_node(hash, &node)?;
+        visiting.remove(&hash);
+        flushed.insert(hash);
+        Ok(())
+    }
+
+    fn persist_node(&mut self, hash: Digest, node: &StoredNode) -> Result<(), SemanticError> {
         let payload = node.encode();
         let left_bytes = node.left.map(|value| value.to_vec());
         let right_bytes = node.right.map(|value| value.to_vec());
-        let count_sql = to_sql_u64(count, "semantic commitment subtree count")?;
+        let count_sql = to_sql_u64(node.count, "semantic commitment subtree count")?;
         self.client
             .execute(
                 "INSERT INTO atomic_semantic_commitment_nodes \
@@ -302,8 +371,6 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
                 &[&&hash[..], &payload, &left_bytes, &right_bytes, &count_sql],
             )
             .map_err(|error| pg_error("persistent-commitment/node-insert", error))?;
-        // `ON CONFLICT` is idempotency, never permission to accept a digest
-        // collision or a differently encoded copy.
         let stored = self
             .client
             .query_one(
@@ -315,16 +382,14 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
         if stored.get::<_, Vec<u8>>(0) != payload
             || optional_digest(stored.get(1), "semantic commitment left child")? != node.left
             || optional_digest(stored.get(2), "semantic commitment right child")? != node.right
-            || from_sql_u64(stored.get(3), "semantic commitment subtree count")? != count
+            || from_sql_u64(stored.get(3), "semantic commitment subtree count")? != node.count
         {
             return Err(corrupt(
                 "persistent-commitment/node-collision",
                 "semantic commitment node hash resolves to different canonical content",
             ));
         }
-        self.work.rehash();
-        self.cache.insert(hash, node);
-        Ok(NodeRef { hash, count })
+        Ok(())
     }
 
     fn insert(
@@ -495,6 +560,7 @@ pub(crate) fn advance_persistent_commitment<C: GenericClient>(
         root: root.map(|node| node.hash),
         count: root.map_or(0, |node| node.count),
     };
+    store.flush_reachable(root.root)?;
     Ok((root, store.work))
 }
 
@@ -1002,6 +1068,65 @@ mod codec_tests {
             root.state_hash(database.basis_t(), database.eidx_frontier()),
             checkpoint_state_hash(database).unwrap()
         );
+    }
+
+    #[test]
+    fn eager_seed_writes_only_the_final_reachable_tree_child_first() {
+        let Some(connection) = connection() else {
+            return;
+        };
+        let schema_name = isolated_schema(&connection, "persistent_commitment_final_tree");
+        let mut client = client_in_schema(&connection, &schema_name);
+        crate::PostgresMigrator::from_client(client)
+            .migrate()
+            .unwrap();
+        client = client_in_schema(&connection, &schema_name);
+
+        let database = Database::new(test_schema()).unwrap();
+        let root = {
+            let mut transaction = client.transaction().unwrap();
+            let root = persist_eager_snapshot(&mut transaction, &database).unwrap();
+            assert_matches_eager(root, &database);
+            assert!(root.count() > 1, "witness requires a multi-change seed");
+
+            let root_hash = root.root.expect("schema database has a non-empty root");
+            let counts = transaction
+                .query_one(
+                    "WITH RECURSIVE reachable(node_hash) AS ( \
+                         VALUES ($1::bytea) \
+                         UNION \
+                         SELECT child.node_hash \
+                           FROM reachable AS reachable_parent \
+                           JOIN atomic_semantic_commitment_nodes AS parent \
+                             ON parent.node_hash = reachable_parent.node_hash \
+                          CROSS JOIN LATERAL \
+                             (VALUES (parent.left_hash), (parent.right_hash)) AS child(node_hash) \
+                          WHERE child.node_hash IS NOT NULL \
+                     ) \
+                     SELECT (SELECT count(*) FROM atomic_semantic_commitment_nodes), \
+                            (SELECT count(*) FROM reachable)",
+                    &[&&root_hash[..]],
+                )
+                .unwrap();
+            let stored: i64 = counts.get(0);
+            let reachable: i64 = counts.get(1);
+            assert_eq!(stored, i64::try_from(root.count()).unwrap());
+            assert_eq!(reachable, stored, "transient path nodes must remain local");
+
+            // The child references are immediate foreign keys, so reaching
+            // this commit on an initially empty node table also witnesses the
+            // required child-before-parent insertion order.
+            transaction.commit().unwrap();
+            root
+        };
+        let durable: i64 = client
+            .query_one("SELECT count(*) FROM atomic_semantic_commitment_nodes", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(durable, i64::try_from(root.count()).unwrap());
+
+        drop(client);
+        drop_schema(&connection, &schema_name);
     }
 
     #[test]
