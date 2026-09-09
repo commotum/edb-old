@@ -1905,7 +1905,7 @@ pub(crate) fn tree_build_advisory_key(manifest_hash: &Digest) -> i64 {
 /// Compact commitment to the complete, sorted upload ledger.  Staging writes
 /// the ledger in bounded transactions, so the header must bind every retry to
 /// the same set before any partial rows are reused.
-fn build_intent_node_set_hash(node_hashes: &BTreeSet<Digest>) -> Digest {
+pub(crate) fn build_intent_node_set_hash(node_hashes: &BTreeSet<Digest>) -> Digest {
     let mut hasher = Sha256::new();
     hasher.update(b"atomic/tree-build-node-set/v1\0");
     hasher.update((node_hashes.len() as u64).to_be_bytes());
@@ -2221,7 +2221,7 @@ fn stage_unknown_delta(
     Ok(())
 }
 
-fn publication_delta_set_hash(
+pub(crate) fn publication_delta_set_hash(
     mode: i16,
     added: &BTreeSet<Digest>,
     retired: &BTreeSet<Digest>,

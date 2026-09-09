@@ -474,9 +474,15 @@ fn sql_constraints_immutability_and_corruption_checks_fail_closed() {
     assert_eq!(error.as_db_error().unwrap().code().code(), "55000");
 
     let role = unique("atomic_runtime");
+    let schema_name: String = client
+        .query_one("SELECT current_schema()", &[])
+        .unwrap()
+        .get(0);
+    let quoted_schema = format!("\"{}\"", schema_name.replace('"', "\"\""));
     client
         .batch_execute(&format!(
             "CREATE ROLE {role}; \
+             GRANT USAGE ON SCHEMA {quoted_schema} TO {role}; \
              GRANT SELECT, INSERT ON atomic_generation_transactions, \
              atomic_generation_requests, atomic_transaction_contents TO {role}; \
              GRANT SELECT, UPDATE ON atomic_heads TO {role}; \

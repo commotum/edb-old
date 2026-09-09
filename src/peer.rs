@@ -5643,6 +5643,7 @@ impl Peer {
             for transaction in &tail.transactions {
                 database = database.apply_committed(transaction)?;
             }
+            database.validate_invariants()?;
             verify_materialized_endpoint(&database, &successor)?;
             let _ = compatibility.value.set(Arc::new(database));
         } else if require_compatibility {
@@ -9985,8 +9986,10 @@ fn apply_tail<C: GenericClient>(
         *previous_hash = row.tx_hash;
         reports.push(row.transaction);
     }
+    // Independently audit the completed eager replay once, not every prefix.
+    database.validate_invariants()?;
     // The canonical transaction hash chain authenticates every intermediate
-    // tail delta; only the requested tail endpoint needs an O(N) state hash.
+    // tail delta; only the requested tail endpoint needs a state-hash comparison.
     // Any intermediate commitment becomes mandatory if that basis is itself
     // requested as a recovery target or index base.
     if let Some(expected) = target_state

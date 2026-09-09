@@ -104,6 +104,12 @@ success alone is not a semantic integrity claim. Canonical encoding, hashes,
 chain/membership, receipt/program closure and durable root publication remain
 checked during copying.
 
+Reusing an unchanged published backup root also reads and authenticates every
+reachable tree node, validates tree structure, and compares the exact captured
+logical point. This is stronger than checking presence, but does not perform
+semantic replay. A structurally damaged source receipt tree may still require
+explicit administrative replay to repair its portable representation.
+
 Use `list_backup_points` and exact `(log_generation, basis_t)` overloads when
 different physical generations share a logical basis. Presence checks verify
 reachability; deep verification reads/authenticates content and reconstructs
@@ -128,6 +134,13 @@ Staging is inactive until conditional activation. Retry an ambiguous restore
 with the same selected point and destination; do not manually publish staged
 heads or resume permanently claimed/abandoned builders.
 
+Successful restore finishes its selected tree publication's membership fold,
+including when retry reuses an already published root. Each owner call advances
+at most512 nodes; completion follows that exact work header, not an indefinitely
+advancing latest index. An interrupted fold remains protected and resumes through
+the normal owner API. Publication and acknowledged information need not roll
+back merely because later bookkeeping was interrupted.
+
 After restore, restart clients, perform deep `inspect_database`, and use a
 cache-cold peer to check current/history values and an application's query/Pull
 and retry workflow. Retain independent PostgreSQL physical backups/WAL according
@@ -139,6 +152,17 @@ to a separately tested recovery-point/recovery-time policy.
 Report every problem; do not treat successful decoding as proof of tree/log
 agreement. Corruption is scoped to its database, but uncertain shared reachability
 makes global reclamation conservative.
+
+Index publication is atomic, while its liveness bookkeeping folds in bounded
+background work. A healthy report can therefore have `pending_tree_publications`
+and `pending_tree_membership_nodes`: these identify authenticated, protected,
+resumable maintenance, not missing facts. Inspection cross-checks the original
+sealed commitments, predecessor/successor graph closures, live membership,
+remaining additions/removals and consumed retirement rows. It does not merely
+ignore a mismatch when a work header exists, nor require reconstructing the
+historical order of otherwise safe batches. A pending header with zero remaining
+nodes still needs final sealing. Missing or inconsistent protection remains an
+integrity problem.
 
 Preview `garbage_inventory(age)` and apply `collect_garbage(age)` under the same
 chosen policy; concurrent activity can legitimately change separate previews.
@@ -165,6 +189,14 @@ copying application data. Required receipt nodes remain retained, while obsolete
 publication metadata and genuinely unreachable nodes can be reclaimed. Do not
 expect GC to erase information still owned by receipts, current roots or pins.
 
+Semantic-node sweeping is a separate final phase after eligible tree, intent,
+receipt, program and generation work. Its no-incoming-reference search can scan
+the whole semantic-node catalog even when it finds nothing; the512-victim limit
+does not bound examined rows. Empty previews are not scanned again by the delete
+function. On the100k fixture, one read-only empty scan of4,314,635nodes took19.67s;
+this is a workload observation, not a deadline. Set I/O policy for that broad
+phase and include preview time when measuring an operator loop.
+
 Unlike Datomic's documented no-live-segment-read storage GC, this native ownership
 conversion authenticates live receipt trees and uses short administrative fences.
 It can contend with writers; pace batches and retry explicit Busy admission
@@ -180,6 +212,123 @@ restart lose advisory pins; the age horizon protects the interval until readers
 reconnect. Do not claim indefinite retention through a longer disconnected
 period than the chosen policy. Partially collected, unreadable generations retain
 code referenced by remaining authenticated rows until those rows disappear.
+
+## Reproduce the disposable-workload checks
+
+Run from the repository root on a Linux host with PostgreSQL and Rust
+dependencies already available. These are administrative test drivers using
+plaintext development connections, not production deployment commands. Replace
+the paths/account below with existing disposable installations. Use a source
+catalog named `atomic_goal6_*` for the later GC guard, and a separate target on
+a dedicated PostgreSQL server whose data directory is below the system temporary
+directory. Never point the crash driver at a shared server.
+
+```sh
+cargo build --offline --release --example scale_workflow --example operations_workflow \
+  --example restart_workflow --example gc_workflow
+export ATOMIC_POSTGRES_URL='host=/source/socket port=55432 user=atomic_test dbname=atomic_goal6_scale'
+export ATOMIC_RESTORE_POSTGRES_URL='host=/target/socket port=55434 user=atomic_test dbname=atomic_goal6_restore'
+```
+
+First create the workload. This launches its own writer and two submitting peer
+processes, exercises writer SIGKILL/replacement, and leaves the writer stopped
+and SQL data retained. Copy the exact `database=` value from its final `PASS`:
+
+```sh
+ATOMIC_SCALE_RECORDS=100000 ATOMIC_SCALE_BATCH=100 \
+ATOMIC_SCALE_REQUIRE_CACHE_EXCEEDED=1 target/release/examples/scale_workflow
+export ATOMIC_DATABASE_ID='ID_FROM_SCALE_PASS'
+```
+
+Defaults are 10,000 records and batches of 100; accepted ranges are 2–10,000,000
+and 1–1,000 respectively. Cache-exceeding proof is required by default at 25,000
+records or more; set `ATOMIC_SCALE_REQUIRE_CACHE_EXCEEDED=1` explicitly for a
+scale claim. Small smoke runs are not that proof. `ATOMIC_SCALE_IMPORT_TIMEOUT_SECS`
+defaults to 7,200 (range 1–86,400); individual uncertain requests reconcile for
+up to 15 minutes with the same key/content. Optional positive
+`ATOMIC_SCALE_PROBE_TIMEOUT_MS` shortens each peer's first response wait to
+exercise that retry path; it is unset by default.
+
+Next keep the source stopped and restore into the independent target. Stop
+target writers and peers too. The driver checks actual server/catalog/schema
+identity, refuses active source/target writer leases, and runs capture, unchanged
+repeat, deep verification, restore, native comparisons, exact scale-request
+retry, deep inspection and a final source-unchanged comparison:
+
+```sh
+ATOMIC_BACKUP_DIRECTORY='/tmp/atomic-backup-UNIQUE_RUN' \
+  target/release/examples/operations_workflow
+```
+
+Choose a fresh directory or an existing operator-private repository for this
+lineage. Omitting `ATOMIC_BACKUP_DIRECTORY` creates a private temporary repository
+and prints its retained path. Each phase runs in its own process and reports
+elapsed time and RSS/high-water memory. Leave `ATOMIC_OPS_PHASE` and
+`ATOMIC_OPS_EXPECT_*` unset; the parent driver manages those internal variables.
+
+If an earlier run completed capture and unchanged repeat,
+retain that output and resume the remaining phases with its exact manifest hash:
+
+```sh
+ATOMIC_BACKUP_DIRECTORY='/tmp/atomic-backup-UNIQUE_RUN' \
+ATOMIC_OPS_RESUME_MANIFEST='EXACT_PREVIOUS_OP_RESULT_MANIFEST' \
+  target/release/examples/operations_workflow
+```
+
+Resume checks that the selected root matches the source's current lineage,
+generation and basis before changing the target. Restore still deep-verifies
+the backup, and all target/native/retry/integrity/source-unchanged checks run.
+The final line reports `resumed=true`; its elapsed time excludes the earlier
+capture/repeat, whose separate evidence must be retained. A prior standalone
+deep check may be complete or interrupted; report that result accurately.
+Resumed restore always performs its own mandatory deep semantic verification.
+
+Only after portable operations succeed, crash/restart the dedicated **target**
+server. Supply its actual data directory, matching `pg_ctl`, log path and exact
+startup options, including any external configuration file:
+
+```sh
+ATOMIC_ALLOW_DISPOSABLE_PG_CRASH=1 \
+ATOMIC_RESTART_POSTGRES_URL="$ATOMIC_RESTORE_POSTGRES_URL" \
+ATOMIC_RESTART_POSTGRES_DATA='/tmp/DEDICATED_TARGET/data' \
+ATOMIC_RESTART_PG_CTL='/absolute/path/to/pg_ctl' \
+ATOMIC_RESTART_POSTGRES_LOG='/tmp/DEDICATED_TARGET/server.log' \
+ATOMIC_RESTART_POSTGRES_OPTIONS='-c config_file=/tmp/DEDICATED_TARGET/postgresql.conf' \
+  target/release/examples/restart_workflow
+```
+
+The guard requires explicit opt-in, a canonical data directory strictly below
+the system temporary directory matching `SHOW data_directory`, and `fsync`,
+`synchronous_commit` and `full_page_writes` all on. Those checks do not establish
+that the server is unshared; the operator must ensure that. The driver performs
+an immediate PostgreSQL stop, attempts restart even after a later failure, and
+adds two marker transactions. `ATOMIC_RESTART_ATTRIBUTE` defaults to 1002 and
+must select a Long attribute with existing workload facts. It does not provision
+a server or delete its data directory.
+
+Finally run GC against the **source**, only after all source-unchanged checks
+have finished. Every writer in that installation schema must be stopped:
+
+```sh
+ATOMIC_ALLOW_DISPOSABLE_GC=1 ATOMIC_GC_MAX_BATCHES=4096 ATOMIC_GC_WALL_SECONDS=1800 \
+  target/release/examples/gc_workflow
+```
+
+`ATOMIC_POSTGRES_URL` still selects the source above. GC requires explicit
+zero-retention opt-in, an actual catalog name beginning `atomic_goal6_`, and
+existing cardinality-one Long facts at attribute 1002. It adds one marker and
+collects globally across the selected installation schema, first with an old
+snapshot held and then released. Defaults are 128 batches and 120 seconds
+**per window**, both positive; the command raises them explicitly. Wall budgets
+are checked between calls, not a preemptive SQL/Rust deadline. A cap or blocked
+retirement prefix returns failure even after `gc_snapshot_safety=passed` prints.
+
+Require successful process exits and retain the phase output; these instructions
+are not claims that a particular large run passed. Unconfigured PostgreSQL tests
+may skip their live checks and are not substitute evidence. Backup repositories
+and PostgreSQL data directories are not automatically deleted by these drivers;
+retain or dispose of them deliberately under the retention policy. GC itself
+does delete eligible database storage, so its zero-age opt-in is test-only.
 
 ## Excision
 

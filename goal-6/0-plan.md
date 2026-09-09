@@ -10,8 +10,10 @@ a new parent or a reason to create another goal hierarchy.
 
 ## Constraints and starting context
 
-- Goals 1–5 are complete with focused live evidence. Goal5 was reopened and has
-  now repaired ordinary receipt/GC liveness on schema25. Preserve those repairs
+- Goals 1–4 remain complete; Goal5 is reopened for the publication/inspection
+  mismatch below and is the only active child. Goal5 repaired ordinary
+  receipt/GC liveness, backup/replay/proof reuse and repeated semantic sweeping
+  on schema25. Preserve those repairs
   and reopen the owning child for any actual core gap discovered here.
 - Local Datomic documentation is semantic authority; recovered 1.0.7705 is
   architectural/algorithmic evidence. Native Rust, PostgreSQL and same-host
@@ -56,8 +58,10 @@ and any bottlenecks without substituting timing assertions for correctness.
 
 ### 2. Recover the same information through failure and maintenance
 
-**Status:** Paused for owning Goal5's backup/replay-scale repair. Successful
-100k source and independent dedicatedserver55434 restore schema are preserved.
+**Status:** Paused for Goal5. The exact-manifest 100k restore, independent native
+current/history fingerprints, and original-request retry pass on dedicated55434.
+Inspection failed on valid deferred publication membership; Goal5 owns the
+repair. Server crash and large GC remain pending. Source/backups are preserved.
 
 **Outcome:** The measured database survives abrupt writer/server interruption,
 replacement and operational recovery without forks, missing commits or changed
@@ -91,16 +95,67 @@ failure. Only then mark Goal 0 complete.
 
 ## Continuation — 2026-09-09
 
-Goal2's scaled index repairs and Goal5's receipt-archive handoff now pass. Resume
-the implemented scale/deployment workflow with current25 optimized binaries
-and use the successful workload for portable operations,
-dedicated crash recovery and reclamation measurements. Small driver smokes and
+Goal5 is the only active child after the new publication/inspection mismatch.
+The100k deployed application has passed; preserve that source and resume its portable operations,
+dedicated crash recovery and reclamation measurements on current25 binaries.
+Do not repeat the unrelated import merely because an administrative path changed.
+Small driver smokes and
 the failed initial100k attempt below are not scaled acceptance.
 Historical main catalog `postgres` on port55432 intentionally remains version23;
 do not migrate it. Main test socket is `/tmp/atomic-goal-pg.MWicgR/socket`.
 The separate restart/TLS server at `/tmp/atomic-goal5-tls.J4Rk1G/data`, port55434,
 is available after coordinating users; its explicit config is
 `/tmp/atomic-goal5-tls.J4Rk1G/goal5-postgresql.conf`. Preserve all existing work.
+
+### Current operational run — 2026-09-09
+
+Goal5's renewal closes with17livebackup/proof cases,22liveGC/integrity/lifecycle
+cases, full/resumed smalloperations and12-full-fingerprintGC smoke. The broad
+Rust run's only failure was a sandbox-denied socket write; its exact permitted
+rerun passes. Unconfigured PG early returns are not live evidence.
+
+First100k backup129.687s/VmHWM86040KiB,8214newobjects,484539927bytes/8217files;
+unchanged repeat137.792s/VmHWM94896KiB,8214reused/0new, exactsame root. Retained
+repository`/tmp/atomic-operations-ozvYpB`, manifest
+`cf050a943f0d17e0240194c080813ce534119afa73544ed0e0924216b3d645ff`.
+Earlier standalone deepverification was deliberately stopped incomplete after
+1608s/VmHWM1913552KiB to switch to tested currentrestore; it is not a pass or
+completed latency. Initial520s failedcapture and invalidoldbinary repositories
+also remain retained; see Goal5 for their exact paths.
+
+The exact-manifest resumed release parent441700, tool session11723, exited1
+at deep inspection with `integrity/tree-live-membership-mismatch` after more
+than40minutes. Read-only proof finds1430 protected nodes =1024 live +406 pending,
+with zero missing/extra nodes or missing payloads; no complete live-set row yet.
+This is valid deferred publication work misclassified by inspection. Goal5 owns
+pending-aware authentication and finite restore completion; no crash or GC ran.
+Restore child441737 completed successfully after3367.648s, peak2200884KiB RSS.
+Independent target-native verification passed1.114s/13424KiB, with exact
+401150 current and401152 history datom fingerprints and zero eager fallback.
+Original-request retry passed0.390s/17872KiB, returning basis1002 without a new
+commit. Deep integrity and the final unchanged-source phase have not passed.
+Final formatting and all-target clippy with warnings denied pass on the combined
+tree. BinarySHA256
+`c8359d6504c6f8ae998a6064fd903a6804529392e01fcd3f57f10895bb8e48b3`.
+Source database`scale-workflow-361523-1788975974408163506` is unchanged at
+generation1/basis1002/hash
+`48554c0fade3c85f93f6fc73e606c64f918183b9d2b76c4b594600e2d87d53bf`, in
+`atomic_goal6_scale.goal6_acceptance_20260909_b` on main55432. Fresh native
+fingerprints match1.127s/13336KiB with0eager. Restore targets the same SQLschema
+name in dedicatedserver55434's`atomic_goal6_restore`. Mandatory deep verification
+occurs inside resumed restore; current run then requires native fingerprints,
+persisted retry, deep inspection and source-unchanged checks. Its timing excludes
+the earlier completed copy/repeat. Do not overwrite the running release binary.
+
+After portable success, run guarded immediatePGrestart only on dedicated55434,
+then rebuild/run the enhancedGC driver against the stopped source with4096batches/
+1800s perwindow. GC source preflight:68pubs,1430live/5138stored nodes,443379586
+stored payloadbytes,1002receipts covering all68bases,0archives,4,314,635semantic
+nodes/1003roots. No activewriters. The final empty semantic sweep measured19.67s;
+the Rust phase repair removes repetition during earlier work, not its inherent
+broad scan. ~48.5k archive memberships is an estimate. Requiredreceiptpayloads
+may remain while metadata retires; do not require deletion of reachable data.
+Large restore/crash/GC are still pending. Reopen the owning child for a real gap.
 
 ## Integration checkpoint — 2026-09-09
 

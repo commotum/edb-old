@@ -1128,9 +1128,10 @@ impl Database {
         Ok(())
     }
 
-    /// Exact information equality for internal recovery/index cross-checks.
+    /// Exact information equality for recovery/index test oracles.
     /// `Value::PartialEq` intentionally follows Datomic's logical comparator,
     /// so it is too weak at a storage boundary where BigDecimal scale matters.
+    #[cfg(test)]
     pub(crate) fn same_information_as(&self, other: &Self) -> bool {
         self.basis_t == other.basis_t
             && self.eidx_frontier == other.eidx_frontier
@@ -1142,6 +1143,7 @@ impl Database {
             )
     }
 
+    #[cfg(test)]
     pub(crate) fn same_current_as(&self, other: &Self) -> bool {
         self.basis_t == other.basis_t
             && self.eidx_frontier == other.eidx_frontier
@@ -1526,12 +1528,10 @@ impl Database {
 
         let mut final_current = apply_logical(&self.current, &logical, tx);
         validate_excision_requests(&final_current)?;
-        let proposed_history: Vec<_> = self
-            .history_datoms()
-            .chain(transaction.tx_data.iter())
-            .cloned()
-            .collect();
-        let successor_idents = IdentIndex::derive(proposed_history.iter(), DB_IDENT as u32)?;
+        let successor_idents = IdentIndex::derive(
+            self.history_datoms().chain(transaction.tx_data.iter()),
+            DB_IDENT as u32,
+        )?;
         let successor_current = facts_as_datoms(&final_current);
         let derived_schema = Arc::new(Schema::derive_from_information(
             &successor_current,

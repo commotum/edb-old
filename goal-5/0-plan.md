@@ -8,8 +8,10 @@ retention model. Preserve completed Goals 1–4 and the existing lifecycle tools
 
 ## Constraints and starting evidence
 
-- Goal 0 owns the objective. This is the only active child; no nested goals or
-  corrective parent. Archived operations goals are evidence, not instructions.
+- Goal 0 owns the objective. This child is reopened and is the only active
+  child; Goal6 is paused on an observed integrity-reporting/lifecycle gap.
+  No nested goals or corrective parent. Archived operations goals
+  are evidence, not instructions.
 - Local Datomic administration/backup/excision docs govern intended guarantees;
   recovered 1.0.7705 code guides design. No JVM/wire or other-store compatibility.
 - Keep ordinary trusted-root adoption lazy. Deep verification may replay and
@@ -69,9 +71,10 @@ unknown/rejected outcomes; secure deployment instructions match tested APIs.
 
 ### 3. Verify lifecycle operations as one recoverable workflow
 
-**Status:** Reopened for operational replay scalability. Preserve completed
-receipt-preserving GC and lifecycle repairs; the first100k backup exposed
-unnecessary initial replay plus quadratic eager invariant/replay algorithms.
+**Status:** Reopened. The large restore, full native fingerprints and exact retry
+pass, but inspection misclassifies valid deferred publication folding as corrupt.
+Repair pending-membership authentication/reporting and finish restore-owned
+bounded publication work, preserving the earlier capture/replay/GC repairs.
 
 **Outcome:** Backup, restore, upgrade, inspection, retention/GC and excision work
 together without losing acknowledged history, receipts or live captured values.
@@ -87,8 +90,8 @@ are measured or explicitly unmeasured, with actionable operator procedures.
 
 ### 4. Return operational acceptance to the parent
 
-**Status:** Pending renewed scaled operational closure. Existing GC/current25
-lifecycle, upgrade, authority and integrity evidence remains valid.
+**Status:** Pending the reopened publication/inspection repair. Earlier schema25
+lifecycle, upgrade, authority and focused integrity evidence remains valid.
 
 **Outcome:** Goal 0 can proceed to realistic integrated load/failure acceptance.
 
@@ -101,11 +104,65 @@ executed. This child is not the parent's finish line.
 
 ## Continuation
 
-This is the only active child; Goal6's100k deployment passed but portable
-operations paused on the measured backup bottleneck. Repair copy/deep boundaries
-and quadratic eager replay while preserving explicit deep validation, then
-return to Goal0→Goal6 on the same successful data. Preserve schema25 and all
-earlier repairs; never migrate the damaged historical version23 catalog.
+Goal5 is the only active child. The large operations parent441700/session11723
+exited1 at deep inspection: `integrity/tree-live-membership-mismatch`, after
+more than40minutes of inspection. Restore itself passed3367.648s/2200884KiB
+peak RSS; full native current/history fingerprints and original-request retry
+at1002 passed. The source and retained backup are unchanged; no large crash or
+GC ran. Do not repeat the successful import or semantic restore to repair a
+derived bookkeeping/reporting defect.
+
+Exact target on dedicated55434: `atomic_goal6_restore.goal6_acceptance_20260909_b`,
+database `scale-workflow-361523-1788975974408163506`, head1002/generation1.
+Publication revision1/basis991 has manifest
+`aea88e93d6a6c3f8e60351c4754ce78fa727e80f0dbfc189f5ef779d1af87864`.
+Its sealed1430-node intent equals the disjoint union of1024 live nodes and406
+pending additions, with zero missing/extra nodes or absent payloads. The complete
+live-set row is not present yet. Restore folds one512-node batch; the short retry
+writer apparently folded another before shutdown. This is legitimate protected
+maintenance state, not lost facts. Inspection must authenticate the pending
+transition rather than require instantaneous complete folding. Restore should
+also finish its finite owned publication work, including existing-root retry.
+
+Scope decision: prove authenticated safe/resumable node sets, not forensic
+equivalence to a particular sorted SQL batch history. A review model accepted
+31419 reachable states across16596 small set/batch cases; arbitrary safe consumed
+subsets can also resume correctly. They do not require a new ordering constraint
+to preserve facts or GC safety. Pending metrics distinguish remaining node work
+from final header sealing. Missing live/retired/pending witnesses and inconsistent
+commitments still reject. This follows the documented separation of atomic
+information from background indexing/reclamation; it does not make ordinary
+publication or the background worker synchronously unbounded.
+
+Next: verify the repair with large-node-count small-log PostgreSQL fixtures and
+corrupt pending witnesses, resume the retained target through the normal bounded
+maintenance API, rerun the repaired inspection and unchanged-source proof, then
+return to Goal6 for actual crash and GC. The crash driver now has16 full streamed
+current/history scans (build/clippy/fmt pass, live execution still pending).
+Preserve schema25, applied migration checksums, source/backup and all earlier
+repairs; never migrate the damaged historical version23 catalog.
+
+## Renewed closure — 2026-09-09
+
+Copy/deep semantics, exact stored-value indexed helpers, schema grouping,
+endpoint audits and private restore proof reuse now have actualPG/pure evidence
+below. Modern restore retains one deep source proof and one persistent-coordinate
+pass, not repeated target reconstruction. GC defers its broad semantic sweep to
+the final phase without weakening reachability/authority. Latest22GC/integrity/
+lifecycle/phase and17backup cases pass; broader configured library276passes
+precede the final narrowly tested backup/GC changes.
+
+The strengthened GC driver passes a fresh20record actualPG workflow3.813s/
+VmHWM18352KiB:12full current/history streamed fingerprint scans match, both
+windows quiescent(8/7batches), blockedprefixes0, exactindependentreopen,0eager/
+0cache. Old234/236datoms become236/238 afteritsmarker;2obsolete publication/
+manifest and3intent records removed,2receiptarchivescreated, no treepayload
+deleted because all remainedreachable. Fixture
+`atomic_goal6_regression.goal6_gc_full_fingerprint_20260909_r1`, database
+`scale-workflow-457292-1788981810054362885`, finalbasis7, is retained. Approval
+initially declined, then succeeded after read-only single-fixture/fixed-schema
+proof; there is no remaining permission blocker. This is small lifecycle
+acceptance, not the still-running large Goal6 result.
 
 ## Scaled backup/replay reopening — 2026-09-09
 
@@ -144,14 +201,146 @@ tempid normalization and locally valid but semantically false frontier rejection
 Review also found unchanged-root retry automatically deep-replays the backup;
 replace that overstrict repeated proof with full physical/content/structural
 authentication and exact captured logical-point equality, retaining explicit
-semantic verification and restore checks. This follow-up is in progress.
+semantic verification and restore checks. This follow-up is implemented and
+passes2actualPG copy-boundary tests6.46s plus11backup units0.42s. Retry reads and
+authenticates the full reachable tree structure and exact logical coordinates;
+hash-valid false semantics can be copied/reused but explicit deep/restore reject.
+
+Indexed eager helpers preserve stored/index equality (including nontransitive
+mixed decimal/numeric comparison), first-match behavior and alteration hooks.
+All new committed datoms retain type/entity/ref/frontier/transaction checks;
+schema transitions validate retained values. The unchanged independent full
+invariant audit now runs at whole-recovery, verification/restore, compatibility
+tail, legacy backfill and preactivation excision endpoints, not every prefix.
+19database tests pass;2kfacts/20transactions debug replay with every-prefix
+audits14.538s versus endpoint audit3.206s preserves every state hash and exact
+final information. This is a focused comparison, not a100k operational result;
+per-prefix index construction and current-state scans remain. Current actualPG
+recovery/backup/excision regressions and the release100k workflow are next.
+
+Current release capture now completes: first100k backup129.687s,8214newobjects,
+484539927repository bytes/8217files, VmHWM86040KiB. Retained private repository
+`/tmp/atomic-operations-ozvYpB`, manifest
+`cf050a943f0d17e0240194c080813ce534119afa73544ed0e0924216b3d645ff`.
+Fresh native fingerprint1.103s/13380KiB matches both prior digests with0eager.
+Unchanged reuse/deepverify/restore are still running; this is not whole-operation
+acceptance. Release build26.75s and all-targetclippy7.24s pass. Renewed actualPG
+backup integrity4/4(21.01s), backup/restore10/10(89.19s), excision1/1(5.89s),
+integrity3/3(8.83s), programreferenceupgrade8/8(26.95s), v6/currentcommitment
+backfills1each(1.68/1.42s) pass; pure COW3/excision7 also pass.
+
+Read-only attribution found another avoidable eager replay cost: schema
+derivation scans the full current set for each property of every installed
+attribute. A scoped per-schema-entity grouping and borrowed ident-history
+iterator repair is implemented;2schema differential tests pass256mutation cases
+and error/input-order witnesses. Debug28attribute schema derivation,5repeat
+medians:1kfacts3.823→0.461ms,4k13.299→1.114ms. The running release measurement
+predates that optimization; binarySHA256
+`ab8c09d96c643a17bbb76d52f8938f0a84a09e6bd1bd0ca8ac31d1fb0cc7d25e`.
+Do not silently attribute its results to a later binary. Final current-code
+PostgreSQL-configured serial library passes276/0fail/1expected internal worker
+ignore in208.76s in`atomic_goal5_refs.goal5_final_lib_1788979074568`. Its passing
+process-death parent explicitly launches that worker; PostgreSQL checks did run.
+The current-source ordinary native application example is next.
+
+Unchanged100k backup reuse passes137.792s/VmHWM94896KiB,8214reused/0newobjects,
+exact same manifest and repository bytes/files. This eliminates writes but the
+full structural/content authentication does not demonstrate a latency saving;
+do not claim Datomic-style incremental timing from this result. Deep verification
+is now the active phase. No large restore/server-crash/GC result exists yet.
+
+The renewed native application workflow also passes on current debug source:
+`workflow-423053-1788979481097827270`, schema25/head3, including controlled/tuple
+transactions, query/Pull, history/log/index-pull, deferred projections and chained
+speculation, immutable old values and reopen.11.61s includes9.74s compilation;
+do not use wrapper memory as application RSS.
+
+Restore review identified up to five complete replays: deep backup proof,
+persistent-coordinate staging, target-row comparison, main-tree base recovery,
+and final returned-head recovery. The last three appear redundant with a private
+verified proof and exact target-row/coordinate checks. A bounded repair is in
+progress, retaining full deep semantics and the one coordinate-building replay.
+Do not replace `content != expected_content` alone: its derived PartialEq uses
+logical Value equality and can hide stored BigDecimal scale. Replacement proof
+must compare canonical encoded bytes, retain request/archive/completion checks,
+carry the verified main-base schema (which can precede head), bind local generation
+coordinates, and recheck final head/lineage/state/frontier before returning.
+New live stored-byte, schema/base, rebind/retry and final-head-race tests are required.
+
+That restore proof reuse is implemented and compiles. It captures only the main
+index's verified schema/coordinate, leaves public BackupVerification unchanged,
+compares canonical target content bytes and rechecks a locked final target head.
+Legacy main bases preceding head need no invented persistent coordinate; an
+existing coordinate must agree. Three redundant target replays are removed;
+the explicit deep source proof and coordinate-building semantic pass remain.
+Current existing/new actualPG regressions are running. The final276-test library
+and ordinary workflow above precede this latest backup-only repair.
+
+The older deep-check baseline was deliberately stopped after1608s (SIGTERM only
+child417278); parent410436 exited1 and both are gone. It did not complete and
+is not acceptance. Last CPU99.9%,RSS1800528KiB,VmHWM1913552KiB; at1390s kernel
+rchar4.535GB/read_bytes0 (cached reads). Source t1002/gen1/hash is unchanged;
+the complete backup repository is retained. Move to the tested current restore,
+which retains mandatory deep verification, rather than keep testing the older
+implementation. This is an incomplete cost baseline, not a completed latency.
+
+Restore proof reuse passes17actualPG tests (10existing82.04s,4semantic19.92s,
+3new17.29s),11backup units0.42s andclippy. A real same-basis-generation failure
+was repaired by checking canonical log identity before archive closure; mismatched
+legitimate generations remain replaceable, without skipping corruption checks.
+The operational driver now supports exact-manifest resume after completed copy/
+repeat. It binds source lineage/generation/basis before target writes; mandatory
+restore deep proof, native equality, retry, inspection and source-unchanged checks
+remain. Small current-code full driver passes4.057s and resumed driver1.582s at
+schema25/head3; bad manifest rejects before restore. Its retained repository is
+`/tmp/atomic-operations-wTbtlN`. Resumed elapsed excludes earlier completed
+copy/repeat; a previous standalone deep check need not have completed.
+
+Read-only100k GC preflight found another avoidable cost: the no-garbage semantic
+node candidate query scans4,314,635stored nodes/1003roots and takes19.67s to
+return0rows (first5sprobe canceled). Current code repeats it during every earlier
+tree/conversion phase and reselects even an empty frontier. A Rust-only phase
+split is being implemented; do not add a migration or remove root/reachability
+authentication. Skip semantic sweeping during earlier work and skip its delete
+function when the authenticated preview is empty. All current source hashes
+remain unchanged by this read-only preflight; actualGC is still pending.
+
+Current run: releasebuild25.11s succeeds, all-targetclippy0.41s passes. Binary
+SHA256`c8359d6504c6f8ae998a6064fd903a6804529392e01fcd3f57f10895bb8e48b3`.
+Resumed operations parent441700/session11723, restore child441737. Exact source
+fingerprints pass again1.127s/13336KiB/0eager atbasis1002, and the retained manifest
+passes the resume identity guard. Restore (including its own mandatory deep
+verification) is running on dedicatedserver55434's isolated target schema.
+No successful large restore, server crash or sourceGC result exists yet. Keep
+the running release executable intact; GC phase edits are separate source work
+and its example must be rebuilt after this parent finishes.
+
+GC phase repair is verified on22actualPG cases: GC15/15(61.61s), integrity3/3
+(9.23s), receipt archive lifecycle2/2(17.87s), new phase tests2/2(8.12s).
+The deterministic relation-lock witness proves earlier intent work proceeds,
+then the final semantic sweep still occurs; exact orphan deletion follows lock
+release. Conversion phases0–4, program work and receipt bindings remain valid.
+No migration/ACL change. Whole-catalog semantic search remains broad (~19.67s);
+only its needless repetition was removed. All1002scale receipts retain all68
+physical bases, so required payloads may remain even after publication metadata
+is reclaimed. Driver budgets4096batches/1800s perwindow are estimates until run.
+
+Broad current Rust pure/build regression finished: all integration targets and
+7example harnesses pass. Library275pass/1expectedworkerignore/1sandbox EPERM
+on a socket write made the original all-target command exit101; exact fixture
+passes0.03s with local-socket permission, no code change. PostgreSQL variables
+were unset; those early-return cases are not live evidence. Actual pure results
+include validation3/3(53.42s), identity5/5(308.36s), kernel14/14(23.41s), semantic22,
+programruntime22, DatabaseValue8, Pull13 and query suites. Live configured and
+focused evidence is recorded separately above.
 
 One attempted fresh measurement was invalid: a release build collided with
 in-progress eager-helper declarations and failed; the command then inadvertently
 started the older binary. It was stopped promptly (owned PID392372), and no
 performance or correctness result is counted. Its partial private repository
 `/tmp/atomic-copy-measurement.bqP2eC` is retained. Build success must gate the
-next run; source head/hash remain unchanged and no measurement is running now.
+next run; source head/hash remain unchanged. Both incomplete repositories remain
+available for diagnosis; no timing from the invalid run is used.
 
 ## Integration checkpoint — 2026-09-09
 

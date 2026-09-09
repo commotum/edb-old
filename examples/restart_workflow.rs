@@ -2,10 +2,12 @@
 //! This is destructive to server availability, not to database files. It refuses
 //! to run without explicit disposable-server opt-in and matching data_directory.
 use atomic_core::{
-    AttributeName, BackgroundIndexingConfig, CapacityLimits, Connection, EntityRef, ErrorCategory,
-    IndexPrefix, PostgresConnectionConfig, PostgresIoPolicy, PullAttribute, PullPattern, TimePoint,
-    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, Value,
+    AttributeName, BackgroundIndexingConfig, CapacityLimits, Connection, DatabaseValue, EntityRef,
+    ErrorCategory, IndexOrder, IndexPrefix, IndexSegment, PostgresConnectionConfig,
+    PostgresIoPolicy, PullAttribute, PullPattern, TimePoint, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxOp, Value, encode_index_segment,
 };
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -103,6 +105,47 @@ fn memory(label: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Fingerprint {
+    datoms: u64,
+    digest: [u8; 32],
+}
+
+fn fingerprints(phase: &str, value: &DatabaseValue) -> Result<[Fingerprint; 2]> {
+    Ok([
+        fingerprint(phase, "current", value)?,
+        fingerprint(phase, "history", &value.clone().history())?,
+    ])
+}
+
+fn fingerprint(phase: &str, view: &str, value: &DatabaseValue) -> Result<Fingerprint> {
+    let started = Instant::now();
+    let mut hash = Sha256::new();
+    let mut datoms = 0_u64;
+    // Consume every EAVT fact through bounded native cursor pages. As in the
+    // operations/GC workflows, frame one canonical datom at a time: no whole
+    // database collection, tree-packing dependency or legacy sort conversion.
+    for datom in value.scan_cursor(IndexOrder::Eavt)? {
+        let encoded = encode_index_segment(&IndexSegment {
+            order: IndexOrder::Eavt,
+            history: true,
+            datoms: vec![datom?],
+        })?;
+        hash.update((encoded.len() as u64).to_be_bytes());
+        hash.update(encoded);
+        datoms += 1;
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    println!(
+        "restart_full_fingerprint phase={phase} view={view} basis={} as_of_t={:?} datoms={datoms} sha256={hex} elapsed_ms={}",
+        value.basis_t(),
+        value.as_of_t(),
+        started.elapsed().as_millis()
+    );
+    Ok(Fingerprint { datoms, digest })
+}
+
 fn writer_config(database: &str, holder: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
         connection: String::new(), // configured constructor is the sole source.
@@ -186,6 +229,7 @@ fn main() -> Result<()> {
     if sample.is_empty() {
         return Err("existing workload has no facts at the requested Long attribute".into());
     }
+    let before_fingerprints = fingerprints("old-before-crash", &before)?;
     let request = TransactionRequest::new(
         format!("{run}-acknowledged"),
         vec![TxOp::Add {
@@ -209,6 +253,7 @@ fn main() -> Result<()> {
         captured.values(marker, attribute)?,
         vec![Value::Long(710_001)]
     );
+    let acknowledged_fingerprints = fingerprints("acknowledged-before-crash", &captured)?;
     memory("before-crash")?;
 
     let outage = Instant::now();
@@ -231,7 +276,26 @@ fn main() -> Result<()> {
     assert!(replay.replayed);
     assert_eq!(replay.basis_t, acknowledged.basis_t);
     assert_eq!(replay.tempids, acknowledged.tempids);
-    assert_eq!(peer.sync()?.basis_t(), acknowledged.basis_t);
+    let recovered = peer.sync()?;
+    assert_eq!(recovered.basis_t(), acknowledged.basis_t);
+    assert_eq!(
+        fingerprints("acknowledged-current-after-restart", &recovered)?,
+        acknowledged_fingerprints,
+        "restart changed the acknowledged complete current/history facts"
+    );
+    assert_eq!(
+        fingerprints("retained-old-after-restart", &before)?,
+        before_fingerprints,
+        "restart changed the retained old complete current/history facts"
+    );
+    assert_eq!(
+        fingerprints(
+            "old-as-of-after-restart",
+            &recovered.clone().as_of(before.basis_t())
+        )?,
+        before_fingerprints,
+        "recovered as-of view differs from the complete pre-marker value"
+    );
     assert_eq!(
         log.tx_range(Some(TimePoint::T(acknowledged.basis_t)), None)?
             .collect::<std::result::Result<Vec<_>, _>>()?,
@@ -288,6 +352,15 @@ fn main() -> Result<()> {
         captured.pull(&pattern, marker)?,
         current.pull(&pattern, marker)?
     );
+    assert_eq!(
+        fingerprints(
+            "acknowledged-as-of-after-next-marker",
+            &current.clone().as_of(acknowledged.basis_t)
+        )?,
+        acknowledged_fingerprints,
+        "successor as-of view differs from the complete acknowledged value"
+    );
+    let final_fingerprints = fingerprints("final-before-writer-stop", &current)?;
     let residency = replacement.writer_residency_stats();
     assert_eq!(residency.eager_database_values, 0);
     assert_eq!(residency.eager_history_datoms, 0);
@@ -301,6 +374,17 @@ fn main() -> Result<()> {
         reopened.db().values(marker, attribute)?,
         vec![Value::Long(710_002)]
     );
+    assert_eq!(
+        fingerprints("independent-reopen-final", &reopened.db())?,
+        final_fingerprints,
+        "independent final reopen differs from the complete successor value"
+    );
+    for connection in [&peer, &reopened] {
+        let load = connection.load_stats();
+        assert_eq!(load.compatibility_materializations, 0);
+        assert_eq!(load.compatibility_hits, 0);
+        assert_eq!(load.compatibility_failures, 0);
+    }
     memory("after-recovery")?;
     println!(
         "recovery storage_restart_ms={} replacement_start_ms={} base_t={} target_t={} tail_transactions={} tail_range_reads={}",
@@ -312,7 +396,7 @@ fn main() -> Result<()> {
         recovery.tail_range_reads
     );
     println!(
-        "PASS restart-workflow database={database} original_basis={} final_basis={} immediate_pg_crash=true durable_settings=on exact_replay=true old_values=true old_log=true native_eager=0",
+        "PASS restart-workflow database={database} original_basis={} final_basis={} immediate_pg_crash=true durable_settings=on exact_replay=true old_values=true old_log=true full_current_history_fingerprints=true native_eager=0",
         before.basis_t(),
         changed.basis_t
     );

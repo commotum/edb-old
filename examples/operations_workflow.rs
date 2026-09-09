@@ -1,6 +1,8 @@
 //! Measured portable operations for an existing, stopped application database.
 //! Required: ATOMIC_POSTGRES_URL, ATOMIC_DATABASE_ID, ATOMIC_RESTORE_POSTGRES_URL.
 //! Optional: ATOMIC_BACKUP_DIRECTORY (otherwise a retained private temp dir).
+//! ATOMIC_OPS_RESUME_MANIFEST resumes after a previously completed copy/repeat,
+//! requiring its exact printed manifest hash and explicit backup directory.
 //! The restore catalog/schema must be independent. Each phase gets a fresh
 //! process, so Linux VmHWM describes that operation, not an earlier allocator.
 //! Backups are retained; this example never deletes an existing repository.
@@ -27,20 +29,25 @@ fn main() -> Result<()> {
     if let Ok(phase) = std::env::var("ATOMIC_OPS_PHASE") {
         let baseline = memory();
         let start = Instant::now();
-        let result = run_phase(&phase)?;
-        for (key, value) in result {
-            println!("{PREFIX}{key}={value}");
-        }
+        let result = run_phase(&phase);
         println!(
-            "operations_phase={phase} elapsed_ms={} baseline={baseline} final={}",
+            "operations_phase={phase} outcome={} elapsed_ms={} baseline={baseline} final={}",
+            if result.is_ok() { "passed" } else { "failed" },
             start.elapsed().as_millis(),
             memory()
         );
+        for (key, value) in result? {
+            println!("{PREFIX}{key}={value}");
+        }
         return Ok(());
     }
     let source = std::env::var("ATOMIC_POSTGRES_URL")?;
     let target = std::env::var("ATOMIC_RESTORE_POSTGRES_URL")?;
     let database = std::env::var("ATOMIC_DATABASE_ID")?;
+    let resume_manifest = std::env::var("ATOMIC_OPS_RESUME_MANIFEST").ok();
+    if resume_manifest.is_some() && std::env::var_os("ATOMIC_BACKUP_DIRECTORY").is_none() {
+        return Err("resuming requires the retained ATOMIC_BACKUP_DIRECTORY".into());
+    }
     if catalog_identity(&source)? == catalog_identity(&target)? {
         return Err("restore must use a separate PostgreSQL catalog or schema".into());
     }
@@ -65,17 +72,24 @@ fn main() -> Result<()> {
     );
     let start = Instant::now();
     let captured = child("source-native", &directory, &Fields::new())?;
-    let first = child("backup-first", &directory, &captured)?;
-    let repeated = child("backup-repeat", &directory, &captured)?;
-    for key in ["basis", "manifest", "lineage", "generation"] {
-        if first.get(key) != repeated.get(key) {
-            return Err(format!("backup endpoint changed between passes: {key}").into());
+    if let Some(manifest) = &resume_manifest {
+        check_resume_point(&source, &database, &directory, &captured, manifest)?;
+        println!(
+            "operations_resumed_manifest={manifest} copy_and_repeat=previous_run standalone_verify=not_rerun restore_deep_verify=required"
+        );
+    } else {
+        let first = child("backup-first", &directory, &captured)?;
+        let repeated = child("backup-repeat", &directory, &captured)?;
+        for key in ["basis", "manifest", "lineage", "generation"] {
+            if first.get(key) != repeated.get(key) {
+                return Err(format!("backup endpoint changed between passes: {key}").into());
+            }
         }
+        if repeated.get("objects_written").map(String::as_str) != Some("0") {
+            return Err("unchanged repeat backup unexpectedly wrote immutable objects".into());
+        }
+        child("deep-verify", &directory, &captured)?;
     }
-    if repeated.get("objects_written").map(String::as_str) != Some("0") {
-        return Err("unchanged repeat backup unexpectedly wrote immutable objects".into());
-    }
-    child("deep-verify", &directory, &captured)?;
     child("restore", &directory, &captured)?;
     child("target-native", &directory, &captured)?;
     if captured.get("scale_fixture").map(String::as_str) == Some("true") {
@@ -91,10 +105,51 @@ fn main() -> Result<()> {
     }
     let (files, bytes) = repository_size(&directory)?;
     println!(
-        "operations_acceptance=passed elapsed_ms={} repository_files={files} repository_bytes={bytes} backup_retained={}",
+        "operations_acceptance=passed resumed={} elapsed_ms={} repository_files={files} repository_bytes={bytes} backup_retained={}",
+        resume_manifest.is_some(),
         start.elapsed().as_millis(),
         directory.display()
     );
+    Ok(())
+}
+
+fn check_resume_point(
+    source: &str,
+    database: &str,
+    directory: &Path,
+    captured: &Fields,
+    manifest_hash: &str,
+) -> Result<()> {
+    let basis: u64 = captured
+        .get("basis")
+        .ok_or("source basis missing")?
+        .parse()?;
+    let row = Client::connect(source, NoTls)?.query_one(
+        "SELECT d.lineage_id, h.log_generation, h.basis_t FROM atomic_heads h \
+         JOIN atomic_databases d USING (database_id) WHERE h.database_id=$1",
+        &[&database],
+    )?;
+    let lineage: String = row.get(0);
+    let generation = u64::try_from(row.get::<_, i64>(1))?;
+    if u64::try_from(row.get::<_, i64>(2))? != basis {
+        return Err("source advanced before resume-point validation".into());
+    }
+    // The basis-only restore API chooses the latest generation at that basis.
+    // Bind that exact selection before provisioning or changing the target.
+    let point = PortableBackup::list_backup_points(directory)?
+        .into_iter()
+        .filter(|point| point.basis_t == basis)
+        .max_by_key(|point| point.log_generation)
+        .ok_or("retained repository does not contain the captured source basis")?;
+    if point.lineage_id != lineage
+        || point.log_generation != generation
+        || hex(&point.manifest_hash) != manifest_hash
+    {
+        return Err("resume manifest does not identify the exact current source point".into());
+    }
+    // Listing is only an identity guard. Restore still performs the complete
+    // semantic proof; target fingerprints/retry/integrity and source-unchanged
+    // checks below remain mandatory. Copy timings come from the earlier run.
     Ok(())
 }
 

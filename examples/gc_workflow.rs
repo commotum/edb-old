@@ -11,11 +11,12 @@
 //! exact receipt archives and held snapshots deliberately retain their nodes.
 use atomic_core::{
     CapacityLimits, Cardinality, DatabaseValue, Datom, EntityRef, GarbageInventory, IndexBoundary,
-    IndexComponents, Peer, PostgresConnectionConfig, PostgresIndexer, PostgresIoPolicy,
-    PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TxOp, Value, ValueType,
+    IndexComponents, IndexOrder, IndexSegment, Peer, PostgresConnectionConfig, PostgresIndexer,
+    PostgresIoPolicy, PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxOp, Value, ValueType, encode_index_segment,
 };
 use postgres::Client;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -59,7 +60,7 @@ fn main() -> Result<()> {
     );
 
     // No cache retention and raw cursors prevent a post-GC verification from
-    // succeeding merely because the sampled leaves were already cached.
+    // succeeding merely because previously scanned leaves were already cached.
     let old_peer = Peer::connect_configured_with_cache_limits(&config, &database, 0, 0)?;
     let old = old_peer.database_value();
     let attribute = old.schema().attribute(ATTRIBUTE)?;
@@ -71,6 +72,7 @@ fn main() -> Result<()> {
     if old_sample.is_empty() {
         return Err("GC workflow requires existing application facts under attribute 1002".into());
     }
+    let old_fingerprints = fingerprints("old-before-gc", &old)?;
     let old_hashes = old_peer.pinned_manifest_hashes();
     if old_hashes.len() != 1 {
         return Err("expected one initial native physical snapshot root".into());
@@ -121,6 +123,7 @@ fn main() -> Result<()> {
     assert_eq!(current_sample, old_sample);
     assert_marker(&old, marker_entity, None)?;
     assert_marker(&current, marker_entity, Some(marker_value))?;
+    let current_fingerprints = fingerprints("current-before-gc", &current)?;
     println!(
         "gc_snapshot_prepared old_t={old_basis} current_t={current_basis} current_sample={} history_sample={} memory={}",
         old_sample.len(),
@@ -142,7 +145,17 @@ fn main() -> Result<()> {
     assert_eq!(sample(&current, current_sample.len())?, current_sample);
     assert_marker(&old, marker_entity, None)?;
     assert_marker(&current, marker_entity, Some(marker_value))?;
-    assert_eq!(old_peer.load_stats().compatibility_materializations, 0);
+    assert_eq!(
+        fingerprints("old-after-pinned-window", &old)?,
+        old_fingerprints,
+        "GC changed the held old database's complete current/history facts"
+    );
+    assert_eq!(
+        fingerprints("current-after-pinned-window", &current)?,
+        current_fingerprints,
+        "GC changed the current database's complete current/history facts"
+    );
+    assert_uncached_native(&old_peer);
     println!(
         "gc_old_snapshot_verified=true native_load={:?} cache={:?}",
         old_peer.load_stats(),
@@ -154,6 +167,11 @@ fn main() -> Result<()> {
     let released = window(&mut operator, &mut sql, "old-released", max_batches, wall)?;
     assert_eq!(sample(&current, current_sample.len())?, current_sample);
     assert_marker(&current, marker_entity, Some(marker_value))?;
+    assert_eq!(
+        fingerprints("current-after-released-window", &current)?,
+        current_fingerprints,
+        "GC changed the current database after releasing the old snapshot"
+    );
     // Independent lazy reopen after both windows verifies durable information,
     // not just a retained in-process endpoint.
     let reopened = Peer::connect_configured_with_cache_limits(&config, &database, 0, 0)?;
@@ -165,8 +183,13 @@ fn main() -> Result<()> {
         old_history_sample
     );
     assert_marker(&value, marker_entity, Some(marker_value))?;
-    assert_eq!(current_peer.load_stats().compatibility_materializations, 0);
-    assert_eq!(reopened.load_stats().compatibility_materializations, 0);
+    assert_eq!(
+        fingerprints("independent-reopen-after-gc", &value)?,
+        current_fingerprints,
+        "independent reopen changed the complete current/history facts"
+    );
+    assert_uncached_native(&current_peer);
+    assert_uncached_native(&reopened);
     require_stopped(&mut sql)?;
     let old_still_published: bool = sql.query_one(
         "SELECT EXISTS (SELECT 1 FROM atomic_tree_publications WHERE database_id=$1 AND manifest_hash=$2)",
@@ -178,23 +201,78 @@ fn main() -> Result<()> {
     )?.get(0);
     let blocked_prefixes = receipt_blocked_prefixes(&mut sql)?;
     println!(
-        "gc_snapshot_safety=passed old_pinned_quiescent={pinned} old_released_quiescent={released} receipt_blocked_retirement_prefixes={blocked_prefixes} old_manifest_still_published={old_still_published} old_manifest_current_receipt_bindings={receipt_bindings} snapshot_release_reclamation_observed={} elapsed_ms={} memory={} current_load={:?} reopened_load={:?}",
+        "gc_snapshot_safety=passed full_current_history_fingerprints=passed old_pinned_quiescent={pinned} old_released_quiescent={released} receipt_blocked_retirement_prefixes={blocked_prefixes} old_manifest_still_published={old_still_published} old_manifest_current_receipt_bindings={receipt_bindings} snapshot_release_reclamation_observed={} elapsed_ms={} memory={} current_load={:?} reopened_load={:?} current_cache={:?} reopened_cache={:?}",
         !old_still_published,
         began.elapsed().as_millis(),
         memory()?,
         current_peer.load_stats(),
-        reopened.load_stats()
+        reopened.load_stats(),
+        current_peer.cache_stats(),
+        reopened.cache_stats()
     );
     if !pinned || !released {
         return Err(
-            "GC window reached its batch/wall cap; samples verified but collection is incomplete"
+            "GC window reached its batch/wall cap; full fingerprints and samples verified but collection is incomplete"
                 .into(),
         );
     }
     if blocked_prefixes > 0 {
-        return Err("GC is retention-blocked by active receipt bases; snapshot samples passed but reclamation is not established".into());
+        return Err("GC is retention-blocked by active receipt bases; full fingerprints and samples passed but reclamation is not established".into());
     }
     Ok(())
+}
+
+fn assert_uncached_native(peer: &Peer) {
+    let load = peer.load_stats();
+    assert_eq!(load.compatibility_materializations, 0);
+    assert_eq!(load.compatibility_hits, 0);
+    assert_eq!(load.compatibility_failures, 0);
+    let cache = peer.cache_stats();
+    assert_eq!(cache.current_entries, 0);
+    assert_eq!(cache.current_bytes, 0);
+    assert_eq!(cache.peak_entries, 0);
+    assert_eq!(cache.peak_bytes, 0);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Fingerprint {
+    datoms: u64,
+    digest: [u8; 32],
+}
+
+fn fingerprints(phase: &str, value: &DatabaseValue) -> Result<[Fingerprint; 2]> {
+    Ok([
+        fingerprint(phase, "current", value)?,
+        fingerprint(phase, "history", &value.clone().history())?,
+    ])
+}
+
+fn fingerprint(phase: &str, view: &str, value: &DatabaseValue) -> Result<Fingerprint> {
+    let started = Instant::now();
+    let mut hash = Sha256::new();
+    let mut datoms = 0_u64;
+    // The cursor pages through the entire EAVT view without collecting it.
+    // Frame one canonical datom at a time, as in operations_workflow: neither
+    // index-tree packing nor the historical flat-segment comparator affects
+    // the digest, and memory is bounded by cursor pages and one encoded fact.
+    for datom in value.scan_cursor(IndexOrder::Eavt)? {
+        let encoded = encode_index_segment(&IndexSegment {
+            order: IndexOrder::Eavt,
+            history: true,
+            datoms: vec![datom?],
+        })?;
+        hash.update((encoded.len() as u64).to_be_bytes());
+        hash.update(encoded);
+        datoms += 1;
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    println!(
+        "gc_full_fingerprint phase={phase} view={view} basis={} datoms={datoms} sha256={hex} elapsed_ms={}",
+        value.basis_t(),
+        started.elapsed().as_millis()
+    );
+    Ok(Fingerprint { datoms, digest })
 }
 
 fn positive(name: &str, default: u64) -> Result<u64> {

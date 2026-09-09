@@ -50,7 +50,8 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Starting point — 2026-09-08
 
-**Status:** Open; Stage5 is reopened by scaled backup/replay cost. This is a fresh
+**Status:** Open; Stage5 is reopened for a publication/inspection mismatch and
+is the only active child. Stage6 is paused. This is a fresh
 strategy over the existing code, not a claim that historical repairs vanished.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
@@ -246,9 +247,17 @@ or is hidden behind a parity claim.
 
 ### 5. Establish operational integrity and recovery
 
-**Status:** Reopened; [Goal5](../goal-5/0-plan.md) owns unnecessary initial backup
-replay and quadratic eager validators/history replay exposed on the successful
-100k workload. Preserve the repaired ordinary-GC liveness and current25 evidence.
+**Status:** Reopened; [Goal5](../goal-5/0-plan.md) owns the latest publication/
+inspection mismatch. The large restore and exact native/retry checks pass, but
+inspection rejects a valid1430-node protected transition (1024 live +406 pending).
+Authenticate deferred membership and complete restore-owned publication work;
+preserve the operational-scale repairs below.
+Initial/repeat capture and indexed eager validators are repaired. Three redundant
+restore replays are replaced by exact-byte/coordinate proofs with17live regression
+passes. GC's repeated19.67s empty semantic sweep is deferred to its own phase;
+22liveGC/integrity/lifecycle checks and the12-full-fingerprint small workflow
+pass. Current100k restore and subsequent integrated crash/GC remain Stage6 work.
+Preserve schema25 and earlier lifecycle repairs.
 
 Integrated testing found that active-generation receipt bases pin the oldest
 physical publication and prevent later prefix-ordered retirement indefinitely.
@@ -287,10 +296,14 @@ remain lazy. Operator procedures state supported guarantees and limitations.
 
 ### 6. Demonstrate the complete system under realistic load and failure
 
-**Status:** Paused for Goal5's operational-scale repair. [Goal6](../goal-6/0-plan.md)
+**Status:** Paused for Goal5's publication/inspection repair. [Goal6](../goal-6/0-plan.md)
 has passed the100k independent-peer deployment and writer SIGKILL/replacement.
 First backup was incomplete after520s and deliberately stopped with source and
-partial repository preserved; remaining backup/restore/server-crash/GC must pass.
+partial repository preserved. Repaired copy/repeat pass. The exact-manifest
+restore passes3367.648s/2200884KiB peak RSS; independent native current/history
+fingerprints and original-request retry pass with no new commit. Deep integrity
+inspection failed only on valid deferred membership, now owned by Goal5.
+Server-crash and full-fingerprint GC must still finish.
 
 **Outcome:** One reproducible deployment and acceptance workflow demonstrates
 the original database objective and a measured operating envelope.
@@ -315,7 +328,8 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-09:** Goal5 is the only active child again.
+**Continuation checkpoint — 2026-09-09:** Goal5 is the only active child again,
+repairing deferred-publication inspection and finite restore completion.
 Goal 3 is verified; preserve its input grammar, controlled/filtered speculative
 successors and dependency retention. Goal 4 read-depth/history/composition APIs
 and public workflow pass. Goal5 closes semantic backup verification, versioned
@@ -329,9 +343,16 @@ The fresh100k run passes in `atomic_goal6_scale.goal6_acceptance_20260909_b`,
 basis1002,773.913s import/129.213records/s with measured cache/RSS and zero eager
 loads; actual writer SIGKILL/fenced replay passes. The new exact-receipt cache/
 session reuse regression is repaired without weakening writer-admission limits.
-Repair unnecessary first-backup replay and quadratic eager invariants/history
-replay, preserving deep validation; then continue this same dataset through
-portable operations, dedicatedserver crash and reclamation on current binaries.
-The broad configured library before this newest repair passes.
+First100k backup passes129.687s/8214objects/484.54MB; unchanged repeat137.792s/
+0newobjects. The older standalone deep baseline was stopped incomplete after
+1608s; do not claim it passed. Current release resumes that exact retained
+manifest. Restore with mandatory deep verification passes3367.648s; native
+current/history fingerprints and original-request retry also pass. Integrity
+inspection failed on incomplete folding despite an exact protected live/pending
+node union; final unchanged-source checks did not run. Repair that boundary in
+Goal5, then resume the retained target's inspection/source checks, dedicatedserver
+crash and actual reclamation on the verified Rust-onlyGC phase repair. Latest configured
+library276passes precede the newest backup proof reuse; its17actualPG cases and
+small full/resumed operations workflows pass. See Goal5 for PIDs/binary/paths.
 Neither failed100k run is acceptance.
 No overall production outcome has yet been claimed.

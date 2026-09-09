@@ -298,6 +298,12 @@ impl GenerationRewriter {
         })
     }
 
+    /// Independently audit a complete candidate before making it visible.
+    pub(crate) fn validate_complete(&self) -> Result<(), SemanticError> {
+        self.ensure_complete()?;
+        self.database.validate_invariants()
+    }
+
     fn ensure_complete(&self) -> Result<(), SemanticError> {
         if self.database.basis_t() != self.expected_basis {
             return Err(fault(
@@ -310,7 +316,7 @@ impl GenerationRewriter {
 
     #[cfg(test)]
     fn finish_test(self, rows: Vec<GenerationLogRow>) -> Result<GenerationRewrite, SemanticError> {
-        self.ensure_complete()?;
+        self.validate_complete()?;
         let state_hash = checkpoint_state_hash(&self.database)?;
         Ok(GenerationRewrite {
             database: self.database,

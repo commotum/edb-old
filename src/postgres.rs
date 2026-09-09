@@ -1168,6 +1168,8 @@ fn backfill_state_commitments<C: GenericClient>(client: &mut C) -> Result<(), Se
                 "migration replay did not reach the published database head",
             ));
         }
+        // Audit the completed replay once, before the migration can commit.
+        database.validate_invariants()?;
     }
     client
         .batch_execute(

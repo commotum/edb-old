@@ -110,6 +110,13 @@ pub struct OperationalMetrics {
     /// removed in the newest usable native publication. Zero means every
     /// logically requested AVET projection is physically ready.
     pub pending_avet_projections: u64,
+    /// Authenticated published roots whose durable membership fold remains
+    /// unfinished. This is maintenance backlog, not an integrity problem.
+    pub pending_tree_publications: u64,
+    /// Remaining addition/removal rows in that fold, including replacement
+    /// old-node removals that do not have explicit delta rows. A zero-node
+    /// pending publication can still require its final metadata seal.
+    pub pending_tree_membership_nodes: u64,
     /// Unique immutable native nodes reachable from this database's retained
     /// publications, including roots, directories, and leaves.
     pub tree_nodes: u64,
@@ -966,14 +973,12 @@ impl PostgresOperator {
                 "program collection diverged from its same-snapshot preview",
             ));
         }
-        // Drain only the frontier visible in the preview. Semantic roots
-        // removed below may expose parent nodes; those become work for the
-        // next bounded call, mirroring native-tree publication work. Archive
-        // release is a separate phase: the preview deliberately excludes all
-        // semantic/log work then, including unrelated orphan nodes. Applying
-        // a fresh semantic frontier here would diverge and roll back archive
-        // progress indefinitely whenever such orphans coexist.
-        let mut collected_semantic_nodes = if candidates.request_base_archives.is_empty() {
+        // Only reselect a nonempty frontier actually admitted by the preview.
+        // Earlier tree/archive/log phases deliberately defer the broad semantic
+        // sweep, and a confirmed empty frontier needs no second full scan.
+        // Roots removed below expose work for the next call, never additional
+        // victims in this same-snapshot application.
+        let mut collected_semantic_nodes = if !candidates.semantic_nodes.is_empty() {
             transaction
                 .query(
                     "SELECT node_hash \
@@ -1626,6 +1631,7 @@ fn build_and_activate_excision(
             continue;
         }
         rewriter.expect_through(active_basis);
+        rewriter.validate_complete()?;
         let candidate_state_hash = rewriter.current_state_hash()?;
         let mut staged_tree = if source_had_tree {
             let mut store = PostgresTreeStore::connect_configured(connection)?;
@@ -2373,6 +2379,13 @@ fn inspect_semantic_commitments<C: postgres::GenericClient>(
     Ok(())
 }
 
+struct AuthenticatedNativePublication {
+    manifest_hash: Digest,
+    revision: u64,
+    generation: u64,
+    nodes: BTreeSet<Digest>,
+}
+
 fn inspect_native_trees<C: postgres::GenericClient>(
     client: &mut C,
     database_id: &str,
@@ -2406,7 +2419,8 @@ fn inspect_native_trees<C: postgres::GenericClient>(
     let mut previous_revision = None;
     let mut all_nodes = BTreeMap::<Digest, Vec<u8>>::new();
     let mut newest_manifest_hash = None;
-    let mut newest_authenticated_nodes = None;
+    let mut newest_authenticated = None;
+    let mut predecessor_authenticated = None;
 
     for publication in publications {
         let revision = positive_or_zero(publication.get(0), "tree publication revision")?;
@@ -2414,7 +2428,7 @@ fn inspect_native_trees<C: postgres::GenericClient>(
         let published_tx = digest(publication.get(2), "tree publication transaction hash")?;
         let manifest_hash = digest(publication.get(3), "tree publication manifest hash")?;
         newest_manifest_hash = Some(manifest_hash);
-        newest_authenticated_nodes = None;
+        predecessor_authenticated = newest_authenticated.take();
         metrics.tree_publication_revision = metrics.tree_publication_revision.max(revision);
         if let Some(previous) = previous_revision
             && revision != previous + 1
@@ -2570,8 +2584,12 @@ fn inspect_native_trees<C: postgres::GenericClient>(
             }
         }
         if publication_valid {
-            newest_authenticated_nodes =
-                Some(manifest_nodes.keys().copied().collect::<BTreeSet<_>>());
+            newest_authenticated = Some(AuthenticatedNativePublication {
+                manifest_hash,
+                revision,
+                generation: stored_generation,
+                nodes: manifest_nodes.keys().copied().collect(),
+            });
         }
         // A prior excision generation remains retained physical history, but
         // it is no longer a usable index for the current database value.
@@ -2594,17 +2612,23 @@ fn inspect_native_trees<C: postgres::GenericClient>(
         }
         all_nodes.extend(manifest_nodes);
     }
-    if !native_live_membership_matches(
+    match native_live_membership_status(
         client,
         database_id,
         newest_manifest_hash,
-        newest_authenticated_nodes.as_ref(),
+        newest_authenticated.as_ref(),
+        predecessor_authenticated.as_ref(),
     )? {
-        problem(
+        NativeLiveMembership::Complete => {}
+        NativeLiveMembership::Pending { remaining_nodes } => {
+            metrics.pending_tree_publications = 1;
+            metrics.pending_tree_membership_nodes = remaining_nodes;
+        }
+        NativeLiveMembership::Mismatch => problem(
             problems,
             "integrity/tree-live-membership-mismatch",
-            "current native live membership is absent, incomplete, or disagrees with authenticated reachability",
-        );
+            "native live membership and pending publication witnesses disagree with authenticated reachability",
+        ),
     }
     metrics.tree_nodes = all_nodes.len() as u64;
     metrics.tree_node_bytes = all_nodes.values().map(|bytes| bytes.len() as u64).sum();
@@ -3110,46 +3134,248 @@ fn integrity_fault(message: impl Into<String>) -> SemanticError {
     )
 }
 
-fn native_live_membership_matches<C: postgres::GenericClient>(
+enum NativeLiveMembership {
+    Complete,
+    Pending { remaining_nodes: u64 },
+    Mismatch,
+}
+
+fn native_membership_hashes<C: postgres::GenericClient>(
+    client: &mut C,
+    query: &str,
+    parameters: &[&(dyn postgres::types::ToSql + Sync)],
+) -> Result<BTreeSet<Digest>, SemanticError> {
+    client
+        .query(query, parameters)
+        .map_err(|error| operation_error("operations/tree-membership-witness", error))?
+        .into_iter()
+        .map(|row| digest(row.get(0), "tree membership node hash"))
+        .collect()
+}
+
+fn native_live_membership_status<C: postgres::GenericClient>(
     client: &mut C,
     database_id: &str,
     newest_manifest_hash: Option<Digest>,
-    expected: Option<&BTreeSet<Digest>>,
-) -> Result<bool, SemanticError> {
-    let Some(status) = client
+    newest: Option<&AuthenticatedNativePublication>,
+    predecessor: Option<&AuthenticatedNativePublication>,
+) -> Result<NativeLiveMembership, SemanticError> {
+    let status = client
         .query_opt(
             "SELECT manifest_hash, complete, problem_code \
                FROM atomic_tree_live_sets WHERE database_id = $1",
             &[&database_id],
         )
-        .map_err(|error| operation_error("operations/tree-live-status", error))?
-    else {
-        let stored_nodes: i64 = client
-            .query_one(
-                "SELECT count(*) FROM atomic_tree_live_nodes WHERE database_id = $1",
-                &[&database_id],
-            )
-            .map_err(|error| operation_error("operations/tree-live-nodes", error))?
-            .get(0);
-        return Ok(newest_manifest_hash.is_none() && stored_nodes == 0);
-    };
-    let manifest_hash = digest(status.get(0), "tree live manifest hash")?;
-    let complete: bool = status.get(1);
-    let problem_code: Option<String> = status.get(2);
-    let stored = client
-        .query(
-            "SELECT node_hash FROM atomic_tree_live_nodes \
-             WHERE database_id = $1 ORDER BY node_hash",
+        .map_err(|error| operation_error("operations/tree-live-status", error))?;
+    let marker = status
+        .map(|row| {
+            Ok::<_, SemanticError>((
+                digest(row.get(0), "tree live manifest hash")?,
+                row.get::<_, bool>(1),
+                row.get::<_, Option<String>>(2),
+            ))
+        })
+        .transpose()?;
+    let live = native_membership_hashes(
+        client,
+        "SELECT node_hash FROM atomic_tree_live_nodes WHERE database_id = $1",
+        &[&database_id],
+    )?;
+    let published_work_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM atomic_tree_delta_headers h \
+               JOIN atomic_tree_publications p USING (manifest_hash) \
+              WHERE p.database_id = $1",
             &[&database_id],
         )
-        .map_err(|error| operation_error("operations/tree-live-nodes", error))?
-        .into_iter()
-        .map(|row| digest(row.get(0), "tree live node hash"))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    Ok(complete
-        && problem_code.is_none()
-        && newest_manifest_hash == Some(manifest_hash)
-        && expected.is_some_and(|expected| &stored == expected))
+        .map_err(|error| operation_error("operations/tree-published-work", error))?
+        .get(0);
+    if newest_manifest_hash.is_none() {
+        return Ok(
+            if marker.is_none() && live.is_empty() && published_work_count == 0 {
+                NativeLiveMembership::Complete
+            } else {
+                NativeLiveMembership::Mismatch
+            },
+        );
+    }
+    let Some(newest) = newest.filter(|value| Some(value.manifest_hash) == newest_manifest_hash)
+    else {
+        return Ok(NativeLiveMembership::Mismatch);
+    };
+    if marker.as_ref().is_some_and(|(hash, complete, problem)| {
+        *hash == newest.manifest_hash && *complete && problem.is_none()
+    }) {
+        return Ok(if live == newest.nodes && published_work_count == 0 {
+            NativeLiveMembership::Complete
+        } else {
+            NativeLiveMembership::Mismatch
+        });
+    }
+    if published_work_count != 1 {
+        return Ok(NativeLiveMembership::Mismatch);
+    }
+
+    // Publication is atomic but its potentially large membership fold is
+    // deliberately not. Authenticate the original sealed work, then prove
+    // that the current rows form an authenticated, safe resumable fold state.
+    // Batch order is not information: equivalent protected subsets are valid
+    // even when their history cannot be inferred from the remaining rows.
+    // A header's mere presence never excuses absent or extraneous membership.
+    let Some(work) = client
+        .query_opt(
+            "SELECT h.predecessor_manifest_hash, h.delta_mode, h.expected_node_count, \
+                    h.staged_node_count, h.delta_set_hash, h.added_node_count, \
+                    h.added_set_hash, h.delta_state, s.predecessor_manifest_hash, \
+                    s.delta_mode, i.database_id, i.log_generation, i.expected_revision, \
+                    i.expected_node_count, i.staged_node_count, i.node_set_hash, i.intent_state \
+               FROM atomic_tree_delta_headers h \
+               JOIN atomic_tree_publication_states s USING (manifest_hash) \
+               JOIN atomic_tree_build_intents i USING (manifest_hash) \
+              WHERE h.manifest_hash = $1",
+            &[&&newest.manifest_hash[..]],
+        )
+        .map_err(|error| operation_error("operations/tree-pending-work", error))?
+    else {
+        return Ok(NativeLiveMembership::Mismatch);
+    };
+    let previous_hash = work
+        .get::<_, Option<Vec<u8>>>(0)
+        .map(|bytes| digest(bytes, "tree pending predecessor"))
+        .transpose()?;
+    let provenance_previous = work
+        .get::<_, Option<Vec<u8>>>(8)
+        .map(|bytes| digest(bytes, "tree publication predecessor"))
+        .transpose()?;
+    let mode: i16 = work.get(1);
+    if !matches!(mode, 1 | 2)
+        || work.get::<_, i16>(7) != 2
+        || work.get::<_, i16>(16) != 2
+        || provenance_previous != previous_hash
+        || work.get::<_, i16>(9) != mode
+        || work.get::<_, String>(10) != database_id
+        || positive_or_zero(work.get(11), "tree intent generation")? != newest.generation
+        || positive_or_zero(work.get(12), "tree intent expected revision")?
+            != newest.revision.saturating_sub(1)
+    {
+        return Ok(NativeLiveMembership::Mismatch);
+    }
+    let empty = BTreeSet::new();
+    let previous_nodes = match (previous_hash, predecessor) {
+        (None, None) if newest.revision == 1 && mode == 1 && marker.is_none() => &empty,
+        (Some(hash), Some(previous))
+            if previous.manifest_hash == hash
+                && previous.revision + 1 == newest.revision
+                && marker.as_ref().is_some_and(|(marked, complete, problem)| {
+                    *marked == hash && *complete && problem.is_none()
+                }) =>
+        {
+            &previous.nodes
+        }
+        _ => return Ok(NativeLiveMembership::Mismatch),
+    };
+    let additions = native_membership_hashes(
+        client,
+        "SELECT node_hash FROM atomic_tree_build_intent_nodes WHERE manifest_hash = $1",
+        &[&&newest.manifest_hash[..]],
+    )?;
+    let removed = previous_nodes
+        .difference(&newest.nodes)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let original_delta_removals = if mode == 2 { &removed } else { &empty };
+    let addition_hash = crate::tree_store::build_intent_node_set_hash(&additions);
+    let delta_hash =
+        crate::tree_store::publication_delta_set_hash(mode, &additions, original_delta_removals);
+    let original_count = (additions.len() + original_delta_removals.len()) as u64;
+    if positive_or_zero(work.get(2), "tree delta expected nodes")? != original_count
+        || positive_or_zero(work.get(3), "tree delta staged nodes")? != original_count
+        || digest(work.get(4), "tree delta set hash")? != delta_hash
+        || positive_or_zero(work.get(5), "tree delta added nodes")? != additions.len() as u64
+        || digest(work.get(6), "tree delta addition hash")? != addition_hash
+        || positive_or_zero(work.get(13), "tree intent expected nodes")? != additions.len() as u64
+        || positive_or_zero(work.get(14), "tree intent staged nodes")? != additions.len() as u64
+        || digest(work.get(15), "tree intent set hash")? != addition_hash
+        || !additions.is_subset(&newest.nodes)
+        || (mode == 1 && additions != newest.nodes)
+        || !newest
+            .nodes
+            .difference(previous_nodes)
+            .all(|hash| additions.contains(hash))
+    {
+        return Ok(NativeLiveMembership::Mismatch);
+    }
+    let mut pending_additions = BTreeSet::new();
+    let mut pending_removals = BTreeSet::new();
+    for row in client
+        .query(
+            "SELECT node_hash, direction FROM atomic_tree_delta_nodes WHERE manifest_hash = $1",
+            &[&&newest.manifest_hash[..]],
+        )
+        .map_err(|error| operation_error("operations/tree-pending-delta", error))?
+    {
+        let hash = digest(row.get(0), "tree pending delta node")?;
+        match row.get::<_, i16>(1) {
+            1 => {
+                pending_additions.insert(hash);
+            }
+            -1 => {
+                pending_removals.insert(hash);
+            }
+            _ => return Ok(NativeLiveMembership::Mismatch),
+        }
+    }
+    let retired = if let Some(previous) = predecessor {
+        let retirement = client
+            .query_opt(
+                "SELECT manifest_hash, bookkeeping_complete, garbage_complete, \
+                        EXISTS (SELECT 1 FROM atomic_tree_retirement_progress p \
+                                 WHERE p.database_id = r.database_id \
+                                   AND p.publication_revision = r.publication_revision) \
+                   FROM atomic_tree_retirements r \
+                  WHERE database_id = $1 AND publication_revision = $2",
+                &[
+                    &database_id,
+                    &sql_u64(previous.revision, "predecessor revision")?,
+                ],
+            )
+            .map_err(|error| operation_error("operations/tree-pending-retirement", error))?;
+        if !retirement.is_some_and(|row| {
+            row.get::<_, Vec<u8>>(0) == previous.manifest_hash
+                && !row.get::<_, bool>(1)
+                && !row.get::<_, bool>(2)
+                && !row.get::<_, bool>(3)
+        }) {
+            return Ok(NativeLiveMembership::Mismatch);
+        }
+        native_membership_hashes(
+            client,
+            "SELECT node_hash FROM atomic_tree_retired_nodes \
+              WHERE database_id = $1 AND publication_revision = $2",
+            &[
+                &database_id,
+                &sql_u64(previous.revision, "predecessor revision")?,
+            ],
+        )?
+    } else {
+        BTreeSet::new()
+    };
+    if !pending_additions.is_subset(&additions)
+        || !retired.is_subset(&removed)
+        || (mode == 1 && !pending_removals.is_empty())
+        || (mode == 2 && pending_removals != removed.difference(&retired).copied().collect())
+    {
+        return Ok(NativeLiveMembership::Mismatch);
+    }
+    let mut expected_live = previous_nodes.clone();
+    expected_live.extend(additions.difference(&pending_additions).copied());
+    expected_live.retain(|hash| !retired.contains(hash));
+    if live != expected_live {
+        return Ok(NativeLiveMembership::Mismatch);
+    }
+    Ok(NativeLiveMembership::Pending {
+        remaining_nodes: (pending_additions.len() + removed.len() - retired.len()) as u64,
+    })
 }
 
 fn native_manifest_roots_match<C: postgres::GenericClient>(
@@ -3812,7 +4038,39 @@ fn garbage_candidates<C: postgres::GenericClient>(
         .map(|row| digest(row.get(0), "program garbage hash"))
         .collect::<Result<Vec<_>, _>>()?;
     let request_base_archives = request_base_archive_candidates(client, older_than_millis)?;
-    let mut semantic_nodes = if request_base_archives.is_empty() {
+    let log_generations = if request_base_archives.is_empty() {
+        log_generation_candidates(client, older_than_millis)?
+    } else {
+        Vec::new()
+    };
+    let semantic_roots = if let Some(candidate) = log_generations
+        .iter()
+        .find(|candidate| candidate.semantic_roots_removed > 0)
+    {
+        semantic_root_candidates(
+            client,
+            &candidate.database_id,
+            candidate.generation,
+            MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC,
+        )?
+    } else {
+        Vec::new()
+    };
+    // Finding an empty no-incoming-reference frontier may inspect the whole
+    // semantic node catalog. Do it as its own phase, not once per bounded
+    // accelerator/receipt/intent/program step. Generation work is selected
+    // first: retiring its roots can expose semantic garbage, and the broad
+    // sweep must neither delay that cleanup nor invent same-call victims.
+    let semantic_phase_ready = segments.is_empty()
+        && programs.is_empty()
+        && tree_publications.is_empty()
+        && tree_build_intents.is_empty()
+        && tree_manifests.is_empty()
+        && tree_nodes.is_empty()
+        && request_base_archives.is_empty()
+        && receipt_archive_conversion.is_none()
+        && log_generations.is_empty();
+    let mut semantic_nodes = if semantic_phase_ready {
         client
             .query(
                 "SELECT node_hash \
@@ -3838,24 +4096,6 @@ fn garbage_candidates<C: postgres::GenericClient>(
         Vec::new()
     };
     semantic_nodes.sort_unstable();
-    let log_generations = if request_base_archives.is_empty() {
-        log_generation_candidates(client, older_than_millis)?
-    } else {
-        Vec::new()
-    };
-    let semantic_roots = if let Some(candidate) = log_generations
-        .iter()
-        .find(|candidate| candidate.semantic_roots_removed > 0)
-    {
-        semantic_root_candidates(
-            client,
-            &candidate.database_id,
-            candidate.generation,
-            MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC,
-        )?
-    } else {
-        Vec::new()
-    };
     Ok(GarbageCandidates {
         segments,
         programs,

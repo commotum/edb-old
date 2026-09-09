@@ -49,6 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8; 4] = b"ATBK";
@@ -85,6 +86,35 @@ pub struct BackupVerification {
     pub point: BackupPoint,
     pub database: Database,
     pub objects_read: usize,
+}
+
+/// In-process evidence from the mandatory deep pass, not a persisted trust
+/// flag. Retain only the main accelerator's schema/coordinate, never one full
+/// database per receipt archive or historical tree.
+struct VerifiedMainTree {
+    manifest_hash: Digest,
+    basis_t: u64,
+    state_hash: Digest,
+    eidx_frontier: u64,
+    schema: Arc<crate::Schema>,
+}
+
+struct VerifiedBackupSource {
+    verification: BackupVerification,
+    main_tree: Option<VerifiedMainTree>,
+}
+
+/// Exact target identity established by comparing its authoritative rows to
+/// the deeply verified backup. A final locked-head check consumes this proof
+/// after optional physical publication, including on an ambiguous retry.
+struct MatchedRestoreTarget {
+    lineage_id: String,
+    generation: u64,
+    basis_t: u64,
+    tx_hash: Digest,
+    state_hash: Digest,
+    eidx_frontier: u64,
+    genesis_hash: Digest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -225,6 +255,8 @@ pub enum RestoreFault {
     BeforeCommit,
     /// Stop after the root transaction commits but before acknowledging it.
     AfterCommitBeforeResponse,
+    /// Leave a published native root's bounded membership fold unfinished.
+    AfterTreePublication,
 }
 
 pub struct PortableBackup {
@@ -754,6 +786,7 @@ impl PortableBackup {
         validate_backup_directory(directory, true)?;
         let (manifest, manifest_hash) = load_manifest(directory, basis)?;
         Self::verify_loaded_backup(directory, manifest, manifest_hash, deep)
+            .map(|verified| verified.verification)
     }
 
     /// Verify one exact retained information generation. The basis-only
@@ -767,6 +800,7 @@ impl PortableBackup {
         validate_backup_directory(directory, true)?;
         let (manifest, manifest_hash) = load_manifest_generation(directory, basis, log_generation)?;
         Self::verify_loaded_backup(directory, manifest, manifest_hash, deep)
+            .map(|verified| verified.verification)
     }
 
     fn verify_loaded_backup(
@@ -774,7 +808,7 @@ impl PortableBackup {
         manifest: Manifest,
         manifest_hash: Digest,
         deep: bool,
-    ) -> Result<BackupVerification, SemanticError> {
+    ) -> Result<VerifiedBackupSource, SemanticError> {
         verify_claim(directory, &manifest)?;
         let genesis = read_object(directory, manifest.genesis_hash)?;
         let decoded_genesis = decode_genesis(&genesis)?;
@@ -798,6 +832,7 @@ impl PortableBackup {
         // retaining one Database clone per archive would make deep verification
         // grow with the number of endpoints as well as the database size.
         let mut trees_by_basis = BTreeMap::<u64, Vec<TreeBackup>>::new();
+        let mut verified_main_tree = None;
         if deep {
             let mut trees = request_base_trees(&log);
             if let Some(tree) = &manifest.tree {
@@ -825,6 +860,19 @@ impl PortableBackup {
                     &database,
                     current_state_hash,
                 )?);
+                if manifest
+                    .tree
+                    .as_ref()
+                    .is_some_and(|main| main.manifest_hash == tree.manifest_hash)
+                {
+                    verified_main_tree = Some(VerifiedMainTree {
+                        manifest_hash: tree.manifest_hash,
+                        basis_t: database.basis_t(),
+                        state_hash: current_state_hash,
+                        eidx_frontier: database.eidx_frontier(),
+                        schema: database.schema_arc(),
+                    });
+                }
             }
         }
         for entry in &log.entries {
@@ -863,6 +911,19 @@ impl PortableBackup {
                         &database,
                         current_state_hash,
                     )?);
+                    if manifest
+                        .tree
+                        .as_ref()
+                        .is_some_and(|main| main.manifest_hash == tree.manifest_hash)
+                    {
+                        verified_main_tree = Some(VerifiedMainTree {
+                            manifest_hash: tree.manifest_hash,
+                            basis_t: database.basis_t(),
+                            state_hash: current_state_hash,
+                            eidx_frontier: database.eidx_frontier(),
+                            schema: database.schema_arc(),
+                        });
+                    }
                 }
             }
             if entry
@@ -926,17 +987,20 @@ impl PortableBackup {
         // commitment above. Audit the derived caches/history once at this
         // explicit recovery endpoint instead of rebuilding every prefix.
         database.validate_invariants()?;
-        Ok(BackupVerification {
-            point: BackupPoint {
-                lineage_id: manifest.lineage_id.clone(),
-                log_generation: manifest.log_generation,
-                basis_t: manifest.basis,
-                manifest_hash,
-                objects_written: 0,
-                objects_reused: 0,
+        Ok(VerifiedBackupSource {
+            main_tree: verified_main_tree,
+            verification: BackupVerification {
+                point: BackupPoint {
+                    lineage_id: manifest.lineage_id.clone(),
+                    log_generation: manifest.log_generation,
+                    basis_t: manifest.basis,
+                    manifest_hash,
+                    objects_written: 0,
+                    objects_reused: 0,
+                },
+                database,
+                objects_read,
             },
-            database,
-            objects_read,
         })
     }
 
@@ -952,6 +1016,7 @@ impl PortableBackup {
             None,
             target_database_id,
             RestoreFault::None,
+            None,
             None,
         )
     }
@@ -972,6 +1037,7 @@ impl PortableBackup {
             target_database_id,
             RestoreFault::None,
             None,
+            None,
         )
     }
 
@@ -983,7 +1049,15 @@ impl PortableBackup {
         target_database_id: &str,
         fault_at: RestoreFault,
     ) -> Result<Database, SemanticError> {
-        self.restore_backup_selected(directory, basis, None, target_database_id, fault_at, None)
+        self.restore_backup_selected(
+            directory,
+            basis,
+            None,
+            target_database_id,
+            fault_at,
+            None,
+            None,
+        )
     }
 
     /// Test seam at the dangerous builder-to-publication lock handoff. The
@@ -1007,9 +1081,35 @@ impl PortableBackup {
             target_database_id,
             RestoreFault::None,
             Some(&mut probe),
+            None,
         )
     }
 
+    /// Test seam after exact target-row proof and optional tree publication,
+    /// immediately before the final locked identity/head comparison.
+    #[doc(hidden)]
+    pub fn restore_backup_with_completion_probe<F>(
+        &mut self,
+        directory: &Path,
+        basis: u64,
+        target_database_id: &str,
+        mut probe: F,
+    ) -> Result<Database, SemanticError>
+    where
+        F: FnMut(),
+    {
+        self.restore_backup_selected(
+            directory,
+            basis,
+            None,
+            target_database_id,
+            RestoreFault::None,
+            None,
+            Some(&mut probe),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn restore_backup_selected(
         &mut self,
         directory: &Path,
@@ -1018,6 +1118,7 @@ impl PortableBackup {
         target_database_id: &str,
         fault_at: RestoreFault,
         activation_probe: Option<&mut dyn FnMut()>,
+        completion_probe: Option<&mut dyn FnMut()>,
     ) -> Result<Database, SemanticError> {
         if target_database_id.is_empty() {
             return Err(SemanticError::incorrect(
@@ -1025,10 +1126,14 @@ impl PortableBackup {
                 "restore target cannot be empty",
             ));
         }
-        let verification = match log_generation {
-            Some(generation) => Self::verify_backup_point(directory, basis, generation, true)?,
-            None => Self::verify_backup(directory, basis, true)?,
+        validate_backup_directory(directory, true)?;
+        let (source_manifest, source_manifest_hash) = match log_generation {
+            Some(generation) => load_manifest_generation(directory, basis, generation)?,
+            None => load_manifest(directory, basis)?,
         };
+        let verified =
+            Self::verify_loaded_backup(directory, source_manifest, source_manifest_hash, true)?;
+        let verification = &verified.verification;
         let (manifest, manifest_hash) = match log_generation {
             Some(generation) => load_manifest_generation(directory, basis, generation)?,
             None => load_manifest(directory, basis)?,
@@ -1066,7 +1171,7 @@ impl PortableBackup {
             &genesis,
             genesis_hash,
         )?;
-        if target_matches_backup(
+        if let Some(matched_target) = target_matches_backup(
             &mut self.client,
             directory,
             &manifest,
@@ -1085,6 +1190,10 @@ impl PortableBackup {
                 &log,
                 target_database_id,
                 &verification.database,
+                verified.main_tree.as_ref(),
+                &matched_target,
+                fault_at,
+                completion_probe,
             );
         }
 
@@ -1161,7 +1270,7 @@ impl PortableBackup {
         if fault_at == RestoreFault::AfterCommitBeforeResponse {
             return Err(injected("backup/restore-after-activation"));
         }
-        if !target_matches_backup(
+        let Some(matched_target) = target_matches_backup(
             &mut self.client,
             directory,
             &manifest,
@@ -1169,12 +1278,13 @@ impl PortableBackup {
             &completed_excisions,
             target_database_id,
             &verification.database,
-        )? {
+        )?
+        else {
             return Err(fault(
                 "backup/restore-postcondition",
                 "restored authoritative rows do not exactly match the requested backup point",
             ));
-        }
+        };
         complete_restored_target(
             &self.connection,
             directory,
@@ -1182,6 +1292,10 @@ impl PortableBackup {
             &log,
             target_database_id,
             &verification.database,
+            verified.main_tree.as_ref(),
+            &matched_target,
+            fault_at,
+            completion_probe,
         )
     }
 }
@@ -2988,6 +3102,7 @@ fn capture_completed_excisions<C: postgres::GenericClient>(
     Ok(previous)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_restored_target(
     connection: &PostgresConnectionConfig,
     directory: &Path,
@@ -2995,25 +3110,90 @@ fn complete_restored_target(
     log: &LoadedBackupLog,
     target_database_id: &str,
     expected: &Database,
+    main_tree: Option<&VerifiedMainTree>,
+    matched: &MatchedRestoreTarget,
+    fault_at: RestoreFault,
+    completion_probe: Option<&mut dyn FnMut()>,
 ) -> Result<Database, SemanticError> {
-    restore_tree_backup(connection, directory, manifest, log, target_database_id)?;
-    let mut store = PostgresStore::connect_configured(connection)?;
-    let restored = store.recover(target_database_id)?;
-    if !restored.same_information_as(expected) {
+    restore_tree_backup(
+        connection,
+        directory,
+        manifest,
+        log,
+        target_database_id,
+        main_tree,
+        matched,
+        fault_at,
+    )?;
+    if let Some(probe) = completion_probe {
+        probe();
+    }
+    let mut client = connection.connect()?;
+    let mut transaction = client.transaction().map_err(|error| {
+        crate::postgres::postgres_error("backup/restore-final-check-begin", error)
+    })?;
+    let head = transaction
+        .query_opt(
+            "SELECT h.basis_t, h.tx_hash, h.log_generation, d.lineage_id, d.genesis_hash, \
+                t.state_hash, t.eidx_frontier \
+           FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
+           LEFT JOIN atomic_generation_transactions t \
+             ON t.database_id = h.database_id AND t.generation = h.log_generation \
+            AND t.basis_t = h.basis_t \
+          WHERE h.database_id = $1 FOR SHARE OF h, d",
+            &[&target_database_id],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-final-check", error))?
+        .ok_or_else(|| {
+            fault(
+                "backup/restore-target-changed",
+                "restored target head disappeared before completion",
+            )
+        })?;
+    let basis = unsigned(head.get(0), "final restored basis")?;
+    let state = head
+        .get::<_, Option<Vec<u8>>>(5)
+        .map(|bytes| digest(bytes, "final restored state"))
+        .transpose()?;
+    let frontier = head
+        .get::<_, Option<i64>>(6)
+        .map(|value| unsigned(value, "final restored frontier"))
+        .transpose()?;
+    if basis != matched.basis_t
+        || digest(head.get(1), "final restored transaction")? != matched.tx_hash
+        || unsigned(head.get(2), "final restored generation")? != matched.generation
+        || head.get::<_, String>(3) != matched.lineage_id
+        || digest(head.get(4), "final restored genesis")? != matched.genesis_hash
+        || (basis > 0
+            && (state != Some(matched.state_hash) || frontier != Some(matched.eidx_frontier)))
+        || expected.basis_t() != matched.basis_t
+        || expected.eidx_frontier() != matched.eidx_frontier
+        || checkpoint_state_hash(expected)? != matched.state_hash
+    {
         return Err(fault(
-            "backup/restore-verify",
-            "restored database information differs from the verified backup point",
+            "backup/restore-target-changed",
+            "restored target no longer names the exactly verified information generation",
         ));
     }
-    Ok(restored)
+    transaction.commit().map_err(|error| {
+        crate::postgres::postgres_error("backup/restore-final-check-commit", error)
+    })?;
+    // Database contains immutable information, not a mutable catalog name or
+    // local generation. Exact canonical row equality proves this same value
+    // under the rebound target identity without replaying its log again.
+    Ok(expected.clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn restore_tree_backup(
     connection: &PostgresConnectionConfig,
     directory: &Path,
     manifest: &Manifest,
     _log: &LoadedBackupLog,
     target_database_id: &str,
+    verified: Option<&VerifiedMainTree>,
+    matched: &MatchedRestoreTarget,
+    fault_at: RestoreFault,
 ) -> Result<(), SemanticError> {
     let Some(tree) = &manifest.tree else {
         // The authoritative log is complete. A target without a captured
@@ -3021,8 +3201,24 @@ fn restore_tree_backup(
         // consolidated normally after restore.
         return Ok(());
     };
+    let verified = verified.ok_or_else(|| {
+        fault(
+            "backup/restore-tree-proof",
+            "main tree has no exact deep-verification evidence",
+        )
+    })?;
     let source_payload = read_object(directory, tree.manifest_hash)?;
     let source = PersistentTreeManifest::decode(&source_payload)?;
+    if tree.manifest_hash != verified.manifest_hash
+        || source.basis_t != verified.basis_t
+        || source.state_hash != verified.state_hash
+        || source.eidx_frontier != verified.eidx_frontier
+    {
+        return Err(fault(
+            "backup/restore-tree-proof",
+            "main tree disagrees with its verified immutable coordinate",
+        ));
+    }
 
     let mut client = connection.connect()?;
     let basis_sql = i64::try_from(source.basis_t).map_err(|_| {
@@ -3040,7 +3236,11 @@ fn restore_tree_backup(
         })?;
     let target_generation = unsigned(identity.get(0), "restored tree generation")?;
     let target_lineage: String = identity.get(1);
-    if target_generation == 0 || target_lineage != manifest.lineage_id {
+    if target_generation == 0
+        || target_lineage != manifest.lineage_id
+        || target_generation != matched.generation
+        || target_lineage != matched.lineage_id
+    {
         return Err(fault(
             "backup/restore-tree-generation",
             "restored tree target is not on the expected lineage generation",
@@ -3052,11 +3252,17 @@ fn restore_tree_backup(
     } else {
         let row = client
             .query_one(
-                "SELECT tx_hash, state_hash FROM atomic_generation_transactions \
+                "SELECT tx_hash, state_hash, eidx_frontier FROM atomic_generation_transactions \
                  WHERE database_id = $1 AND generation = $2 AND basis_t = $3",
                 &[&target_database_id, &generation_sql, &basis_sql],
             )
             .map_err(|error| crate::postgres::postgres_error("backup/restore-tree-log", error))?;
+        if unsigned(row.get(2), "restored tree frontier")? != verified.eidx_frontier {
+            return Err(fault(
+                "backup/restore-tree-state",
+                "restored tree basis has a different issued frontier",
+            ));
+        }
         (
             digest(row.get(0), "restored tree transaction hash")?,
             digest(row.get(1), "restored tree state hash")?,
@@ -3089,26 +3295,25 @@ fn restore_tree_backup(
         trees: source.trees,
         pending_avet: source.pending_avet,
     };
-    let recovered_target = recover_generation_to(
+    // Native request-base restores rebuild every persistent coordinate. An
+    // older/no-request-base restore may legitimately have only its head seed;
+    // exact canonical target-row proof plus the verified source witness still
+    // proves an earlier main base without requiring a synthetic coordinate.
+    if let Some(coordinate) = crate::persistent_commitment::load_persistent_coordinate(
         &mut client,
         target_database_id,
         target_generation,
         target.basis_t,
-        target.tx_hash,
-    )?;
-    if recovered_target.final_hash != target.tx_hash
-        || recovered_target.database.eidx_frontier() != target.eidx_frontier
-        || checkpoint_state_hash(&recovered_target.database)? != target.state_hash
+    )? && (coordinate.tx_hash != target.tx_hash
+        || coordinate.state_hash != target.state_hash
+        || coordinate.eidx_frontier != target.eidx_frontier)
     {
         return Err(fault(
             "backup/restore-tree-reconstruction",
-            "target generation log does not reproduce the restored tree coordinate",
+            "persistent target coordinate disagrees with verified main tree",
         ));
     }
-    crate::peer::validate_avet_work_directions(
-        &target.pending_avet,
-        recovered_target.database.schema(),
-    )?;
+    crate::peer::validate_avet_work_directions(&target.pending_avet, &verified.schema)?;
     let payload = target.encode()?;
     let manifest_hash = sha256(&payload);
     let roots: Vec<TreeRootBinding> = target
@@ -3185,10 +3390,7 @@ fn restore_tree_backup(
             && existing.eidx_frontier == target.eidx_frontier
         {
             validate_stored_tree_graph(&mut store, &existing)?;
-            crate::peer::validate_avet_work_directions(
-                &existing.pending_avet,
-                recovered_target.database.schema(),
-            )?;
+            crate::peer::validate_avet_work_directions(&existing.pending_avet, &verified.schema)?;
             // Readiness is monotone at one immutable database coordinate.
             // A complete existing accelerator always dominates. Two partial
             // accelerators have no useful total order (clearing has no
@@ -3196,7 +3398,10 @@ fn restore_tree_backup(
             // Only a complete backup source may replace a partial existing
             // value at the next physical revision.
             if existing.pending_avet.is_empty() || !target.pending_avet.is_empty() {
-                return Ok(());
+                if fault_at == RestoreFault::AfterTreePublication {
+                    return Err(injected("backup/restore-after-tree-publication"));
+                }
+                return finish_restored_publication_work(&mut client, &mut store, existing_hash);
             }
         }
     }
@@ -3246,7 +3451,44 @@ fn restore_tree_backup(
     match (publication, release) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Ok(())) => {
+            if fault_at == RestoreFault::AfterTreePublication {
+                return Err(injected("backup/restore-after-tree-publication"));
+            }
+            finish_restored_publication_work(&mut client, &mut store, manifest_hash)
+        }
+    }
+}
+
+/// Complete only this restored publication's finite membership work. Each
+/// owner call commits at most 512 nodes outside any head/publication lock.
+/// A concurrent successor can consume the final header before we observe it;
+/// header disappearance is terminal, not an invitation to chase that newer
+/// publication (and never a reason to rebuild/replay the restored database).
+fn finish_restored_publication_work(
+    client: &mut Client,
+    store: &mut PostgresTreeStore,
+    manifest_hash: Digest,
+) -> Result<(), SemanticError> {
+    loop {
+        let pending = client
+            .query_opt(
+                "SELECT delta_state FROM atomic_tree_delta_headers WHERE manifest_hash = $1",
+                &[&&manifest_hash[..]],
+            )
+            .map_err(|error| crate::postgres::postgres_error("backup/restore-tree-work", error))?;
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        if pending.get::<_, i16>(0) != 2 {
+            return Err(fault(
+                "backup/restore-tree-work-state",
+                "published restored tree has a non-published membership work header",
+            ));
+        }
+        // false can mean this exact header was consumed and superseded in
+        // between the two calls. Reselect the same hash, never the latest.
+        store.advance_publication_work(manifest_hash)?;
     }
 }
 
@@ -5101,7 +5343,7 @@ fn target_matches_backup<C: postgres::GenericClient>(
     completed_excisions: &[(u64, u64)],
     target_database_id: &str,
     expected_database: &Database,
-) -> Result<bool, SemanticError> {
+) -> Result<Option<MatchedRestoreTarget>, SemanticError> {
     let Some(catalog) = client
         .query_opt(
             "SELECT lineage_id, genesis, genesis_hash FROM atomic_databases WHERE database_id = $1",
@@ -5109,7 +5351,7 @@ fn target_matches_backup<C: postgres::GenericClient>(
         )
         .map_err(|error| crate::postgres::postgres_error("backup/restore-check-catalog", error))?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let lineage_id: String = catalog.get(0);
     let genesis: Vec<u8> = catalog.get(1);
@@ -5118,7 +5360,7 @@ fn target_matches_backup<C: postgres::GenericClient>(
         || genesis_hash != manifest.genesis_hash
         || genesis != read_object(directory, manifest.genesis_hash)?
     {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(head) = client
         .query_opt(
@@ -5127,23 +5369,13 @@ fn target_matches_backup<C: postgres::GenericClient>(
         )
         .map_err(|error| crate::postgres::postgres_error("backup/restore-check-head", error))?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let target_basis = unsigned(head.get(0), "restored head basis")?;
     let target_head_hash = digest(head.get(1), "restored head hash")?;
     let target_generation = unsigned(head.get(2), "restored log generation")?;
     if target_generation == 0 || target_basis != manifest.basis {
-        return Ok(false);
-    }
-    let recovered = crate::postgres::recover_generation_to(
-        client,
-        target_database_id,
-        target_generation,
-        target_basis,
-        target_head_hash,
-    )?;
-    if !recovered.database.same_information_as(expected_database) {
-        return Ok(false);
+        return Ok(None);
     }
     let generation_sql = sql_u64(target_generation, "restored log generation")?;
     let rows = client
@@ -5165,16 +5397,9 @@ fn target_matches_backup<C: postgres::GenericClient>(
         )
         .map_err(|error| crate::postgres::postgres_error("backup/restore-check-log", error))?;
     if rows.len() != log.entries.len() {
-        return Ok(false);
+        return Ok(None);
     }
-    let restored_request_bases = match_restored_request_base_archives(
-        client,
-        directory,
-        manifest,
-        log,
-        target_database_id,
-        target_generation,
-    )?;
+    let mut request_base_bindings = Vec::with_capacity(rows.len());
     let mut receipts: BTreeMap<u64, (Digest, BTreeMap<String, u64>)> = BTreeMap::new();
     for row in client
         .query(
@@ -5203,7 +5428,7 @@ fn target_matches_backup<C: postgres::GenericClient>(
                 )
                 .is_some()
         {
-            return Ok(false);
+            return Ok(None);
         }
     }
     let mut previous = manifest.genesis_hash;
@@ -5228,7 +5453,7 @@ fn target_matches_backup<C: postgres::GenericClient>(
             .get::<_, Option<Vec<u8>>>(15)
             .map(|hash| digest(hash, "restored request base hash"))
             .transpose()?;
-        let content = LineageTransactionContent::decode(&content_payload)?;
+        LineageTransactionContent::decode(&content_payload)?;
         let expected_content = LineageTransactionContent::from_transaction(
             &manifest.lineage_id,
             prior_frontier,
@@ -5265,25 +5490,42 @@ fn target_matches_backup<C: postgres::GenericClient>(
             || content_basis != row_basis
             || content_frontier != row_frontier
             || content_version != 1
-            || content != expected_content
+            || content_payload != expected_content.encode()?
             || request_key_hash != entry.request.request_key_hash
             || request_digest != expected_request_digest
             || request_kind != i16::from(entry.request.request_kind)
             || request_tx_hash != row_hash
-            || request_base_hash
-                != entry
-                    .request
-                    .base_manifest_hash
-                    .and_then(|portable| restored_request_bases.get(&portable).copied())
             || receipt != entry.request.receipt_tempids
         {
-            return Ok(false);
+            return Ok(None);
         }
         previous = row_hash;
         prior_frontier = row_frontier;
+        request_base_bindings.push((request_base_hash, entry.request.base_manifest_hash));
     }
-    if !receipts.is_empty() || target_head_hash != previous {
-        return Ok(false);
+    if !receipts.is_empty()
+        || target_head_hash != previous
+        || target_basis != expected_database.basis_t()
+        || prior_frontier != expected_database.eidx_frontier()
+    {
+        return Ok(None);
+    }
+    // A different legitimate same-basis information generation can have a
+    // different archive set. First establish exact canonical log/request
+    // equality; only then is a missing/different archive a corrupt proof of
+    // this requested point rather than an ordinary nonmatching restore target.
+    let restored_request_bases = match_restored_request_base_archives(
+        client,
+        directory,
+        manifest,
+        log,
+        target_database_id,
+        target_generation,
+    )?;
+    if request_base_bindings.into_iter().any(|(actual, portable)| {
+        actual != portable.and_then(|hash| restored_request_bases.get(&hash).copied())
+    }) {
+        return Ok(None);
     }
     let restored_completed = client
         .query(
@@ -5322,10 +5564,10 @@ fn target_matches_backup<C: postgres::GenericClient>(
         })?
         .get(0);
     if !has_completion_root {
-        return Ok(false);
+        return Ok(None);
     }
     if restored_completed != completed_excisions {
-        return Ok(false);
+        return Ok(None);
     }
 
     let decoded_genesis = decode_genesis(&genesis)?;
@@ -5351,16 +5593,24 @@ fn target_matches_backup<C: postgres::GenericClient>(
                 crate::postgres::postgres_error("backup/restore-check-program", error)
             })?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         if row.get::<_, i16>(0) != kind
             || row.get::<_, i16>(1) != arity
             || row.get::<_, Vec<u8>>(2) != payload
         {
-            return Ok(false);
+            return Ok(None);
         }
     }
-    Ok(true)
+    Ok(Some(MatchedRestoreTarget {
+        lineage_id,
+        generation: target_generation,
+        basis_t: target_basis,
+        tx_hash: target_head_hash,
+        state_hash: checkpoint_state_hash(expected_database)?,
+        eidx_frontier: expected_database.eidx_frontier(),
+        genesis_hash: manifest.genesis_hash,
+    }))
 }
 
 #[derive(Debug)]

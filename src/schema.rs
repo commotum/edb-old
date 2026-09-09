@@ -420,8 +420,33 @@ impl Schema {
             installed.insert(entity);
         }
 
+        // Property readers intentionally retain their simple, ordered checks,
+        // but only over the owning schema entity's facts. Scanning all user
+        // information for every one of its properties would multiply each
+        // recovery prefix by the installed schema size.
+        let mut by_entity: BTreeMap<_, Vec<_>> = installed
+            .iter()
+            .copied()
+            .map(|entity| (entity, Vec::new()))
+            .collect();
+        for datom in current {
+            if let Some(facts) = by_entity.get_mut(&datom.entity) {
+                facts.push(datom);
+            }
+        }
+        Self::derive_from_entity_information(installed, idents, |entity| {
+            by_entity[&entity].as_slice()
+        })
+    }
+
+    fn derive_from_entity_information<'a>(
+        installed: BTreeSet<u64>,
+        idents: &IdentIndex,
+        entity_facts: impl Fn(u64) -> &'a [&'a Datom],
+    ) -> Result<Self, SemanticError> {
         let mut schema = Self::new();
         for entity in installed {
+            let current = entity_facts(entity);
             let id = schema_eid_to_attr_id(entity)?;
             let ident = required_keyword(current, entity, DB_IDENT, ":db/ident")?;
             let value_type_entity = required_ref(current, entity, DB_VALUE_TYPE, ":db/valueType")?;
@@ -950,7 +975,7 @@ fn schema_information_error(code: &'static str, message: impl Into<String>) -> S
     SemanticError::new(ErrorCategory::Incorrect, code, message)
 }
 
-fn values(current: &[Datom], entity: u64, attribute: u64) -> Vec<&Value> {
+fn values<'a>(current: &[&'a Datom], entity: u64, attribute: u64) -> Vec<&'a Value> {
     current
         .iter()
         .filter(|datom| {
@@ -961,7 +986,7 @@ fn values(current: &[Datom], entity: u64, attribute: u64) -> Vec<&Value> {
 }
 
 fn exactly_zero_or_one<'a>(
-    current: &'a [Datom],
+    current: &[&'a Datom],
     entity: u64,
     attribute: u64,
     label: &str,
@@ -978,7 +1003,7 @@ fn exactly_zero_or_one<'a>(
 }
 
 fn required_keyword(
-    current: &[Datom],
+    current: &[&Datom],
     entity: u64,
     attribute: u64,
     label: &str,
@@ -997,7 +1022,7 @@ fn required_keyword(
 }
 
 fn required_ref(
-    current: &[Datom],
+    current: &[&Datom],
     entity: u64,
     attribute: u64,
     label: &str,
@@ -1016,7 +1041,7 @@ fn required_ref(
 }
 
 fn optional_ref(
-    current: &[Datom],
+    current: &[&Datom],
     entity: u64,
     attribute: u64,
     label: &str,
@@ -1032,7 +1057,7 @@ fn optional_ref(
 }
 
 fn optional_bool(
-    current: &[Datom],
+    current: &[&Datom],
     entity: u64,
     attribute: u64,
     label: &str,
@@ -1048,7 +1073,7 @@ fn optional_bool(
 }
 
 fn optional_keyword(
-    current: &[Datom],
+    current: &[&Datom],
     entity: u64,
     attribute: u64,
     label: &str,
@@ -1064,7 +1089,7 @@ fn optional_keyword(
 }
 
 fn optional_tuple<'a>(
-    current: &'a [Datom],
+    current: &[&'a Datom],
     entity: u64,
     attribute: u64,
     label: &str,
@@ -1203,5 +1228,222 @@ fn validate_tuple_slot(value_type: ValueType, value: &Value) -> Result<(), Seman
             "tuple BigDecimals are limited to 256 digits",
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod grouped_information_tests {
+    use super::*;
+    use crate::{Database, View};
+    use std::time::Instant;
+
+    // The original projection supplied the ENTIRE current relation to each
+    // property reader. Share the unchanged validators, not the optimized
+    // grouping, so this checks both successful schemas and exact error order.
+    fn ungrouped_reference(
+        current: &[Datom],
+        idents: &IdentIndex,
+    ) -> Result<Schema, SemanticError> {
+        let mut installed = BTreeSet::new();
+        for datom in current.iter().filter(|datom| {
+            datom.added
+                && datom.entity == DB_PART_DB
+                && (u64::from(datom.attribute) == DB_INSTALL_ATTRIBUTE
+                    || u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE)
+        }) {
+            let Value::Ref(entity) = datom.value else {
+                return Err(schema_information_error(
+                    "schema/invalid-install-marker",
+                    "attribute install and alter markers must contain refs",
+                ));
+            };
+            installed.insert(entity);
+        }
+        let all: Vec<_> = current.iter().collect();
+        Schema::derive_from_entity_information(installed, idents, |_| &all)
+    }
+
+    fn fixture() -> (Vec<Datom>, IdentIndex) {
+        let mut schema = Schema::new();
+        for attribute in [
+            Attribute::new(
+                1_000,
+                Keyword::new("projection", "key"),
+                ValueType::Long,
+                Cardinality::One,
+            )
+            .unique(Unique::Identity)
+            .predicate("projection/valid-key"),
+            Attribute::new(
+                1_001,
+                Keyword::new("projection", "label"),
+                ValueType::String,
+                Cardinality::One,
+            ),
+            Attribute::new(
+                1_002,
+                Keyword::new("projection", "tags"),
+                ValueType::Tuple,
+                Cardinality::Many,
+            )
+            .tuple(TupleSpec::Homogeneous(ValueType::Keyword)),
+            Attribute::new(
+                1_003,
+                Keyword::new("projection", "pair"),
+                ValueType::Tuple,
+                Cardinality::One,
+            )
+            .tuple(TupleSpec::Composite(vec![1_000, 1_001])),
+        ] {
+            schema.install(attribute).unwrap();
+        }
+        let database = Database::new(schema).unwrap();
+        let current = database.datoms(View::Current, IndexOrder::Eavt);
+        let idents = IdentIndex::derive(current.iter(), DB_IDENT as u32).unwrap();
+        (current, idents)
+    }
+
+    fn check(current: &[Datom], idents: &IdentIndex) -> Result<Schema, SemanticError> {
+        let expected = ungrouped_reference(current, idents);
+        let actual = Schema::derive_from_information(current, idents);
+        assert_eq!(actual, expected);
+        actual
+    }
+
+    #[test]
+    fn grouped_schema_projection_preserves_absent_duplicate_and_split_properties() {
+        let (current, idents) = fixture();
+        check(&current, &idents).unwrap();
+        let mut reversed = current.clone();
+        reversed.reverse();
+        assert_eq!(check(&reversed, &idents), check(&current, &idents));
+
+        for property in [
+            DB_IDENT,
+            DB_VALUE_TYPE,
+            DB_CARDINALITY,
+            DB_UNIQUE,
+            DB_INDEX,
+            DB_IS_COMPONENT,
+            DB_NO_HISTORY,
+            DB_TUPLE_TYPE,
+            DB_TUPLE_TYPES,
+            DB_TUPLE_ATTRS,
+            DB_TUPLE_DISCONTINUED,
+        ] {
+            let mut missing = current.clone();
+            missing
+                .retain(|datom| !(datom.entity == 1_000 && u64::from(datom.attribute) == property));
+            let _ = check(&missing, &idents);
+            let value = current
+                .iter()
+                .find(|datom| datom.entity == 1_000 && u64::from(datom.attribute) == property)
+                .map_or(Value::Bool(false), |datom| datom.value.clone());
+            let property_datom = Datom {
+                entity: 1_000,
+                attribute: property as u32,
+                value,
+                tx: crate::t_to_tx(1).unwrap(),
+                added: true,
+            };
+            let mut duplicate = missing.clone();
+            duplicate.insert(0, property_datom.clone());
+            duplicate.push(property_datom.clone());
+            assert_eq!(
+                check(&duplicate, &idents).unwrap_err().code,
+                "schema/conflicting-functional-property"
+            );
+            // A property belonging to another entity must never satisfy this
+            // entity's required property, even when physically adjacent.
+            if matches!(property, DB_IDENT | DB_VALUE_TYPE | DB_CARDINALITY) {
+                let mut split = missing;
+                let mut elsewhere = property_datom;
+                elsewhere.entity = 1_999;
+                split.insert(0, elsewhere);
+                assert_eq!(
+                    check(&split, &idents).unwrap_err().code,
+                    "schema/missing-property"
+                );
+            }
+        }
+
+        let mut competing = current.clone();
+        competing
+            .retain(|datom| !(datom.entity == 1_000 && u64::from(datom.attribute) == DB_IDENT));
+        competing.push(Datom {
+            entity: DB_PART_DB,
+            attribute: DB_INSTALL_ATTRIBUTE as u32,
+            value: Value::Bool(false),
+            tx: crate::t_to_tx(1).unwrap(),
+            added: true,
+        });
+        assert_eq!(
+            check(&competing, &idents).unwrap_err().code,
+            "schema/invalid-install-marker",
+            "marker discovery errors still precede descriptor validation"
+        );
+
+        let mut random = 0x9128_450a_ef24_d76b_u64;
+        for case in 0..256 {
+            let mut changed = current.clone();
+            random = random
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let index = (random >> 16) as usize % changed.len();
+            match case % 4 {
+                0 => {
+                    changed.remove(index);
+                }
+                1 => {
+                    changed.push(changed[index].clone());
+                }
+                2 => {
+                    changed[index].added = false;
+                }
+                _ => {
+                    changed[index].value = Value::String("invalid-property".into());
+                }
+            }
+            changed.rotate_left(index);
+            let _ = check(&changed, &idents);
+        }
+    }
+
+    #[test]
+    fn grouped_schema_projection_measures_complete_schema_with_business_facts() {
+        let (schema_facts, idents) = fixture();
+        for business_count in [1_000, 4_000] {
+            let mut current = schema_facts.clone();
+            current.extend((0..business_count).map(|index| Datom {
+                entity: crate::make_eid(crate::USER_PARTITION, 2_000 + index).unwrap(),
+                attribute: 1_001,
+                value: Value::String("p".repeat(256)),
+                tx: crate::t_to_tx(1).unwrap(),
+                added: true,
+            }));
+            let mut reference_times = Vec::new();
+            let mut grouped_times = Vec::new();
+            for _ in 0..5 {
+                let start = Instant::now();
+                let expected = ungrouped_reference(&current, &idents).unwrap();
+                reference_times.push(start.elapsed());
+                let start = Instant::now();
+                let actual = Schema::derive_from_information(&current, &idents).unwrap();
+                grouped_times.push(start.elapsed());
+                assert_eq!(actual, expected);
+            }
+            reference_times.sort();
+            grouped_times.sort();
+            eprintln!(
+                "schema_projection_scale business_facts={business_count} attributes={} repeats=5 ungrouped_median={:?} grouped_median={:?}",
+                schema_facts
+                    .iter()
+                    .filter(|datom| datom.entity == DB_PART_DB
+                        && datom.attribute == DB_INSTALL_ATTRIBUTE as u32)
+                    .count(),
+                reference_times[2],
+                grouped_times[2],
+            );
+        }
     }
 }

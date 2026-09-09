@@ -11,8 +11,10 @@ operational tooling. The native connection/report and transaction stages are
 verified, as is native read composition. Integrated testing exposed and repaired
 an ordinary-GC receipt-retention defect; schema25 now preserves exact receipts
 while allowing reclamation. A scaled background-indexing failure near98000records
-is also repaired and verified on the retained data. Goal6 is rerunning the full
-deployment and operational acceptance; the full Goal0 outcome is not yet claimed.
+is also repaired and verified on the retained data. Goal6's independent-peer
+100,000-record deployment and abrupt writer replacement pass. Its portable
+operations exposed excessive eager replay; Goal5 owns that repair and scaled
+verification is underway. The full Goal0 outcome is not yet claimed.
 
 ## Start here
 
